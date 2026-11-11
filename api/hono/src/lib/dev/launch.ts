@@ -23,6 +23,7 @@ import {
   unreusedLiveDatabase,
 } from "@/lib/dev/live-dashboard"
 import { listening, portlessDir } from "@/lib/dev/proxy"
+import { ensurePglite } from "@/lib/pglite"
 import {
   GuardError,
   type GuardFailure,
@@ -370,6 +371,7 @@ export type Guard = {
   locate?: (url: string) => Located
   pending?: (url: string) => Promise<number>
   prove?: (url: string, located: Located) => Promise<string>
+  revive?: (url: string) => Promise<void>
   root?: string
   tables?: (url: string) => Promise<number>
 }
@@ -389,6 +391,7 @@ export async function preflight(
     locate = locateOwner,
     pending = pendingMigrations,
     prove = proveOwner,
+    revive = ensurePglite,
     root = process.cwd(),
     tables = tableCount,
   }: Guard = {},
@@ -436,6 +439,7 @@ export async function preflight(
   if (!url) return { dashboard, ok: true, proof: SETUP_MODE }
   let located: Located
   try {
+    await revive(url)
     located = locate(url)
   } catch (error) {
     return refuseFor(error)

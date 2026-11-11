@@ -21,6 +21,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "catalog:",
     "@arcjet/ip": "catalog:",
+    "@electric-sql/pglite": "catalog:",
     "@hono/node-server": "catalog:",
     "@hono/standard-validator": "catalog:",
     "@packages/auth": "workspace:*",
