@@ -17,6 +17,16 @@ const SSL_REQUEST = 80877103
 const GSS_REQUEST = 80877104
 const CANCEL_REQUEST = 80877102
 
+const frame = (type: string, body = ""): Uint8Array => {
+  const bytes = Buffer.alloc(5 + Buffer.byteLength(body))
+  bytes.write(type, 0)
+  bytes.writeInt32BE(4 + Buffer.byteLength(body), 1)
+  bytes.write(body, 5)
+  return bytes
+}
+// A dropped client's half-run statement: ROLLBACK undoes its writes and its transaction, Sync ends the statement or the error PGlite skips to, so the next client starts clean.
+const RESET = [frame("Q", "ROLLBACK\0"), frame("S")]
+
 export const pgliteRoot = (env: NodeJS.ProcessEnv = process.env): string =>
   join(dataDirOf(env), "pglite")
 
@@ -108,7 +118,11 @@ export async function serve(home: string): Promise<void> {
   }
   const free = async (conn: Socket, rollback = false) => {
     if (owner !== conn) return
-    if (rollback && pg.isInTransaction()) await pg.exec("ROLLBACK")
+    if (rollback) {
+      await pg.runExclusive(async () => {
+        for (const step of RESET) await pg.execProtocolRaw(step)
+      })
+    }
     owner = null
     const woken = waiting
     waiting = []
@@ -150,8 +164,10 @@ export async function serve(home: string): Promise<void> {
       buffer = Buffer.concat([buffer, chunk])
       for (;;) {
         if (!started) {
-          if (buffer.length < 8 || buffer.length < buffer.readInt32BE(0)) return
+          if (buffer.length < 8) return
           const length = buffer.readInt32BE(0)
+          if (length < 8) return void conn.destroy()
+          if (buffer.length < length) return
           const code = buffer.readInt32BE(4)
           const message = buffer.subarray(0, length)
           buffer = buffer.subarray(length)
@@ -165,6 +181,7 @@ export async function serve(home: string): Promise<void> {
         }
         if (buffer.length < 5) return
         const length = 1 + buffer.readInt32BE(1)
+        if (length < 5) return void conn.destroy()
         if (buffer.length < length) return
         run(String.fromCharCode(buffer[0]!), buffer.subarray(0, length))
         buffer = buffer.subarray(length)

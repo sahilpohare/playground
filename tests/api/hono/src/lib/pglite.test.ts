@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { connect } from "node:net"
 import { join } from "node:path"
 
 import { SQL } from "bun"
@@ -34,6 +35,54 @@ const stop = async (pid: number) => {
 afterAll(async () => {
   for (const { pid } of mine()) await stop(pid).catch(() => {})
 })
+
+const frame = (type: string, ...parts: Buffer[]) => {
+  const body = Buffer.concat(parts)
+  const head = Buffer.alloc(5)
+  head.write(type, 0)
+  head.writeInt32BE(4 + body.length, 1)
+  return Buffer.concat([head, body])
+}
+const cstr = (text: string) => Buffer.from(`${text}\0`)
+const int16 = (n: number) => Buffer.from([n >> 8, n & 255])
+
+// A raw client that sends Parse, Bind, Execute and Flush with no Sync, waits for the statement's own reply, then drops its connection.
+const dropMidStatement = (url: string, query: string, reply: string) =>
+  new Promise<void>((done, fail) => {
+    const socket = connect(Number(new URL(url).port), "127.0.0.1")
+    const startup = Buffer.concat([
+      cstr("user"),
+      cstr("postgres"),
+      cstr("database"),
+      cstr("postgres"),
+      Buffer.from([0]),
+    ])
+    const head = Buffer.alloc(8)
+    head.writeInt32BE(8 + startup.length, 0)
+    head.writeInt32BE(196608, 4)
+    let seen = ""
+    let sent = false
+    socket.on("error", fail)
+    socket.on("data", (chunk: Buffer) => {
+      seen += chunk.toString("latin1")
+      if (!sent && seen.includes("Z\0\0\0\x05I")) {
+        sent = true
+        seen = ""
+        socket.write(
+          Buffer.concat([
+            frame("P", cstr(""), cstr(query), int16(0)),
+            frame("B", cstr(""), cstr(""), int16(0), int16(0), int16(0)),
+            frame("E", cstr(""), Buffer.alloc(4)),
+            frame("H"),
+          ]),
+        )
+      } else if (sent && seen.includes(reply)) {
+        socket.destroy()
+        done()
+      }
+    })
+    socket.write(Buffer.concat([head, startup]))
+  })
 
 const noDocker: Docker = () => {
   throw new Error("docker was called for a PGlite database")
@@ -122,6 +171,18 @@ describe("a PGlite database", () => {
       await sql.close()
     }
   }, 60_000)
+
+  test("undoes a client that drops mid-statement, written or failed, so the next one starts clean", async () => {
+    await dropMidStatement(url, "insert into tx_probe (v) values ('orphan')", "C")
+    await dropMidStatement(url, "select 1/0", "E")
+    const sql = new SQL(url, { max: 1 })
+    try {
+      const [row] = await sql`select count(*)::int as n from tx_probe where v = 'orphan'`
+      expect(row.n).toBe(0)
+    } finally {
+      await sql.close()
+    }
+  }, 30_000)
 
   test("ensurePglite leaves alone a URL no PGlite record names", async () => {
     await ensurePglite("postgres://postgres@127.0.0.1:1/postgres", root)
