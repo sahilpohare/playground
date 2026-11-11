@@ -6,12 +6,15 @@ import {
   blobSha,
   parseManifest,
   UPSTREAM_SKILLS,
+  UPSTREAMS,
 } from "../../../../packages/scripts/src/vendor-upstream/stage"
 
 // The upstream skills core keeps are upstream's bytes, held to MANIFEST offline: this test reads core alone, so a changed byte, a stray file, or a rewritten skill fails without a network call.
 const CORE = join(import.meta.dir, "..", "..", "..", "..", "extensions", "core")
 
-const manifest = parseManifest(readFileSync(join(CORE, "upstream", "MANIFEST"), "utf8"))
+const manifestOf = (name: string) =>
+  parseManifest(readFileSync(join(CORE, "upstream", name, "MANIFEST"), "utf8"))
+const manifest = UPSTREAMS.flatMap(({ name }) => manifestOf(name))
 const manifestPaths = manifest.map(({ path }) => path)
 
 const walk = (dir: string, sub = ""): string[] => {
@@ -53,7 +56,7 @@ describe("the upstream skills in core", () => {
     expect(extra).toEqual([])
   })
 
-  test("MANIFEST holds the 9 kept skills, each named by its frontmatter, and the NOTICE names them with core's pr", () => {
+  test("the MANIFESTs hold the kept skills, each named by its frontmatter, and the NOTICE names them with core's pr", () => {
     const skills = manifestPaths.filter((path) => /^skills\/[^/]+\/SKILL\.md$/.test(path))
     expect(skills.map((path) => path.split("/")[1]).sort()).toEqual([...UPSTREAM_SKILLS].sort())
     const renamed = skills.flatMap((path) => {
@@ -64,7 +67,7 @@ describe("the upstream skills in core", () => {
     expect(renamed).toEqual([])
     const notice = readFileSync(join(CORE, "NOTICE"), "utf8")
     for (const name of [...UPSTREAM_SKILLS, "pr"]) expect(notice).toContain(name)
-    expect([...UPSTREAM_SKILLS, "pr"]).toHaveLength(10)
+    expect([...UPSTREAM_SKILLS, "pr"]).toHaveLength(12)
   })
 
   // tdd calls codebase-design, which only the user scope carried, so a session without that copy found no skill (PG-167)
@@ -84,18 +87,28 @@ describe("the upstream skills in core", () => {
     ).toEqual([])
   })
 
-  test("the MIT license travels with the bytes, the NOTICE carries its copyright, and SOURCE names the repo and sha", () => {
-    const license = readFileSync(join(CORE, "upstream", "LICENSE"), "utf8")
-    expect(license.startsWith("MIT License")).toBe(true)
-    const copyright = /^Copyright \(c\) .+$/m.exec(license)?.[0] ?? ""
-    expect(copyright).not.toBe("")
-    expect(readFileSync(join(CORE, "NOTICE"), "utf8")).toContain(copyright)
-    const source = readFileSync(join(CORE, "upstream", "SOURCE"), "utf8").split("\n")
-    expect(source[0]).toMatch(/^[\w.-]+\/[\w.-]+ [0-9a-f]{40}$/)
-    expect(source[1]).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-    for (const name of UPSTREAM_SKILLS)
-      expect(readFileSync(join(CORE, "skills", name, "CREDITS.md"), "utf8")).toContain(
-        "MIT License",
-      )
+  test("each upstream's license travels with its bytes, the NOTICE names its repo, its SOURCE its sha, and each skill's CREDITS its license", () => {
+    const licenses: Record<string, string> = {
+      graphify: "Apache License",
+      impeccable: "Apache License",
+      mattpocock: "MIT License",
+    }
+    expect(Object.keys(licenses).sort()).toEqual(UPSTREAMS.map(({ name }) => name).sort())
+    const notice = readFileSync(join(CORE, "NOTICE"), "utf8")
+    for (const { name, repo, skills } of UPSTREAMS) {
+      const license = readFileSync(join(CORE, "upstream", name, "LICENSE"), "utf8")
+      expect(license).toContain(licenses[name]!)
+      expect(notice).toContain(repo)
+      const source = readFileSync(join(CORE, "upstream", name, "SOURCE"), "utf8").split("\n")
+      expect(source[0]).toBe(`${repo} ${source[0]!.split(" ")[1]}`)
+      expect(source[0]).toMatch(/^[\w.-]+\/[\w.-]+ [0-9a-f]{40}$/)
+      expect(source[1]).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      for (const skill of skills)
+        expect(readFileSync(join(CORE, "skills", skill, "CREDITS.md"), "utf8")).toContain(
+          licenses[name]!,
+        )
+    }
+    const mit = readFileSync(join(CORE, "upstream", "mattpocock", "LICENSE"), "utf8")
+    expect(notice).toContain(/^Copyright \(c\) .+$/m.exec(mit)?.[0] ?? "missing")
   })
 })

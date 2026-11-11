@@ -17,6 +17,8 @@ describe("the root NOTICE", () => {
   test("the root holds no LICENSE file, any case or extension, while the vendored one stays", () => {
     const licenses = readdirSync(ROOT).filter((name) => /^license(\..*)?$/i.test(name))
     expect(licenses).toEqual([])
-    expect(existsSync(join(ROOT, "extensions", "core", "upstream", "LICENSE"))).toBe(true)
+    expect(existsSync(join(ROOT, "extensions", "core", "upstream", "mattpocock", "LICENSE"))).toBe(
+      true,
+    )
   })
 })

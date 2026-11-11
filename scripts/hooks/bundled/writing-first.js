@@ -210,7 +210,8 @@ function sessionOf(raw) {
 }
 
 // packages/scripts/src/vendor-upstream/stage.ts
-var UPSTREAM_SKILLS = [
+var licenseFor = (name, files) => (path) => files.includes(path) ? `upstream/${name}/${path}` : null;
+var MATTPOCOCK_SKILLS = [
   "code-review",
   "codebase-design",
   "diagnosing-bugs",
@@ -221,6 +222,33 @@ var UPSTREAM_SKILLS = [
   "to-spec",
   "writing-for-agents"
 ];
+var UPSTREAMS = [
+  {
+    coreFor: (path) => path === "graphify/skill.md" ? "skills/graphify/SKILL.md" : path.startsWith("graphify/skills/claude/references/") ? path.replace("graphify/skills/claude/", "skills/graphify/") : licenseFor("graphify", ["LICENSE", "LICENSE-MIT", "NOTICE"])(path),
+    name: "graphify",
+    ref: "v8",
+    repo: "Graphify-Labs/graphify",
+    skills: ["graphify"]
+  },
+  {
+    coreFor: (path) => path.startsWith(".claude/skills/impeccable/") ? path.replace(".claude/", "") : licenseFor("impeccable", ["LICENSE", "NOTICE.md"])(path),
+    name: "impeccable",
+    ref: "main",
+    repo: "pbakaus/impeccable",
+    skills: ["impeccable"]
+  },
+  {
+    coreFor: (path) => {
+      const skill = /^skills\/[^/]+\/([^/]+)\//.exec(path)?.[1];
+      return skill && MATTPOCOCK_SKILLS.includes(skill) ? path.replace(/^skills\/[^/]+\//, "skills/") : licenseFor("mattpocock", ["LICENSE"])(path);
+    },
+    name: "mattpocock",
+    ref: "main",
+    repo: "mattpocock/skills",
+    skills: MATTPOCOCK_SKILLS
+  }
+];
+var UPSTREAM_SKILLS = UPSTREAMS.flatMap(({ skills }) => skills).sort();
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js
 function joinValues(array, separator = "|") {

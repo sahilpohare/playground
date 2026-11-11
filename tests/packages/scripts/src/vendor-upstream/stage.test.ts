@@ -21,6 +21,8 @@ import {
   parseManifest,
   readTree,
   upstreamKeep,
+  upstreamNamed,
+  UPSTREAMS,
   vendored,
   vendor,
   type UpstreamFile,
@@ -41,7 +43,14 @@ const UPSTREAM: UpstreamFile[] = [
   },
 ]
 
-const kept = (): UpstreamFile[] => vendored(UPSTREAM.filter(({ path }) => upstreamKeep(path)))
+// mattpocock's upstream under the test's own repo name, which the fake gh answers for.
+const MATT = { ...upstreamNamed("mattpocock")!, repo: "upstream/skills" }
+
+const kept = (): UpstreamFile[] =>
+  vendored(
+    MATT,
+    UPSTREAM.filter(({ path }) => upstreamKeep(MATT, path)),
+  )
 
 const put = (dir: string, path: string, data: Uint8Array): void => {
   const dest = join(dir, path)
@@ -58,10 +67,10 @@ const coreOf = (root: string): string => {
   put(core, "skills/research/SKILL.md", bytes("old\n"))
   put(
     core,
-    "upstream/MANIFEST",
+    "upstream/mattpocock/MANIFEST",
     bytes(`${"0".repeat(40)} skills/research/SKILL.md\n${"0".repeat(40)} skills/tdd/SKILL.md\n`),
   )
-  put(core, "upstream/SOURCE", bytes("stub\n"))
+  put(core, "upstream/mattpocock/SOURCE", bytes("stub\n"))
   return core
 }
 
@@ -91,18 +100,39 @@ describe("blobSha", () => {
 
 describe("the manifest", () => {
   test("keeps the kept skills and LICENSE alone, flat under skills/ and upstream/, sorted by path", () => {
-    expect(upstreamKeep("skills/engineering/tdd/SKILL.md")).toBe(true)
-    expect(upstreamKeep("LICENSE")).toBe(true)
-    expect(upstreamKeep("skills/engineering/triage/SKILL.md")).toBe(false)
-    expect(upstreamKeep("skills/engineering/pr/SKILL.md")).toBe(false)
-    expect(upstreamKeep(".claude-plugin/plugin.json")).toBe(false)
-    expect(upstreamKeep("README.md")).toBe(false)
+    expect(upstreamKeep(MATT, "skills/engineering/tdd/SKILL.md")).toBe(true)
+    expect(upstreamKeep(MATT, "LICENSE")).toBe(true)
+    expect(upstreamKeep(MATT, "skills/engineering/triage/SKILL.md")).toBe(false)
+    expect(upstreamKeep(MATT, "skills/engineering/pr/SKILL.md")).toBe(false)
+    expect(upstreamKeep(MATT, ".claude-plugin/plugin.json")).toBe(false)
+    expect(upstreamKeep(MATT, "README.md")).toBe(false)
     const text = manifestFor([...kept()].reverse())
     expect(parseManifest(text).map(({ path }) => path)).toEqual([
       "skills/handoff/SKILL.md",
       "skills/tdd/SKILL.md",
-      "upstream/LICENSE",
+      "upstream/mattpocock/LICENSE",
     ])
+  })
+})
+
+describe("each upstream's paths", () => {
+  test("graphify lands as its installer lays it out, impeccable from its Claude build, each license under upstream/<name>/", () => {
+    const graphify = upstreamNamed("graphify")!
+    expect(graphify.coreFor("graphify/skill.md")).toBe("skills/graphify/SKILL.md")
+    expect(graphify.coreFor("graphify/skills/claude/references/query.md")).toBe(
+      "skills/graphify/references/query.md",
+    )
+    expect(graphify.coreFor("graphify/skills/codex/references/query.md")).toBeNull()
+    expect(graphify.coreFor("graphify/skill-codex.md")).toBeNull()
+    expect(graphify.coreFor("LICENSE-MIT")).toBe("upstream/graphify/LICENSE-MIT")
+    const impeccable = upstreamNamed("impeccable")!
+    expect(impeccable.coreFor(".claude/skills/impeccable/scripts/context.mjs")).toBe(
+      "skills/impeccable/scripts/context.mjs",
+    )
+    expect(impeccable.coreFor(".agents/skills/impeccable/SKILL.md")).toBeNull()
+    expect(impeccable.coreFor("NOTICE.md")).toBe("upstream/impeccable/NOTICE.md")
+    expect(impeccable.coreFor("README.md")).toBeNull()
+    expect(UPSTREAMS.map(({ name }) => name)).toEqual(["graphify", "impeccable", "mattpocock"])
   })
 })
 
@@ -118,6 +148,7 @@ describe("vendoring", () => {
           coreDir: core,
           files,
           manifest,
+          name: "mattpocock",
           repo: "upstream/skills",
           sha: "a".repeat(40),
           ...rootsOf(root),
@@ -135,16 +166,16 @@ describe("vendoring", () => {
         "skills/pr/SKILL.md",
         "skills/tdd/CREDITS.md",
         "skills/tdd/SKILL.md",
-        "upstream/LICENSE",
-        "upstream/MANIFEST",
-        "upstream/SOURCE",
+        "upstream/mattpocock/LICENSE",
+        "upstream/mattpocock/MANIFEST",
+        "upstream/mattpocock/SOURCE",
       ])
       expect(readFileSync(join(core, "skills/tdd/SKILL.md"), "utf8")).toBe(
         "---\nname: tdd\n---\n\nTdd.\n",
       )
       expect(readFileSync(join(core, "skills/tdd/CREDITS.md"), "utf8")).toBe("Our credits.\n")
-      expect(readFileSync(join(core, "upstream/MANIFEST"), "utf8")).toBe(manifest)
-      expect(readFileSync(join(core, "upstream/SOURCE"), "utf8")).toBe(
+      expect(readFileSync(join(core, "upstream/mattpocock/MANIFEST"), "utf8")).toBe(manifest)
+      expect(readFileSync(join(core, "upstream/mattpocock/SOURCE"), "utf8")).toBe(
         `upstream/skills ${"a".repeat(40)}\n${new Date().toISOString().slice(0, 10)}\n`,
       )
       expect(staged(core)).toEqual([])
@@ -154,13 +185,16 @@ describe("vendoring", () => {
       const replaced = join(trash, batch!, "1", ".upstream-replaced")
       expect(readFileSync(join(replaced, "skills", "tdd", "SKILL.md"), "utf8")).toBe("old\n")
       expect(readFileSync(join(replaced, "skills", "research", "SKILL.md"), "utf8")).toBe("old\n")
-      expect(readFileSync(join(replaced, "upstream", "SOURCE"), "utf8")).toBe("stub\n")
+      expect(readFileSync(join(replaced, "upstream", "mattpocock", "SOURCE"), "utf8")).toBe(
+        "stub\n",
+      )
       // A second run over the same sha swaps the same bytes in again.
       expect(
         vendor({
           coreDir: core,
           files,
           manifest,
+          name: "mattpocock",
           repo: "upstream/skills",
           sha: "a".repeat(40),
           ...rootsOf(root),
@@ -185,6 +219,7 @@ describe("vendoring", () => {
           coreDir: core,
           files,
           manifest: manifestFor(files),
+          name: "mattpocock",
           repo: "upstream/skills",
           sha: "a".repeat(40),
           ...rootsOf(root),
@@ -208,6 +243,7 @@ describe("vendoring", () => {
           coreDir: core,
           files: kept(),
           manifest: manifestText(entries),
+          name: "mattpocock",
           repo: "upstream/skills",
           sha: "a".repeat(40),
           ...rootsOf(root),
@@ -233,6 +269,7 @@ describe("vendoring", () => {
         coreDir: core,
         files: kept(),
         manifest: manifestText(entries),
+        name: "mattpocock",
         repo: "upstream/skills",
         sha: "a".repeat(40),
         ...rootsOf(root),
@@ -268,9 +305,9 @@ describe("the download", () => {
           ? readFileSync(tarball)
           : Buffer.from(JSON.stringify({ tree: wanted.map((path) => ({ path, type: "blob" })) }))
       }
-      const { kept: got, missing } = await download(gh, "upstream/skills", "a".repeat(40), tmp)
+      const { kept: got, missing } = await download(gh, MATT, "a".repeat(40), tmp)
       expect(got.map(({ path }) => path).sort()).toEqual(
-        UPSTREAM.filter(({ path }) => upstreamKeep(path))
+        UPSTREAM.filter(({ path }) => upstreamKeep(MATT, path))
           .map(({ path }) => path)
           .sort(),
       )
@@ -293,7 +330,7 @@ describe("the skill diff", () => {
       manifestText([
         { sha: "0".repeat(40), path: "skills/alpha/SKILL.md" },
         { sha: "0".repeat(40), path: "skills/delta/SKILL.md" },
-        { sha: "0".repeat(40), path: "upstream/LICENSE" },
+        { sha: "0".repeat(40), path: "upstream/mattpocock/LICENSE" },
       ]),
     )
     expect(diffSkills(old, now)).toEqual(["added: delta", "removed: gamma"])

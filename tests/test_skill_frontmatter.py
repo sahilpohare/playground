@@ -30,10 +30,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Skills copied whole from upstream, held to its text by tests/extensions/core/skills/<name>/drift.test.ts.
 COPIED = {"pr"}
 
-# Core's upstream skills, held byte for byte to extensions/core/upstream/MANIFEST, so their frontmatter is upstream's.
+# Core's upstream skills, held byte for byte to each extensions/core/upstream/<name>/MANIFEST, so their frontmatter is upstream's.
+UPSTREAM_DIR = os.path.join(ROOT, "extensions", "core", "upstream")
 UPSTREAM = {
     line.split(" ", 1)[1].split("/")[1]
-    for line in open(os.path.join(ROOT, "extensions", "core", "upstream", "MANIFEST"), encoding="utf-8").read().splitlines()
+    for name in sorted(os.listdir(UPSTREAM_DIR))
+    for line in open(os.path.join(UPSTREAM_DIR, name, "MANIFEST"), encoding="utf-8").read().splitlines()
     if line.endswith("/SKILL.md")
 }
 

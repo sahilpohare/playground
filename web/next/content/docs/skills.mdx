@@ -22,8 +22,8 @@ Each session Playground starts loads a set written for its repo the moment it st
 A session you start yourself gets the home set, `ws-home@ws`, which `scripts/link-skills.sh` installs for your user and renews on each run (`playground orgs home`); `scripts/link-skills.sh` also removes a link in `~/.claude/skills` at a name the home set ships when the link points into Playground's own checkout, and keeps a link that points anywhere else, your own skill, naming the clash in one line.
 `.agents/skills`, `.claude/skills` and `.github/skills` all link to `skills/zerostarter`, so an agent in this repo reads the starter's skills from the place its tool looks.
 
-The upstream skills in `extensions/core/skills` change only through `bun run vendor:upstream`, and a drift test holds them byte for byte to the commit `extensions/core/upstream/SOURCE` names.
-Their license is upstream's, in `extensions/core/upstream/LICENSE`, and core's `NOTICE` names them; the root `NOTICE` covers only this repo's own code.
+The upstream skills in `extensions/core/skills` (mattpocock's, graphify and impeccable) change only through `bun run vendor:upstream <name>`, and a drift test holds them byte for byte to the commit each `extensions/core/upstream/<name>/SOURCE` names.
+Each license is its upstream's, in `extensions/core/upstream/<name>/`, and core's `NOTICE` names them; the root `NOTICE` covers only this repo's own code.
 
 ## Orgs
 

@@ -18,8 +18,21 @@ export type UpstreamFile = { path: string; bytes: Uint8Array }
 export type ManifestEntry = { sha: string; path: string }
 export type Vendored = { ok: true; files: number } | { ok: false; mismatches: string[] }
 
-// The upstream skills core keeps, the ones in use; `pr` is core's own version, so upstream's is not taken.
-export const UPSTREAM_SKILLS = [
+// One repo core takes skills from: its own files (licenses, SOURCE, MANIFEST) live in upstream/<name>/, and coreFor maps each upstream path to the core path it lands at, relative to extensions/core/, or null for a path core does not take.
+export type Upstream = {
+  coreFor: (path: string) => string | null
+  name: string
+  ref: string
+  repo: string
+  skills: string[]
+}
+
+const licenseFor =
+  (name: string, files: string[]) =>
+  (path: string): string | null =>
+    files.includes(path) ? `upstream/${name}/${path}` : null
+
+const MATTPOCOCK_SKILLS = [
   "code-review",
   "codebase-design",
   "diagnosing-bugs",
@@ -31,18 +44,58 @@ export const UPSTREAM_SKILLS = [
   "writing-for-agents",
 ]
 
-const UPSTREAM_SKILL = /^skills\/[^/]+\/([^/]+)\//
+// The upstreams core keeps skills from, and the skills in use from each; mattpocock's `pr` is core's own version, so upstream's is not taken.
+export const UPSTREAMS: Upstream[] = [
+  {
+    // graphify's own installer writes skill.md as SKILL.md beside its claude references/
+    coreFor: (path) =>
+      path === "graphify/skill.md"
+        ? "skills/graphify/SKILL.md"
+        : path.startsWith("graphify/skills/claude/references/")
+          ? path.replace("graphify/skills/claude/", "skills/graphify/")
+          : licenseFor("graphify", ["LICENSE", "LICENSE-MIT", "NOTICE"])(path),
+    name: "graphify",
+    ref: "v8",
+    repo: "Graphify-Labs/graphify",
+    skills: ["graphify"],
+  },
+  {
+    coreFor: (path) =>
+      path.startsWith(".claude/skills/impeccable/")
+        ? path.replace(".claude/", "")
+        : licenseFor("impeccable", ["LICENSE", "NOTICE.md"])(path),
+    name: "impeccable",
+    ref: "main",
+    repo: "pbakaus/impeccable",
+    skills: ["impeccable"],
+  },
+  {
+    coreFor: (path) => {
+      const skill = /^skills\/[^/]+\/([^/]+)\//.exec(path)?.[1]
+      return skill && MATTPOCOCK_SKILLS.includes(skill)
+        ? path.replace(/^skills\/[^/]+\//, "skills/")
+        : licenseFor("mattpocock", ["LICENSE"])(path)
+    },
+    name: "mattpocock",
+    ref: "main",
+    repo: "mattpocock/skills",
+    skills: MATTPOCOCK_SKILLS,
+  },
+]
 
-// The paths core takes from upstream: the kept skills' files and upstream's LICENSE.
-export const upstreamKeep = (path: string): boolean =>
-  path === "LICENSE" || UPSTREAM_SKILLS.includes(UPSTREAM_SKILL.exec(path)?.[1] ?? "")
+// Every upstream skill core keeps, the ones only vendor:upstream writes.
+export const UPSTREAM_SKILLS = UPSTREAMS.flatMap(({ skills }) => skills).sort()
 
-// The core path an upstream file lands at: a skill flat under skills/, its category dropped, and LICENSE under upstream/, so MANIFEST and every staged path are relative to extensions/core/.
-export const vendored = (files: UpstreamFile[]): UpstreamFile[] =>
-  files.map(({ path, bytes }) => ({
-    path: path === "LICENSE" ? "upstream/LICENSE" : path.replace(/^skills\/[^/]+\//, "skills/"),
-    bytes,
-  }))
+export const upstreamNamed = (name: string): Upstream | undefined =>
+  UPSTREAMS.find((upstream) => upstream.name === name)
+
+// The paths core takes from an upstream.
+export const upstreamKeep = (upstream: Upstream, path: string): boolean =>
+  upstream.coreFor(path) !== null
+
+// Each kept file at its core path, so MANIFEST and every staged path are relative to extensions/core/.
+export const vendored = (upstream: Upstream, files: UpstreamFile[]): UpstreamFile[] =>
+  files.map(({ path, bytes }) => ({ path: upstream.coreFor(path)!, bytes }))
 
 // A git blob sha, the same value git stores for the bytes.
 export const blobSha = (bytes: Uint8Array): string => {
@@ -117,22 +170,22 @@ export const diffSkills = (oldText: string | null, entries: ManifestEntry[]): st
 // Downloads sha's tarball through gh into a scratch folder of its own, since a download is untrusted data, and hands back the kept files with each kept path the tree lists that the tarball lacks; the folder goes once they are read.
 export const download = async (
   gh: (...args: string[]) => Buffer,
-  repo: string,
+  upstream: Upstream,
   sha: string,
   tmp = tmpdir(),
 ): Promise<{ kept: UpstreamFile[]; missing: string[] }> => {
   const scratch = makeScratch("vendor-upstream-", tmp)
   try {
     const tarball = join(scratch, "tarball.tgz")
-    await Bun.write(tarball, gh(`repos/${repo}/tarball/${sha}`))
-    const upstream = join(scratch, "upstream")
-    extractTarball(tarball, upstream)
-    const tree = JSON.parse(gh(`repos/${repo}/git/trees/${sha}?recursive=1`).toString()) as {
-      tree: { path: string; type: string }[]
-    }
-    const kept = readTree(upstream).filter(({ path }) => upstreamKeep(path))
+    await Bun.write(tarball, gh(`repos/${upstream.repo}/tarball/${sha}`))
+    const extracted = join(scratch, "upstream")
+    extractTarball(tarball, extracted)
+    const tree = JSON.parse(
+      gh(`repos/${upstream.repo}/git/trees/${sha}?recursive=1`).toString(),
+    ) as { tree: { path: string; type: string }[] }
+    const kept = readTree(extracted).filter(({ path }) => upstreamKeep(upstream, path))
     const missing = tree.tree
-      .filter((entry) => entry.type === "blob" && upstreamKeep(entry.path))
+      .filter((entry) => entry.type === "blob" && upstreamKeep(upstream, entry.path))
       .map((entry) => entry.path)
       .filter((path) => !kept.some(({ path: got }) => got === path))
     return { kept, missing }
@@ -150,11 +203,12 @@ const dropStaging = (staging: string, coreDir: string) => {
 
 const REPLACED = ".upstream-replaced"
 
-// Stages the files in core, writes upstream/SOURCE and upstream/MANIFEST, and swaps each upstream skill folder and upstream/ in only when every staged byte matches its manifest sha; a skill's CREDITS.md, which is core's, stays, a skill the old MANIFEST held and the new one does not leaves, and a mismatch leaves core as it was; the staging folder goes however the run ends. Each folder it replaces is moved into one REPLACED folder that goes to the trash whole, so a run is one quarantine under the tripwire's 3 a minute, and a refusal throws its text. It never commits.
+// Stages one upstream's files in core, writes its upstream/<name>/SOURCE and MANIFEST, and swaps each of its skill folders and its upstream/<name>/ in only when every staged byte matches its manifest sha; a skill's CREDITS.md, which is core's, stays, a skill the old MANIFEST held and the new one does not leaves, and a mismatch leaves core as it was; the staging folder goes however the run ends. Each folder it replaces is moved into one REPLACED folder that goes to the trash whole, so a run is one quarantine under the tripwire's 3 a minute, and a refusal throws its text. It never commits.
 export const vendor = ({
   coreDir,
   files,
   manifest,
+  name,
   repo,
   roots,
   session,
@@ -163,11 +217,13 @@ export const vendor = ({
   coreDir: string
   files: UpstreamFile[]
   manifest: string
+  name: string
   repo: string
   roots: Roots
   session: string
   sha: string
 }): Vendored => {
+  const own = join("upstream", name)
   const entries = parseManifest(manifest)
   const bytesOf = new Map(files.map(({ path, bytes }) => [path, bytes]))
   const protectedWhy = isProtected(join(coreDir, REPLACED), roots)
@@ -182,18 +238,18 @@ export const vendor = ({
         throw new Error(`vendor: MANIFEST names ${path}, which the downloaded tree does not hold`)
       writeFileSync(dest, bytes)
     }
-    mkdirSync(join(staging, "upstream"), { recursive: true })
+    mkdirSync(join(staging, own), { recursive: true })
     writeFileSync(
-      join(staging, "upstream", "SOURCE"),
+      join(staging, own, "SOURCE"),
       `${repo} ${sha}\n${new Date().toISOString().slice(0, 10)}\n`,
     )
-    writeFileSync(join(staging, "upstream", "MANIFEST"), manifest)
+    writeFileSync(join(staging, own, "MANIFEST"), manifest)
     const mismatches = entries.flatMap(({ path, sha: wanted }) => {
       const got = blobSha(readFileSync(join(staging, path)))
       return got === wanted ? [] : [`${path}: staged ${got}, MANIFEST says ${wanted}`]
     })
     if (mismatches.length > 0) return { ok: false, mismatches }
-    const oldManifest = join(coreDir, "upstream", "MANIFEST")
+    const oldManifest = join(coreDir, own, "MANIFEST")
     const was = existsSync(oldManifest)
       ? skillsIn(parseManifest(readFileSync(oldManifest, "utf8")))
       : new Set<string>()
@@ -216,8 +272,9 @@ export const vendor = ({
       renameSync(join(staging, "skills", name), live)
       if (kept) writeFileSync(credits, kept)
     }
-    moveAside(join(coreDir, "upstream"), "upstream")
-    renameSync(join(staging, "upstream"), join(coreDir, "upstream"))
+    moveAside(join(coreDir, own), own)
+    mkdirSync(join(coreDir, "upstream"), { recursive: true })
+    renameSync(join(staging, own), join(coreDir, own))
     try {
       toTrash(replaced, reason, roots, session)
     } catch (error) {
