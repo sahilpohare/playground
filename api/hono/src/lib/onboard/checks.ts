@@ -22,7 +22,17 @@ export type Check = {
   status: "MISSING" | "ok" | "optional" | "waiting"
 }
 
-type Tool = "bun" | "claude" | "docker" | "gh" | "git" | "herdr" | "node" | "python3" | "uv"
+type Tool =
+  | "bun"
+  | "claude"
+  | "claude-codex"
+  | "docker"
+  | "gh"
+  | "git"
+  | "herdr"
+  | "node"
+  | "python3"
+  | "uv"
 
 type Action = NonNullable<Check["action"]>
 
@@ -35,6 +45,13 @@ const TOOLS: [Tool, boolean, string, Action | null, string][] = [
     "every session",
     { id: "claude", label: "Install Claude Code" },
     "Claude Code is not installed.",
+  ],
+  [
+    "claude-codex",
+    false,
+    "a Codex (ChatGPT) subscription alongside Claude's",
+    null,
+    "claude-codex is not installed. Only useful with a Codex CLI login too.",
   ],
   [
     "docker",

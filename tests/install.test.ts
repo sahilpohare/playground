@@ -47,6 +47,7 @@ const FAKED = [
   "brew",
   "bun",
   "claude",
+  "claude-codex",
   "curl",
   "docker",
   "gh",
@@ -100,7 +101,17 @@ const git = (cwd: string, home: string, ...args: string[]) =>
     env: gitEnv(home),
   })
 
-type Tool = "brew" | "bun" | "claude" | "docker" | "gh" | "git" | "node" | "python3" | "uv"
+type Tool =
+  | "brew"
+  | "bun"
+  | "claude"
+  | "claude-codex"
+  | "docker"
+  | "gh"
+  | "git"
+  | "node"
+  | "python3"
+  | "uv"
 type Setup = {
   // what the terminal answers, given as INSTALL_TTY
   answer?: string
@@ -245,12 +256,14 @@ const setup = ({
         ? `if [ "$1 $2" = "auth login" ]; then exec ${process.execPath} ${reader}; fi`
         : `if [ "$1 $2" = "auth login" ]; then read -r answer; echo "claude auth login read $answer" >> ${log}; touch ${state}/claude-login; fi`,
     ].join("\n"),
+    "claude-codex": `echo "claude-codex $*" >> ${log}`,
     curl: [
       `echo "curl $*" >> ${log}`,
       "for url; do :; done",
       'case "$url" in',
       `  https://bun.sh/install) ${fail.includes("bun") ? "exit 22" : `echo 'echo "bun installer $*" >> ${log}; mkdir -p "$HOME/.bun/bin" && cp ${store}/bun "$HOME/.bun/bin/bun"'`} ;;`,
       `  https://claude.ai/install.sh) ${fail.includes("claude") ? "exit 22" : `echo 'mkdir -p "$HOME/.local/bin" && cp ${store}/claude "$HOME/.local/bin/claude"'`} ;;`,
+      `  https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh) ${fail.includes("claude-codex") ? "exit 22" : `echo 'mkdir -p "$HOME/.local/bin" && cp ${store}/claude-codex "$HOME/.local/bin/claude-codex"'`} ;;`,
       `  https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh) ${fail.includes("brew") ? "exit 22" : `echo 'read -r answer; echo "homebrew installer read $answer" >> ${log}; mkdir -p ${prefix}/bin && cp ${store}/brew ${prefix}/bin/brew'`} ;;`,
       "  *) exit 22 ;;",
       "esac",
@@ -287,6 +300,7 @@ const setup = ({
   for (const tool of [
     "bun",
     "claude",
+    "claude-codex",
     "curl",
     "docker",
     "gh",
@@ -393,7 +407,18 @@ const bunCache = (path: string) => /^(\.bun\/install|\.cache|Library)(\/|$)/.tes
 const written = (home: string) =>
   Object.fromEntries(Object.entries(snapshot(home)).filter(([path]) => !bunCache(path)))
 
-const ALL: Tool[] = ["brew", "bun", "claude", "docker", "gh", "git", "node", "python3", "uv"]
+const ALL: Tool[] = [
+  "brew",
+  "bun",
+  "claude",
+  "claude-codex",
+  "docker",
+  "gh",
+  "git",
+  "node",
+  "python3",
+  "uv",
+]
 const BREW_LINE = (prefix: string) => `eval "$(${prefix}/bin/brew shellenv)"`
 const PATH_LINE = (dir: string) => `export PATH="${dir}:$PATH"`
 const count = (text: string, line: string) => text.split("\n").filter((l) => l === line).length
@@ -524,6 +549,7 @@ describe("install.sh", () => {
       "brew install uv",
       "curl -fsSL https://bun.sh/install",
       "curl -fsSL https://claude.ai/install.sh",
+      "curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh",
       "brew install --cask docker",
     ])
       expect(calls).toContain(call)

@@ -129,6 +129,10 @@ install_tool() {
       has claude && return 0
       curl -fsSL https://claude.ai/install.sh | bash && on_path "$HOME/.local/bin" && has claude
       ;;
+    claude-codex)
+      has claude-codex && return 0
+      curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash && on_path "$HOME/.local/bin" && has claude-codex
+      ;;
     docker)
       has docker && return 0
       ensure_brew && brew install --cask docker </dev/null || return 1
@@ -228,7 +232,7 @@ DOCTOR="$DIR/packages/scripts/src/playground/doctor.ts"
 # The rest of the doctor's own list, as name<TAB>fix in the order the tools are installed in: only the tools install_tool installs, since the gh login waits for a gh this run may install, and herdr is herdr_pin's.
 rest_of_doctor() {
   "$BUN" --no-env-file "$DOCTOR" --tools --json | "$BUN" --no-env-file -e '
-    const order = ["git", "node", "gh", "python3", "uv", "bun", "claude", "docker"]
+    const order = ["git", "node", "gh", "python3", "uv", "bun", "claude", "claude-codex", "docker"]
     const left = JSON.parse(await Bun.stdin.text()).filter((c) => c.status !== "ok" && order.includes(c.name))
     for (const c of left.sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name)))
       console.log(`${c.name}\t${c.detail.replace(/^.*?fix: /, "").replace(/ \([^)]*\)$/, "")}`)

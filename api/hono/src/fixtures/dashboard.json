@@ -24,6 +24,14 @@
       },
       {
         "action": null,
+        "detail": "installed",
+        "name": "claude-codex",
+        "need": "a Codex (ChatGPT) subscription alongside Claude's",
+        "note": null,
+        "status": "ok"
+      },
+      {
+        "action": null,
         "detail": "28.3.1",
         "name": "docker",
         "need": "the database",
@@ -119,6 +127,14 @@
         "need": "every session",
         "note": null,
         "status": "ok"
+      },
+      {
+        "action": null,
+        "detail": "not found",
+        "name": "claude-codex",
+        "need": "a Codex (ChatGPT) subscription alongside Claude's",
+        "note": "claude-codex is not installed. Only useful with a Codex CLI login too.",
+        "status": "optional"
       },
       {
         "action": {
