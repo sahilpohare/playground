@@ -23,7 +23,7 @@
   {
     "hits": 1,
     "kind": "ownerName",
-    "line": "> The main product is [ZeroSDK](https://github.com/nrjdalal/zerosdk), which comes later in 2027.",
+    "line": "> The main product is [ZeroSDK](https://github.com/sahilpohare/zerosdk), which comes later in 2027.",
     "path": "README.md",
     "reason": "the README's warning the owner asked for, linking ZeroSDK's public repository"
   },

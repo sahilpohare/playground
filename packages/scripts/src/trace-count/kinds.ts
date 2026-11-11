@@ -8,7 +8,7 @@ import { dataDir } from "../../../env/src/data-dir"
 type Environment = Record<string, string | undefined>
 
 // Today's public repositories, the factory's and Yard's, which the guard and the ratchet read while factory.publicRepo is unset, and which migrate seeds it with beside the checkout's origin.
-export const TODAY_PUBLIC = ["nrjdalal/playground", "nrjdalal/playground-yard"]
+export const TODAY_PUBLIC = ["sahilpohare/playground", "sahilpohare/playground-yard"]
 
 // The repositories, and the owner's names (owner.names, then the archive's owner), read from the settings at run time so no private name is written in the tree; an unset archive is empty, which leaves its links unmeasured.
 export type Repos = { archive: string; owner: string[]; public: string[] }

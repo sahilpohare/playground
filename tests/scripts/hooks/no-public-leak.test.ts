@@ -265,7 +265,7 @@ describe("what it lets through", () => {
     )
     expect(
       await run(
-        bash(`gh pr comment 1 --repo nrjdalal/playground-yard --body "Quilla Marsh asked"`),
+        bash(`gh pr comment 1 --repo sahilpohare/playground-yard --body "Quilla Marsh asked"`),
         empty,
       ),
     ).toContain("a person's name")
