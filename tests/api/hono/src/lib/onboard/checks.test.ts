@@ -150,7 +150,7 @@ describe("onboardChecks on a machine it reads", () => {
     expect(rows.uv!.note).toBeTruthy()
   })
 
-  test("gh not signed in, Docker not running and an old node are MISSING, each with its fix", async () => {
+  test("gh not signed in and an old node are MISSING, and Docker not running is optional, each with its fix", async () => {
     const { reader } = machine(
       TOOLS,
       {
@@ -169,8 +169,12 @@ describe("onboardChecks on a machine it reads", () => {
       status: "MISSING",
     })
     expect(rows.docker).toMatchObject({
-      action: { id: "docker" },
+      action: { id: "docker", label: "Start Docker" },
       detail: "not running",
+      status: "optional",
+    })
+    expect(rows.Database).toMatchObject({
+      action: { id: "pglite", label: "Start without Docker" },
       status: "MISSING",
     })
     expect(rows.node).toMatchObject({
@@ -372,8 +376,21 @@ describe("the Database row", () => {
     return byName(await onboardChecks({ ...signedUp, database, reader })).Database
   }
 
-  test("waits on docker, then reads setup's state until the database runs, with Start as its action", async () => {
-    expect(await run({ status: "idle" }, false)).toMatchObject({ action: null, status: "waiting" })
+  test("reads setup's state until the database runs, starting a container when docker runs and PGlite when it does not", async () => {
+    expect(await run({ status: "idle" }, false)).toMatchObject({
+      action: { id: "pglite", label: "Start without Docker" },
+      detail: "not started",
+      status: "MISSING",
+    })
+    expect(await run({ reason: "PGlite did not start", status: "failed" }, false)).toMatchObject({
+      action: { id: "pglite" },
+      detail: "PGlite did not start",
+      status: "MISSING",
+    })
+    expect(await run({ status: "starting", step: "Starting PGlite" }, false)).toMatchObject({
+      action: null,
+      status: "waiting",
+    })
     expect(await run({ status: "idle" })).toMatchObject({
       action: { id: "database" },
       detail: "not started",
@@ -516,8 +533,8 @@ describe("a fixture stack", () => {
         source: fixture,
       }),
     )
-    expect(missing.docker).toMatchObject({ action: { id: "docker" }, status: "MISSING" })
-    expect(missing.Database!.status).toBe("waiting")
+    expect(missing.docker).toMatchObject({ action: { id: "docker" }, status: "optional" })
+    expect(missing.Database).toMatchObject({ action: { id: "pglite" }, status: "MISSING" })
     expect(missing.gh).toMatchObject({
       action: { id: "gh-login" },
       detail: "not signed in",
@@ -538,7 +555,7 @@ describe("a fixture stack", () => {
           source: fixture,
         }),
       ).docker
-    expect((await read())!.status).toBe("MISSING")
+    expect((await read())!.status).toBe("optional")
     fixtureFixed.add("docker")
     expect(await read()).toMatchObject({ action: null, note: null, status: "ok" })
   })
