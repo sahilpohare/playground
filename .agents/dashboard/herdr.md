@@ -53,10 +53,11 @@
   a non-empty list of whole-number pids or an absolute socket path.
   `memory_pressure` stays off the list (its `-l` simulates pressure, and `kern.memorystatus_level` is the free share it prints), and `sysctl` is never handed a `name=value`.
   `tests/api/hono/src/lib/spawn-allowlist.test.ts` fails when a file outside those it names starts a process anywhere under the api's `lib/`, so a new reading arrives as a `COMMANDS` entry.
-  There are six exceptions.
+  There are seven exceptions.
   The first is the update check the System report carries (`api/hono/src/lib/dashboard/update.ts`), whose `git fetch` of the one branch the checkout follows is not a read, so it and the `git rev-list`, `git log` and `git rev-parse` reads beside it stay out of `COMMANDS`: it runs git with no shell, a fixed argv and no argument from a request.
   The second is first run's Start a local container, the Database row's fix (`api/hono/src/lib/setup/container.ts`, stack.md), whose `docker run`, `docker exec` and `docker rm -f -v` are not reads: it runs docker with no shell and a fixed argv, the container's name from the checkout's path and never from a request, the password in the child's environment alone, and reads back only the port,
   from `docker port`.
+  Its sibling Start without Docker (`api/hono/src/lib/pglite.ts`) starts the checkout's PGlite server, a long-lived process like a container, detached: `process.execPath` on the fixed `api/hono/src/bin/pglite.ts`, with no shell, its one argument the data folder's `pglite/<name>` from the checkout's path and never from a request.
   The third is the first run's fixes (`api/hono/src/lib/onboard/fix.ts`), which set up or fix what a check found: each id in `FIX_IDS` (`fix-ids.ts`) runs its own fixed argv from `PLANS` with no shell, picked by what is on PATH and never from a request, one fix at a time,
   each step killed by its own handle past its bound and given only the variables in `PASSED` (a proxy's included), so the API's settings and tokens reach no installer.
   The `trust` fix runs this checkout's own portless CLI (`node <checkout>/node_modules/portless/dist/cli.js trust`) as the signed-in user in a session of its own, with no terminal, so any password macOS asks for goes to its own window, the app never sees it, and portless's `sudo` retry after a cancelled window fails at once rather than asking in the API's pane.
