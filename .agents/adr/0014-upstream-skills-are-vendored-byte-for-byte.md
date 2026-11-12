@@ -14,4 +14,4 @@ Core keeps the upstream skills in use, each flat at `extensions/core/skills/<nam
 
 - An upstream change reaches the repo only as a re-vendor PR, whose diff and drift test a reviewer reads, which answers ADR 0009's worry that a copy drifts silently.
 - `pr` is core's one changed copy, `extensions/core/skills/pr/`, upstream's text plus the blocks the gates and the Changelog read, held by its own drift test against a pinned upstream copy; upstream's `pr` is not taken.
-- The upstream skills keep their licenses (MIT for mattpocock's, Apache-2.0 for graphify and impeccable) in `extensions/core/upstream/<name>/`; the root `NOTICE` covers only this repo's own code, and `tests/NOTICE.test.ts` fails on any `LICENSE` at the root.
+- The upstream skills keep their licenses (MIT for mattpocock's, Apache-2.0 for graphify and impeccable) in `extensions/core/upstream/<name>/`; the root `NOTICE` and the proprietary root `LICENSE` cover only this repo's own code, and `tests/NOTICE.test.ts` holds the root to that one `LICENSE`.
