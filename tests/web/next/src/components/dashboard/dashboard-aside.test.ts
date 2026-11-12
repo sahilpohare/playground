@@ -278,11 +278,12 @@ describe("the aside's tabs", () => {
   })
 
   // the tab bar can stay shown, by a choice kept in this browser
-  test("stay shown when Auto-hide tab bar is unticked in the user menu, kept for this browser", async () => {
+  test("stay shown by default and while Auto-hide tab bar is unticked in the user menu, kept for this browser", async () => {
     const aside = await source("components/dashboard/dashboard-aside.tsx")
     const menu = await source("components/dashboard/owner-menu.tsx")
     expect(aside).toContain('const AUTO_HIDE_KEY = "playground:aside:autoHide"')
     expect(aside).toContain("const hidden = autoHide && barHidden")
+    expect(aside).toContain('setAutoHide(localStorage.getItem(AUTO_HIDE_KEY) === "1")')
     expect(aside).toContain('localStorage.setItem(AUTO_HIDE_KEY, on ? "1" : "0")')
     expect(aside).toContain("<AsideUserMenu autoHide={autoHide} onAutoHide={setAutoHideKept} />")
     expect(menu).toContain(
