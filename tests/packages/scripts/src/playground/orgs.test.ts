@@ -339,17 +339,19 @@ test("orgs home lists the home set in the ws marketplace, adds and installs it o
   ])
 })
 
-test("orgs home removes a personal link into the checkout at a name the set ships, keeps the rest, and names a real folder, exit 1", async () => {
+test("orgs home removes a personal link into the checkout at a name the set ships, keeps the rest, and moves a real folder to my-skills, linked back", async () => {
   const data = extensionsWith("personal", policy)
   const personal = join(data, "personal-skills")
   mkdirSync(join(personal, "tdd"), { recursive: true })
   symlinkSync(join(scratch, "elsewhere", "archify"), join(personal, "archify"))
   symlinkSync(join(checkout, "skills", "playground", "ask"), join(personal, "ask"))
   const result = await home(data)
-  expect(result.code).toBe(1)
+  expect(result.code).toBe(0)
   expect(readdirSync(personal).sort()).toEqual(["archify", "tdd"])
-  expect(lstatSync(join(personal, "tdd")).isDirectory()).toBe(true)
-  expect(result.err.join("\n")).toContain(`skipped tdd: ${join(personal, "tdd")} is a real folder`)
+  const kept = join(data, "my-skills", "tdd")
+  expect(readlinkSync(join(personal, "tdd"))).toBe(kept)
+  expect(lstatSync(kept).isDirectory()).toBe(true)
+  expect(result.out.join("\n")).toContain(`moved your tdd to ${kept} and linked it back`)
 })
 
 // An install's link-skills removed the user's own links at the names the home set ships, writing-for-agents into inscope's cache among them, so running sessions lost those skills

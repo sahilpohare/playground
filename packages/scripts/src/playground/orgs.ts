@@ -11,6 +11,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -269,7 +270,7 @@ const linksIntoCheckout = (path: string, checkout: string): boolean => {
   return pathsOf(target).some((t) => pathsOf(checkout).some((root) => within(t, root)))
 }
 
-// The home set at user scope, through a directory marketplace, ws, in <data>/orgs: Claude Code installs a copy, so a later run moves the entry to the new folder and updates it. A link in the personal skills folder at a name the set ships into Playground's own checkout goes first, since it would take the name; a link elsewhere is the user's and stays, named in one line; a real folder there is left alone and named, exit 1.
+// The home set at user scope, through a directory marketplace, ws, in <data>/orgs: Claude Code installs a copy, so a later run moves the entry to the new folder and updates it. A link in the personal skills folder at a name the set ships into Playground's own checkout goes first, since it would take the name; a link elsewhere is the user's and stays, named in one line; a real folder there moves to my-skills beside it and links back, exit 1 only when my-skills holds the name already.
 const installHome = (io: OrgsIo, plugin: string): number => {
   let code = 0
   for (const name of readdirSync(join(plugin, "skills"))) {
@@ -288,10 +289,20 @@ const installHome = (io: OrgsIo, plugin: string): number => {
       rmSync(path)
       io.out(`removed the personal link ${name}: the home skill set ships it`)
     } else {
-      io.err(
-        `skipped ${name}: ${path} is a real folder, which takes the name over the home skill set; move it aside`,
+      const kept = join(dirname(io.personal), "my-skills", name)
+      if (existsSync(kept)) {
+        io.err(
+          `skipped ${name}: ${path} is a real folder, and ${kept} is taken; move one of them out of ${dirname(kept)}, then run bash ${io.checkout}/scripts/link-skills.sh`,
+        )
+        code = 1
+        continue
+      }
+      mkdirSync(dirname(kept), { recursive: true })
+      renameSync(path, kept)
+      symlinkSync(kept, path)
+      io.out(
+        `moved your ${name} to ${kept} and linked it back, so it keeps the name over the home skill set's ${name}`,
       )
-      code = 1
     }
   }
   const orgs = join(io.data, "orgs")
