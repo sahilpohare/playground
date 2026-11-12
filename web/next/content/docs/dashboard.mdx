@@ -20,7 +20,8 @@ The Assistant has a chat and a box of its own too, opened from its **Assistant**
 Each dispatcher's chat and its box are named by its label, such as Message Alpha; the model its newest reply ran shows in its sidebar row's tooltip.
 A menu directly left of the box's send button, such as **Opus · High**, shows the model and effort the dispatcher's newest reply ran with, and a pick types `/model` or `/effort` into it for you; the row shows the new one from its next reply.
 On a first run the chat starts with **Let's check this Mac**, each check marked there or missing with the button that fixes it, then **Continue**, which makes you this Mac's owner ([Where to start](/docs#where-to-start)).
-Once every check has passed, it shows one line, **This Mac has everything Playground needs**, over the steps left, each ticked once done: GitHub, Settings (**Set up settings**), a Claude account (**Add a Claude account**) and **Start** with the dispatcher's name.
+Once every check has passed, it shows one line, **This Mac has everything Playground needs**, over the steps left, each ticked once done: GitHub, Settings (**Set up settings**), Harness, a Claude account (**Add a Claude account**, for Claude Code alone) and **Start** with the dispatcher's name.
+Harness shows a card each for Claude Code and Codex ([Pick what Alpha runs on](/docs/install#pick-what-alpha-runs-on)).
 While a restore brings your sessions back after a restart, it says **The factory is coming back** in their place, with no **Start**, until the dispatcher is back.
 If the restore cannot bring the dispatcher back, **Start** shows again, even while other sessions still wait.
 Once the dispatcher runs, its chat takes their place.
@@ -166,6 +167,7 @@ A script's row shows its plain name over its status (Running, Waiting, Failing o
 A script that is Failing or Down shows in red, even while the group is collapsed.
 A Waiting script has nothing to read yet, such as Claude usage readings before you add a Claude account, and reads muted.
 Hover it for its job id, what it does, the reason and its last beat.
+What an extension's own job does comes from the description in that job's settings, and a job with no description there reads "No description in this job's settings".
 A script paused on purpose is not listed; the System page lists it under Paused.
 
 ### Threads

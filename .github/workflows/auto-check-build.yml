@@ -120,7 +120,7 @@ jobs:
 
       # the spawn gates' fake pane types its command into zsh, which ubuntu-latest lacks
       - name: Install zsh
-        run: sudo apt-get update -q && sudo apt-get install -y -q zsh
+        uses: ./.github/actions/install-zsh
 
       - name: Cache turbo
         uses: actions/cache@v4

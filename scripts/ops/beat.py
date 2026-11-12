@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """beat.py <job> <pid> <startedAt> <cycleSeconds> <lastResult> [extra JSON]: write the job's heartbeat, ops/<job>.json, atomically.
-Imported, it also holds checkout(), the one place the ops scripts name the main checkout.
+Imported, it also holds checkout(), the one place the ops scripts name the main checkout, and the factory login's one rule (factory_login, with has_token beside it), which login-flip.py and run.py read the flip state's `factory` through.
 
 The dashboard reads it: Running while lastResult is "ok" and lastBeatAt is fresh, Waiting while it starts "waiting: " (the reason after it), Failing when lastResult is anything else,
 Down when lastBeatAt is older than 3 x cycleSeconds, the pid is gone or the file is missing.
@@ -58,6 +58,23 @@ def setting(key):
     if r.returncode != 0:
         raise SystemExit(f"{key}: {r.stderr.strip() or f'exit {r.returncode}'}")
     return json.loads(r.stdout)
+
+
+def has_token(account, service):
+    """Whether the account's long-lived token still sits in the Keychain: the item's existence, judged by the exit alone, its secret never read; a read that fails or outlasts its 15 seconds counts as none."""
+    try:
+        return subprocess.run(["security", "find-generic-password", "-s", service, "-a", account], capture_output=True, text=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def factory_login(factory, pool, shares, service):
+    """The factory login's one rule, which every reader of the flip state's `factory` reads it through: `factory` itself while the pool lists it and its token still reads, else the pool account `shares` gives the best share among those holding a token; `factory` unchanged when the pool reads none, and None when it names no factory or no candidate holds one."""
+    if not factory or pool is None:
+        return factory
+    if factory in pool and has_token(factory, service):
+        return factory
+    return max((a for a in pool if a != factory and has_token(a, service) and shares.get(a, 0) > 0), key=shares.get, default=None)
 
 
 if __name__ == "__main__":

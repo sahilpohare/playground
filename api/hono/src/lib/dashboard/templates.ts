@@ -3,7 +3,13 @@ import { join } from "node:path"
 
 import { ID_ALPHABET, seatOf } from "@packages/config/kinds"
 import { spawnEnv } from "@packages/env/api-hono"
-import { BRIEF_NAME, readSessionTemplates, type SessionTemplate } from "@packages/settings"
+import {
+  BRIEF_NAME,
+  type HarnessId,
+  readSessionTemplates,
+  type SessionTemplate,
+  templateBackend,
+} from "@packages/settings"
 
 import { readConfigAccount } from "@/lib/dashboard/account"
 import { checkoutRoot, fixtureStart, readsLive } from "@/lib/dashboard/fixture"
@@ -25,7 +31,7 @@ export type TemplateStarted =
 // What a Claude second dispatcher with no account of its own waits on, said as the owner's next step.
 export const NEEDS_ACCOUNT = "Add a second Claude account in Settings > Accounts"
 
-// Pure: the argv each step of a template's start runs, in order: an orchestrator's roster row, then spawn.sh's manager start with the template's backend, account, model and effort; or why it cannot start.
+// Pure: the argv each step of a template's start runs, in order: an orchestrator's roster row, then spawn.sh's manager start with the template's backend (--backend glm for a GLM model), account, model and effort; or why it cannot start.
 export function templateArgv({
   account,
   dispatcher,
@@ -39,7 +45,8 @@ export function templateArgv({
   root: string
   template: SessionTemplate
 }): { error: string } | { steps: string[][] } {
-  const { backend, brief, effort, kind, label, model } = template
+  const { brief, effort, kind, label, model } = template
+  const backend = templateBackend(template)
   if (!BRIEF_NAME.test(brief) || brief.includes(".."))
     return { error: `A brief is a file name in the data folder or scripts/briefs, not ${brief}` }
   if (kind === "dispatcher" && backend === "claude" && !account) return { error: NEEDS_ACCOUNT }
@@ -123,7 +130,7 @@ export const refusalOf = (
   template: SessionTemplate,
   { account, briefFound }: { account?: string; briefFound: boolean },
 ): string | null => {
-  if (template.kind === "dispatcher" && template.backend === "claude" && !account)
+  if (template.kind === "dispatcher" && templateBackend(template) === "claude" && !account)
     return NEEDS_ACCOUNT
   return briefFound ? null : `No brief ${template.brief} in the data folder or scripts/briefs`
 }
@@ -148,7 +155,9 @@ const contextOf = async (
   return {
     account: (template) =>
       template.account ??
-      (template.kind === "dispatcher" && template.backend === "claude" ? second : undefined),
+      (template.kind === "dispatcher" && templateBackend(template) === "claude"
+        ? second
+        : undefined),
     data,
     root,
   }
@@ -161,8 +170,8 @@ const refusalIn = (template: SessionTemplate, { account, data, root }: Context) 
   })
 
 export type TemplateRow = {
-  backend: "claude" | "glm"
   effort: string | null
+  harness: HarnessId
   id: string
   kind: string
   label: string
@@ -184,8 +193,8 @@ export async function listTemplates({
 } = {}): Promise<TemplateRow[]> {
   const context = await contextOf(data, root, login)
   return templates.map((template) => ({
-    backend: template.backend,
     effort: template.effort ?? null,
+    harness: template.harness,
     id: template.id,
     kind: template.kind,
     label: template.label,

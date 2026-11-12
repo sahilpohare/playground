@@ -3,10 +3,11 @@
 // Ported from ~/.playground/ops/optimizer/idle_sessions.py; a session's PRs are its roster pr and prs list, its worker's, every open one on its branch and every one its transcript links, so a checker serving a second PR is never listed while that one is open.
 // Flags, from Claude's session registry (live pid, status, statusUpdatedAt), roster.json and GitHub REST reads per PR (an open PR cached 5 minutes, a merged or closed one for good):
 // Every flag needs 10+ minutes not busy, so a session finishing a step is never listed. ops-tick's auto-end beat ends what auto_end.ts takes of it.
-//   checker-worker-gone  a reviewer or tester whose worker has no live session
+//   checker-worker-gone  a reviewer or tester whose worker has no live session, with no open PR a live worker serves among its PRs
 //   checker-pr-done      a reviewer or tester whose PRs are all merged or closed
 //   checker-nothing      a reviewer or tester not busy for 30+ minutes whose every PR head carries its verdict or is closed
-//   worker-prs-done      a worker whose roster holds a pr, and whose PRs are all merged or closed
+//   worker-prs-done      a worker whose roster holds a pr, whose PRs are all merged or closed, and whose /pull/ PR that closed last merged
+//   worker-pr-closed     a worker whose /pull/ PR that closed last closed unmerged; its lead is asked to reassign or end it
 //   roster-says-<status> any session whose roster entry reads paused or ended
 // A session whose status is `shell` (a background command still running) is not busy, and is marked `+bg`, since its watcher keeps waking it.
 // Prints one line per flagged session and a total; reads only, signals nothing.
@@ -49,6 +50,7 @@ export type RosterEntry = {
 }
 
 export type PrState = {
+  closedAt?: string
   head: string
   mergeSha?: string
   mergedAt?: string
@@ -58,9 +60,9 @@ export type PrState = {
 }
 
 export type Row = {
+  donePr?: string
   kind: string | null
   lead?: string
-  mergedPr?: string
   name: string
   quiet: number
   refs: string[]
@@ -101,6 +103,18 @@ export async function sessionPrs(
       ...(workerSession && linkedPrs ? await linkedPrs(workerSession) : []),
     ]),
   ]
+}
+
+// True when a live worker session serves an open PR of the list, as workerPrs (its roster pr and open branch PRs) reads them; called only once the checker's own worker is found gone, each worker's PRs once per call.
+export async function servesLiveWorker(input: CollectInput, open: string[]): Promise<boolean> {
+  if (open.length === 0) return false
+  const { roster, sessions, workerPrs } = input
+  for (const w of Object.keys(sessions)) {
+    if (kindOf(w, roster[w]?.kind) !== "worker") continue
+    const served = await workerPrs(w)
+    if (open.some((url) => served.includes(url))) return true
+  }
+  return false
 }
 
 type Usage = {
@@ -199,37 +213,51 @@ export async function collect(input: CollectInput): Promise<Row[]> {
     const checker = kind === "reviewer" || kind === "tester"
     const worker = checker ? workerOf(name, r.worker) : undefined
     let refs: string[] = []
-    let mergedPr: string | undefined
+    let donePr: string | undefined
     let sha: string | undefined
     if (checker || kind === "worker") {
+      const prs = await sessionPrs(input, name, worker, d.sessionId)
+      const states = await Promise.all(prs.map((url) => prState(url)))
+      const open = states.flatMap((s, i) => (s?.state === "open" ? [prs[i]] : []))
       if (
         worker &&
         !(worker in sessions) &&
-        !Object.keys(sessions).some((s) => s.startsWith("worker-") && s.startsWith(worker))
+        !Object.keys(sessions).some((s) => s.startsWith("worker-") && s.startsWith(worker)) &&
+        !(await servesLiveWorker(input, open))
       )
         why.push(`checker-worker-gone (${worker})`)
-      const prs = await sessionPrs(input, name, worker, d.sessionId)
-      const states = await Promise.all(prs.map((url) => prState(url)))
       refs = states.flatMap((s) => (s?.ref ? [s.ref] : []))
-      // The PR that merged last, by its merged_at, so an older linked PR never names the merge: a state cached without one sorts oldest, and a tie keeps the later in the list.
+      // The PR that closed last decides the end, a merge by its merged_at and a close by its closed_at, so an older merged PR never names a newer close: a state with no merged_at or closed_at sorts oldest, and a tie keeps the later in the list.
       let newest: number | undefined
+      let newestAt: string | undefined
       states.forEach((s, i) => {
-        if (
-          s?.mergeSha &&
-          (newest === undefined || (s.mergedAt ?? "") >= (states[newest]?.mergedAt ?? ""))
-        )
+        // An issue URL never counts as the last close: GitHub closes a PR's issue a beat after its merge, and the PR it closes decides instead.
+        if (!PR_URL.test(prs[i] ?? "")) return
+        const at =
+          s?.state === "merged"
+            ? (s.mergedAt ?? "")
+            : s?.state === "closed"
+              ? (s.closedAt ?? "")
+              : undefined
+        if (at === undefined) return
+        if (newest === undefined || at >= (newestAt ?? "")) {
           newest = i
+          newestAt = at
+        }
       })
       if (newest !== undefined) {
-        mergedPr = PR_URL.exec(prs[newest] ?? "")?.[2]
-        sha = states[newest]?.mergeSha
+        donePr = PR_URL.exec(prs[newest] ?? "")?.[2]
+        if (states[newest]?.state === "merged") sha = states[newest]?.mergeSha
       }
       const done = states.every((s) => s !== null && (s.state === "merged" || s.state === "closed"))
-      const how = states.some((s) => s?.state === "merged") ? "merged" : "closed"
+      // The PR that closed last names the how alone: a worker whose last close was a close is kept and its lead asked, not ended.
+      const how = newest !== undefined && states[newest]?.state === "merged" ? "merged" : "closed"
       // A worker only while its roster holds a pr: one with none sits between chores, since assign clears it.
-      if (states.length > 0 && done && (checker || r.pr))
-        why.push(`${checker ? "checker" : "worker"}-pr${checker ? "" : "s"}-done (${how})`)
-      else if (
+      if (states.length > 0 && done && (checker || r.pr)) {
+        if (checker) why.push(`checker-pr-done (${how})`)
+        else if (how === "merged") why.push("worker-prs-done (merged)")
+        else why.push(`worker-pr-closed (closed${donePr ? ` #${donePr}` : ""})`)
+      } else if (
         checker &&
         quiet >= 30 &&
         states.length > 0 &&
@@ -242,9 +270,9 @@ export async function collect(input: CollectInput): Promise<Row[]> {
     }
     if (why.length === 0) continue
     rows.push({
+      donePr,
       kind,
       lead: r.lead ?? (worker ? roster[worker]?.lead : undefined),
-      mergedPr,
       name,
       quiet,
       refs,
@@ -347,6 +375,7 @@ export async function prStateLive(
     return read?.state ? remember({ at: now, head: "", state: read.state, verdicts: [] }) : null
   }
   const pr = (await api(`repos/${m[1]}/pulls/${m[2]}`)) as {
+    closed_at?: string | null
     comments?: number
     head?: { ref?: string; sha?: string }
     merge_commit_sha?: string | null
@@ -367,6 +396,7 @@ export async function prStateLive(
   }
   return remember({
     at: now,
+    closedAt: pr.closed_at || undefined,
     head: pr.head.sha,
     mergeSha: (pr.merged_at && pr.merge_commit_sha) || undefined,
     mergedAt: pr.merged_at || undefined,

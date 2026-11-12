@@ -1,11 +1,9 @@
-import { mkdirSync, readdirSync, symlinkSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, symlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 import { makeScratch } from "@packages/safe-delete"
 
 import {
-  boardSignature,
-  daySignature,
   finalText,
   majority,
   triageMajority,
@@ -22,7 +20,7 @@ export const HERE = import.meta.dir
 export type Replay = {
   allowed: string[]
   args: string
-  compare: "board" | "day" | "triage"
+  compare: string
   model: string
   runs: number
   servers: string[]
@@ -36,10 +34,18 @@ export const skillFile = (entry: SkillMap[string]): string => entry.file ?? "SKI
 // A scope's replays sit in its own folder, beside the skills they replay: replays/replays.json, replays/map.json (each skill's folder inside the scope) and replays/fixtures/<name>/.
 export const replaysDir = (scope: string) => join(scope, "replays")
 export const fixtureDir = (scope: string, name: string) => join(replaysDir(scope), "fixtures", name)
-export const schemaFile = (server: string) => join(HERE, "schemas", `${server}.json`)
+// A scope's layouts, its script item parity-replay: schemas/<server>.json, each server's tool list, and compare.ts, the comparators its replays name beyond core's triage.
+export const LAYOUTS = join("scripts", "parity-replay")
+export const SCHEMAS = join(LAYOUTS, "schemas")
+export const schemaFile = (scope: string, server: string) => join(scope, SCHEMAS, `${server}.json`)
 
 // Pure: the --mcp-config naming each server the replay reads as a stub of that name, so its tools keep their mcp__<server>__ names.
-export const mcpConfig = (fixtures: string, servers: string[], misses: string): string =>
+export const mcpConfig = (
+  scope: string,
+  fixtures: string,
+  servers: string[],
+  misses: string,
+): string =>
   JSON.stringify({
     mcpServers: Object.fromEntries(
       servers.map((server) => [
@@ -48,7 +54,7 @@ export const mcpConfig = (fixtures: string, servers: string[], misses: string): 
           args: [
             join(HERE, "stub-mcp.ts"),
             ...["--server", server, "--recording", join(fixtures, `${server}.json`)],
-            ...["--schemas", schemaFile(server), "--log", misses],
+            ...["--schemas", schemaFile(scope, server), "--log", misses],
           ],
           command: process.execPath,
           type: "stdio",
@@ -101,18 +107,30 @@ export const replayEnv = (
   }
 }
 
-const SIGNATURES = {
-  board: (lines: string[]) => boardSignature(finalText(lines)),
-  day: (lines: string[]) => daySignature(finalText(lines)),
-  triage: triageSignature,
+// How a replay compares its runs: each run's signature, and how a side's signatures make its majority.
+export type Comparator = {
+  majority: (signatures: string[]) => string | null
+  sign: (lines: string[]) => string
 }
 
-export const signature = (replay: Replay, lines: string[]) => SIGNATURES[replay.compare](lines)
+// The comparators a scope's replays can name: core's triage, which takes each item most runs share, and each one the scope's compare.ts exports in `comparators`, which signs the run's last message and takes the one exact signature most runs share.
+export const comparators = async (scope: string): Promise<Record<string, Comparator>> => {
+  const file = join(scope, LAYOUTS, "compare.ts")
+  const own = existsSync(file)
+    ? (((await import(file)).comparators ?? {}) as Record<string, (report: string) => string>)
+    : {}
+  return {
+    ...Object.fromEntries(
+      Object.entries(own).map(([name, sign]) => [
+        name,
+        { majority, sign: (lines: string[]) => sign(finalText(lines)) },
+      ]),
+    ),
+    triage: { majority: triageMajority, sign: triageSignature },
+  }
+}
 
-// How a side's signatures make its majority: the one exact signature most runs share, or for triage each item most runs share.
-export const MAJORITIES = { board: majority, day: majority, triage: triageMajority }
-
-// Every problem in a replay's setup, found without running a model: its skill in its scope's map.json and on disk there, a recording and a schema for each server, every recorded tool in its server's schema, and gh's recording.
+// Every problem in a replay's setup, found without running a model: its skill in its scope's map.json and on disk there, a recording and a schema for each server, every recorded tool in its server's schema, gh's recording, and its comparator.
 export const problems = async (
   scope: string,
   name: string,
@@ -125,9 +143,12 @@ export const problems = async (
   if (!(await Bun.file(join(scope, entry.skill, skillFile(entry))).exists()))
     found.push(`${name}: no ${join(entry.skill, skillFile(entry))}`)
   for (const server of replay.servers) {
-    const schema = Bun.file(schemaFile(server))
+    const schema = Bun.file(schemaFile(scope, server))
     const recording = Bun.file(join(fixtureDir(scope, name), `${server}.json`))
-    if (!(await schema.exists())) found.push(`${name}: no schema for ${server}`)
+    if (!(await schema.exists()))
+      found.push(
+        `${name}: no layout for ${server}: the scope holds no ${join(SCHEMAS, `${server}.json`)}`,
+      )
     if (!(await recording.exists())) found.push(`${name}: no recording for ${server}`)
     if (!(await schema.exists()) || !(await recording.exists())) continue
     const tools = new Set(((await schema.json()) as Tool[]).map((t) => t.name))
@@ -138,8 +159,10 @@ export const problems = async (
   const gh = Bun.file(join(fixtureDir(scope, name), "gh.json"))
   if (!(await gh.exists()) || !Array.isArray(await gh.json()))
     found.push(`${name}: no gh.json list`)
-  if (!["board", "day", "triage"].includes(replay.compare))
-    found.push(`${name}: no comparator ${replay.compare}`)
+  if (!(replay.compare in (await comparators(scope))))
+    found.push(
+      `${name}: no comparator ${replay.compare}: core has triage, and the scope's ${join(LAYOUTS, "compare.ts")} names no ${replay.compare}`,
+    )
   return found
 }
 
@@ -162,7 +185,9 @@ export const runSide = async (o: {
   fixtures: string
   replay: Replay
   runs: number
+  scope: string
   scratch: string
+  sign: Comparator["sign"]
   skillDir: string
   token: string
 }): Promise<Side> => {
@@ -177,7 +202,7 @@ export const runSide = async (o: {
     const argv = replayArgv({
       allowed: o.replay.allowed,
       claude: o.claude,
-      mcp: mcpConfig(o.fixtures, o.replay.servers, misses),
+      mcp: mcpConfig(o.scope, o.fixtures, o.replay.servers, misses),
       model: o.replay.model,
       prompt: prompt(o.skillDir, o.replay.args, o.file),
       skillDir: o.skillDir,
@@ -197,7 +222,7 @@ export const runSide = async (o: {
     const out = await new Response(run.stdout).text()
     await run.exited
     await Bun.write(join(dir, "stream.jsonl"), out)
-    side.signatures.push(signature(o.replay, out.split("\n")))
+    side.signatures.push(o.sign(out.split("\n")))
     side.misses.push(...(await Bun.file(misses).text()).split("\n").filter(Boolean))
   }
   return side

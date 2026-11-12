@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -326,6 +327,11 @@ export async function spawn(
       ranIn(config, dir, name, id)
   // Every case runs in herdr, the one runtime spawn.sh starts in, so each home holds the fake herdr's pin; a case's own setup replaces it.
   herdrPin()(home)
+  // SCRATCH_DATA runs the case on a scratch data folder, as a run beside the live one does: the seeded folder moves out of the home's .playground, and PLAYGROUND_DATA_DIR names it.
+  if (env.SCRATCH_DATA) {
+    renameSync(join(home, ".playground"), join(home, "scratch-data"))
+    env = { ...env, PLAYGROUND_DATA_DIR: join(home, "scratch-data") }
+  }
   setup?.(home)
   // a worker or checker starts with a title, so each case gives one unless it names its own or NO_TITLE leaves it off.
   const titled =

@@ -5,6 +5,7 @@ import {
   dispatcherLabelOfName,
   dispatcherOf,
   factoryRoleOf,
+  hasManagerRole,
   kindOf,
   kindOfName,
   managerKindOfName,
@@ -112,6 +113,16 @@ describe("kindOf", () => {
     expect(kindOf("b7k2mq-reviewer", undefined)).toBe("reviewer")
     expect(kindOf("worker-greed", "nonsense")).toBe("worker")
     expect(kindOf("merritt", null)).toBeNull()
+  })
+})
+
+describe("hasManagerRole", () => {
+  test("the roster's manager role, wider than the four seats", () => {
+    expect(hasManagerRole("dispatcher")).toBe(true)
+    expect(hasManagerRole("orchestrator")).toBe(true)
+    expect(hasManagerRole("ops")).toBe(true)
+    expect(hasManagerRole("runner")).toBe(false)
+    expect(hasManagerRole("worker")).toBe(false)
   })
 })
 

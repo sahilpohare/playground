@@ -256,6 +256,8 @@ test("run-slot.sh kind prints the lane a command takes and runs nothing", async 
   }
   expect(await kind(["cp", "-R", "node_modules", join(m.root, "made")])).toBe("clone")
   expect(await kind(["touch", join(m.root, "made")])).toBe("")
+  // issue 1722: env's no-argument flags and the VAR=x words before it wrap the command, so the lane and size read the command itself
+  expect(await kind(["env", "-i", "X=Y", "bun", "install"])).toBe("quick")
   // review round 1: a run run-slot refuses reads as refuse, a dev stack's among them
   expect(await kind(["bun", "run", "dev"])).toBe("refuse")
   // a chain's git steps take the commit lane only in a repo, so these name a throwaway one: kind runs nothing, but the lane decision reads the named repo's index and lefthook.yml, and naming this checkout let a staged packages/ file answer for it (issue 1487)

@@ -6,17 +6,18 @@ The stored login (Claude Code's keychain item "Claude Code-credentials") is read
 (api.anthropic.com/api/oauth/usage) into usage/stored-login.json, which login-flip.py reads, and into usage-<local part>.json beside
 usage.json, the file the dashboard's Week tooltip reads. It never refreshes that token (a refresh
 rotates the refresh token Claude Code holds); an expired one waits for Claude Code to refresh it.
-While login-flip.json names a `factory` account other than the stored login (the factory's sessions run on that account's token,
-spawn.sh --account), usage.json holds that account's limits instead: login-flip's own reading of it, from one 1-token call's
+login-flip.json's `factory` login reads through the pool rule beat.factory_login carries: itself while the pool still lists it and its
+token still reads (has_token's Keychain check), else the pool account the split gives the best share. While that login is an account other than the stored login (the
+factory's sessions run on its token, spawn.sh --account), usage.json holds that account's limits instead: login-flip's own reading of it, from one 1-token call's
 rate-limit headers (a setup-token's inference scope cannot read /usage), taken here when login-flip's is 14 minutes old or more and its
 limitedUntil has passed, and shared through login-flip.json, so the two never probe the same account twice in that time. usage.json then adds `readAt` (when the
 limits were measured), `source` "token/ratelimit-headers" and `storedLogin` (the stored login's account and week). Remove `factory`
-from login-flip.json when the factory moves back to the stored login. login-flip.json's `accounts` lists every account the factory's
-sessions spend into; each is probed the same way, and usage.json's `accounts` holds each fresh week reading, which week-marks.py sums.
+from login-flip.json when the factory moves back to the stored login. login-flip.json's `accounts` lists every pool account the factory's
+sessions spend into, login-flip.py pruning it to the pool on each run; each is probed the same way, and usage.json's `accounts` holds each fresh week reading, which week-marks.py sums.
 ops/alerts-usage.json holds, while each lasts, one alert per factory account whose week is past 90, 97 or 98% (usage.json's account
 and each in its `accounts`), and the logged-in account's 5-hour window at 90% or more; ops-unstick folds it in.
 Each alert's `name` is its account, since the leads' sweep keys an alert by its kind and name.
-While login-flip.json names no `factory`, each Claude account the Dashboard's Add a Claude account keeps (usage.accounts, its
+While login-flip.json's `factory` resolves to no account, each Claude account the Dashboard's Add a Claude account keeps (usage.accounts, its
 setup-token under usage.keychainService) comes before the stored login: usage.json holds the first one's probe reading, since the
 dispatcher's sessions run on it, and the stored login's only when none of them reads. With neither a stored login nor an added account, the job beats "waiting", not an error.
 usage.json's `rotation` is login-flip.json's: `pool`, each account login-flip.py switches between (its TARGETS), whether its plan ends, when, and the day of the month a renewing one renews.
@@ -38,7 +39,7 @@ API = os.environ.get("PLAYGROUND_USAGE_API") or "https://api.anthropic.com/api/o
 PROBE_URL = os.environ.get("PLAYGROUND_PROBE_URL") or "https://api.anthropic.com/v1/messages"  # the new-user gate points it at a closed loopback port, so its made-up token never leaves the Mac
 STARTED = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 sys.path.insert(0, OPS)
-from beat import beat, checkout, setting  # noqa: E402
+from beat import beat, checkout, factory_login, setting  # noqa: E402
 
 PROBE_MODEL, SERVICE = setting("models.probe"), setting("usage.keychainService")
 
@@ -189,9 +190,18 @@ def rotation(flip):
     return {"pool": [{"account": e["account"], "ending": e["ending"], "endsAt": e.get("endsAt"), "renewsOn": e.get("renewsOn")} for e in pool]} if isinstance(pool, list) and all(map(entry, pool)) else None
 
 
-def factory_reading(stored, flip, accounts):
-    """usage.json's data for login-flip.json's `factory` account, when that is not the stored login and usage.accounts still lists it; else None."""
-    factory = flip.get("factory")
+def resolved_factory(flip):
+    """The factory login the pool rule (beat.factory_login) resolves for this file: the file's pool and split against its `factory`, the token read the rule's validity test."""
+    pool = rotation(flip)
+    return factory_login(flip.get("factory"), [e["account"] for e in pool["pool"]] if pool else None, (flip.get("split") or {}).get("shares") or {}, SERVICE)
+
+
+_UNRESOLVED = object()  # factory_reading's resolved argument: absent, so the caller's None (the rule resolving to none) is taken as handed in
+
+
+def factory_reading(stored, flip, accounts, resolved=_UNRESOLVED):
+    """usage.json's data for the factory login resolved_factory resolves (the cycle hands one resolution in, so a cycle resolves once), when that is not the stored login and usage.accounts still lists it; else None."""
+    factory = resolved_factory(flip) if resolved is _UNRESOLVED else resolved
     if not factory or (stored and factory == stored["account"]) or (accounts is not None and factory not in accounts):
         return None
     now = time.time()
@@ -261,12 +271,13 @@ while True:
         no_login = isinstance(e, NoLogin)
         problems.append(f"stored login: {type(e).__name__}: {e}")
     flip = flip_file() or {}
+    resolved = resolved_factory(flip)
     try:
-        data = factory_reading(stored, flip, FACTORY)
+        data = factory_reading(stored, flip, FACTORY, resolved)
     except Exception as e:
         problems.append(f"factory account: {type(e).__name__}: {e}")
-    # a factory login-flip names, the stored login included, is the account the sessions run on, so the added ones are read only while it names none
-    if not data and not flip.get("factory"):
+    # the factory login, resolved through the pool rule, is the account the sessions run on, so the added ones are read only while it resolves to none
+    if not data and not resolved:
         try:
             data = added_reading(stored, flip, FACTORY or [])
         except Exception as e:

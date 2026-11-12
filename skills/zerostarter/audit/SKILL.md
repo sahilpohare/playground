@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Run the dependency security audit and maintain docs/dependencies.md. Use when the canary pre-push audit hook fails, or when `bun audit` flags a high advisory.
+description: Run the dependency security audit, update every package to its latest version, and maintain docs/dependencies.md. Use when the canary pre-push audit hook fails, when `bun audit` flags a high advisory, or when asked to update all packages to latest.
 source: https://github.com/nrjdalal/zerostarter
 ---
 
@@ -18,6 +18,16 @@ The first two run through `packages/scripts/src/audit.ts`, which tries again whe
   It stays strict because only a direct push reaches it: `bun run pr:merge` lands a PR through GitHub's API, which runs no hook.
 
 `docs/dependencies.md` is the canonical record of every active override, and it stays in place even when there are none.
+
+## Update every package to latest
+
+When asked to update all packages to their latest versions, bump every range at once, then take the steps below as for an advisory:
+
+```bash
+bun update --latest --recursive
+```
+
+`--recursive` reaches the root `catalog` and every workspace, and `--latest` ignores their ranges, so it crosses majors: read each major's release notes before you accept it. The catalog entries keep their caret ([Catalog ranges](../../../docs/dependencies.md#catalog-ranges)). A version published minutes ago can fail to resolve (`No version matching`) while the registry's metadata catches up; run it again a few minutes later. Done when `package.json` and `bun.lock` hold the new versions; then run steps 1 to 4, where step 2's proof gates the whole update.
 
 ## 1. Run
 

@@ -22,7 +22,7 @@ export type EntryKind = (typeof ENTRY_KINDS)[number]
 
 export const SESSION_KINDS = ["fork", "headless", "interactive", "subagent"] as const
 
-type Json = Record<string, unknown>
+export type Json = Record<string, unknown>
 
 export type EntryRow = {
   at: Date | null
@@ -70,25 +70,25 @@ export type TranscriptFile = {
 // In characters (UTF-16 code units), not bytes.
 export const TEXT_LIMIT = 256 * 1024
 
-const TASK_LIMIT = 300
+export const TASK_LIMIT = 300
 
 const NEWLINE = 0x0a
 
-const isRecord = (value: unknown): value is Json =>
+export const isRecord = (value: unknown): value is Json =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
-const str = (value: unknown): string => (typeof value === "string" ? value : "")
+export const str = (value: unknown): string => (typeof value === "string" ? value : "")
 
-const list = (value: unknown): Json[] => (Array.isArray(value) ? value.filter(isRecord) : [])
+export const list = (value: unknown): Json[] => (Array.isArray(value) ? value.filter(isRecord) : [])
 
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
 
 // Postgres refuses a NUL and a lone surrogate (half an emoji, as a cut can leave) in text and in jsonb, and one bad line would stop the importer at it.
-const storable = (text: string): string =>
+export const storable = (text: string): string =>
   (text.includes("\u0000") ? text.replaceAll("\u0000", "\uFFFD") : text).toWellFormed()
 
-const clipText = (text: string): string =>
+export const clipText = (text: string): string =>
   storable(text.length > TEXT_LIMIT ? text.slice(0, TEXT_LIMIT) : text)
 
 export type Line = { seq: number; text: string }
@@ -115,7 +115,7 @@ export const parseJson = (text: string): Json | null => {
   }
 }
 
-// The line as stored: base64 media keeps its type and length but not its bytes, a thinking block loses its opaque signature, and the toolUseResult that repeats a tool result's content is dropped.
+// The line as stored: base64 media keeps its type and length but not its bytes, a thinking block loses its opaque signature, a Codex rollout item its opaque encrypted_content, and the toolUseResult that repeats a tool result's content is dropped.
 function stripValue(value: unknown): unknown {
   if (typeof value === "string") return storable(value)
   if (Array.isArray(value)) return value.map(stripValue)
@@ -123,6 +123,7 @@ function stripValue(value: unknown): unknown {
   const out: Json = {}
   for (const [key, inner] of Object.entries(value)) {
     if (key === "signature" && value.type === "thinking") continue
+    if (key === "encrypted_content") continue
     if (key === "data" && (value.type === "base64" || value.type === "redacted_thinking")) {
       out.omittedLength = str(inner).length
       continue
@@ -188,7 +189,7 @@ const skillOf = (text: string): string | null => {
   return dir ? `/${basename(dir)}` : null
 }
 
-const atOf = (value: unknown): Date | null => {
+export const atOf = (value: unknown): Date | null => {
   const at = new Date(str(value))
   return Number.isNaN(at.getTime()) ? null : at
 }

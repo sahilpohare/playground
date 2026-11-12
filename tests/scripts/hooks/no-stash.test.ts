@@ -220,7 +220,7 @@ describe("it fails closed only on a call that reads as a stash", () => {
   })
 })
 
-describe("the factory settings run it", () => {
+describe("the factory settings run it through guards", () => {
   type Entry = { hooks: { command: string; timeout?: number; type: string }[]; matcher: string }
 
   const entry = async (): Promise<Entry> => {
@@ -228,9 +228,9 @@ describe("the factory settings run it", () => {
       hooks: { PreToolUse: Entry[] }
     }
     const found = settings.hooks.PreToolUse.find((e) =>
-      e.hooks.some((h) => h.command.includes("scripts/hooks/bundled/no-stash.js")),
+      e.hooks.some((h) => h.command.includes("scripts/hooks/bundled/guards.js")),
     )
-    if (!found) throw new Error("scripts/factory-settings.json registers no no-stash hook")
+    if (!found) throw new Error("scripts/factory-settings.json registers no guards hook")
     return found
   }
 

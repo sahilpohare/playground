@@ -395,7 +395,7 @@ export const PASTE_MISS_ENTRIES = 50
 export const PASTE_REPORT_BYTES = 128 * 1024
 export const LOAD_MARK_KEY = "dashboard.paste-log.loaded"
 
-// emptied: the box went empty within EMPTY_WAIT_MS of a paste into it, with no key or press of his; empty-paste: a paste into the box carried no text and no file; no-paste: a Cmd+V aimed at the box brought no paste within PASTE_WAIT_MS; off-box: a Cmd+V reached nothing that takes text. A Cmd+V the page never heard is not seen here: Wispr Flow's history gives its time.
+// emptied: the box went empty within EMPTY_WAIT_MS of a paste into it, with no key or press of his; empty-paste: a paste into the box carried no text and no file; no-paste: a Cmd+V aimed at the box brought no paste within PASTE_WAIT_MS; off-box: a Cmd+V reached nothing that takes text. A Cmd+V the page never heard is not seen here: a dictation app's own history gives its time.
 export type PasteMiss = "emptied" | "empty-paste" | "no-paste" | "off-box"
 
 type Timers = { clear: (id: unknown) => void; set: (run: () => void, ms: number) => unknown }

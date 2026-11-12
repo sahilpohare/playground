@@ -15,8 +15,8 @@ import {
 import { authMiddleware, guardWrites, requireConsoleRole } from "@/middlewares"
 
 const templateSchema = z.object({
-  backend: z.enum(["claude", "glm"]),
   effort: z.string().nullable(),
+  harness: z.literal("claude-code"),
   id: z.string(),
   kind: z.string(),
   label: z.string(),

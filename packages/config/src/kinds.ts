@@ -37,6 +37,9 @@ export const ROSTER_ROLE_OF_KIND: Record<RosterKind, "manager" | "runner" | "wor
   worker: "worker",
 }
 
+// Pure: whether a kind holds the roster's manager role, which isManagerKind's four seats narrow.
+export const hasManagerRole = (kind: RosterKind): boolean => ROSTER_ROLE_OF_KIND[kind] === "manager"
+
 // Pure: whether a roster row's status ends its session for good, done or ended, so the row no longer counts as listed (an ended second dispatcher draws no sidebar row); a parked or paused row still does.
 export const isEndedStatus = (status: string | null | undefined): boolean =>
   status === "done" || status === "ended"

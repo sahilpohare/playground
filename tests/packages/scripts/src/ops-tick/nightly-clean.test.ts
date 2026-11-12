@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 import {
   bytesOf,
@@ -21,12 +21,14 @@ import {
   type Prs,
   pruneTurbo,
   readPrs,
+  rootsOf,
   staleBranches,
   staleContainers,
   staleVolumes,
   staleWorktrees,
   trashIdOf,
   trashSince,
+  workIn,
   worktreesIn,
 } from "../../../../../packages/scripts/src/ops-tick/nightly-clean"
 import { BEATS, type Context } from "../../../../../packages/scripts/src/ops-tick/tick"
@@ -354,6 +356,7 @@ describe("one night's run against a fixture data folder", () => {
     const deps: NightDeps = {
       cleanup: async () => cleanup,
       free: () => (free += grow * 1024 ** 3),
+      live: async () => [],
       now: () => Date.now(),
       prs: async () => ({
         ...prsOf({
@@ -364,7 +367,9 @@ describe("one night's run against a fixture data folder", () => {
         }),
         repo: "https://github.com/acme/app",
       }),
+      roots: async () => [],
       sleep: async () => {},
+      trashRoots: () => ({ home: "/nowhere", main: "/nowhere", trash: "/nowhere" }),
       turbo: join(root, "turbo"),
     }
     return { ctx, deps, inputs, ops, runs, sent, wt }
@@ -563,6 +568,7 @@ describe("one night's run against a fixture data folder", () => {
         rm: async () => ({ ok: true, out: "" }),
       }),
       free: () => 100 * 1024 ** 3,
+      live: async () => [],
       now: () => t,
       prs: async () => ({
         ...prsOf(
@@ -572,7 +578,9 @@ describe("one night's run against a fixture data folder", () => {
         ),
         repo: "https://github.com/acme/app",
       }),
+      roots: async () => [],
       sleep,
+      trashRoots: () => ({ home: "/nowhere", main: "/nowhere", trash: "/nowhere" }),
       turbo: join(root, "turbo"),
     }
     await nightlyClean(deps)(ctx)
@@ -646,6 +654,7 @@ describe("one night's run against a fixture data folder", () => {
         },
       }),
       free: () => 100 * 1024 ** 3,
+      live: async () => [],
       now: () => t,
       prs: async () => ({
         ...prsOf(
@@ -655,10 +664,12 @@ describe("one night's run against a fixture data folder", () => {
         ),
         repo: "https://github.com/acme/app",
       }),
+      roots: async () => [],
       sleep: async (ms) => {
         waits.push(ms)
         t += ms
       },
+      trashRoots: () => ({ home: "/nowhere", main: "/nowhere", trash: "/nowhere" }),
       turbo: join(root, "turbo"),
     }
     await nightlyClean(deps)(ctx)
@@ -733,6 +744,7 @@ describe("one night's run against a fixture data folder", () => {
         rm: async () => ({ ok: true, out: "" }),
       }),
       free: () => 100 * 1024 ** 3,
+      live: async () => [],
       now: () => 0,
       prs: async () => ({
         ...prsOf(
@@ -742,7 +754,9 @@ describe("one night's run against a fixture data folder", () => {
         ),
         repo: "https://github.com/acme/app",
       }),
+      roots: async () => [],
       sleep,
+      trashRoots: () => ({ home: "/nowhere", main: "/nowhere", trash: "/nowhere" }),
       turbo: join(root, "turbo"),
     }
     await nightlyClean(deps)(ctx)
@@ -822,6 +836,7 @@ describe("one night's run against a fixture data folder", () => {
         rm: async () => ({ ok: true, out: "" }),
       }),
       free: () => 100 * 1024 ** 3,
+      live: async () => [],
       now: () => t,
       prs: async () => ({
         ...prsOf(
@@ -831,7 +846,9 @@ describe("one night's run against a fixture data folder", () => {
         ),
         repo: "https://github.com/acme/app",
       }),
+      roots: async () => [],
       sleep,
+      trashRoots: () => ({ home: "/nowhere", main: "/nowhere", trash: "/nowhere" }),
       turbo: join(root, "turbo"),
     }
     await nightlyClean(deps)(ctx)
@@ -882,7 +899,7 @@ describe("one night's run against a fixture data folder", () => {
     expect(
       ran.some((r) => r.includes("git/refs") && r.includes("ref=refs/tags/archive/scratch")),
     ).toBe(true)
-    expect(ran.some((r) => r.endsWith("tag archive/scratch s"))).toBe(!archived)
+    expect(ran.some((r) => r.endsWith("tag -f archive/scratch s"))).toBe(!archived)
     expect(ran.some((r) => r.includes("push") && r.includes("archive/scratch"))).toBe(false)
     expect(ran.some((r) => r.endsWith("branch -D scratch"))).toBe(archived)
     const log = readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")
@@ -895,7 +912,7 @@ describe("one night's run against a fixture data folder", () => {
         "kept scratch: its head s is not on GitHub, so it is tagged archive/scratch locally alone",
       )
       expect(line).toContain(
-        "branch scratch kept: its head is not on GitHub, tagged archive/scratch locally",
+        "branch scratch kept: its head s is not on GitHub, so it is tagged archive/scratch locally alone",
       )
     }
   })
@@ -908,10 +925,66 @@ describe("one night's run against a fixture data folder", () => {
     })
     await nightlyClean(deps)(ctx)
     const ran = runs.map((r) => r.join(" "))
-    expect(ran.some((r) => r.endsWith("tag archive/scratch s"))).toBe(false)
+    expect(ran.some((r) => r.endsWith("tag -f archive/scratch s"))).toBe(false)
     expect(ran.some((r) => r.endsWith("branch -D scratch"))).toBe(false)
     expect(readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")).not.toContain("scratch")
     expect(sent.find((s) => s.to === "ops")?.text ?? "").not.toContain("scratch")
+  })
+
+  test("a local archive tag at another head is re-pointed to the branch's head and named with both", async () => {
+    const { ctx, deps, ops, runs, sent } = night({
+      "git/refs": unknown,
+      "refs/tags/archive/scratch": "older",
+      "for-each-ref refs/heads": "main m\nPG-9-done h9\nscratch s",
+    })
+    await nightlyClean(deps)(ctx)
+    const ran = runs.map((r) => r.join(" "))
+    expect(ran.some((r) => r.endsWith("tag -f archive/scratch s"))).toBe(true)
+    const log = readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")
+    expect(log).toContain("kept scratch: its local archive/scratch tag held older, now holds s")
+    const line = sent.find((s) => s.to === "ops")
+    expect(line?.text).toContain(
+      "branch scratch kept: its local archive/scratch tag held older, now holds s",
+    )
+  })
+
+  test("a re-point whose old head is no ancestor of the new one keeps the old head at its own tag", async () => {
+    const { ctx, deps, ops, runs, sent } = night({
+      "git/refs": unknown,
+      "refs/tags/archive/scratch": "older",
+      "for-each-ref refs/heads": "main m\nPG-9-done h9\nscratch s",
+      "merge-base --is-ancestor": { code: 1, err: "" },
+    })
+    await nightlyClean(deps)(ctx)
+    const ran = runs.map((r) => r.join(" "))
+    expect(ran.some((r) => r.endsWith("tag archive/scratch-older older"))).toBe(true)
+    expect(ran.some((r) => r.endsWith("tag -f archive/scratch s"))).toBe(true)
+    const log = readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")
+    expect(log).toContain(
+      "kept scratch: its local archive/scratch tag held older, now holds s, the old head kept at archive/scratch-older",
+    )
+    const line = sent.find((s) => s.to === "ops")
+    expect(line?.text).toContain("the old head kept at archive/scratch-older")
+  })
+
+  test("a rescue whose tag fails leaves the old tag where it is, skips the re-point, and names the failure", async () => {
+    const { ctx, deps, ops, runs, sent } = night({
+      "git/refs": unknown,
+      "refs/tags/archive/scratch": "older",
+      "for-each-ref refs/heads": "main m\nPG-9-done h9\nscratch s",
+      "merge-base --is-ancestor": { code: 1, err: "" },
+      "tag archive/scratch-older": { code: 1, err: "fatal: tag archive/scratch-older failed\n" },
+    })
+    await nightlyClean(deps)(ctx)
+    const ran = runs.map((r) => r.join(" "))
+    expect(ran.some((r) => r.endsWith("tag -f archive/scratch s"))).toBe(false)
+    expect(ran.some((r) => r.endsWith("branch -D scratch"))).toBe(false)
+    const log = readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")
+    expect(log).toContain(
+      "kept scratch: its local archive/scratch tag held older, and keeping it at archive/scratch-older failed: fatal: tag archive/scratch-older failed",
+    )
+    const line = sent.find((s) => s.to === "ops")
+    expect(line?.text).toContain("branch scratch kept: its local archive/scratch tag held older")
   })
 
   // #1515
@@ -1044,4 +1117,316 @@ describe("one night's run against a fixture data folder", () => {
     await nightlyClean(deps)(ctx)
     expect(inputs).toEqual([])
   })
+})
+
+// #1778: the stale worktrees of every other repo the factory works in, each a real git checkout under a fake code root and org folder, PRs, lsof and the roster faked
+describe("other repos' worktrees", () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const proc = Bun.spawnSync(
+      ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-C", cwd, ...args],
+      { stderr: "pipe", stdout: "pipe" },
+    )
+    if (proc.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${proc.stderr.toString()}`)
+    return proc.stdout.toString()
+  }
+  // A checkout at <dir> with a bare origin beside it, one pushed commit on main, and a .gitignore for build output and *.txt
+  const repoAt = (dir: string) => {
+    mkdirSync(dir, { recursive: true })
+    git(dirname(dir), "init", "-q", "--bare", `${basename(dir)}-origin.git`)
+    git(dir, "init", "-q", "-b", "main")
+    writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env*\n*.txt\n")
+    writeFileSync(join(dir, "a.ts"), "a\n")
+    git(dir, "add", ".")
+    git(dir, "commit", "-qm", "one")
+    git(dir, "remote", "add", "origin", join(dirname(dir), `${basename(dir)}-origin.git`))
+    git(dir, "push", "-q", "origin", "main")
+    return dir
+  }
+  // A worktree of repo at .claude/worktrees/<name> on branch <name>, with a commit of its own that is pushed or not
+  const worktreeOf = (repo: string, name: string, pushed: boolean) => {
+    const path = join(repo, ".claude", "worktrees", name)
+    git(repo, "worktree", "add", "-q", path, "-b", name)
+    writeFileSync(join(path, `${name}.ts`), "b\n")
+    git(path, "add", ".")
+    git(path, "commit", "-qm", name)
+    if (pushed) git(path, "push", "-q", "origin", name)
+    return path
+  }
+
+  const night = (answers: Record<string, string> = {}) => {
+    const root = scratch()
+    const data = join(root, "data")
+    const ops = join(data, "ops")
+    mkdirSync(join(ops, "log"), { recursive: true })
+    const code = join(root, "code")
+    const orgs = join(root, "home", "acme")
+    const main = join(code, "playground")
+    mkdirSync(join(main, ".git"), { recursive: true })
+    mkdirSync(join(main, ".claude", "worktrees", "own"), { recursive: true })
+    const app = repoAt(join(code, "app"))
+    const site = repoAt(join(orgs, "site"))
+    const lost = repoAt(join(root, "elsewhere", "lost"))
+    const w = {
+      branched: worktreeOf(app, "branched", true),
+      done: worktreeOf(app, "done", true),
+      dirty: worktreeOf(app, "dirty", true),
+      held: worktreeOf(app, "held", true),
+      ignored: worktreeOf(app, "ignored", true),
+      lost: worktreeOf(lost, "lost", true),
+      open: worktreeOf(app, "open", true),
+      pushed: worktreeOf(site, "pushed", true),
+      rostered: worktreeOf(app, "rostered", true),
+      unpushed: worktreeOf(site, "unpushed", false),
+    }
+    mkdirSync(join(w.done, "node_modules", "x"), { recursive: true })
+    writeFileSync(join(w.done, ".env.local"), "A=1\n")
+    writeFileSync(join(w.dirty, "a.ts"), "changed\n")
+    writeFileSync(join(w.ignored, "notes.txt"), "mine\n")
+    writeFileSync(
+      join(data, "roster.json"),
+      JSON.stringify({
+        agents: [
+          { name: "abc123-worker", worktree: w.rostered },
+          { name: "def456-worker", branch: "branched" },
+        ],
+      }),
+    )
+    const fake = fakeRun({
+      "docker ps": "",
+      "docker system df": JSON.stringify({ Volumes: [] }),
+      lsof: `p1\nfcwd\nn${root}\np2\nfcwd\nn${join(w.held, "src")}\n`,
+      "worktree list": `worktree ${main}\nHEAD a\nbranch refs/heads/main`,
+      ...answers,
+    })
+    // git runs for real in every scratch checkout but Playground's own, whose reads the fakes answer as the other rows do
+    const runs: string[][] = []
+    const run: Context["run"] = async (argv, timeoutMs, stdin) => {
+      runs.push(argv)
+      if (argv[0] !== "git" || argv[1] !== "-C" || !argv[2]!.startsWith(root) || argv[2] === main)
+        return fake.run(argv, timeoutMs, stdin)
+      const proc = Bun.spawnSync(argv, { stderr: "pipe", stdout: "pipe" })
+      return { code: proc.exitCode, out: proc.stdout.toString() + proc.stderr.toString() }
+    }
+    const sent: { text: string; to: string }[] = []
+    const ctx: Context = {
+      now: new Date("2026-11-11T03:00:00Z"),
+      ops,
+      repo: main,
+      run,
+      send: async (to, text) => {
+        sent.push({ text, to })
+        return true
+      },
+    }
+    const cleanup: CleanupDeps = {
+      containers: async () => [],
+      devStop: async () => ({ ok: true, out: "" }),
+      finished: async () => false,
+      git: async () => "",
+      held: async () => null,
+      live,
+      liveBranch: "live/dashboard",
+      main,
+      removeContainer: async () => true,
+      rm: async () => ({ ok: true, out: "" }),
+    }
+    const prsByRepo: Record<string, Prs> = {
+      [app]: prsOf({
+        branched: pr("MERGED"),
+        dirty: pr("MERGED"),
+        done: pr("MERGED"),
+        held: pr("MERGED"),
+        ignored: pr("CLOSED"),
+        open: pr("OPEN"),
+        rostered: pr("MERGED"),
+      }),
+      [site]: prsOf({}),
+    }
+    const deps = {
+      cleanup: async () => cleanup,
+      free: () => 100 * 1024 ** 3,
+      now: () => Date.now(),
+      prs: async (_ctx: Context, _branches: string[], _numbers: number[], dir?: string) =>
+        (dir && prsByRepo[dir]) || prsOf({}),
+      live: async () => [],
+      roots: async () => [code, orgs],
+      sleep: async () => {},
+      trashRoots: () => ({ home: root, main, trash: join(root, "trash") }),
+      turbo: join(root, "turbo"),
+    } as NightDeps
+    return { ctx, data, deps, lost, main, ops, runs, sent, w }
+  }
+  const outbox = (sent: { text: string; to: string }[]) =>
+    sent.find((s) => s.to === "ops")?.text ?? ""
+
+  test("a worktree that passes all three tests is removed by git worktree remove, its branch kept", async () => {
+    const { ctx, deps, runs, sent, w } = night()
+    await nightlyClean(deps)(ctx)
+    for (const path of [w.done, w.pushed]) {
+      expect(existsSync(path)).toBe(false)
+      expect(outbox(sent)).toContain(`worktree ${path} by git worktree remove`)
+    }
+    expect(git(dirname(dirname(dirname(w.done))), "branch", "--list", "done")).toContain("done")
+    expect(runs.some((r) => r.includes("--force"))).toBe(false)
+  })
+
+  test("a worktree that fails a test is kept, its reason in the outbox line", async () => {
+    const { ctx, deps, sent, w } = night()
+    await nightlyClean(deps)(ctx)
+    const kept: [string, string][] = [
+      [w.open, "its PR is open"],
+      [w.unpushed, "it has no PR and a commit no remote holds"],
+      [w.dirty, "uncommitted work"],
+      [w.ignored, "ignored files outside build output: notes.txt"],
+      [w.held, "a live process works in it"],
+      [w.rostered, "the roster names it"],
+    ]
+    for (const [path, why] of kept) {
+      expect(existsSync(path)).toBe(true)
+      expect(outbox(sent)).toContain(`worktree ${path} kept: ${why}`)
+    }
+  })
+
+  test("a worktree whose branch a roster row's branch names is kept, though no roster text holds its path", async () => {
+    const { ctx, deps, sent, w } = night()
+    await nightlyClean(deps)(ctx)
+    expect(existsSync(w.branched)).toBe(true)
+    expect(outbox(sent)).toContain(`worktree ${w.branched} kept: the roster names it`)
+  })
+
+  test("an lsof the step cannot read names the step's early exit and removes nothing", async () => {
+    const { ctx, deps, ops, w } = night({ lsof: "" })
+    await nightlyClean(deps)(ctx)
+    expect(readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")).toContain(
+      "other repos: lsof unreadable, none removed",
+    )
+    expect(existsSync(w.done)).toBe(true)
+    expect(existsSync(w.pushed)).toBe(true)
+  })
+
+  test("a roster the step cannot read names the step's early exit and removes nothing", async () => {
+    const { ctx, data, deps, ops, w } = night()
+    writeFileSync(join(data, "roster.json"), "not json")
+    await nightlyClean(deps)(ctx)
+    expect(readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")).toContain(
+      "other repos: the roster unreadable, none removed",
+    )
+    expect(existsSync(w.done)).toBe(true)
+    expect(existsSync(w.pushed)).toBe(true)
+  })
+
+  test("PRs the step cannot read name the repo's early exit and keep its worktrees", async () => {
+    const { ctx, deps, ops, w } = night()
+    deps.prs = async () => null
+    await nightlyClean(deps)(ctx)
+    const log = readFileSync(join(ops, "log", "nightly-clean.log"), "utf8")
+    expect(log).toContain("GitHub unreadable, none read")
+    expect(existsSync(w.done)).toBe(true)
+    expect(existsSync(w.pushed)).toBe(true)
+  })
+
+  test("a repo outside the code root and the org folders is never read", async () => {
+    const { ctx, deps, lost, runs, sent, w } = night()
+    await nightlyClean(deps)(ctx)
+    expect(existsSync(w.lost)).toBe(true)
+    expect(runs.some((r) => r.some((a) => a.startsWith(lost)))).toBe(false)
+    expect(outbox(sent)).not.toContain(lost)
+  })
+
+  test("Playground's own checkout is never read by the new step", async () => {
+    const { ctx, deps, main, runs } = night()
+    await nightlyClean(deps)(ctx)
+    expect(existsSync(join(main, ".claude", "worktrees", "own"))).toBe(true)
+    expect(runs.some((r) => r.some((a) => a.startsWith(join(main, ".claude"))))).toBe(false)
+    expect(runs.some((r) => r.includes("remove") && r.includes(main))).toBe(false)
+  })
+})
+
+test("a worktree's work: a change or untracked file, else an ignored path outside build output", () => {
+  expect(
+    workIn("!! node_modules/\n!! web/next/.next/\n!! .env.local\n!! __pycache__/\n"),
+  ).toBeUndefined()
+  expect(workIn(" M a.ts\n!! node_modules/\n")).toBe("uncommitted work")
+  expect(workIn("?? new.ts\n")).toBe("uncommitted work")
+  expect(workIn("!! dist/\n!! notes.txt\n!! keys/\n")).toBe(
+    "ignored files outside build output: notes.txt, keys",
+  )
+})
+
+test("the folders other repos are read in: the code root, else the checkout's folder, and ~/<org> for each org ext.links guards", () => {
+  const settings = (values: Record<string, unknown>) => ({ schemaVersion: 1 as const, values })
+  expect(rootsOf(settings({}), "/code/playground", "/home/me")).toEqual(["/code"])
+  expect(
+    rootsOf(
+      settings({ "ext.links": { acme: ["acme", "*"] }, "paths.codeRoot": "/srv/src" }),
+      "/code/playground",
+      "/home/me",
+    ),
+  ).toEqual(["/srv/src", "/home/me/acme"])
+})
+
+// #1778's add: a gone session's scratch folder in the data folder, through safe-delete's quarantine with that session's own-scratch route, no carve-out
+test("a scratch folder no live session and no roster row but an ended one names goes to the trash; a live session's and a working row's stay", async () => {
+  const root = scratch()
+  const home = join(root, "home")
+  const data = join(home, ".playground")
+  const ops = join(data, "ops")
+  const main = join(root, "main")
+  mkdirSync(join(ops, "log"), { recursive: true })
+  mkdirSync(join(data, "trash"), { recursive: true })
+  mkdirSync(main, { recursive: true })
+  const pad = (name: string) => {
+    const path = join(data, "scratch", name)
+    mkdirSync(path, { recursive: true })
+    writeFileSync(join(path, "notes.md"), "x\n")
+    return path
+  }
+  const gone = pad("qq1zzz-1700")
+  const alive = pad("aa2bbb-1701")
+  const rostered = pad("cc3ddd")
+  const ended = pad("ee4fff-1702")
+  writeFileSync(
+    join(data, "roster.json"),
+    JSON.stringify({
+      agents: [
+        { name: "cc3ddd-worker", status: "working" },
+        { name: "ee4fff-worker", status: "ended" },
+      ],
+    }),
+  )
+  const { run } = fakeRun({
+    "docker ps": "",
+    "docker system df": JSON.stringify({ Volumes: [] }),
+  })
+  const sent: { text: string; to: string }[] = []
+  const ctx: Context = {
+    now: new Date("2026-11-11T03:00:00Z"),
+    ops,
+    repo: main,
+    run,
+    send: async (to, text) => {
+      sent.push({ text, to })
+      return true
+    },
+  }
+  const deps = {
+    cleanup: async () => null,
+    free: () => 100 * 1024 ** 3,
+    live: async () => ["aa2bbb-worker"],
+    now: () => Date.now(),
+    prs: async () => prsOf({}),
+    roots: async () => [],
+    sleep: async () => {},
+    trashRoots: () => ({ home, main, trash: join(data, "trash") }),
+    turbo: join(root, "turbo"),
+  } as NightDeps
+  await nightlyClean(deps)(ctx)
+  expect(existsSync(gone)).toBe(false)
+  expect(existsSync(ended)).toBe(false)
+  expect(existsSync(alive)).toBe(true)
+  expect(existsSync(rostered)).toBe(true)
+  const line = sent.find((s) => s.to === "ops")?.text ?? ""
+  expect(line).toMatch(new RegExp(`scratch ${gone} as trash \\d{8}T\\d{6}Z-qq1zzz-1700/1 `))
+  expect(line).not.toContain(alive)
+  expect(line).not.toContain(rostered)
 })

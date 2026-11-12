@@ -16,14 +16,6 @@
       },
       {
         "action": null,
-        "detail": "2.1.4",
-        "name": "claude",
-        "need": "every session",
-        "note": null,
-        "status": "ok"
-      },
-      {
-        "action": null,
         "detail": "installed",
         "name": "claude-codex",
         "need": "a Codex (ChatGPT) subscription alongside Claude's",
@@ -111,20 +103,24 @@
         "status": "ok"
       }
     ],
+    "harnesses": {
+      "claude-code": {
+        "plan": null,
+        "signedIn": true,
+        "version": "2.1.322"
+      },
+      "codex": {
+        "plan": "plus",
+        "signedIn": false,
+        "version": "0.167.1"
+      }
+    },
     "missing": [
       {
         "action": null,
         "detail": "1.3.2",
         "name": "bun",
         "need": "runs Playground",
-        "note": null,
-        "status": "ok"
-      },
-      {
-        "action": null,
-        "detail": "2.1.4",
-        "name": "claude",
-        "need": "every session",
         "note": null,
         "status": "ok"
       },
@@ -191,7 +187,10 @@
         "status": "ok"
       },
       {
-        "action": { "id": "proxy", "label": "Set up the web address" },
+        "action": {
+          "id": "proxy",
+          "label": "Set up the web address"
+        },
         "detail": "not on 443",
         "name": "portless",
         "need": "the Dashboard's https address",
@@ -225,6 +224,114 @@
     ]
   },
   "files": {
+    "codex/sessions/2026/01/01/rollout-2026-01-01T09-00-00-11111111-1111-7111-8111-00000000c0de.jsonl": [
+      {
+        "payload": {
+          "cli_version": "0.167.1",
+          "cwd": "/fixture/playground",
+          "git": {
+            "branch": "canary"
+          },
+          "id": "11111111-1111-7111-8111-00000000c0de",
+          "model_provider": "openai",
+          "originator": "codex_cli_rs",
+          "session_id": "11111111-1111-7111-8111-00000000c0de",
+          "source": "cli",
+          "timestamp": "2026-01-01T09:00:00.000Z"
+        },
+        "timestamp": "2026-01-01T09:00:00.000Z",
+        "type": "session_meta"
+      },
+      {
+        "payload": {
+          "cwd": "/fixture/playground",
+          "model": "gpt-5.5-codex"
+        },
+        "timestamp": "2026-01-01T09:00:00.100Z",
+        "type": "turn_context"
+      },
+      {
+        "payload": {
+          "content": [
+            {
+              "text": "<environment_context>Fixture: a sandbox in /fixture/playground</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        "timestamp": "2026-01-01T09:00:00.200Z",
+        "type": "response_item"
+      },
+      {
+        "payload": {
+          "content": [
+            {
+              "text": "Fixture: list the open pull requests and say which one needs review first.",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        "timestamp": "2026-01-01T09:00:05.000Z",
+        "type": "response_item"
+      },
+      {
+        "payload": {
+          "summary": [
+            {
+              "text": "Reading the open pull requests",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning"
+        },
+        "timestamp": "2026-01-01T09:00:08.000Z",
+        "type": "response_item"
+      },
+      {
+        "payload": {
+          "arguments": "{\"command\": [\"gh\", \"pr\", \"list\", \"--state\", \"open\"]}",
+          "call_id": "call_fixture_1",
+          "name": "shell",
+          "type": "function_call"
+        },
+        "timestamp": "2026-01-01T09:00:09.000Z",
+        "type": "response_item"
+      },
+      {
+        "payload": {
+          "call_id": "call_fixture_1",
+          "output": "#12  Fixture: tidy the sidebar\n#14  Fixture: a faster board refresh",
+          "type": "function_call_output"
+        },
+        "timestamp": "2026-01-01T09:00:11.000Z",
+        "type": "response_item"
+      },
+      {
+        "payload": {
+          "content": [
+            {
+              "text": "Two pull requests are open. **#14** needs review first: it changes how often the board refreshes, and #12 builds on it.",
+              "type": "output_text"
+            }
+          ],
+          "role": "assistant",
+          "type": "message"
+        },
+        "timestamp": "2026-01-01T09:00:15.000Z",
+        "type": "response_item"
+      },
+      {
+        "payload": {
+          "type": "task_complete"
+        },
+        "timestamp": "2026-01-01T09:00:15.100Z",
+        "type": "event_msg"
+      }
+    ],
     "projects/-fixture-playground/11111111-1111-4111-8111-000000000001.jsonl": [
       {
         "agentName": "dispatcher",
@@ -3500,6 +3607,20 @@
           "task": "Post the morning usage note",
           "title": "Morning usage note",
           "workspace": "workspace:19"
+        },
+        {
+          "branch": "feat/codex-light",
+          "eta": "2026-01-01T13:00:00.000Z",
+          "kind": "worker",
+          "lastReport": "Fixture report: a session in Codex, whose state no record tells",
+          "lastReportAt": "2026-01-01T11:50:00.000Z",
+          "name": "c4dx7n-worker",
+          "repo": "example/fixture",
+          "role": "worker",
+          "status": "working",
+          "task": "Fixture task: a worker running in Codex",
+          "title": "Codex light",
+          "workspace": "workspace:22"
         }
       ],
       "backlog": [
@@ -3673,6 +3794,14 @@
     "playground/ops/jobs.json": {
       "jobs": [
         {
+          "description": "Sends a digest of the night's merges",
+          "heartbeat": "nightly-digest",
+          "name": "nightly-digest",
+          "schedule": {
+            "cron": "0 6 * * *"
+          }
+        },
+        {
           "heartbeat": "ops-awake",
           "name": "ops-awake",
           "schedule": {
@@ -3687,6 +3816,7 @@
           }
         },
         {
+          "description": "Runs each open pull request's checks",
           "heartbeat": "ops-checks",
           "name": "ops-checks",
           "schedule": {
@@ -3712,19 +3842,20 @@
         {
           "disabled": true,
           "disabledWhy": "Fixture: paused on purpose",
+          "heartbeat": "ops-dm-watch",
+          "name": "ops-dm-watch",
+          "schedule": {
+            "cron": "*/2 * * * *"
+          }
+        },
+        {
+          "description": "Runs a Dashboard on made-up data for checks",
+          "disabled": true,
+          "disabledWhy": "Fixture: paused on purpose",
           "heartbeat": "ops-fixture",
           "name": "ops-fixture",
           "schedule": {
             "always": true
-          }
-        },
-        {
-          "disabled": true,
-          "disabledWhy": "Fixture: paused on purpose",
-          "heartbeat": "ops-linear-dm",
-          "name": "ops-linear-dm",
-          "schedule": {
-            "cron": "*/2 * * * *"
           }
         },
         {
@@ -3742,6 +3873,7 @@
           }
         },
         {
+          "description": "Tests merges made outside the merge tools",
           "heartbeat": "ops-merge-watch",
           "name": "ops-merge-watch",
           "schedule": {
@@ -3749,6 +3881,7 @@
           }
         },
         {
+          "description": "Writes the report for the Plan app",
           "heartbeat": "ops-report",
           "name": "ops-report",
           "schedule": {
@@ -3756,6 +3889,7 @@
           }
         },
         {
+          "description": "Passes watched chat messages on to Playground",
           "heartbeat": "ops-slack-watch",
           "name": "ops-slack-watch",
           "schedule": {
@@ -3770,6 +3904,7 @@
           }
         },
         {
+          "description": "Reads the tracker's tickets",
           "heartbeat": "ops-tickets",
           "name": "ops-tickets",
           "schedule": {
@@ -3791,12 +3926,20 @@
           }
         },
         {
+          "description": "Keeps the usage post up to date",
           "disabled": true,
           "disabledWhy": "Fixture: paused on purpose",
           "heartbeat": "ops-usage-post",
           "name": "ops-usage-post",
           "schedule": {
             "cron": "0 5 * * *"
+          }
+        },
+        {
+          "heartbeat": "ops-wa",
+          "name": "ops-wa",
+          "schedule": {
+            "always": true
           }
         },
         {
@@ -4335,6 +4478,14 @@
       "pid": 900045,
       "startedAt": "2026-01-01T08:00:00.000Z"
     },
+    "playground/ops/nightly-digest.json": {
+      "cycleSeconds": 86400,
+      "job": "nightly-digest",
+      "lastBeatAt": "2026-01-01T06:00:00.000Z",
+      "lastResult": "ok",
+      "pid": 900055,
+      "startedAt": "2026-01-01T06:00:00.000Z"
+    },
     "playground/ops/ops-merge-watch.json": {
       "cycleSeconds": 3600,
       "job": "ops-merge-watch",
@@ -4381,6 +4532,14 @@
       "lastBeatAt": "2026-01-01T11:59:00.000Z",
       "lastResult": "ok",
       "pid": 900052,
+      "startedAt": "2026-01-01T08:00:00.000Z"
+    },
+    "playground/ops/ops-wa.json": {
+      "cycleSeconds": 3600,
+      "job": "ops-wa",
+      "lastBeatAt": "2026-01-01T11:59:00.000Z",
+      "lastResult": "waiting: the pairing code waits to be typed on the spare phone",
+      "pid": 900060,
       "startedAt": "2026-01-01T08:00:00.000Z"
     },
     "sessions/900019.json": {
@@ -4548,7 +4707,9 @@
       "reason": "plan",
       "sessionId": "11111111-1111-4111-8111-000000000009",
       "state": "stuck"
-    }
+    },
+    "playground/backends/c4dx7n-worker": "codex openai\n",
+    "playground/resume/c4dx7n-worker.sh": "#!/bin/bash\nexec /fixture/playground/scripts/spawn.sh resume c4dx7n-worker /fixture/playground/.claude/worktrees/codex-light 0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2c\n"
   },
   "git": {
     "/fixture/playground": {
@@ -5073,6 +5234,28 @@
         "terminal_id": "t-5f000000-0000-4000-8000-000000000013",
         "transcript_path": "$CONFIG/projects/-fixture-playground--claude-worktrees-canary/11111111-1111-4111-8111-000000000015.jsonl",
         "workspace_id": "wL"
+      },
+      {
+        "agent_status": "idle",
+        "label": "c4dx7n-worker",
+        "pane_id": "wN:p1",
+        "processes": [
+          {
+            "argv": [
+              "/usr/local/bin/codex",
+              "--dangerously-bypass-hook-trust",
+              "resume",
+              "0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2c"
+            ],
+            "cwd": "/fixture/playground/.claude/worktrees/codex-light",
+            "pid": 900054
+          }
+        ],
+        "scroll": {
+          "offset_from_bottom": 0
+        },
+        "terminal_id": "t-5f000000-0000-4000-8000-000000000054",
+        "workspace_id": "wN"
       }
     ],
     "prompts": {
@@ -5176,6 +5359,10 @@
       {
         "label": "runner-quiet-lamp",
         "workspace_id": "wL"
+      },
+      {
+        "label": "c4dx7n-worker",
+        "workspace_id": "wN"
       }
     ]
   },
@@ -5294,6 +5481,10 @@
       "command": "claude -n worker-bright-lark",
       "start": "Thu Jan  1 07:30:00 2026"
     },
+    "900060": {
+      "command": "bun --no-env-file packages/scripts/src/ops-wa/cli.ts --data /fixture/playground",
+      "start": "Thu Jan  1 08:00:00 2026"
+    },
     "900030": {
       "command": "python3 ops/loop.py ops-checks",
       "start": "Thu Jan  1 08:00:00 2026"
@@ -5353,6 +5544,14 @@
     "900018": {
       "command": "claude -n runner-quiet-lamp",
       "start": "Thu Jan  1 08:00:00 2026"
+    },
+    "900054": {
+      "command": "codex --dangerously-bypass-hook-trust resume 0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2c",
+      "start": "Thu Jan  1 08:00:00 2026"
+    },
+    "900055": {
+      "command": "python3 ops/loop.py nightly-digest",
+      "start": "Thu Jan  1 06:00:00 2026"
     }
   },
   "pulls": {

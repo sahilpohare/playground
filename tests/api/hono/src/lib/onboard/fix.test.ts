@@ -76,7 +76,7 @@ const machine = () => {
 }
 
 type Read = {
-  device: { code: string; url: string } | null
+  device: { code: string | null; url: string } | null
   id: string
   lines: string[]
   reason: string | null
@@ -394,6 +394,81 @@ describe("each fix runs its fixed argv", () => {
     ])
   })
 
+  test("codex installs through brew's cask, and an installed one upgrades (#1835)", async () => {
+    const m = machine()
+    m.stub("brew")
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/codex`)).status).toBe(202)
+    expect((await settled(app, `${FIX}/codex`)).state).toBe("ok")
+    m.stub("codex")
+    expect((await begin(app, `${FIX}/codex`)).status).toBe(202)
+    expect((await settled(app, `${FIX}/codex`)).state).toBe("ok")
+    expect(m.calls()).toEqual(["brew install --cask codex", "brew upgrade --cask codex"])
+  })
+
+  test("codex-login signs in within its own CODEX_HOME, showing Codex's link and code until it finishes (#1835)", async () => {
+    const m = machine()
+    m.stub(
+      "codex",
+      [
+        'echo "home=$CODEX_HOME" >> "$(dirname "$0")/../calls.log"',
+        'echo "Follow these steps to sign in with ChatGPT using device code authorization:"',
+        'echo "1. Open this link in your browser and sign in to your account"',
+        'printf "   \\033[94mhttps://auth.openai.com/codex/device\\033[0m\\n"',
+        'echo "2. Enter this one-time code (expires in 15 minutes)"',
+        'printf "   \\033[94mMADE-12345\\033[0m\\n"',
+        m.hold,
+        'echo "Successfully logged in"',
+      ].join("\n"),
+    )
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/codex-login`)).status).toBe(202)
+    const waiting = await settled(
+      app,
+      `${FIX}/codex-login`,
+      (r) => r.device !== null || r.state !== "running",
+    )
+    expect(waiting.device).toEqual({
+      code: "MADE-12345",
+      url: "https://auth.openai.com/codex/device",
+    })
+    m.go()
+    const done = await settled(app, `${FIX}/codex-login`)
+    expect(done.state).toBe("ok")
+    expect(done.device).toBeNull()
+    expect(m.calls()).toEqual([
+      "codex login --device-auth",
+      `home=${join(m.home, ".playground", "codex")}`,
+    ])
+  })
+
+  test("claude-login runs claude auth login and shows its sign-in link, with no code (#1835)", async () => {
+    const m = machine()
+    m.stub(
+      "claude",
+      [
+        `echo "Browser didn't open? Use the url below to sign in:"`,
+        'echo "https://claude.ai/oauth/authorize?code=true&made-up=1"',
+        m.hold,
+        'echo "Login successful."',
+      ].join("\n"),
+    )
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/claude-login`)).status).toBe(202)
+    const waiting = await settled(
+      app,
+      `${FIX}/claude-login`,
+      (r) => r.device !== null || r.state !== "running",
+    )
+    expect(waiting.device).toEqual({
+      code: null,
+      url: "https://claude.ai/oauth/authorize?code=true&made-up=1",
+    })
+    m.go()
+    expect((await settled(app, `${FIX}/claude-login`)).state).toBe("ok")
+    expect(m.calls()).toEqual(["claude auth login"])
+  })
+
   test("keeps the last 40 lines of what a fix printed", async () => {
     const m = machine()
     m.stub("brew", 'i=1; while [ $i -le 200 ]; do echo "line $i"; i=$((i + 1)); done')
@@ -600,6 +675,22 @@ describe("the guards", () => {
     expect((await settled(app, "/fix/trust")).state).toBe("ok")
     expect(m.calls()).toEqual([expect.stringMatching(/ trust$/)])
   })
+
+  // #1835: the harnesses' install and sign-in fixes run only on the owner's own click, from a trusted origin over loopback
+  test.each(["claude-login", "codex", "codex-login"])(
+    "%s runs nothing off loopback or from another origin",
+    async (id) => {
+      const m = machine()
+      m.stub("brew")
+      m.stub("claude")
+      m.stub("codex")
+      const app = full(m.fixes, [])
+      for (const refusal of refusals)
+        expect((await begin(app, `/fix/${id}`, refusal)).status).toBe(403)
+      expect((await read(app, `/fix/${id}`)).state).toBe("idle")
+      expect(m.calls()).toEqual([])
+    },
+  )
 
   // #810: the proxy fix runs only on the owner's own click, from a trusted origin over loopback
   test("proxy runs nothing off loopback, from another origin, or without its start", async () => {

@@ -295,6 +295,42 @@ export const installCheck = (out: string, shot: () => string): Omit<Step, "name"
   }
 }
 
+// Step 2's wait: the click can land before the button renders under load, so the click retries each poll until POSTGRES_URL lands, the way step 3 retries Continue; the button has buttonMs to show, after which the step gives up and names it, and the URL has urlMs, whose miss names it. Each poll the button is missing, reopen runs before the next click, since a page read before the box's name registered stays a 404.
+export const databaseCheck = async (
+  click: () => boolean,
+  saved: () => boolean,
+  waits: { buttonMs: number; pollMs: number; urlMs: number } = {
+    buttonMs: 60_000,
+    pollMs: 2_000,
+    urlMs: 120_000,
+  },
+  reopen: () => void = () => {},
+): Promise<Pick<Step, "detail" | "ok">> => {
+  let clicked = false
+  for (
+    const urlEnd = Date.now() + waits.urlMs, buttonEnd = Date.now() + waits.buttonMs;
+    Date.now() < urlEnd;
+    await Bun.sleep(waits.pollMs)
+  ) {
+    if (click()) clicked = true
+    if (saved()) return { detail: "", ok: true }
+    if (!clicked && Date.now() >= buttonEnd)
+      return {
+        detail: `the Start the database button never showed in ${waits.buttonMs / 1000}s`,
+        ok: false,
+      }
+    if (!clicked) reopen()
+  }
+  if (click()) clicked = true
+  if (saved()) return { detail: "", ok: true }
+  return {
+    detail: clicked
+      ? `no POSTGRES_URL in the desk's .env after ${waits.urlMs / 1000}s`
+      : `the Start the database button never showed in ${waits.buttonMs / 1000}s`,
+    ok: false,
+  }
+}
+
 // One agent-browser session for the run, its screenshots in the box.
 class Browser {
   readonly session = `pg-gate-${process.pid}`
@@ -493,17 +529,18 @@ const main = async (args: string[]) => {
       )
     })
     await check("first run starts the database with one click", async () => {
-      browser.cmd("find", "role", "button", "click", "--name", "Start the database")
       const env = join(desk, ".env")
-      const saved = await waitFor(
+      const saved = await databaseCheck(
+        () => browser.clickEnabled("Start the database"),
         () => existsSync(env) && /^POSTGRES_URL=\S/m.test(readFileSync(env, "utf8")),
-        120_000,
+        undefined,
+        () => {
+          try {
+            if (/\b404\b/.test(browser.text())) browser.cmd("open", `${web}/dashboard`)
+          } catch {}
+        },
       )
-      return {
-        detail: saved ? "" : "no POSTGRES_URL in the desk's .env after 120s",
-        ok: saved,
-        shot: browser.shot("2-database"),
-      }
+      return { ...saved, shot: browser.shot("2-database") }
     })
     await check("the Dashboard shows Alpha", async () => {
       browser.cmd("open", `${web}/dashboard`)

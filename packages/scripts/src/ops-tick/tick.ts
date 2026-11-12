@@ -1,6 +1,5 @@
-import { readFileSync, realpathSync, statfsSync, statSync } from "node:fs"
-import { appendFile, mkdir, stat, unlink } from "node:fs/promises"
-import { loadavg } from "node:os"
+import { realpathSync, statfsSync } from "node:fs"
+import { appendFile, mkdir, readdir, stat, unlink } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 
 import {
@@ -10,7 +9,7 @@ import {
   managerKindOfName,
   managerOf,
 } from "@packages/config/kinds"
-import { purgeTrash } from "@packages/safe-delete"
+import { purgeTrash, stripTrash } from "@packages/safe-delete"
 import { accountSettings, readPolicy, ruleSettings } from "@packages/settings"
 
 import {
@@ -221,6 +220,69 @@ const focusCardBeat = async (ctx: Context) => {
 // Each window playground priority opened that has stood LAPSE_HOURS is lifted with a line in ops/priority.log (lapse), and that line goes to ops, so a window nobody lifted stops passing --priority starts by itself.
 const priorityLapse = async (ctx: Context) => {
   for (const line of await lapse(join(ctx.ops, ".."), ctx.now)) await ctx.send("ops", line)
+}
+
+const RUN_SLOTS = ["run-slot", "run-slot-2", "run-slot-3", "run-slot-4"]
+const HOLD_AFTER_MS = 30 * 60_000
+
+const pidLive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as { code?: string }).code === "EPERM"
+  }
+}
+
+// A run-slot hold past 30 minutes while a waiter queues is told to ops once per hold: the four queue lanes' holder lines (`<who> <pid> <iso> <units> <size>`) give the holder and its start, runs.log's ask line for that who and pid the command (a hold can-take, a reread or the merge train's own mkdir made names none), a dead pid no alert, the queue's live waiter tickets counted by each ticket's pid as run-slot.sh's own queue read prunes the dead ones, and tick/run-slot-hold-told.json holds one `<slot>:<pid>` key per told hold, pruned to the live holds on every pass, a no-waiter one included.
+export const runSlotHold = async (ctx: Context) => {
+  const toldPath = join(ctx.ops, "tick", "run-slot-hold-told.json")
+  const told = ((await readJson(toldPath).catch(() => null)) ?? {}) as Record<string, string>
+  const before = JSON.stringify(told)
+  let runsLog: string | null = null
+  const holds: { heldMs: number; pid: string; since: string; slot: string; who: string }[] = []
+  for (const slot of RUN_SLOTS) {
+    const line = (
+      await Bun.file(join(ctx.ops, `${slot}.holder`))
+        .text()
+        .catch(() => "")
+    ).trim()
+    const [who, pid, since] = line.split(/\s+/)
+    const heldMs = ctx.now.getTime() - Date.parse(since ?? "")
+    if (
+      !who ||
+      !pid ||
+      !Number.isFinite(heldMs) ||
+      heldMs <= HOLD_AFTER_MS ||
+      !pidLive(Number(pid))
+    )
+      continue
+    holds.push({ heldMs, pid, since: since!, slot, who })
+  }
+  const live = new Set(holds.map((h) => `${h.slot}:${h.pid}`))
+  for (const key of Object.keys(told)) if (!live.has(key)) delete told[key]
+  let waiters = 0
+  try {
+    waiters = (await readdir(join(ctx.ops, "run-slot.waiters"))).filter((t) =>
+      pidLive(Number(t.split("-")[1])),
+    ).length
+  } catch {}
+  if (waiters > 0) {
+    for (const hold of holds) {
+      const key = `${hold.slot}:${hold.pid}`
+      if (told[key]) continue
+      runsLog ??= await Bun.file(join(ctx.ops, "run-slot.runs.log"))
+        .text()
+        .catch(() => "")
+      const asked = runsLog.split("\n").findLast((l) => l.includes(` ask ${hold.who} ${hold.pid} `))
+      const command = asked
+        ? asked.replace(/^[^ ]+ ask \S+ \d+ /, "")
+        : "command unread from run-slot.runs.log"
+      const text = `run-slot: ${hold.who}'s run has held ${hold.slot} for ${Math.floor(hold.heldMs / 60_000)} min while ${waiters} waiter${waiters === 1 ? "" : "s"} queue${waiters === 1 ? "s" : ""}: ${command} (pid ${hold.pid}, since ${hold.since})`
+      if (await ctx.send("ops", text, true)) told[key] = text
+    }
+  }
+  if (JSON.stringify(told) !== before) await writeAtomic(toldPath, JSON.stringify(told))
 }
 
 // One kept focus card resolved, true, once no ask posted in its window is open; false while one is
@@ -643,31 +705,18 @@ const freeBytes = (dir: string): number => {
   return fs.bavail * fs.bsize
 }
 
-// The load5 cap as run-slot.sh's load_line reads it (scripts/ops/README.md): run-slot.load5-cap's last line, a whole number, while the switch stands (its expiry on the first line, else 4 hours from its mtime), 22 at most, else 22.
-export const loadCapOf = (ops: string, now: Date): number => {
-  try {
-    const path = join(ops, "run-slot.load5-cap")
-    const lines = readFileSync(path, "utf8").trimEnd().split("\n")
-    const ends = /^\S+ [\d-]{10}T[\d:]{8}Z ([\d-]{10}T[\d:]{8}Z) /.exec(lines[0] ?? "")?.[1]
-    const until = ends ? Date.parse(ends) : statSync(path).mtimeMs + 4 * 3_600_000
-    const cap = lines.at(-1) ?? ""
-    if (until > now.getTime() && /^\d{1,3}$/.test(cap)) return Math.min(Number(cap), 22)
-  } catch {}
-  return 22
-}
-
-// The trash playground rm fills, beside ops in the data folder, emptied hourly by purgeTrash (@packages/safe-delete): each batch over 7 days old, then the oldest while its disk has under 50 GB free, every batch taken only while load5 is under run-slot.load5-cap's cap (22 while it is off), or at any load once the disk is under the 5 GB floor; one line in ops/log/trash-purge.log, naming the batches the load held.
+// The trash playground rm fills, beside ops in the data folder, emptied hourly: purgeTrash (@packages/safe-delete) takes each batch over 7 days old, then the oldest while its disk has under 50 GB free, deleting being cheap whatever the load, and stripTrash beside it removes each batch's node_modules folders and web/next/.next, oldest first and paced, which an install or a build rebuilds; one line in ops/log/trash-purge.log.
 export const trashPurge =
-  (trash?: string, free = freeBytes, load: () => number = () => loadavg()[1] ?? 0) =>
+  (
+    trash?: string,
+    free = freeBytes,
+    sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+  ) =>
   async (ctx: Context) => {
     const root = trash ?? join(dirname(ctx.ops), "trash")
-    const { removed, skipped, leftForLoad } = purgeTrash(root, {
-      free: () => free(root),
-      load,
-      loadCap: loadCapOf(ctx.ops, ctx.now),
-      now: ctx.now,
-    })
-    const line = `removed ${removed.length}${removed.length ? ` (${removed.join(", ")})` : ""}${skipped.length ? `, skipped ${skipped.join(", ")}` : ""}${leftForLoad.length ? `, left for load (${leftForLoad.join(", ")})` : ""}`
+    const { removed, skipped } = purgeTrash(root, { free: () => free(root), now: ctx.now })
+    const strip = await stripTrash(root, { sleep })
+    const line = `removed ${removed.length}${removed.length ? ` (${removed.join(", ")})` : ""}${skipped.length ? `, skipped ${skipped.join(", ")}` : ""}${strip.folders ? `, stripped ${strip.folders} folders (${strip.batches.join(", ")})` : ""}${strip.failed.length ? `, not finished (${strip.failed.join(", ")})` : ""}`
     await mkdir(join(ctx.ops, "log"), { recursive: true })
     await appendFile(join(ctx.ops, "log", "trash-purge.log"), `${isoSeconds(ctx.now)} ${line}\n`)
   }
@@ -993,6 +1042,7 @@ export const BEATS: Beat[] = [
   { cron: "*/10 * * * *", name: "guard-probe", run: guardProbe, to: "dispatcher" },
   { cron: "* * * * *", name: "focus-card", run: focusCardBeat, to: "the Inbox, by bun run ask" },
   { cron: "*/5 * * * *", name: "priority-lapse", run: priorityLapse, to: "ops" },
+  { cron: "*/5 * * * *", name: "run-slot-hold", run: runSlotHold, to: "ops" },
   {
     cron: "* * * * *",
     name: "dashboard-watch",

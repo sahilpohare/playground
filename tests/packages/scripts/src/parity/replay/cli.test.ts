@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -7,7 +7,7 @@ const REPO = join(import.meta.dir, "../../../../../..")
 const scratch = mkdtempSync(join(tmpdir(), "parity-replay-cli-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
-// A data folder whose extensions hold one scope with a made-up replay, and core with none.
+// A data folder whose extensions hold one scope with a made-up replay and its layout, and core with none.
 const DATA = join(scratch, "data")
 const SCOPE = join(DATA, "extensions", "acme")
 for (const [path, text] of Object.entries({
@@ -26,11 +26,17 @@ for (const [path, text] of Object.entries({
       servers: ["linear-shared"],
     },
   }),
+  "scripts/parity-replay/schemas/linear-shared.json": "[]",
   "skills/triage/SKILL.md": "# triage\n",
 })) {
   mkdirSync(dirname(join(SCOPE, path)), { recursive: true })
   writeFileSync(join(SCOPE, path), text)
 }
+
+// The same scope with no layout, as a machine holds it before its org's layouts are put.
+const BARE = join(scratch, "bare")
+for (const path of ["replays", "skills"])
+  cpSync(join(SCOPE, path), join(BARE, "extensions", "acme", path), { recursive: true })
 
 const parity = (data: string, ...args: string[]) => {
   const env = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: "", PLAYGROUND_DATA_DIR: data }
@@ -55,6 +61,14 @@ describe("bun run parity replay", () => {
     const r = parity(join(scratch, "empty"), "--runs", "0")
     expect(r.code).toBe(0)
     expect(r.out.trim()).toBe("parity replay: no scope holds a replay")
+  })
+
+  test("a replay whose scope holds no layout says so plainly, and runs no model", () => {
+    const r = parity(BARE, "--runs", "0")
+    expect(r.code).toBe(1)
+    expect(r.err.trim()).toBe(
+      "parity replay: made-up-triage: no layout for linear-shared: the scope holds no scripts/parity-replay/schemas/linear-shared.json",
+    )
   })
 
   test("--only takes one replay, and refuses a name it does not have", () => {

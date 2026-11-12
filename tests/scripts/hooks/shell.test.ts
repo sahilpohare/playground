@@ -104,6 +104,7 @@ const madePaths = (prefix: string): Paths => {
     MAIN: join(root, "main"),
     ROOT: extensions,
     SCOPE: join(extensions, "login"),
+    TREE_LINK: join(root, "main", ".claude", "worktrees", "a", "into-main"),
     WORDS: join(root, "home", "words"),
     WORK: join(root, "home", "work"),
   }

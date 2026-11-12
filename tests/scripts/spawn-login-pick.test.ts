@@ -544,6 +544,62 @@ describe("the capacity gate refuses and spawns nothing", () => {
     },
   )
 
+  // #1756: a lead steers a start onto the own login by naming it, past a split that would send it to the factory
+  const splitToFactory = (home: string) => {
+    storedLogin("own@example.com", 20)(home)
+    writeFileSync(
+      join(home, ".playground", "ops", "usage", "login-flip.json"),
+      JSON.stringify({
+        split: { at: Date.now() / 1000, shares: { "factory@example.com": 1 } },
+        seen: {},
+      }),
+    )
+  }
+
+  test("--account naming the own login starts on it, the split skipped and its usage judged", async () => {
+    const r = await spawn(
+      ["worker", "worker-brave-otter", "b.md", "--account", "own@example.com"],
+      [],
+      { CLAUDE_JSON: ownLogin, PACE_OFF_UNTIL: offUntilUtc, USAGE_JSON: factoryUsage(10) },
+      script,
+      undefined,
+      splitToFactory,
+    )
+    expect(r.code).toBe(0)
+    expect(r.out).toContain(
+      "--account own@example.com is this machine's own login, so it starts there, the split skipped: its week is at 20% (stored-login.json)",
+    )
+    expect(launchOf(r)).not.toContain("CLAUDE_CODE_OAUTH_TOKEN")
+    expect(r.security).toBeUndefined()
+    expect(capacityLog(r)).toEqual([
+      expect.objectContaining({ readings: expect.objectContaining({ week: 20 }) }),
+    ])
+    expect(() =>
+      readFileSync(join(r.home, ".playground", "ops", "usage", "split-picks.json")),
+    ).toThrow()
+    expect(execLine(r, "worker-brave-otter")).toContain("--account own@example.com")
+  })
+
+  test.each([
+    ["missing", () => {}],
+    ["stale", storedLogin("own@example.com", 20, 20)],
+  ])(
+    "--account naming the own login is refused while its stored-login.json is %s, though the factory has room",
+    async (_, files) => {
+      const r = await spawn(
+        ["worker", "worker-brave-otter", "b.md", "--account", "own@example.com"],
+        [],
+        { CLAUDE_JSON: ownLogin, PACE_OFF_UNTIL: offUntilUtc, USAGE_JSON: factoryUsage(10) },
+        script,
+        undefined,
+        files,
+      )
+      expect(r.code).not.toBe(0)
+      expect(placing(r)).toEqual([])
+      expect(r.err).toContain("--account own@example.com, this machine's own login: ")
+    },
+  )
+
   test("a usage.json without five_hour is an account with no 5-hour limit, read as none rather than 0%, and passes (#85)", async () => {
     const raw = JSON.stringify(usage({ rate_limits: { seven_day: usage().rate_limits.seven_day } }))
     const r = await spawn(["worker", "worker-brave-otter", "b.md"], [], { USAGE_JSON: raw })

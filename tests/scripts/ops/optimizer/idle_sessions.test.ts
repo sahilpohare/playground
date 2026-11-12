@@ -93,6 +93,173 @@ describe("collect: live sessions with nothing to do", () => {
     expect(prefix).toEqual([])
   })
 
+  // #1738: the row's worker names one PR's worker; an open PR of a live worker keeps the reviewer on.
+  test("checker-worker-gone: kept while an open PR on its prs list has a live worker, listed when that worker is gone too", async () => {
+    const OPEN = "https://github.com/o/r/pull/2130"
+    const open = { head: "ccc3333", state: "open", verdicts: [] }
+    const prState = async (url: string) => (url === OPEN ? open : null)
+    const roster = {
+      "b4w2k8-reviewer": {
+        kind: "reviewer",
+        name: "b4w2k8-reviewer",
+        prs: [OPEN],
+        worker: "a3f9d1-worker",
+      },
+      "c5e7g2-worker": { kind: "worker", name: "c5e7g2-worker", pr: OPEN },
+    }
+    const reviewer = entry({ name: "b4w2k8-reviewer" })
+
+    // the row's worker is gone, and the open PR belongs to another worker whose session is live
+    const kept = await collect(
+      deps({
+        prState,
+        roster,
+        sessions: {
+          "b4w2k8-reviewer": reviewer,
+          "c5e7g2-worker": entry({ name: "c5e7g2-worker" }),
+        },
+        workerPrs: async (name) => (name === "c5e7g2-worker" ? [OPEN] : []),
+      }),
+    )
+    expect(kept).toEqual([])
+
+    // every open PR of a gone worker still ends the reviewer
+    const goneOwner = await collect(
+      deps({
+        prState,
+        roster,
+        sessions: { "b4w2k8-reviewer": reviewer },
+        workerPrs: async (name) => (name === "c5e7g2-worker" ? [OPEN] : []),
+      }),
+    )
+    expect(whys(goneOwner)).toEqual([["checker-worker-gone (a3f9d1-worker)"]])
+  })
+
+  // most live workers carry no roster pr: a live worker's own PRs, its roster pr and open branch PRs among them, keep the checker on
+  test("checker-worker-gone: kept while an open PR on its prs list is a live worker's open branch PR, its row holding no pr", async () => {
+    const OPEN = "https://github.com/o/r/pull/2131"
+    const prState = async (url: string) =>
+      url === OPEN ? { head: "ddd4444", state: "open", verdicts: [] } : null
+    const roster = {
+      "e6h8j3-reviewer": {
+        kind: "reviewer",
+        name: "e6h8j3-reviewer",
+        prs: [OPEN],
+        worker: "b4w2k8-worker",
+      },
+      "f7k9l4-worker": { kind: "worker", name: "f7k9l4-worker" },
+    }
+    const kept = await collect(
+      deps({
+        prState,
+        roster,
+        sessions: {
+          "e6h8j3-reviewer": entry({ name: "e6h8j3-reviewer" }),
+          "f7k9l4-worker": entry({ name: "f7k9l4-worker" }),
+        },
+        workerPrs: async (name) => (name === "f7k9l4-worker" ? [OPEN] : []),
+      }),
+    )
+    expect(kept).toEqual([])
+  })
+
+  // a checker with no open PR reads no live worker's PRs at all
+  test("checker-worker-gone: a checker whose PRs are all done reads no live worker's PRs", async () => {
+    const MERGED = "https://github.com/o/r/pull/2131"
+    let reads = 0
+    const rows = await collect(
+      deps({
+        prState: async () => ({ head: "ddd4444", state: "merged", verdicts: [] }),
+        roster: {
+          "e6h8j3-reviewer": {
+            kind: "reviewer",
+            name: "e6h8j3-reviewer",
+            prs: [MERGED],
+            worker: "b4w2k8-worker",
+          },
+          "f7k9l4-worker": { kind: "worker", name: "f7k9l4-worker" },
+        },
+        sessions: {
+          "e6h8j3-reviewer": entry({ name: "e6h8j3-reviewer" }),
+          // busy, so collect skips its own row and the count holds servesLiveWorker's reads alone
+          "f7k9l4-worker": entry({ name: "f7k9l4-worker", status: "busy" }),
+        },
+        workerPrs: async (name) => {
+          if (name === "f7k9l4-worker") reads++
+          return [MERGED]
+        },
+      }),
+    )
+    expect(whys(rows)).toEqual([
+      ["checker-worker-gone (b4w2k8-worker)", "checker-pr-done (merged)"],
+    ])
+    expect(reads).toBe(0)
+  })
+
+  // the reads wait for the gone worker and cost one GitHub read per live worker, whatever the open PR count
+  test("checker-worker-gone: servesLiveWorker reads each live worker's PRs once per call", async () => {
+    const OPEN = "https://github.com/o/r/pull/2131"
+    const OTHER = "https://github.com/o/r/pull/2133"
+    let reads = 0
+    const rows = await collect(
+      deps({
+        prState: async () => ({ head: "ddd4444", state: "open", verdicts: [] }),
+        roster: {
+          "e6h8j3-reviewer": {
+            kind: "reviewer",
+            name: "e6h8j3-reviewer",
+            prs: [OPEN, OTHER],
+            worker: "b4w2k8-worker",
+          },
+          "f7k9l4-worker": { kind: "worker", name: "f7k9l4-worker" },
+        },
+        sessions: {
+          "e6h8j3-reviewer": entry({ name: "e6h8j3-reviewer" }),
+          // busy, so collect skips its own row and the count holds servesLiveWorker's reads alone
+          "f7k9l4-worker": entry({ name: "f7k9l4-worker", status: "busy" }),
+        },
+        workerPrs: async (name) => {
+          if (name === "f7k9l4-worker") reads++
+          return [OTHER]
+        },
+      }),
+    )
+    expect(rows).toEqual([])
+    expect(reads).toBe(1)
+  })
+
+  test("checker-worker-gone: a live worker does not keep a checker whose PR to it is closed or merged", async () => {
+    const DONE = "https://github.com/o/r/pull/2131"
+    const roster = {
+      "e6h8j3-reviewer": {
+        kind: "reviewer",
+        name: "e6h8j3-reviewer",
+        prs: [DONE],
+        worker: "b4w2k8-worker",
+      },
+      "f7k9l4-worker": { kind: "worker", name: "f7k9l4-worker" },
+    }
+    for (const [how, state] of [
+      ["closed", "closed"],
+      ["merged", "merged"],
+    ] as const) {
+      const rows = await collect(
+        deps({
+          prState: async (url) => (url === DONE ? { head: "ddd4444", state, verdicts: [] } : null),
+          roster,
+          sessions: {
+            "e6h8j3-reviewer": entry({ name: "e6h8j3-reviewer" }),
+            "f7k9l4-worker": entry({ name: "f7k9l4-worker" }),
+          },
+          workerPrs: async (name) => (name === "f7k9l4-worker" ? [DONE] : []),
+        }),
+      )
+      expect(whys(rows)).toEqual([
+        ["checker-worker-gone (b4w2k8-worker)", `checker-pr-done (${how})`],
+      ])
+    }
+  })
+
   // a checker is known by its roster kind, so a name with no role prefix still is one.
   test("a checker by its roster kind is flagged like one by its name; another kind is not a checker", async () => {
     const roster = {
@@ -151,6 +318,39 @@ describe("collect: live sessions with nothing to do", () => {
       }),
     )
     expect(whys(closed)).toEqual([["checker-pr-done (closed)"]])
+  })
+
+  // #1762: the PR that closed last names the how; an older merged PR on the list does not
+  test("checker-pr-done: the how reads from the PR that closed last, not from an older merged one", async () => {
+    const sessions = {
+      "tester-mild-cove": entry({ name: "tester-mild-cove", sessionId: "sess-mc" }),
+      "worker-mild-cove": entry({ name: "worker-mild-cove" }),
+    }
+    const rows = await collect(
+      deps({
+        prState: async (url) =>
+          url.endsWith("/1")
+            ? {
+                head: "aaa1111",
+                mergeSha: "meeeee1000",
+                mergedAt: "2026-11-01T00:10:00Z",
+                state: "merged",
+                verdicts: [],
+              }
+            : {
+                closedAt: "2026-11-01T03:00:00Z",
+                head: "bbb2222",
+                state: "closed",
+                verdicts: [],
+              },
+        sessions,
+        workerPrs: async (name) =>
+          name.startsWith("tester-")
+            ? ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"]
+            : [],
+      }),
+    )
+    expect(whys(rows)).toEqual([["checker-pr-done (closed)"]])
   })
 
   test("checker-nothing: the head scored lists at 30+ quiet minutes, not at 15", async () => {

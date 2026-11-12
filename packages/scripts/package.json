@@ -20,6 +20,7 @@
     "@types/fontkit": "catalog:",
     "@types/node": "catalog:",
     "@viz-js/viz": "catalog:",
+    "baileys": "catalog:",
     "fontkit": "catalog:",
     "globby": "catalog:",
     "nanoid": "catalog:",

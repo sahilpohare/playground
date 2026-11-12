@@ -1,4 +1,5 @@
 import "@packages/env/aliases"
+import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { envValue } from "@packages/config/org"
@@ -19,6 +20,13 @@ export const livePath = (...names: string[]): string | undefined =>
   readsLive() ? envValue(process.env, ...names) : undefined
 
 export const projectsDir = (): string => join(claudeDir(), "projects")
+
+// Codex keeps its rollouts under CODEX_HOME when it is set, else ~/.codex, in sessions/YYYY/MM/DD. Only a stack that reads this machine reads that folder; any other reads its fixture's, a codex folder inside the fixture's config folder.
+export const codexSessionsDir = (): string =>
+  join(
+    readsLive() ? process.env.CODEX_HOME || join(homedir(), ".codex") : join(claudeDir(), "codex"),
+    "sessions",
+  )
 
 // Pure: where Claude Code writes a session's transcript under a config folder: its projects folder, under the working folder with every character but a letter or a digit turned into a dash.
 export const transcriptPath = (config: string, cwd: string, sessionId: string): string =>

@@ -275,6 +275,87 @@ describe("a GLM session's push", () => {
   })
 })
 
+// a GLM branch brings canary in after both sides changed spawn.sh: git merges the file by itself, so the result differs from each side yet holds no change of the GLM session's
+describe("bringing canary in", () => {
+  const lines = (edit: Record<number, string> = {}) =>
+    Array.from({ length: 8 }, (_, i) => `${edit[i] ?? i}\n`).join("")
+  // a pushed feat branch whose commit changed spawn.sh's first line, a canary that changed its last, and docs/a.md changed on both, so it conflicts
+  const behind = async (name: string) => {
+    const dir = join(DIR, name)
+    const put = (path: string, text: string) => Bun.write(join(dir, path), text)
+    git(DIR, "init", "-q", "--bare", "-b", "canary", `${dir}.git`)
+    git(DIR, "clone", "-q", `${dir}.git`, dir)
+    await put("docs/a.md", "base\n")
+    await put("scripts/spawn.sh", lines())
+    git(dir, "add", ".")
+    git(dir, "commit", "-q", "-m", "base")
+    git(dir, "push", "-q", "origin", "HEAD:canary")
+    git(dir, "checkout", "-q", "-b", "feat")
+    await put("docs/a.md", "feat\n")
+    await put("scripts/spawn.sh", lines({ 0: "feat" }))
+    git(dir, "commit", "-q", "-am", "feat")
+    git(dir, "push", "-q", "origin", "feat")
+    git(dir, "checkout", "-q", "canary")
+    await put("docs/a.md", "canary\n")
+    await put("scripts/spawn.sh", lines({ 7: "canary" }))
+    git(dir, "commit", "-q", "-am", "canary")
+    git(dir, "push", "-q", "origin", "canary")
+    git(dir, "checkout", "-q", "feat")
+    // git stops on docs/a.md's conflict, which the session resolves
+    const stop = async (...args: string[]) => {
+      const proc = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+        cwd: dir,
+        env: GIT_ENV,
+        stderr: "ignore",
+        stdin: "ignore",
+        stdout: "ignore",
+      })
+      expect(proc.exitCode).not.toBe(0)
+      await put("docs/a.md", "both\n")
+      git(dir, "add", "docs/a.md")
+    }
+    const handEdit = async () => {
+      await put("scripts/spawn.sh", lines({ 0: "feat", 3: "a hand edit", 7: "canary" }))
+      git(dir, "add", "scripts/spawn.sh")
+    }
+    return { dir, handEdit, stop }
+  }
+
+  test("a merge whose only fenced change comes from canary passes", async () => {
+    const { dir, stop } = await behind("bring-merge")
+    await stop("merge", "-q", "origin/canary")
+    expect(await bash("git commit --no-edit", dir)).toBeUndefined()
+    git(dir, "commit", "-q", "--no-edit")
+    expect(await bash("git push origin feat", dir)).toBeUndefined()
+  })
+
+  test("a merge whose resolution edits a fenced file is refused", async () => {
+    const { dir, handEdit, stop } = await behind("bring-merge-edit")
+    await stop("merge", "-q", "origin/canary")
+    await handEdit()
+    expect(await bash("git commit --no-edit", dir)).toContain("scripts/spawn.sh")
+    git(dir, "commit", "-q", "--no-edit")
+    expect(await bash("git push origin feat", dir)).toContain("scripts/spawn.sh")
+  })
+
+  test("a rebase whose only fenced change comes from canary passes", async () => {
+    const { dir, stop } = await behind("bring-rebase")
+    await stop("rebase", "-q", "origin/canary")
+    git(dir, "-c", "core.editor=true", "rebase", "--continue")
+    expect(await bash("git push --force-with-lease origin feat", dir)).toBeUndefined()
+    expect(await bash("git push -f", dir)).toBeUndefined()
+  })
+
+  test("a rebase whose resolution edits a fenced file is refused", async () => {
+    const { dir, handEdit, stop } = await behind("bring-rebase-edit")
+    await stop("rebase", "-q", "origin/canary")
+    await handEdit()
+    git(dir, "-c", "core.editor=true", "rebase", "--continue")
+    expect(await bash("git push --force-with-lease origin feat", dir)).toContain("scripts/spawn.sh")
+    expect(await bash("git push -f", dir)).toContain("scripts/spawn.sh")
+  })
+})
+
 // the hook reads the checkout before any part of the call runs, so a chain is judged only where that read covers what the chain will commit
 describe("a chained commit or push", () => {
   const fresh = async (name: string) => {
@@ -675,14 +756,26 @@ describe("which sessions it acts for", () => {
       join(CONFIG, "sessions", "102.json"),
       JSON.stringify({ name: "worker-claude-pin", sessionId: "s-claude" }),
     )
+    await Bun.write(
+      join(CONFIG, "sessions", "103.json"),
+      JSON.stringify({ name: "worker-harness-glm-pin", sessionId: "s-harness-glm" }),
+    )
+    await Bun.write(
+      join(CONFIG, "sessions", "104.json"),
+      JSON.stringify({ name: "worker-harness-claude-pin", sessionId: "s-harness-claude" }),
+    )
     await pin("worker-glm-pin", "glm")
     await pin("worker-claude-pin", "claude")
+    await pin("worker-harness-glm-pin", "claude-code glm")
+    await pin("worker-harness-claude-pin", "claude-code claude")
   })
 
   test.each([
     { label: "GLM's base URL", env: { ...env, ...GLM }, session: "s-none", want: true },
     { label: "a glm pin with no base URL", env, session: "s-glm", want: true },
     { label: "a claude pin", env, session: "s-claude", want: false },
+    { label: "a claude-code glm pin", env, session: "s-harness-glm", want: true },
+    { label: "a claude-code claude pin", env, session: "s-harness-claude", want: false },
     { label: "no pin and no base URL", env, session: "s-none", want: false },
     {
       label: "a base URL that only holds z.ai in its path",
@@ -1202,10 +1295,10 @@ describe("its registration", () => {
       }),
     )
 
-  test("both settings files send it every Bash call, every MCP tool and Claude Code's three MCP resource tools, and no other tool", async () => {
+  // Bash reaches it through guards (tests/scripts/hooks/guards.test.ts).
+  test("both settings files send it every MCP tool and Claude Code's three MCP resource tools, and no other tool", async () => {
     for (const { file, matcher } of await matchers()) {
       for (const tool of [
-        "Bash",
         "ListMcpResourcesTool",
         "ReadMcpResourceDirTool",
         "ReadMcpResourceTool",
@@ -1214,6 +1307,7 @@ describe("its registration", () => {
       ])
         expect({ file, tool, sent: matcher.test(tool) }).toEqual({ file, tool, sent: true })
       for (const tool of [
+        "Bash",
         "Edit",
         "Write",
         "WebFetch",

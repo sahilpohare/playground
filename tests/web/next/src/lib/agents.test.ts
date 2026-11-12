@@ -377,6 +377,12 @@ describe("waitsOf", () => {
     const live = { worker: worker("runner-pride", "idle", { role: "runner", tasks: job }) }
     expect(statusParts(runner, NOW, null, false, live).state).toBe("working")
     expect(statusParts(runner, NOW).state).toBe("idle")
+    // a Codex runner, whose idle reads unknown, still reads Working while its job runs
+    const codex = {
+      light: "unknown" as const,
+      worker: worker("runner-pride", "unknown", { role: "runner", tasks: job }),
+    }
+    expect(statusParts(runner, NOW, null, false, codex).state).toBe("working")
     // a quiet runner whose job runs is not hung: No progress reads the session's own work alone
     const quiet = {
       worker: worker("runner-pride", "idle", {

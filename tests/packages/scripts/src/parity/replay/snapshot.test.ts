@@ -13,7 +13,13 @@ afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 test("lists a stdio server's tools by name, read here from a replay's own stub", async () => {
   const fixture = join(scratch, "slack-shared.json")
   writeFileSync(fixture, "{}\n")
-  const schemas = join(HERE, "schemas/slack-shared.json")
+  const schemas = join(scratch, "schemas.json")
+  writeFileSync(
+    schemas,
+    JSON.stringify(
+      ["search_messages", "chat_post_message"].map((name) => ({ inputSchema: {}, name })),
+    ),
+  )
   const tools = await listTools({
     args: [
       join(HERE, "stub-mcp.ts"),
@@ -28,11 +34,5 @@ test("lists a stdio server's tools by name, read here from a replay's own stub",
     ],
     command: process.execPath,
   })
-  expect(tools.map((t) => t.name)).toEqual([
-    "chat_post_message",
-    "conversations_history",
-    "conversations_replies",
-    "search_messages",
-    "users_lookup_by_email",
-  ])
+  expect(tools.map((t) => t.name)).toEqual(["chat_post_message", "search_messages"])
 })

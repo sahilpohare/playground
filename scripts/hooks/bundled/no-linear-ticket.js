@@ -45,7 +45,7 @@ applyEnvAliases();
 
 // scripts/hooks/no-linear-ticket.ts
 import { realpath } from "fs/promises";
-import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join as join4, resolve as resolve3, sep } from "path";
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute4, join as join4, resolve as resolve4, sep } from "path";
 
 // packages/env/src/data-dir.ts
 import { homedir } from "os";
@@ -58,6 +58,55 @@ var dataDirOf = (env, home = env.HOME || homedir()) => {
     throw new Error(`PLAYGROUND_DATA_DIR is relative (${named}), so each process would read it from its own folder: set it to an absolute path`);
   return resolve(named);
 };
+
+// scripts/hooks/codex.ts
+import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+var HEADERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
+var SHELL_PATCH = /(?:^|[\n;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*\/)?(?:apply_patch|applypatch)(?=$|[\s;&|)<>'"`])/;
+var patchPaths = (text) => text.split(`
+`).flatMap((line) => {
+  const trimmed = line.trim();
+  const header = HEADERS.find((h) => trimmed.startsWith(h));
+  return header && trimmed.length > header.length ? [trimmed.slice(header.length)] : [];
+});
+var writeOf = (input, path, patch) => {
+  const cwd = typeof input.cwd === "string" ? input.cwd : "/";
+  return JSON.stringify({
+    ...input,
+    tool_input: { content: patch, file_path: isAbsolute2(path) ? path : resolve2(cwd, path) },
+    tool_name: "Write"
+  });
+};
+function guardInputs(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return [raw];
+  }
+  if (typeof input !== "object" || input === null || typeof input.turn_id !== "string")
+    return [raw];
+  const tool = input.tool_name;
+  const command = input.tool_input?.command;
+  const text = typeof command === "string" ? command : "";
+  const shell = tool === "Bash" && SHELL_PATCH.test(text);
+  if (tool !== "apply_patch" && !shell)
+    return [raw];
+  const paths = patchPaths(text);
+  if (paths.length === 0)
+    return null;
+  return [...shell ? [raw] : [], ...paths.map((path) => writeOf(input, path, text))];
+}
+async function eachInput(raw, guard, judge) {
+  const inputs = guardInputs(raw);
+  if (!inputs)
+    return `${guard} hook refuses an apply_patch whose patch names no file it can read: give the patch whole in the call itself, with each file on its own *** Add File, *** Update File or *** Delete File line.`;
+  for (const input of inputs) {
+    const reason = await judge(input);
+    if (reason)
+      return reason;
+  }
+}
 
 // scripts/hooks/role.ts
 import { homedir as homedir2 } from "os";
@@ -156,6 +205,23 @@ async function registryName(sessionId, environment = process.env) {
     } catch {}
   }
 }
+async function codexName(sessionId, environment = process.env) {
+  if (!environment.CODEX_HOME)
+    return;
+  let name;
+  try {
+    const index = await Bun.file(join2(environment.CODEX_HOME, "session_index.jsonl")).text();
+    for (const line of index.split(`
+`)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.id === sessionId && typeof entry.thread_name === "string")
+          name = entry.thread_name;
+      } catch {}
+    }
+  } catch {}
+  return name;
+}
 async function rosterKind(name, environment = process.env) {
   const path = join2(dataDirOf(environment), "roster.json");
   try {
@@ -176,7 +242,7 @@ async function sessionRole(environment, sessionId) {
   if (typeof sessionId !== "string")
     return "";
   try {
-    const name = await registryName(sessionId, environment) ?? "";
+    const name = await registryName(sessionId, environment) ?? await codexName(sessionId, environment) ?? "";
     const role = name && await rosterRole(name, environment);
     if (role)
       return role;
@@ -196,8 +262,9 @@ function sessionOf(raw) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
+import { realpathSync, statSync } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename, dirname, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+import { basename, dirname, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var UNKNOWN = "\x00";
 var READ = "\x01";
 var NOT_RUN = "The refusal stopped this whole Bash call, so none of its commands ran: once it is fixed, run again each one you still need.";
@@ -949,6 +1016,8 @@ function walk(lx, scope, nested, inherit) {
       if (after === "&&")
         done.chained = true;
       done.chain = lx.token;
+      if (lx.orRun)
+        done.orRun = true;
       const last = lx.commands[lx.commands.length - 1]?.words;
       const compound = !!done.group && last?.length === 1 && OPENS.has(reserved[0] ?? "") && !HELD.has(reserved[0] ?? "");
       if (reserved.some((w) => HELD.has(w)) || compound)
@@ -981,8 +1050,10 @@ function walk(lx, scope, nested, inherit) {
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
-      if (depth === 0 && FREES.has(op))
+      if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
+        lx.orRun = op === "||";
+      }
       after = op;
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
@@ -1510,6 +1581,7 @@ async function runAll(lexed, env, visit, builtins) {
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
 async function examine(cmd, env, visit, builtins) {
   tick();
+  orElse(cmd, env);
   unchain(cmd, env);
   if (cmd.opaque) {
     env.cwdAnywhere = true;
@@ -1668,11 +1740,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
+  const lineOr = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
+  env.cwdOr = undefined;
   try {
     return await body();
   } finally {
+    const scriptOr = env.cwdOr;
+    env.cwdOr = scriptOr && scriptOr.orChain === undefined ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope } : lineOr;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -1706,7 +1782,8 @@ async function cdTarget(name, args, env) {
   const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
   if (!dir)
     return homedir3();
-  const typed = dir.value === "-" ? undefined : await folder(pathOf(dir, env));
+  const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
+  const typed = await folder(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
   const base = sign && (sign === "-" ? env.old?.dir : env.cwd);
   return base ? await folder(base + dir.value.slice(2)) : typed;
@@ -1714,7 +1791,7 @@ async function cdTarget(name, args, env) {
 async function folder(path) {
   if (!path)
     return;
-  return await isFolder(path) ? path : undefined;
+  return isFolder(path) ? path : undefined;
 }
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -1726,6 +1803,7 @@ function cdTargets(name, cmd, parsed, env, from) {
     return { back: true, paths: [], unread: true };
   const paths = new Set;
   const many = manyTimes(cmd, parsed);
+  const physical = physicalCd(parsed.args);
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
@@ -1738,14 +1816,23 @@ function cdTargets(name, cmd, parsed, env, from) {
         unread = true;
         continue;
       }
-      paths.add(path);
+      const landed = physical ? kernelPath(word, base, path) : path;
+      paths.add(landed);
       if (many && word.value.split("/").includes("..")) {
-        for (const up of ancestors(path))
+        for (const up of ancestors(landed))
           paths.add(up);
       }
     }
   }
   return { back: dirs.length > 1, paths: [...paths], unread };
+}
+var physicalCd = (args) => args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"));
+function kernelPath(word, base, lexical) {
+  try {
+    return realpathSync.native(isAbsolute3(word.value) ? word.value : `${base}/${word.value}`);
+  } catch {
+    return lexical;
+  }
 }
 function tildeMove(move, name, parsed, env, from, back) {
   const dir = parsed.args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -1784,10 +1871,11 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   const chained = cmd.chained && !negated(cmd);
-  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || await isFolder(paths[0]))) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
+    env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
       env.oldFrom = bases;
     if (chained) {
@@ -1797,11 +1885,44 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   env.cwdSure = undefined;
-  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
+  env.cwdOr = undefined;
+  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || paths.every(isFolder));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
 var negated = (cmd) => markers(cmd.words).filter((word) => word === "!").length % 2 === 1;
+var EXITS = new Set(["exit"]);
+function orElse(cmd, env) {
+  const or = env.cwdOr;
+  if (!or)
+    return;
+  if (cmd.chain === or.orChain) {
+    if (or.exits && cmd.detached)
+      env.cwdOr = { ...or, exits: false };
+    return;
+  }
+  if (cmd.chain === or.cdChain) {
+    if (!or.joined)
+      env.cwdOr = { ...or, joined: true };
+    return;
+  }
+  if (or.orChain === undefined && cmd.orRun) {
+    env.cwdOr = {
+      ...or,
+      exits: EXITS.has(parse(cmd).name) && !cmd.detached && cmd.scope === or.scope,
+      landed: { maybe: env.cwdMaybe ?? [], sure: env.cwdSure },
+      orChain: cmd.chain
+    };
+    env.cwdMaybe = keep([...new Set([...startFolders(env), ...or.before])], env);
+    env.cwdSure = undefined;
+    return;
+  }
+  if ((or.joined || or.exits) && or.landed) {
+    env.cwdMaybe = or.landed.maybe;
+    env.cwdSure = or.landed.sure;
+  }
+  env.cwdOr = undefined;
+}
 function unchain(cmd, env) {
   if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
     return;
@@ -1821,9 +1942,9 @@ function keep(folders, env) {
   env.cwdUnread = true;
   return folders.slice(0, MAX_FOLDERS);
 }
-async function isFolder(path) {
+function isFolder(path) {
   try {
-    return (await Bun.file(path).stat()).isDirectory();
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -2043,9 +2164,9 @@ async function resolveText(text, env) {
 function pathOf(text, env) {
   if (text.unknown || text.reads?.length || text.value === "")
     return;
-  if (isAbsolute2(text.value))
+  if (isAbsolute3(text.value))
     return text.value;
-  return env.cwd ? resolve2(env.cwd, text.value) : undefined;
+  return env.cwd ? resolve3(env.cwd, text.value) : undefined;
 }
 async function readFile(path) {
   const file = Bun.file(path);
@@ -2241,7 +2362,7 @@ var within = (path, dir) => path === dir || path.startsWith(`${dir}${sep}`);
 async function inApprovals(path, environment) {
   const dir = approvalsDir(environment);
   const dirs = [dir, await real(dir)];
-  const target = resolve3(path);
+  const target = resolve4(path);
   const targets = [target, join4(await real(dirname2(target)), basename2(target))];
   return targets.some((t) => dirs.some((d) => within(t, d)));
 }
@@ -2424,7 +2545,7 @@ async function readApproval(path) {
 async function fileTool(tool, path, cwd, environment) {
   if (isDispatcher(environment) || typeof path !== "string" || path === "")
     return;
-  const absolute = isAbsolute3(path) ? path : resolve3(typeof cwd === "string" ? cwd : "/", path);
+  const absolute = isAbsolute4(path) ? path : resolve4(typeof cwd === "string" ? cwd : "/", path);
   if (await inApprovals(absolute, environment))
     return refuseApprovals(tool, environment);
 }
@@ -2439,7 +2560,7 @@ async function check(raw, environment = process.env, now = new Date) {
   if (!role)
     return;
   try {
-    return await inspect(raw, { ...environment, PLAYGROUND_ROLE: role }, now);
+    return await eachInput(raw, "no-linear-ticket", (one) => inspect(one, { ...environment, PLAYGROUND_ROLE: role }, now));
   } catch (error) {
     if (!createCall(subjectOf(raw)))
       return;

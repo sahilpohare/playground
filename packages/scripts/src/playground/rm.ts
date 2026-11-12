@@ -405,10 +405,11 @@ export async function runRm(words: string[], deps: RmDeps): Promise<number> {
       )
     return 0
   }
-  const keptGit =
+  const kept =
     "restore" in args
-      ? listTrash(roots.trash).find((entry) => entry.id === args.restore)?.git
+      ? listTrash(roots.trash).find((entry) => entry.id === args.restore)
       : undefined
+  const keptGit = kept?.git
   const relinkRefused = keptGit && relinkRefusal(roots.main, keptGit)
   if (relinkRefused) {
     console.error(`playground: ${relinkRefused}`)
@@ -458,13 +459,15 @@ export async function runRm(words: string[], deps: RmDeps): Promise<number> {
       console.error(`playground: restored ${done.path}, but git cannot read it yet: ${relinked}`)
       return 1
     }
-    console.log(`Restored ${done.path}`)
+    console.log(
+      `Restored ${done.path}${kept?.stripped ? ", and a bun install in it rebuilds what the strip removed" : ""}`,
+    )
     return 0
   }
   if ("worktree" in args && args.worktree)
     Bun.spawnSync(["git", "-C", roots.main, "worktree", "prune"])
   console.log(
-    `Moved to the trash as ${done.id} (${done.files} files); playground rm --restore ${done.id} brings it back`,
+    `Moved to the trash as ${done.id} (${done.files} files); playground rm --restore ${done.id} brings it back${done.stripped ? ", and a bun install in it rebuilds what the strip removed" : ""}${done.stripFailed ? ` (the strip stopped partway: ${done.stripFailed}; the hourly strip takes the rest)` : ""}`,
   )
   return 0
 }

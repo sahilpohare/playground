@@ -14,13 +14,13 @@ import {
   INGEST_LOCK,
   transcriptPaths,
 } from "@/lib/sessions/ingest"
-import { projectsDir } from "@/lib/sessions/paths"
+import { codexSessionsDir, projectsDir } from "@/lib/sessions/paths"
 
 // Puts every Claude Code session on this machine into the dashboard's database: `bun run ingest` reads every transcript up to its end and exits; `bun run ingest --follow` does that, then keeps reading new lines until stopped; `bun run ingest status` says whether a follower is running and how much of the files the database has not read. See `.agents/dashboard/ingest.md` for how the runner hosting the dashboard keeps the follower going.
 const USAGE = `usage: bun run ingest            read every transcript to its end, then exit
        bun run ingest --follow   the same, then keep reading new lines
        bun run ingest status     is a follower running, and how much is not yet read
-transcripts are read from ${projectsDir()}`
+transcripts are read from ${projectsDir()}, Codex rollouts from ${codexSessionsDir()}`
 
 const say = (line: string) => console.log(`${new Date().toISOString()} ${line}`)
 
@@ -181,8 +181,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 say(`writing to ${proof}`)
 const projects = projectsDir()
+const sessions = codexSessionsDir()
 const started = Date.now()
-const pass = await backfill(db, projects, stopping.signal)
+const pass = await backfill(db, projects, stopping.signal, sessions)
 const seconds = Math.round((Date.now() - started) / 1000)
 say(`read ${pass.read} transcripts in ${seconds}s: ${pass.entries} new entries`)
 for (const line of pass.duplicates) say(`duplicate transcript: ${line}`)
@@ -205,5 +206,6 @@ follower = follow(
     process.exit(1)
   },
   Number(process.env.INGEST_RESCAN_MS) || undefined,
+  sessions,
 )
-say(`following ${projects}`)
+say(`following ${projects}, and ${sessions} on each rescan`)

@@ -1,4 +1,4 @@
-// Stop hook, the inbox gate: refuses a manager's stop while its final reply asks the owner for a decision or for their own action in chat, or keeps steps or a table the owner comes back to (keepsForOwner), until it is an item in the owner's Inbox (playbook's ask rule), so nothing the owner needs scrolls away in chat; steps or a table refuse the dispatcher's stop alone, since every other manager's reply is its report up the chain, which the dispatcher folds into the owner's card. It acts for the dispatcher and the leads (PLAYGROUND_ROLE lead, dispatcher or manager, else the roster's kind for the session's registry name, else that name), judges the hook input's `last_assistant_message` (the transcript can lag the turn's last message, ADR 0001), and refuses every stop that still asks, a lead's with the route up to the dispatcher, who posts it, `stop_hook_active` included, Claude Code's own cap on continuations in a row with no tool call between them bounding it. A reply naming an #iN passes once one of them reads open (or, for steps, is listed in the Inbox, as a progress card is) through bun run ask in the live dashboard's checkout; when none does, one it cannot read included, it fails closed for that reply. Anything else it cannot read lets the stop through.
+// Stop hook, the inbox gate, and PreToolUse guard on AskUserQuestion: a session with a manager (PLAYGROUND_ROLE probe, reviewer, runner, tester or worker, else the roster's kind or the registry name, the hosted session aside) is refused the picker, since no one can answer one in its pane, and asks its manager by SendMessage. The gate: refuses a manager's stop while its final reply asks the owner for a decision or for their own action in chat, or keeps steps or a table the owner comes back to (keepsForOwner), until it is an item in the owner's Inbox (playbook's ask rule), so nothing the owner needs scrolls away in chat; steps or a table refuse the dispatcher's stop alone, since every other manager's reply is its report up the chain, which the dispatcher folds into the owner's card. It acts for the dispatcher and the leads (PLAYGROUND_ROLE lead, dispatcher or manager, else the roster's kind for the session's registry name, else that name), judges the hook input's `last_assistant_message` (the transcript can lag the turn's last message, ADR 0001), and refuses every stop that still asks, a lead's with the route up to the dispatcher, who posts it, `stop_hook_active` included, Claude Code's own cap on continuations in a row with no tool call between them bounding it. A reply naming an #iN passes once one of them reads open (or, for steps, is listed in the Inbox, as a progress card is) through bun run ask in the live dashboard's checkout; when none does, one it cannot read included, it fails closed for that reply. Anything else it cannot read lets the stop through.
 
 import "../../packages/env/src/aliases"
 import { join } from "node:path"
@@ -16,13 +16,13 @@ import { readPolicy } from "../../packages/settings/src/rendered"
 import { loadNames, MANAGER_ROLES, registryName, roleOfName, rosterNames, rosterRole } from "./role"
 
 export const REASON =
-  "name the open #iN on the same thing if one exists (bun run ask open lists them), else post it with bun run ask new, then say in chat that it's in the inbox as #iN"
+  "name the open #iN on the same thing if one exists (playground ask open lists them), else post it with playground ask new, then say in chat that it's in the inbox as #iN"
 // A lead's line: a lead sends an owner decision up the chain, and the dispatcher posts it (playbook's Chain)
 export const LEAD_REASON =
   "send the decision to the dispatcher with SendMessage, which posts it to the Inbox, and keep the question out of chat; once the dispatcher names its #iN, say in chat that it's in the inbox as #iN"
 // Chat scrolls, so steps the owner comes back to go in one card whose progress is edited in place.
 export const STEPS_REASON =
-  "put these steps in one Inbox card (bun run ask new; the open #iN on the same thing if one exists, bun run ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line"
+  "put these steps in one Inbox card (playground ask new; the open #iN on the same thing if one exists, playground ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line"
 // git worktree list, then each bun run ask get (all at once), is killed past its limit; one bun run ask get took 5.9s under load.
 const GIT_TIMEOUT_MS = 3000
 const READ_TIMEOUT_MS = 10_000
@@ -306,21 +306,49 @@ const live: Deps = {
   sessionName: registryName,
 }
 
+// The session's factory role: PLAYGROUND_ROLE, else the roster's kind for its registry name, else that name; "" for a session outside the factory.
+async function factoryRole(
+  env: Record<string, string | undefined>,
+  sessionId: unknown,
+  deps: Deps,
+): Promise<string> {
+  const role = env.PLAYGROUND_ROLE ?? ""
+  if (role) return role
+  if (typeof sessionId !== "string") return ""
+  const name = (await deps.sessionName(sessionId)) ?? ""
+  const rostered = name && (await rosterRole(name, env))
+  if (rostered) return rostered
+  await loadNames(env)
+  return roleOfName(name)
+}
+
 // The session's manager role (dispatcher, lead or manager), or "" for every other session.
 async function managerRole(
   env: Record<string, string | undefined>,
   sessionId: unknown,
   deps: Deps,
 ): Promise<string> {
-  const manager = (role: string) => (MANAGER_ROLES.has(role) ? role : "")
-  const role = env.PLAYGROUND_ROLE ?? ""
-  if (role) return manager(role)
-  if (typeof sessionId !== "string") return ""
-  const name = (await deps.sessionName(sessionId)) ?? ""
-  const rostered = name && (await rosterRole(name, env))
-  if (rostered) return manager(rostered)
-  await loadNames(env)
-  return manager(roleOfName(name))
+  const role = await factoryRole(env, sessionId, deps)
+  return MANAGER_ROLES.has(role) ? role : ""
+}
+
+// The roles that report to a manager, which answers their questions by SendMessage.
+const REPORTING_ROLES = new Set(["probe", "reviewer", "runner", "tester", "worker"])
+
+export const PICKER_REASON =
+  "no-chat-question hook refuses AskUserQuestion to a session with a manager: no one can answer a picker in its pane. Send the question to your manager (your brief names it) with SendMessage."
+
+// The hosted session runs as a probe (PLAYGROUND_ROLE=probe, sdk.ts) and its pickers reach the owner as the Dashboard's cards; the Agent SDK it runs on sets this entrypoint.
+const HOSTED_ENTRYPOINT = "sdk-ts"
+
+async function picker(
+  input: { session_id?: unknown; tool_name?: unknown },
+  env: Record<string, string | undefined>,
+  deps: Deps,
+): Promise<string | undefined> {
+  if (input.tool_name !== "AskUserQuestion") return
+  if (env.CLAUDE_CODE_ENTRYPOINT === HOSTED_ENTRYPOINT) return
+  if (REPORTING_ROLES.has(await factoryRole(env, input.session_id, deps))) return PICKER_REASON
 }
 
 // An ask of the owner waits on an open item alone, one the owner archived included, as it waited before the listed rule, so the session is never sent to post a copy of a decision it already posted; steps take any card the Inbox lists, a progress card (an update) the owner has not sent to Done, dismissed or seen resolved, and no archived card, which the Inbox no longer lists.
@@ -364,10 +392,14 @@ async function gate(
 }
 
 async function inspect(raw: string, env: Record<string, string | undefined>, deps: Deps) {
-  const { last_assistant_message: reply, session_id: sessionId } = JSON.parse(raw) as {
+  const input = JSON.parse(raw) as {
+    hook_event_name?: unknown
     last_assistant_message?: unknown
     session_id?: unknown
+    tool_name?: unknown
   }
+  if (input.hook_event_name === "PreToolUse") return picker(input, env, deps)
+  const { last_assistant_message: reply, session_id: sessionId } = input
   if (typeof reply !== "string") return
   const owner = await (deps.ownerNames ?? policyOwnerNames)(env)
   const asks = asksDecision(reply, [], owner)
@@ -381,7 +413,7 @@ async function inspect(raw: string, env: Record<string, string | undefined>, dep
   return gate(reply, deps, STEPS_REASON, STEPS_COUNTS)
 }
 
-// Fails open: an input the hook cannot read, or a session it cannot place, lets the session stop.
+// Fails open: an input the hook cannot read, or a session it cannot place, lets the session stop or the call run.
 export async function check(
   raw: string,
   env: Record<string, string | undefined> = process.env,
@@ -396,6 +428,11 @@ export async function check(
 
 if (import.meta.main) {
   const reason = await check(await Bun.stdin.text())
+  // PreToolUse blocks a call on exit 2 alone, with the reason on stderr
+  if (reason === PICKER_REASON) {
+    console.error(reason)
+    process.exit(2)
+  }
   // additionalContext continues the turn without the "Stop hook error" notice a block shows (ADR 0001)
   if (reason)
     console.log(

@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
+import { eachInput } from "./codex"
 import { sessionOf, sessionRole } from "./role"
 import {
   type Command,
@@ -384,7 +385,9 @@ export async function check(
   const role = await sessionRole(environment, sessionOf(raw))
   if (!role) return
   try {
-    return await inspect(raw, { ...environment, PLAYGROUND_ROLE: role }, now)
+    return await eachInput(raw, "no-linear-ticket", (one) =>
+      inspect(one, { ...environment, PLAYGROUND_ROLE: role }, now),
+    )
   } catch (error) {
     if (!createCall(subjectOf(raw))) return
     return `no-linear-ticket hook could not read this call (${error}), which reads as filing a Linear ticket, so it refuses it. Split it into plain commands and run them again.`

@@ -189,6 +189,7 @@ describe("sendAs", () => {
       await sendAs("tick")("ops", "control")
       await sendAs("channel-watch", true)("dispatcher", "w".repeat(1500))
       await sendAs("channel-watch")("dispatcher", "c".repeat(1500))
+      await sendAs("wa", true, true)("dispatcher", "made-up owner words")
     } finally {
       if (before === undefined) delete process.env.CLAUDE_CONFIG_DIR
       else process.env.CLAUDE_CONFIG_DIR = before
@@ -199,11 +200,17 @@ describe("sendAs", () => {
       "ops-changelog.jsonl",
       "ops-channel-watch.jsonl",
       "ops-tick.jsonl",
+      "ops-wa.jsonl",
     ])
     const watched = (await Bun.file(join(outbox, "ops-channel-watch.jsonl")).text())
       .trim()
       .split("\n")
       .map((line) => (JSON.parse(line) as { text: string }).text.length)
     expect(watched).toEqual([1500, 400])
+    // a private line reaches the outbox whole and alerts.log by its length alone
+    const log = await Bun.file(join(config, "playground", "ops", "alerts.log")).text()
+    expect(log).toContain("[ops-wa → dispatcher] (a private line of 19 characters)")
+    expect(log).not.toContain("made-up owner words")
+    expect(await Bun.file(join(outbox, "ops-wa.jsonl")).text()).toContain("made-up owner words")
   })
 })

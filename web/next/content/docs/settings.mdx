@@ -14,7 +14,7 @@ The square with this Mac's initials, at the right end of the toolbar beside ever
 - **Update now** shows next, in the Dashboard only, while an update is available (see below).
 - **Settings** opens the Settings page.
 - **Console** opens the console, when your role reaches it.
-- **Sessions** lists every Claude Code session Playground has run, live and past ([the Dashboard](/docs/dashboard) says how to list every one on this machine).
+- **Sessions** lists every Claude Code and Codex session Playground has run, live and past ([the Dashboard](/docs/dashboard) says how to list every one on this machine).
 - **Documentation** opens these pages.
 - **Feedback** opens the feedback board in a new tab, when one is set up.
 - **Log out** shows in the Console only, and signs you out.
@@ -49,6 +49,13 @@ The token goes to this Mac's Keychain and is never shown again, and **Remove**, 
 From a terminal, `playground accounts add --provider claude --email <email>` signs one in through Claude Code and keeps its token in the Keychain, and `playground accounts add --provider glm --label <label>` keeps a Z.ai key there under that label.
 `playground accounts list` shows each with its usage and `playground accounts remove <email|label>` takes one off; no token or key is ever shown ([The playground command](/docs/cli#accounts-playground-accounts)).
 
+### Harness
+
+Harness shows a card for each harness Alpha can run on, Claude Code and Codex, the same cards as first run's ([Pick what Alpha runs on](/docs/install#pick-what-alpha-runs-on)), its radio on the one Alpha runs on now.
+Pick the other card, and once it reads Installed and Signed in, **Switch Alpha** asks you to confirm, then sends Alpha a message in your chat asking it to write its handoff and stop; once the handoff is written, Alpha starts again on the new harness from it and the pick saves as `harness.alpha`, so a switch that stops partway leaves the setting on the harness Alpha still runs.
+The section shows each step while it runs, or why it stopped.
+When Alpha is not running, it starts on the new harness at once.
+
 ### Templates
 
 Templates lists the sessions the plus on Alpha's row in the sidebar can start ([the Dashboard](/docs/dashboard)), each with its kind, its model or GLM, its effort, its account and its brief, and whether it is a **Default**, an **Edited default**, one you **Added** or a **New default**.
@@ -72,9 +79,10 @@ Each card's menu holds **Sync now**, **Open on GitHub**, **Why…** (which exten
 As you type it checks GitHub, making nothing: a repo that is there reads whether it is private and how many skills its `skills/` holds, and one that is not reads that it will be created, private, which a confirm names again before it is made.
 Each of these is the same change `playground ext add|order|link|unlink|remove|sync|why` makes, and the check is `playground ext add --dry-run` ([Settings and extensions](/docs/extensions#extensions)).
 
-Below them, **Bundled with Playground** lists each extension Playground ships in its own checkout under `extensions/`, Slack today, each off until you turn its switch on.
+Below them, **Bundled with Playground** lists each extension Playground ships in its own checkout under `extensions/`, Slack and WhatsApp today, each off until you turn its switch on.
 One that is on gives its skills to the sessions started after that, read after your extensions and before core, and one that is off loads none.
 The switch sets `ext.bundled` at your login's scope, so the group shows once your settings are set up ([Settings and extensions](/docs/extensions#which-scope-wins)).
+WhatsApp's card also holds its two numbers, **Device number** (`wa.device`, the spare number it links) and **Your number** (`wa.owner`, the one it answers), each `+` and 8 to 15 digits; Save writes each field you typed into at your login's scope, and a saved number shows by its last 4 digits alone, so an empty field keeps it.
 
 ### Privacy
 

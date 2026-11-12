@@ -9,10 +9,11 @@ import { readsLive } from "@/lib/dashboard/fixture"
 import { serviceDir } from "@/lib/dev/proxy"
 import { ApiError } from "@/lib/error"
 import { FIX_IDS, type FixId, fixtureFixed } from "@/lib/onboard/fix-ids"
+import { codexHome } from "@/lib/onboard/harness"
 
 // The first run's fix buttons: each id in FIX_IDS runs its own fixed steps, chosen by what this machine has and never by request text, one fix at a time, each step stopped past its own bound and given only the environment the tools need, keeping the last lines it printed for the pane; gh's sign-in runs in Bun's pty as claude-setup.ts's does, its one-time code shown for the owner to enter at GitHub. A fixture stack runs fixtures/fix.ts in place of every tool.
 
-export type Device = { code: string; url: string }
+export type Device = { code: string | null; url: string }
 
 export type FixRead = {
   device: Device | null
@@ -27,6 +28,7 @@ type Step =
       admin?: true
       argv: string[]
       detached?: true
+      env?: Env
       failed?: string
       label: string
       login?: true
@@ -85,7 +87,10 @@ const PASSED = [
 ]
 
 // Each fix's steps, from what is on PATH now, each with the most it may take; the database's two starts (a container, or PGlite with no Docker) are the setup app's own, so they have none here.
-const PLANS: Record<FixId, ((has: (tool: string) => boolean, dir: string) => Step[]) | null> = {
+const PLANS: Record<
+  FixId,
+  ((has: (tool: string) => boolean, dir: string, from: Env) => Step[]) | null
+> = {
   claude: (_, dir) => [
     {
       argv: [
@@ -103,6 +108,33 @@ const PLANS: Record<FixId, ((has: (tool: string) => boolean, dir: string) => Ste
       ms: 5 * MINUTE,
     },
     { argv: ["bash", join(dir, "install.sh")], label: "Installing Claude Code", ms: 15 * MINUTE },
+  ],
+  "claude-login": () => [
+    {
+      argv: ["claude", "auth", "login"],
+      label: "Signing in to Claude Code",
+      login: true,
+      ms: 15 * MINUTE,
+    },
+  ],
+  codex: (has) => [
+    has("codex")
+      ? { argv: ["brew", "upgrade", "--cask", "codex"], label: "Updating Codex", ms: 20 * MINUTE }
+      : {
+          argv: ["brew", "install", "--cask", "codex"],
+          label: "Installing Codex",
+          ms: 20 * MINUTE,
+        },
+  ],
+  // Codex's login stays in its own CODEX_HOME's auth.json, the folder spawn.sh starts it with.
+  "codex-login": (_, __, from) => [
+    {
+      argv: ["codex", "login", "--device-auth"],
+      env: { CODEX_HOME: codexHome(from) },
+      label: "Signing in to Codex",
+      login: true,
+      ms: 15 * MINUTE,
+    },
   ],
   database: null,
   docker: (has) => [
@@ -171,6 +203,36 @@ const PLANS: Record<FixId, ((has: (tool: string) => boolean, dir: string) => Ste
 }
 
 const NAMES: Record<string, string> = { brew: "Homebrew", docker: "Docker" }
+
+const plainOf = (screen: string) => Bun.stripANSI(screen).replaceAll("\r", "")
+
+// Each sign-in's prompts that Enter answers with their default, and the link and one-time code it shows the owner, read from its screen: gh's code for GitHub's device page, Claude Code's sign-in link, and Codex's device link and code.
+const LOGINS: Partial<
+  Record<FixId, { answers: string[]; device: (plain: string) => Device | null }>
+> = {
+  "claude-login": {
+    answers: [],
+    device: (plain) => {
+      const url = /https:\/\/\S*\/oauth\/\S+/.exec(plain)?.[0]
+      return url ? { code: null, url } : null
+    },
+  },
+  "codex-login": {
+    answers: [],
+    device: (plain) => {
+      const url = /Open this link[^\n]*\n\s*(https:\/\/\S+)/.exec(plain)?.[1]
+      const code = /one-time code[^\n]*\n\s*([A-Z0-9]+(?:-[A-Z0-9]+)+)/.exec(plain)?.[1]
+      return url && code ? { code, url } : null
+    },
+  },
+  "gh-login": {
+    answers: ["Authenticate Git with your GitHub credentials?", "Press Enter to open"],
+    device: (plain) => {
+      const code = /one-time code: ([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(plain)?.[1]
+      return code ? { code, url: GITHUB_DEVICE } : null
+    },
+  },
+}
 
 // What macOS's window says the password is for, in place of its default "osascript wants to make changes".
 const PROMPT = `${site.name} sets up its web address on your Mac.`
@@ -272,7 +334,7 @@ export const createFixes = ({
         "Docker did not start: finish its first start in the window it opened, then try again",
       )
     }
-    if (step.login) return login(job, command, base, step.ms)
+    if (step.login) return login(job, command, { ...base, ...step.env }, step.ms)
     const osascript = step.admin ? Bun.which("osascript", { PATH: base.PATH ?? "" }) : null
     if (step.admin && !osascript) throw new Error("osascript is not on this Mac")
     const child = Bun.spawn(osascript ? [osascript, "-e", adminLine(command, base)] : command, {
@@ -296,8 +358,9 @@ export const createFixes = ({
     if (code !== 0) throw new Error(step.failed ?? job.lines.at(-1) ?? `it exited with ${code}`)
   }
 
-  // gh auth login --web in a pty: Enter takes its default for each prompt (git over https, and the browser it would open, which is /usr/bin/true), and the code it prints shows in the pane until the owner enters it at GitHub and gh exits.
+  // A sign-in in a pty (gh auth login --web, claude auth login, codex login --device-auth): Enter takes the default of each prompt LOGINS names for it (for gh, git over https and the browser it would open, which is /usr/bin/true), and the link and code it prints show in the pane until the owner finishes at the site and the login exits.
   const login = async (job: FixRead, command: string[], base: Env, ms: number) => {
+    const reads = LOGINS[job.id] ?? { answers: [], device: () => null }
     const decoder = new TextDecoder()
     let screen = ""
     const answered = new Set<string>()
@@ -309,18 +372,14 @@ export const createFixes = ({
           const text = decoder.decode(chunk, { stream: true })
           screen += text
           add(job, text)
-          const plain = Bun.stripANSI(screen)
-          for (const prompt of [
-            "Authenticate Git with your GitHub credentials?",
-            "Press Enter to open",
-          ]) {
+          const plain = plainOf(screen)
+          for (const prompt of reads.answers) {
             if (plain.includes(prompt) && !answered.has(prompt)) {
               answered.add(prompt)
               terminal.write("\r")
             }
           }
-          const code = /one-time code: ([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(plain)?.[1]
-          if (code) job.device = { code, url: GITHUB_DEVICE }
+          job.device = reads.device(plain) ?? job.device
         },
         rows: 50,
       },
@@ -345,7 +404,7 @@ export const createFixes = ({
     const dir = makeScratch("playground-fix-")
     const real = live()
     const plan: Step[] = real
-      ? PLANS[job.id]!(has, dir)
+      ? PLANS[job.id]!(has, dir, from)
       : [
           {
             argv: [process.execPath, FAKE, job.id],

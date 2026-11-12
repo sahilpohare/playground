@@ -68,7 +68,8 @@ import {
 type Option = { label: string; value: string }
 
 const DEFAULT: Option = { label: "Default", value: "" }
-const BACKENDS: Option[] = [
+// Claude Code's backends, as packages/settings' HARNESSES lists them; a test keeps the two equal.
+export const BACKENDS: Option[] = [
   { label: "Claude", value: "claude" },
   { label: "GLM", value: "glm" },
 ]

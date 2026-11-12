@@ -24,7 +24,7 @@ const NOW = Date.parse("2026-10-07T12:00:00Z")
 
 const job = (job: string, fields: Partial<Row> = {}): Row => ({
   callsModel: false,
-  does: null,
+  does: "",
   job,
   lastBeatAt: null,
   model: null,

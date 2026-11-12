@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 
 import { dataDir } from "../../packages/env/src/data-dir"
 import { guardedOrgs } from "../../packages/settings/src/ext"
+import { readPin } from "../../packages/settings/src/harnesses"
 import { readPolicy } from "../../packages/settings/src/rendered"
 import { ruleSettings } from "../../packages/settings/src/rules"
 import { implicitRepos, type Repo, remotes, repoOf } from "./github"
@@ -119,7 +120,7 @@ const ORG_CALL = /\b(?:claude|curl|dm|gh|git|https?|wget|xh)\b|linear[-:]|mcp__/
 export const heavy = (path: string): boolean =>
   OPUS_PATHS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p))
 
-// Whether the session runs on GLM: spawn.sh's GLM launch points ANTHROPIC_BASE_URL at api.z.ai, else the backend pin spawn.sh keeps under the session's registry name reads glm.
+// Whether the session runs on GLM: spawn.sh's GLM launch points ANTHROPIC_BASE_URL at api.z.ai, else the backend pin spawn.sh keeps under the session's registry name names glm (readPin, either shape).
 export async function onGlm(raw: string, environment: Environment = process.env): Promise<boolean> {
   if (/(?:^|\/\/|\.)api\.z\.ai(?:[:/]|$)/.test(environment.ANTHROPIC_BASE_URL ?? "")) return true
   const id = sessionOf(raw)
@@ -128,7 +129,7 @@ export async function onGlm(raw: string, environment: Environment = process.env)
     const name = await registryName(id, environment)
     if (!name || name.includes("/")) return false
     const pin = join(dataDir(environment), "backends", name)
-    return (await Bun.file(pin).text()).trim() === "glm"
+    return readPin(await Bun.file(pin).text())?.backend === "glm"
   } catch {
     return false
   }
@@ -195,6 +196,31 @@ const plain = (w: Word) => !unreadable(w)
 function changedBy(dir: string, ours: string, theirs: string): string[] | null {
   const base = names(dir, ["merge-base", ours, theirs])?.[0]
   return base ? pathsOf(dir, ["diff", "--name-only", "--no-renames", base, theirs]) : null
+}
+
+// The tree git's own merge of two commits makes, conflicts left as markers, or null when it cannot merge them.
+function mergedTree(dir: string, ours: string, theirs: string): string | null {
+  const proc = Bun.spawnSync(["git", "-C", dir, "merge-tree", "--write-tree", ours, theirs], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stderr: "ignore",
+  })
+  if (proc.exitCode !== 0 && proc.exitCode !== 1) return null
+  return proc.stdout.toString().split("\n")[0] || null
+}
+
+// Keeps only the files whose result differs from git's own merge of two sides, since a file git merged by itself holds no change of this session's; keeps them all when that merge cannot be read.
+function beyondMerge(
+  files: Set<string>,
+  ours: string,
+  theirs: string,
+  read: (tree: string) => (string[] | null)[],
+  dir: string,
+) {
+  const tree = mergedTree(dir, ours, theirs)
+  const lists = tree ? read(tree) : [null]
+  if (lists.some((l) => l === null)) return
+  const own = new Set(lists.flat() as string[])
+  for (const file of files) if (!own.has(file)) files.delete(file)
 }
 
 // The commits a merge being concluded brings in, one a side (an octopus has several), or null when they cannot be read.
@@ -288,6 +314,7 @@ async function commit(
   sides.forEach((side, i) => {
     for (const file of side.changed as string[]) if (differ[i].has(file)) files.add(file)
   })
+  if (heads.length === 1) beyondMerge(files, "HEAD", heads[0], against, dir)
   const heavyFiles = [...files].filter(heavy).sort()
   if (heavyFiles.length === 0) return
   // read from disk alone for the chain's sake, an Opus file may be one the git add before never stages
@@ -295,6 +322,38 @@ async function commit(
   if (chained && !all && paths.length === 0 && heavyFiles.every((f) => !staged.has(f)))
     return `no-glm-heavy-path hook refuses this git commit: ${heavyFiles.join(", ")} is on disk and not staged, and the hook cannot tell before the call runs whether the git add before it stages it, while this session runs on GLM and that is Opus work. Run git commit as its own call.`
   return refuse("git commit", heavyFiles)
+}
+
+// The tip a push replaces and the base its commits now sit on, when it rewrites a branch the remote holds that is no ancestor of what it pushes: a rebase; a push naming no remote goes where git sends it.
+function rebased(
+  dir: string,
+  named: string | undefined,
+  source: string,
+  dest: string,
+  not: string,
+): [string, string] | undefined {
+  const branch =
+    dest === "HEAD"
+      ? names(dir, ["symbolic-ref", "-q", "--short", "HEAD"])?.[0]
+      : dest.replace(/^refs\/heads\//, "")
+  if (!branch) return
+  const config = (key: string) => names(dir, ["config", "--get", key])?.[0]
+  const remote =
+    named ??
+    config(`branch.${branch}.pushRemote`) ??
+    config("remote.pushDefault") ??
+    config(`branch.${branch}.remote`) ??
+    "origin"
+  const old = names(dir, ["rev-parse", "-q", "--verify", `refs/remotes/${remote}/${branch}`])?.[0]
+  if (!old) return
+  const ancestor = Bun.spawnSync(["git", "-C", dir, "merge-base", "--is-ancestor", old, source], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stderr: "ignore",
+  })
+  if (ancestor.exitCode !== 1) return
+  const oldest = names(dir, ["rev-list", "--reverse", "--topo-order", source, "--not", not])?.[0]
+  const base = oldest && names(dir, ["rev-parse", "-q", "--verify", `${oldest}^`])?.[0]
+  return base ? [old, base] : undefined
 }
 
 function push(rest: Word[], dir: string, branchReads: (string | undefined)[]): string | undefined {
@@ -315,24 +374,30 @@ function push(rest: Word[], dir: string, branchReads: (string | undefined)[]): s
   if (given.has("--tags") || given.has("--follow-tags") || given.has("--mirror"))
     sources.push("--tags")
   const deleting = given.has("--delete") || given.has("-d")
+  const dests: string[] = []
   for (const spec of refspecs) {
-    const [source] = spec.value.replace(/^\+/, "").split(":")
-    if (source !== "" && !deleting) sources.push(source)
+    const [source, dest = source] = spec.value.replace(/^\+/, "").split(":")
+    if (source !== "" && !deleting) {
+      sources.push(source)
+      dests.push(dest)
+    }
   }
   // --follow-tags pushes the default refspec too; only these push in its place
   const replaced = ["--all", "--branches", "--mirror", "--tags"].some((f) => given.has(f))
-  if (refspecs.length === 0 && !replaced) sources.push("HEAD")
+  if (refspecs.length === 0 && !replaced) {
+    sources.push("HEAD")
+    dests.push("HEAD")
+  }
   if (deleting && sources.length === 0) return
   const name = remote && !/[:/]/.test(remote.value) ? remote.value : undefined
   // a remote not fetched yet has no tracking refs, so every remote stands in for it
   const tracked = name && names(dir, ["for-each-ref", "--count=1", `refs/remotes/${name}`])?.length
   const not = tracked ? `--remotes=${name}` : "--remotes"
-  // dense-combined lists what a merge commit itself changed, which plain --name-only leaves out
   const listed = pathsOf(dir, [
     "log",
     "--name-only",
     "--no-renames",
-    "--diff-merges=dense-combined",
+    "--diff-merges=off",
     "--format=",
     ...sources,
     "--not",
@@ -342,18 +407,51 @@ function push(rest: Word[], dir: string, branchReads: (string | undefined)[]): s
   if (listed === null || merges === null)
     return unread("git push", "the files of the commits it pushes")
   const files = new Set(listed)
-  // a merge commit that does not take a file its other side changed reverts that change once squashed
   for (const merge of merges) {
     const [first, ...others] = names(dir, ["rev-parse", `${merge}^@`]) ?? []
     if (!first) return unread("git push", "the parents of a merge it pushes")
+    // dense-combined lists what a merge commit itself changed, which plain --name-only leaves out
+    const own = pathsOf(dir, [
+      "show",
+      "--name-only",
+      "--no-renames",
+      "--diff-merges=dense-combined",
+      "--format=",
+      merge,
+    ])
+    if (own === null) return unread("git push", "the files of the commits it pushes")
+    const made = new Set(own)
+    // a merge commit that does not take a file its other side changed reverts that change once squashed
     for (const other of others) {
       const changed = changedBy(dir, first, other)
       const differs = pathsOf(dir, ["diff", "--name-only", "--no-renames", other, merge])
       if (changed === null || differs === null)
         return unread("git push", "the files of the commits it pushes")
-      for (const file of changed) if (differs.includes(file)) files.add(file)
+      for (const file of changed) if (differs.includes(file)) made.add(file)
     }
+    if (others.length === 1)
+      beyondMerge(
+        made,
+        first,
+        others[0],
+        (tree) => [pathsOf(dir, ["diff", "--name-only", "--no-renames", tree, merge])],
+        dir,
+      )
+    for (const file of made) files.add(file)
   }
+  // a rebase rewrites a branch the remote holds, so what it pushes is judged by its tip against git's own merge of the tip it replaces and the base it now sits on
+  const bases =
+    sources.length === 1 && dests.length === 1 && (!remote || name)
+      ? rebased(dir, name, sources[0], dests[0], not)
+      : undefined
+  if (bases)
+    beyondMerge(
+      files,
+      bases[0],
+      bases[1],
+      (tree) => [pathsOf(dir, ["diff", "--name-only", "--no-renames", tree, sources[0]])],
+      dir,
+    )
   const heavyFiles = [...files].filter(heavy).sort()
   return heavyFiles.length > 0 ? refuse("git push", heavyFiles) : undefined
 }

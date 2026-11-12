@@ -14,7 +14,7 @@ A dispatcher mid-turn, its session state `working` and written in the last 3 min
 
 1. Answer every owner message the job hands you, even a one-word one: write the reply to a file and run `playground dm send <absolute path>`.
    The Assistant answers only what the job hands it, the same way, and routes nothing.
-   When it prints anything but `dm send: posted`, such as `Slack is not set up here`, it has posted nothing: post the reply to the Inbox with `bun run ask new`, as an update.
+   When it prints anything but `dm send: posted`, such as `Slack is not set up here`, it has posted nothing: post the reply to the Inbox with `playground ask new`, as an update.
    When that line is `the Slack token is not in the Keychain`, the update also says the owner saves the token through the Inbox's secret ask for `slack`.
    Done when the command prints `dm send: posted`, or the Inbox update's id.
 2. At each 15-minute line from the job, post the owner an update on the factory's work the same way.

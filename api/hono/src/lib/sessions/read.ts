@@ -29,7 +29,7 @@ import {
 } from "@/lib/dashboard/peers"
 import { commandOf, type Entry, parseLine, typedOf } from "@/lib/dashboard/transcript"
 import type { EntryKind, SessionKind } from "@/lib/sessions/lines"
-import { projectsDir } from "@/lib/sessions/paths"
+import { claudeDir } from "@/lib/sessions/paths"
 import { escapeLike } from "@/lib/sql"
 
 // What the dashboard reads back from the claude_* tables the importer fills: every session, past and present, newest activity first, with whether it is running now from Claude Code's own registry, and any one session's whole log a page at a time.
@@ -175,11 +175,11 @@ const REACHED = sql.raw(`"claude_entry"."seq" >= 0`)
 const reached = gte(claudeEntry.seq, 0)
 const SESSION_ID = sql.raw(`"claude_session"."id"`)
 
-// A fixture stack shows only the sessions read from its own fixture's transcripts: its database may hold rows imported from a live config folder before, and those never reach its pages. Nothing on the live dashboard. `session` is the column holding the session's id, named in full, in the query it joins.
+// A fixture stack shows only the sessions read from its own fixture's transcripts and rollouts, both inside its config folder: its database may hold rows imported from a live config folder before, and those never reach its pages. Nothing on the live dashboard. `session` is the column holding the session's id, named in full, in the query it joins.
 export const shownHere = (session: SQL = SESSION_ID): SQL | undefined =>
   readsLive()
     ? undefined
-    : sql`exists (select 1 from "claude_transcript" where "claude_transcript"."session_id" = ${session} and "claude_transcript"."path" like ${`${escapeLike(projectsDir())}/%`})`
+    : sql`exists (select 1 from "claude_transcript" where "claude_transcript"."session_id" = ${session} and "claude_transcript"."path" like ${`${escapeLike(claudeDir())}/%`})`
 
 // A query matches a session by its name, task, title or the start of its id, or by any word of its log ('simple' parsing, so ids and paths match as written). match is a line of the newest entry whose first characters hold the words, null when none does, so the row falls back to its task.
 export async function listSessions(db: Database, input: ListInput, live: Map<string, Live>) {

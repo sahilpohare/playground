@@ -19,7 +19,9 @@ import {
   answerInputSchema,
   answerLine,
   answerPayload,
+  askCli,
   checkAnswer,
+  closedPayload,
   inboxCount,
   inboxInputSchema,
   type Delivery,
@@ -36,6 +38,7 @@ import {
   type SecretSink,
   sinkArgv,
   slackPlace,
+  voiceRefusal,
 } from "../../../../../../api/hono/src/lib/dashboard/inbox"
 import { uploadSpec } from "../../../../../../api/hono/src/lib/dashboard/slack-upload"
 import { KEYCHAIN_ITEM_NAMES } from "../../../../../../api/hono/src/lib/keychain-items"
@@ -58,6 +61,7 @@ import {
   settingRows,
 } from "../../../../../../packages/settings/src/settings-folder"
 import { testContainerName } from "../../../../../container"
+import { storeWith } from "../../../../../scripts/hooks/render-set"
 
 const CHANNEL = "https://app.slack.com/client/T0000000000/C0MADEUP01"
 const SLACK = {
@@ -419,10 +423,12 @@ describe("what bun run ask takes", () => {
     }
   })
 
-  test("a draft, or a slack decision, speaks in the owner's voice: I, never we, and code or a quote is someone else's words (#674)", () => {
+  test("under owner.voice's singular, a draft or a slack decision speaks in the owner's voice: I, never we, and code or a quote is someone else's words (#674)", () => {
     // the owner speaks as I, me, my; never we, us, our, our side or the team
+    // the refusal under the singular voice for an item, which parses first
+    const voiced = (input: unknown) => voiceRefusal(inboxInputSchema.parse(input), "singular")
     const draft = (text: string) =>
-      inboxInputSchema.safeParse({
+      voiced({
         from: "dispatcher",
         kind: "draft",
         preview: { link: CHANNEL, text, to: "@Merritt" },
@@ -439,21 +445,19 @@ describe("what bun run ask takes", () => {
       ["It is OURS", "OURS"],
       ["by OURSELVES alone", "OURSELVES"],
     ] as const) {
-      const parsed = draft(`${text}.`)
-      expect(parsed.success, text).toBe(false)
-      expect(parsed.error?.issues.at(-1)?.message, text).toContain(`Found "${word}"`)
+      expect(draft(`${text}.`), text).toContain(`Found "${word}"`)
     }
     // the all-caps US is the country, not the pronoun, so it passes; the other words refuse in every case
     for (const fine of ["the US team grows", "US-east is up", "the US and the EU signed"]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // a match a hyphen follows reads as a compound's half, a region name, not the pronoun (us-east-1)
     for (const fine of ["the region is us-east-1", "us-east-1 is up", "our-side is ready"]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // a word inside a longer word is not the owner's voice
     for (const fine of ["trust the build", "two hours in", "as usual", "user asked"]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // a link is an address, not a voice: bare, or Slack's <url|label>
     for (const fine of [
@@ -461,43 +465,58 @@ describe("what bun run ask takes", () => {
       "the deck lives at https://acme.com/us/en/ now",
       "<https://acme.com|our roadmap> has it",
     ]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // code and quoted words are someone else's words
-    expect(draft("run `we` twice.").success).toBe(true)
-    expect(draft("```\nwe are the setup\n```").success).toBe(true)
-    expect(draft('he said "we will look into it".').success).toBe(true)
-    expect(draft("> we said so\nI will check.").success).toBe(true)
+    expect(draft("run `we` twice.")).toBeUndefined()
+    expect(draft("```\nwe are the setup\n```")).toBeUndefined()
+    expect(draft('he said "we will look into it".')).toBeUndefined()
+    expect(draft("> we said so\nI will check.")).toBeUndefined()
     // a slack decision's words are checked the same way
-    expect(
-      inboxInputSchema.safeParse(decision({ ...SLACK, text: "hi Merritt, we fixed it." })).success,
-    ).toBe(false)
+    expect(voiced(decision({ ...SLACK, text: "hi Merritt, we fixed it." }))).toContain('Found "we"')
     // other kinds and previews are unaffected
+    expect(voiced(decision({ ...PREVIEWS.ask, text: "we will port it now." }))).toBeUndefined()
     expect(
-      inboxInputSchema.safeParse(decision({ ...PREVIEWS.ask, text: "we will port it now." }))
-        .success,
-    ).toBe(true)
+      voiced(decision({ ...PREVIEWS.delete, what: "our stale worktrees", why: "they hold 30 GB" })),
+    ).toBeUndefined()
     expect(
-      inboxInputSchema.safeParse(
-        decision({ ...PREVIEWS.delete, what: "our stale worktrees", why: "they hold 30 GB" }),
-      ).success,
-    ).toBe(true)
-    expect(
-      inboxInputSchema.safeParse({
+      voiced({
         from: "builder",
         kind: "update",
         preview: { outcome: "alert" },
         title: "the Mac is on battery",
-      }).success,
-    ).toBe(true)
+      }),
+    ).toBeUndefined()
     // only the words are the owner's voice: a clean draft passes, its recipient's short name unchecked
     expect(
-      inboxInputSchema.safeParse({
+      voiced({
         from: "dispatcher",
         kind: "draft",
         preview: { link: CHANNEL, text: "I will send it shortly.", to: "our thread" },
         title: "Ask Merritt",
+      }),
+    ).toBeUndefined()
+    // any other voice checks none
+    expect(
+      voiceRefusal(
+        inboxInputSchema.parse(decision({ ...SLACK, text: "hi Merritt, we fixed it." })),
+        "",
+      ),
+    ).toBeUndefined()
+  })
+
+  // issue 1454: the voice is the owner.voice setting's, none by default, so the item's own shape passes a plural draft
+  test("a draft or a slack decision speaking as we parses, since no voice is set by default", () => {
+    expect(
+      inboxInputSchema.safeParse({
+        from: "dispatcher",
+        kind: "draft",
+        preview: { link: CHANNEL, text: "we will ship it.", to: "@Merritt" },
+        title: "Ask Merritt",
       }).success,
+    ).toBe(true)
+    expect(
+      inboxInputSchema.safeParse(decision({ ...SLACK, text: "hi Merritt, we fixed it." })).success,
     ).toBe(true)
   })
 
@@ -908,8 +927,8 @@ describe("an answer", () => {
       ref: 44,
       title: "Accept",
     })
-    const read = (ref: number) => `bun run ask get #i${ref} --ack`
-    const ack = (ref: number) => `bun run ask ack #i${ref} --link <https url>`
+    const read = (ref: number) => `playground ask get #i${ref} --ack`
+    const ack = (ref: number) => `playground ask ack #i${ref} --link <https url>`
     const ackOrWhy = (ref: number) => `${ack(ref)}, or --no-link "<why>" when it leaves no page`
     const asked = item({
       id: "mno",
@@ -1067,7 +1086,7 @@ describe("an answer", () => {
         { accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" }, at: AT, choice: "approve" },
         {
           accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" },
-          close: 'bun run ask ack #i44 --no-link "<why>"',
+          close: 'playground ask ack #i44 --no-link "<why>"',
           next: "nothing",
           verb: "pick",
         },
@@ -1097,6 +1116,23 @@ describe("an answer", () => {
     expect(payloadOf(noted)?.comment).toBe("one\ntwo")
     // no comment, no key
     expect(answerPayload(decided, { at: AT, choice: "deny" })).not.toHaveProperty("comment")
+    // a live-reads test stack's close names its own checkout's CLI, so a probe never closes the live Inbox's item of that number
+    const own = "bun run --cwd /wt ask"
+    expect(answerPayload(decided, { at: AT, choice: "deny" }, own).close).toBe(
+      `${own} get #i${decided.ref} --ack`,
+    )
+    const denied = { ...decided, answer: { at: AT, choice: "deny" } } as InboxItem
+    expect(closedPayload(denied, "dismiss", AT, own).close).toBe(
+      `${own} get #i${decided.ref} --ack`,
+    )
+  })
+
+  test("a close names playground ask, but a live-reads test stack's own checkout's CLI", () => {
+    expect(askCli({ kind: "live", rule: "live-branch" }, "/live")).toBe("playground ask")
+    expect(askCli({ kind: "live", rule: "own" }, "/mine")).toBe("playground ask")
+    expect(askCli({ file: null, kind: "fixture", rule: "factory" }, "/wt")).toBe("playground ask")
+    expect(askCli({ kind: "live", rule: "live-reads" }, "/wt")).toBe("bun run --cwd /wt ask")
+    expect(askCli({ kind: "live", rule: "live-reads" }, null)).toBe("playground ask")
   })
 
   // Send types the words alone into the poster: a draft's files are shared into Slack by the dashboard itself (PG-649), never handed to the session
@@ -2898,7 +2934,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(told.sent).toHaveLength(1)
       expect(told.sent[0]!.to).toBe(go.from)
       expect(payloadOf(told.sent[0]!.text)).toMatchObject({
-        close: `bun run ask ack #i${go.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${go.ref} --no-link "<why>"`,
         go: false,
         id: go.id,
         kind: "decision",
@@ -2912,7 +2948,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       const deniedTold = typed()
       await store.answerItem(db, denied.id, { action: "dismiss" }, { actor, ...deniedTold })
       expect(payloadOf(deniedTold.sent[0]!.text)).toMatchObject({
-        close: `bun run ask get #i${denied.ref} --ack`,
+        close: `playground ask get #i${denied.ref} --ack`,
         verb: "dismiss",
       })
 
@@ -3393,10 +3429,10 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
     )
     if (!answered.ok) throw new Error(answered.message)
     expect(sent.map((d) => d.to)).toEqual(["worker-eod", "dispatcher"])
-    // the dispatcher gets the poster's line with relay set, and reads the preview with bun run ask get
+    // the dispatcher gets the poster's line with relay set, and reads the preview with playground ask get
     const relay = sent[1]?.text ?? ""
     expect(payloadOf(relay)).toMatchObject({
-      close: `bun run ask ack #i${posted.ref} --link <https url>`,
+      close: `playground ask ack #i${posted.ref} --link <https url>`,
       kind: "draft",
       next: "carry-out",
       ref: `#i${posted.ref}`,
@@ -3678,7 +3714,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
     )
     expect(sent.map((d) => d.to)).toEqual(["worker-eod", "dispatcher"])
     expect(payloadOf(sent[1]?.text ?? "")).toMatchObject({
-      close: `bun run ask get #i${posted.ref} --ack`,
+      close: `playground ask get #i${posted.ref} --ack`,
       go: false,
       next: "close",
       relay: { for: "worker-eod", why: "poster-ended" },
@@ -4930,7 +4966,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(sent).toHaveLength(1)
       expect(payloadOf(sent[0]?.text ?? "")).toMatchObject({
         accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" },
-        close: `bun run ask ack #i${posted.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${posted.ref} --no-link "<why>"`,
         next: "nothing",
       })
     })
@@ -5206,7 +5242,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       const relayed = sent.find((delivery) => delivery.to === "dispatcher")
       const relayedPayload = payloadOf(relayed?.text ?? "")
       expect(relayedPayload).toMatchObject({
-        close: `bun run ask ack #i${posted.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${posted.ref} --no-link "<why>"`,
         next: "nothing",
         relay: { for: "worker-eod", why: "poster-ended" },
       })
@@ -5259,7 +5295,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(answered.ok && answered.item.status).toBe("approved")
       // the pane opened, so the poster carries out the recheck asks.md names, then closes it
       expect(payloadOf(sent[0]?.text ?? "")).toMatchObject({
-        close: `bun run ask ack #i${posted.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${posted.ref} --no-link "<why>"`,
         next: "carry-out",
         opened: { exitCode: 0 },
         type: "grant",
@@ -5704,6 +5740,29 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
         ok: false,
       })
       expect((await store.getItem(db, posted.id))?.status).toBe("open")
+    })
+  })
+  // issue 1454: postItem and editItem read owner.voice from the data folder, so the voice check runs only where one is set
+  describe("the owner.voice setting on a post and an edit", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "inbox-voice-"))
+    afterAll(() => rmSync(scratch, { force: true, recursive: true }))
+    const plural = decision({ ...SLACK, text: "hi Merritt, we fixed it." })
+
+    test("a singular voice refuses a plural slack decision on a post and an edit", async () => {
+      const data = storeWith(join(scratch, "singular"), {}, { "owner.voice": "singular" })
+      const posted = await store.postItem(db, plural, undefined, undefined, data)
+      expect(posted).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(!posted.ok && posted.message).toContain('Found "we"')
+      const clean = await store.postItem(db, decision(SLACK), undefined, undefined, data)
+      if (!clean.ok) throw new Error(clean.message)
+      const edited = await store.editItem(db, clean.item.id, plural, undefined, data)
+      expect(!edited.ok && edited.message).toContain('Found "we"')
+    })
+
+    test("no voice set, or no data folder, posts it", async () => {
+      const data = storeWith(join(scratch, "none"), {})
+      expect((await store.postItem(db, plural, undefined, undefined, data)).ok).toBe(true)
+      expect((await store.postItem(db, plural)).ok).toBe(true)
     })
   })
   describe("an own decision's post and Approve (PG-1162)", () => {

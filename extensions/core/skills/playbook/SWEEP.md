@@ -8,7 +8,8 @@ Work the steps in order.
 ## 1. Read what changed
 
 Run `playground sweep <your name>`.
-It prints only what changed since your last sweep, one line each: a new alert from `ops/alerts-pending.json`, the merge queue when it changes, load5 (the third field of `sysctl -n vm.loadavg`) crossing 15, the single-slot flag turning on or off, each of your roster rows whose ETA has passed, and for Ops, once an hour, each ops switch on with its age and reason;
+It prints only what changed since your last sweep, one line each: a new alert from `ops/alerts-pending.json`, the merge queue when it changes, load5 (the third field of `sysctl -n vm.loadavg`) crossing 15,
+the single-slot flag turning on or off or moving between held by load and lifted under the cap, each of your roster rows whose ETA has passed, and for Ops, once an hour, each ops switch on with its age and reason;
 its cursor is `sweep/<your name>.json` in the data folder.
 A parked row's passed ETA reads `parked past eta` where any other row's reads `eta passed`, and its `hold` ([ROSTER.md](ROSTER.md)) prints once when it has closed (`parked on closed hold`), and once when it reads as neither open nor closed (`parked hold unreadable`).
 For each `switch on:` line, Ops checks whether its reason still holds: one that does is set again with a fresh reason through `run-slot.sh set`, and any other is lifted by moving it to `<name>.lifted-<ts>` ([scripts/ops/README.md](../../../../scripts/ops/README.md#ops-switches)); `run-slot.focus` ends only with `playground focus off`, which lifts its merge hold too.
@@ -45,7 +46,7 @@ For every agent of yours that `ListAgents` lists, or the roster shows with a sta
 - **Down**: `ListAgents` lists no session by that name.
   Close what is left of it ([End](SESSIONS.md#end): by its surface, or by its workspace when it is the last one there), end it in the roster with the reason, and re-dispatch its chore when one is unfinished.
 - **Done**: its roster entry reads `ended`, or its PR has merged and its final report is in, and its session is still live.
-  Ending is automatic ([End](SESSIONS.md#end)); act on its `Not ended` line, then close it by hand, its checkers first.
+  Ending is automatic ([End](SESSIONS.md#end)); act on its `Not ended` line, then close it by hand, its checkers first, and on a `Kept` line reassign the worker or close it.
 
 Before you staff a fix this step turns up (an off-scope bug, a down worker's chore), run DISPATCH.md's **open-PR check** on it.
 
@@ -82,9 +83,9 @@ Done when every row the recovery scan leaves and every stalled PR is acted on, e
 
 ## 5. Act on your Inbox decisions
 
-Run `bun run --cwd <dashboard checkout> ask get <id> --ack` (the live Dashboard's checkout, which its runner's roster task names; any other has its own database) for each Inbox decision your roster entry still lists ([ROSTER.md](ROSTER.md)),
+Run `playground ask get <id> --ack` (it runs in the live Dashboard's checkout; any other has its own database) for each Inbox decision your roster entry still lists ([ROSTER.md](ROSTER.md)),
 act on each whose `status` is no longer `open` (`approved`, `denied`, `sent`, `drafted`, `discarded`, `cleared` or `provided`, with the owner's note in `answer.note` and a draft's changed words in `answer.editedText`),
-and take its id off the list once it is closed: a go with `bun run ask ack <id> --link <url>` or `--no-link "<why>"` after you carry it out, a deny, a clear, a discard or a provided secret by that read.
+and take its id off the list once it is closed: a go with `playground ask ack <id> --link <url>` or `--no-link "<why>"` after you carry it out, a deny, a clear, a discard or a provided secret by that read.
 Ops also checks the `asks` on the dispatcher's entry and sends the dispatcher any answer it missed.
 ops-sweep chases an answer of the owner's its poster has not acked (`bun run ask stale`; on 9 Oct, 11 answers failed unseen and #i76's Send never went out), reminding each live poster once, then at most every 4 hours, so a lead hears only `stale-poster-down` findings: an answer whose poster is down, which Ops passes to the Builder to carry out or re-dispatch.
 An answer the dashboard relayed to the dispatcher because its poster had ended (its `[inbox-answer]` line carries `relay`, `textsOf` in `inbox.ts`) is the dispatcher's to carry out and ack, so the Builder asks the dispatcher before it carries out any `stale-poster-down` answer, and takes only the ones the dispatcher did not receive.

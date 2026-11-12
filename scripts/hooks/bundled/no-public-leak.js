@@ -6001,7 +6001,7 @@ var contentFields = {
   value: union([array(unknown()), record(string2(), unknown())]).nullable()
 };
 // packages/settings/src/ext.ts
-var BUNDLED_EXTENSIONS = ["slack"];
+var BUNDLED_EXTENSIONS = ["slack", "whatsapp"];
 var extSettings = defineSettings({
   "ext.bundled": {
     default: [],
@@ -6024,15 +6024,86 @@ var extSettings = defineSettings({
     schema: record(extScopeSchema, string2().regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/, "a repository as owner/name"))
   }
 });
+// packages/config/src/kinds.ts
+var ROSTER_KINDS = [
+  "assistant",
+  "builder",
+  "dispatcher",
+  "ops",
+  "optimizer",
+  "orchestrator",
+  "planner",
+  "probe",
+  "researcher",
+  "reviewer",
+  "runner",
+  "tester",
+  "worker"
+];
+var isRosterKind = (value) => ROSTER_KINDS.includes(value);
+var FACTORY_ROLE_OF_KIND = {
+  assistant: "lead",
+  builder: "lead",
+  dispatcher: "dispatcher",
+  ops: "lead",
+  optimizer: "lead",
+  orchestrator: "lead",
+  planner: "lead",
+  probe: "probe",
+  researcher: "worker",
+  reviewer: "reviewer",
+  runner: "runner",
+  tester: "tester",
+  worker: "worker"
+};
+var ID_ALPHABET = "23456789bcdfghjkmnpqrstvwxyz";
+var ID_NAME_SOURCE = `[${ID_ALPHABET}]{6}-(?:${ROSTER_KINDS.join("|")})`;
+var PREFIXED = /^(probe|reviewer|runner|tester|worker)-./;
+var ID_NAME = new RegExp(`^[${ID_ALPHABET}]{6}-(${ROSTER_KINDS.join("|")})$`);
+var kindOfName = (name) => (ID_NAME.exec(name) ?? PREFIXED.exec(name))?.[1] ?? null;
+var DEFAULT_SESSION_NAMES = {
+  aliases: {},
+  names: { builder: "builder", dispatcher: "dispatcher", ops: "ops", planner: "planner" }
+};
+var NAMES = Symbol.for("playground.sessionNames");
+var held = globalThis;
+var setSessionNames = (next) => {
+  held[NAMES] = next;
+};
+var getSessionNames = () => held[NAMES] ?? DEFAULT_SESSION_NAMES;
+var namedKinds = () => {
+  const { aliases, names } = getSessionNames();
+  return new Map([
+    ...Object.entries(names).map(([kind, name]) => [name, kind]),
+    [`${names.dispatcher}-2`, "dispatcher"],
+    ...Object.entries(aliases),
+    ["optimizer", "optimizer"]
+  ]);
+};
+var placedKindOfName = (name) => kindOfName(name) ?? namedKinds().get(name) ?? null;
+function roleOfName(name) {
+  const kind = placedKindOfName(name);
+  return kind ? FACTORY_ROLE_OF_KIND[kind] : "";
+}
+var SEATLESS = new Set(["ended", "parked"]);
+
 // packages/safe-delete/src/index.ts
 var LIMITS = { bytes: 2 * 1024 ** 3, files: 5000, perMinute: 3 };
+var PLAYGROUND_AGENT = /^com\.playground\.[\w.-]+\.plist$/;
 var CARVE_OUTS = {
   "dashboard-supervisor": {
     bytes: 256 * 1024 ** 2,
     files: 4000,
     folder: "ops/dashboard/builds"
   },
-  jobs: { bytes: 64 * 1024, files: 1, folder: "ops/launch-agents" }
+  jobs: { bytes: 64 * 1024, files: 1, folder: "ops/launch-agents" },
+  "jobs-installed": {
+    bytes: 64 * 1024,
+    files: 1,
+    folder: "Library/LaunchAgents",
+    home: true,
+    name: PLAYGROUND_AGENT
+  }
 };
 
 // packages/settings/src/folder.ts
@@ -6169,6 +6240,10 @@ var JOBS = {
     neverPause: true,
     schedule: { every: 300 }
   }),
+  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
+    description: "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
+    schedule: { always: true }
+  }),
   "ops-zai-usage": launchd("ops-zai-usage", {
     description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
     schedule: { every: 300 }
@@ -6197,7 +6272,7 @@ var factorySettings = defineSettings({
   },
   "factory.publicRepo": {
     default: "",
-    description: "The public repository, or a list of them: no-public-leak refuses a write to one that holds private text, and the trace ratchet reads past each one's own name.",
+    description: "The public repository, or a list of them, the checkout's origin when unset: no-public-leak refuses a write to one that holds private text, and the trace ratchet reads past each one's own name.",
     schema: union([repo, array(repo)])
   },
   "factory.repo": {
@@ -6237,6 +6312,22 @@ var gateSettings = defineSettings({
     default: 300,
     description: "The seconds a start counts toward the load gate, since the load average lags a session's start.",
     schema: number2().int().positive()
+  }
+});
+// packages/settings/src/harnesses.ts
+var HARNESSES = [
+  { backends: ["claude", "glm"], id: "claude-code" },
+  { backends: ["openai"], id: "codex" }
+];
+var GLM_MODEL = "glm";
+
+// packages/settings/src/harness-alpha.ts
+var HARNESS_IDS = HARNESSES.map((harness) => harness.id);
+var harnessSettings = defineSettings({
+  "harness.alpha": {
+    default: "claude-code",
+    description: "The harness the first dispatcher starts on: claude-code or codex. First run's pick and Settings' Switch write it, and the Dashboard's Start runs spawn.sh --harness with it.",
+    schema: _enum(HARNESS_IDS)
   }
 });
 // packages/settings/src/models.ts
@@ -6287,6 +6378,11 @@ var ownerSettings = defineSettings({
     default: [],
     description: "The owner's first name and handles as chat writes them, lowercase: the inbox gate refuses a manager's stop on a line that addresses one of them and asks for an action, and never reads @<handle> as an agent.",
     schema: array(string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a name or handle, lowercase"))
+  },
+  "owner.voice": {
+    default: "",
+    description: "The voice a draft or a slack decision speaks in as the owner: singular has bun run ask refuse one that says we, us, our, ours or ourselves; empty checks none.",
+    schema: _enum(["", "singular"])
   }
 });
 // packages/settings/src/paths.ts
@@ -6320,7 +6416,7 @@ var ruleSettings = defineSettings({
       } catch {
         return false;
       }
-    }, "an IANA time zone, such as UTC or Asia/Kolkata")
+    }, "an IANA time zone, such as UTC or America/New_York")
   },
   "context.window": {
     default: 400000,
@@ -6374,16 +6470,27 @@ var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var BRIEF_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var sessionTemplate = strictObject({
   account: string2().email().optional(),
-  backend: _enum(["claude", "glm"]),
   brief: string2().regex(BRIEF_NAME, "a brief is a file name, with no /").refine((brief) => !brief.includes(".."), "a brief is a file name, with no .."),
   effort: _enum(EFFORTS).optional(),
+  harness: literal("claude-code"),
   id: name,
   kind: _enum(TEMPLATE_KINDS),
   label: string2().min(1).max(40),
   model: string2().regex(/^[a-z0-9][a-z0-9.-]*$/, "a model id").optional()
-}).refine((t) => t.backend === "claude" || t.account === undefined && t.effort === undefined && t.model === undefined, {
-  message: "a GLM template runs on models.glm and its first GLM row, so it takes no account, effort or model"
+}).refine((t) => t.model !== GLM_MODEL || t.account === undefined && t.effort === undefined, {
+  message: "a GLM template runs on models.glm and its first GLM row, so it takes no account or effort"
 });
+var storedTemplates = (value) => Array.isArray(value) ? value.map((row) => {
+  if (typeof row !== "object" || row === null || !("backend" in row) || "harness" in row)
+    return row;
+  const { backend, ...rest } = row;
+  const { model, ...modelless } = rest;
+  if (backend === "glm")
+    return { ...rest, harness: "claude-code", model: GLM_MODEL };
+  if (backend !== "claude")
+    return { ...rest, backend, harness: "claude-code" };
+  return { ...model === GLM_MODEL ? modelless : rest, harness: "claude-code" };
+}) : value;
 var sessionTemplates = array(sessionTemplate).refine((rows) => new Set(rows.map((row) => row.id)).size === rows.length, "each id is listed once");
 var unknownAccounts = (templates, accounts) => {
   const known = new Set(accountsOf(accounts, "claude").map(accountKey));
@@ -6409,36 +6516,38 @@ var sessionSettings = defineSettings({
     against: (templates, read) => unknownAccounts(templates, read("usage.accounts")),
     default: [
       {
-        backend: "claude",
         brief: "assistant.md",
+        harness: "claude-code",
         id: "assistant",
         kind: "assistant",
         label: "Assistant"
       },
       {
-        backend: "claude",
         brief: "orchestrator.md",
+        harness: "claude-code",
         id: "orchestrator",
         kind: "orchestrator",
         label: "Orchestrator"
       },
       {
-        backend: "claude",
         brief: "dispatcher-2.md",
+        harness: "claude-code",
         id: "second-dispatcher-claude",
         kind: "dispatcher",
         label: "Second dispatcher on Claude"
       },
       {
-        backend: "glm",
         brief: "dispatcher-2.md",
+        harness: "claude-code",
         id: "second-dispatcher-glm",
         kind: "dispatcher",
-        label: "Second dispatcher on GLM"
+        label: "Second dispatcher on GLM",
+        model: GLM_MODEL
       }
     ],
-    description: "The templates the sidebar's plus starts a dispatcher or an orchestrator from, A to Z by label: each one's kind, backend, model, effort, account (a Claude row of usage.accounts) and brief. A dispatcher template starts the second dispatcher; any other kind starts a new <id>-<kind> lead reporting to the dispatcher.",
-    schema: sessionTemplates
+    description: "The templates the sidebar's plus starts a dispatcher or an orchestrator from, A to Z by label: each one's kind, harness, model (a Claude id, or glm), effort, account (a Claude row of usage.accounts) and brief. A dispatcher template starts the second dispatcher; any other kind starts a new <id>-<kind> lead reporting to the dispatcher.",
+    schema: sessionTemplates,
+    stored: storedTemplates
   }
 });
 // packages/settings/src/slack.ts
@@ -6492,16 +6601,49 @@ var slotSettings = defineSettings({
     schema: array(string2().regex(/^\/.+/, "an absolute path"))
   }
 });
+// packages/settings/src/whatsapp.ts
+var e1642 = string2().regex(/^(?:\+[1-9]\d{7,14})?$/, "a phone number is + and 8 to 15 digits, as +15550100001");
+var whatsappSettings = defineSettings({
+  "wa.device": {
+    default: "",
+    description: "The spare number ops-wa links to as a device, in E.164: its pairing code is for this number. Never the owner's own number; ops-wa does not run until it is set.",
+    masked: true,
+    schema: e1642
+  },
+  "wa.owner": {
+    default: "",
+    description: "The owner's WhatsApp number in E.164, the allowlist of one: ops-wa hands on only this number's 1:1 messages and sends only to it; ops-wa does not run until it is set.",
+    masked: true,
+    schema: e1642
+  }
+});
+// packages/scripts/src/playground/setting.ts
+import { resolve as resolve2 } from "path";
+var CHECKOUT = resolve2(__CHECKOUT + "/packages/scripts/src/playground", "../../../..");
+var origins = new Map;
+var originRepo = (checkout = CHECKOUT) => {
+  if (!origins.has(checkout)) {
+    const run = Bun.spawnSync(["git", "-C", checkout, "remote", "get-url", "origin"], {
+      stderr: "ignore"
+    });
+    const url = run.stdout.toString().trim();
+    const slug = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(url)?.[1] ?? "";
+    origins.set(checkout, slug.toLowerCase());
+  }
+  return origins.get(checkout);
+};
+if (false)
+  ;
+
 // packages/scripts/src/trace-count/kinds.ts
-var TODAY_PUBLIC = ["sahilpohare/playground", "sahilpohare/playground-yard"];
-var reposOf = (settings) => {
+var reposOf = (settings, checkout) => {
   const archive = factorySettings.get(settings, "factory.archiveRepo").toLowerCase();
   const archiveOwner = archive ? [archive.split("/")[0]] : [];
   const set = [factorySettings.get(settings, "factory.publicRepo")].flat().filter(Boolean);
   return {
     archive,
     owner: [...new Set([...ownerSettings.get(settings, "owner.names"), ...archiveOwner])],
-    public: set.length ? set.map((repo) => repo.toLowerCase()) : TODAY_PUBLIC
+    public: set.length ? set.map((repo) => repo.toLowerCase()) : [originRepo(checkout)].filter(Boolean)
   };
 };
 var UNSET_REPOS = reposOf({ schemaVersion: 1, values: {} });
@@ -6630,8 +6772,9 @@ function remotes(cwd) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
+import { realpathSync, statSync } from "fs";
 import { homedir as homedir2 } from "os";
-import { basename, dirname, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+import { basename, dirname, isAbsolute as isAbsolute2, resolve as resolve3 } from "path";
 var UNKNOWN = "\x00";
 var READ = "\x01";
 var NOT_RUN = "The refusal stopped this whole Bash call, so none of its commands ran: once it is fixed, run again each one you still need.";
@@ -6660,7 +6803,7 @@ function filled(script, mark, value) {
     throw new RangeError("a script too large to read");
   return script.replaceAll(mark, value);
 }
-var held = (text) => text.value.length > MAX_BYTES ? unknown2(LARGE) : text;
+var held2 = (text) => text.value.length > MAX_BYTES ? unknown2(LARGE) : text;
 var BREAK = new Set([" ", "\t", `
 `, ";", "&", "|", "<", ">", "(", ")"]);
 var REDIRECT = /^(\d*|&)(<<<|<<-|<<|<>|<&|>&!?|>>[!|]?|>[!|]|<|>)/;
@@ -7383,6 +7526,8 @@ function walk(lx, scope, nested, inherit) {
       if (after === "&&")
         done.chained = true;
       done.chain = lx.token;
+      if (lx.orRun)
+        done.orRun = true;
       const last = lx.commands[lx.commands.length - 1]?.words;
       const compound = !!done.group && last?.length === 1 && OPENS.has(reserved[0] ?? "") && !HELD.has(reserved[0] ?? "");
       if (reserved.some((w) => HELD.has(w)) || compound)
@@ -7415,8 +7560,10 @@ function walk(lx, scope, nested, inherit) {
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
-      if (depth === 0 && FREES.has(op))
+      if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
+        lx.orRun = op === "||";
+      }
       after = op;
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
@@ -7944,6 +8091,7 @@ async function runAll(lexed, env, visit, builtins) {
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
 async function examine(cmd, env, visit, builtins) {
   tick();
+  orElse(cmd, env);
   unchain(cmd, env);
   if (cmd.opaque) {
     env.cwdAnywhere = true;
@@ -8102,11 +8250,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
+  const lineOr = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
+  env.cwdOr = undefined;
   try {
     return await body();
   } finally {
+    const scriptOr = env.cwdOr;
+    env.cwdOr = scriptOr && scriptOr.orChain === undefined ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope } : lineOr;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -8140,7 +8292,8 @@ async function cdTarget(name, args, env) {
   const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
   if (!dir)
     return homedir2();
-  const typed = dir.value === "-" ? undefined : await folder2(pathOf(dir, env));
+  const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
+  const typed = await folder2(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
   const base = sign && (sign === "-" ? env.old?.dir : env.cwd);
   return base ? await folder2(base + dir.value.slice(2)) : typed;
@@ -8148,7 +8301,7 @@ async function cdTarget(name, args, env) {
 async function folder2(path) {
   if (!path)
     return;
-  return await isFolder(path) ? path : undefined;
+  return isFolder(path) ? path : undefined;
 }
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -8160,6 +8313,7 @@ function cdTargets(name, cmd, parsed, env, from) {
     return { back: true, paths: [], unread: true };
   const paths = new Set;
   const many = manyTimes(cmd, parsed);
+  const physical = physicalCd(parsed.args);
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
@@ -8172,14 +8326,23 @@ function cdTargets(name, cmd, parsed, env, from) {
         unread = true;
         continue;
       }
-      paths.add(path);
+      const landed = physical ? kernelPath(word, base, path) : path;
+      paths.add(landed);
       if (many && word.value.split("/").includes("..")) {
-        for (const up of ancestors(path))
+        for (const up of ancestors(landed))
           paths.add(up);
       }
     }
   }
   return { back: dirs.length > 1, paths: [...paths], unread };
+}
+var physicalCd = (args) => args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"));
+function kernelPath(word, base, lexical) {
+  try {
+    return realpathSync.native(isAbsolute2(word.value) ? word.value : `${base}/${word.value}`);
+  } catch {
+    return lexical;
+  }
 }
 function tildeMove(move, name, parsed, env, from, back) {
   const dir = parsed.args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -8218,10 +8381,11 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   const chained = cmd.chained && !negated(cmd);
-  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || await isFolder(paths[0]))) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
+    env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
       env.oldFrom = bases;
     if (chained) {
@@ -8231,11 +8395,44 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   env.cwdSure = undefined;
-  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
+  env.cwdOr = undefined;
+  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || paths.every(isFolder));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
 var negated = (cmd) => markers(cmd.words).filter((word) => word === "!").length % 2 === 1;
+var EXITS = new Set(["exit"]);
+function orElse(cmd, env) {
+  const or = env.cwdOr;
+  if (!or)
+    return;
+  if (cmd.chain === or.orChain) {
+    if (or.exits && cmd.detached)
+      env.cwdOr = { ...or, exits: false };
+    return;
+  }
+  if (cmd.chain === or.cdChain) {
+    if (!or.joined)
+      env.cwdOr = { ...or, joined: true };
+    return;
+  }
+  if (or.orChain === undefined && cmd.orRun) {
+    env.cwdOr = {
+      ...or,
+      exits: EXITS.has(parse3(cmd).name) && !cmd.detached && cmd.scope === or.scope,
+      landed: { maybe: env.cwdMaybe ?? [], sure: env.cwdSure },
+      orChain: cmd.chain
+    };
+    env.cwdMaybe = keep([...new Set([...startFolders(env), ...or.before])], env);
+    env.cwdSure = undefined;
+    return;
+  }
+  if ((or.joined || or.exits) && or.landed) {
+    env.cwdMaybe = or.landed.maybe;
+    env.cwdSure = or.landed.sure;
+  }
+  env.cwdOr = undefined;
+}
 function unchain(cmd, env) {
   if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
     return;
@@ -8255,9 +8452,9 @@ function keep(folders, env) {
   env.cwdUnread = true;
   return folders.slice(0, MAX_FOLDERS);
 }
-async function isFolder(path) {
+function isFolder(path) {
   try {
-    return (await Bun.file(path).stat()).isDirectory();
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -8318,7 +8515,7 @@ async function record2(cmd, name, args, env) {
       continue;
     const stdout = r.fd === "" || r.fd === "1" || r.fd === "&";
     const out = stdout ? await outputOf(cmd, env) : unknown2(`what ${name || "a command"} writes to stderr`);
-    env.files.set(path, held(r.op === ">>" ? join3([await existing(path, env), out]) : out));
+    env.files.set(path, held2(r.op === ">>" ? join3([await existing(path, env), out]) : out));
   }
   if (name !== "tee")
     return;
@@ -8327,7 +8524,7 @@ async function record2(cmd, name, args, env) {
   for (const a of args) {
     const path = a.value.startsWith("-") ? undefined : pathOf(a, env);
     if (path)
-      env.files.set(path, held(append ? join3([await existing(path, env), input]) : input));
+      env.files.set(path, held2(append ? join3([await existing(path, env), input]) : input));
   }
 }
 async function existing(path, env) {
@@ -8398,13 +8595,13 @@ async function stdinOf(cmd, env) {
   tick();
   const input = cmd.redirects.findLast((r) => !r.bodyFed && ownFeed(r));
   if (!input)
-    return held(cmd.stdin ? await outputOf(cmd.stdin, env) : unknown2("stdin the hook cannot see"));
-  return held(await redirectText(input, env, false));
+    return held2(cmd.stdin ? await outputOf(cmd.stdin, env) : unknown2("stdin the hook cannot see"));
+  return held2(await redirectText(input, env, false));
 }
 async function scriptStdin(cmd, env) {
   const own = await stdinOf(cmd, env);
   tick();
-  const fed = held(await stdinText(cmd, env));
+  const fed = held2(await stdinText(cmd, env));
   return fed.value === own.value && fed.unknown === own.unknown ? [own] : [own, fed];
 }
 var ownFeed = ({ fd, op }) => (fd === "" || fd === "0") && op.startsWith("<") && op !== "<&";
@@ -8479,7 +8676,7 @@ function pathOf(text, env) {
     return;
   if (isAbsolute2(text.value))
     return text.value;
-  return env.cwd ? resolve2(env.cwd, text.value) : undefined;
+  return env.cwd ? resolve3(env.cwd, text.value) : undefined;
 }
 async function readFile(path) {
   const file = Bun.file(path);
@@ -8798,71 +8995,6 @@ function readOnly(raw) {
 // scripts/hooks/role.ts
 import { homedir as homedir3 } from "os";
 import { join as join4 } from "path";
-
-// packages/config/src/kinds.ts
-var ROSTER_KINDS = [
-  "assistant",
-  "builder",
-  "dispatcher",
-  "ops",
-  "optimizer",
-  "orchestrator",
-  "planner",
-  "probe",
-  "researcher",
-  "reviewer",
-  "runner",
-  "tester",
-  "worker"
-];
-var isRosterKind = (value) => ROSTER_KINDS.includes(value);
-var FACTORY_ROLE_OF_KIND = {
-  assistant: "lead",
-  builder: "lead",
-  dispatcher: "dispatcher",
-  ops: "lead",
-  optimizer: "lead",
-  orchestrator: "lead",
-  planner: "lead",
-  probe: "probe",
-  researcher: "worker",
-  reviewer: "reviewer",
-  runner: "runner",
-  tester: "tester",
-  worker: "worker"
-};
-var ID_ALPHABET = "23456789bcdfghjkmnpqrstvwxyz";
-var ID_NAME_SOURCE = `[${ID_ALPHABET}]{6}-(?:${ROSTER_KINDS.join("|")})`;
-var PREFIXED = /^(probe|reviewer|runner|tester|worker)-./;
-var ID_NAME = new RegExp(`^[${ID_ALPHABET}]{6}-(${ROSTER_KINDS.join("|")})$`);
-var kindOfName = (name) => (ID_NAME.exec(name) ?? PREFIXED.exec(name))?.[1] ?? null;
-var DEFAULT_SESSION_NAMES = {
-  aliases: {},
-  names: { builder: "builder", dispatcher: "dispatcher", ops: "ops", planner: "planner" }
-};
-var NAMES = Symbol.for("playground.sessionNames");
-var held2 = globalThis;
-var setSessionNames = (next) => {
-  held2[NAMES] = next;
-};
-var getSessionNames = () => held2[NAMES] ?? DEFAULT_SESSION_NAMES;
-var namedKinds = () => {
-  const { aliases, names } = getSessionNames();
-  return new Map([
-    ...Object.entries(names).map(([kind, name]) => [name, kind]),
-    [`${names.dispatcher}-2`, "dispatcher"],
-    ...Object.entries(aliases),
-    ["optimizer", "optimizer"]
-  ]);
-};
-var placedKindOfName = (name) => kindOfName(name) ?? namedKinds().get(name) ?? null;
-function roleOfName(name) {
-  const kind = placedKindOfName(name);
-  return kind ? FACTORY_ROLE_OF_KIND[kind] : "";
-}
-var SEATLESS = new Set(["ended", "parked"]);
-
-// scripts/hooks/role.ts
 var MANAGER_ROLES = new Set(["dispatcher", "lead", "manager"]);
 var names;
 function loadNames(environment = process.env) {
@@ -8892,6 +9024,23 @@ async function registryName(sessionId, environment = process.env) {
     } catch {}
   }
 }
+async function codexName(sessionId, environment = process.env) {
+  if (!environment.CODEX_HOME)
+    return;
+  let name;
+  try {
+    const index = await Bun.file(join4(environment.CODEX_HOME, "session_index.jsonl")).text();
+    for (const line of index.split(`
+`)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.id === sessionId && typeof entry.thread_name === "string")
+          name = entry.thread_name;
+      } catch {}
+    }
+  } catch {}
+  return name;
+}
 async function rosterKind(name, environment = process.env) {
   const path = join4(dataDirOf(environment), "roster.json");
   try {
@@ -8912,7 +9061,7 @@ async function sessionRole(environment, sessionId) {
   if (typeof sessionId !== "string")
     return "";
   try {
-    const name = await registryName(sessionId, environment) ?? "";
+    const name = await registryName(sessionId, environment) ?? await codexName(sessionId, environment) ?? "";
     const role = name && await rosterRole(name, environment);
     if (role)
       return role;
@@ -8993,7 +9142,7 @@ function chipsSigned(blocks, signature) {
   return opensLine && text.split(`
 `).at(-1)?.trim() === signature.replace(/^_(.*)_$/, "$1");
 }
-var CHECKOUT = join5(__CHECKOUT + "/scripts/hooks", "..", "..");
+var CHECKOUT2 = join5(__CHECKOUT + "/scripts/hooks", "..", "..");
 var REPHRASE = "Say it without the term: name the work, not who did it or how it is run.";
 var READABLE = `Put the text in the command itself, or write the text to a file with the Write tool first, then run the command again in a call of its own that names that file by its literal absolute path (--body-file /abs/body.md, or -F /abs/msg.md for a commit). ${NOT_RUN}`;
 var MCP_READABLE = "Pass the input as an object whose fields are strings.";

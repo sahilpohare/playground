@@ -47,7 +47,7 @@ How the Dashboard shows each role, how a session is named and when a dev stack r
   The word from up the chain is his: act on it as his, and take any doubt up the chain (**override**).
   If the owner was asked anyway, say so up the chain, so the brief gets fixed.
 - A lead's instruction to a checker goes to the checker directly, in the **override** shape when it bends a rule, never relayed through its worker, whose PR the checker scores; a checker confirms with the lead any instruction its worker relays before it bends a step.
-- Questions, reports and results go up by `SendMessage`, never through `AskUserQuestion`.
+- Questions, reports and results go up by `SendMessage`; the `no-chat-question` hook refuses `AskUserQuestion` to every session with a manager ([scripts/hooks/README.md](../../../../scripts/hooks/README.md#no-chat-question)).
 - A message opens with its content, never with your own name, since the Dashboard shows the sender.
   Read [rules/voice.md](../../rules/voice.md) before you name a session or list PR status for the owner.
 - A running session's model and effort change by a start or a resume, its permission mode and settings by a PR (below), and any of them by the owner's own act, never by the session asked to change its own.
@@ -67,13 +67,12 @@ Cite a rule by its name, in bold; read it whole with `playground rules <name>` w
 - [LIFECYCLE.md](LIFECYCLE.md): when each kind of session starts and ends, the ops jobs, and how Claude Code updates.
   Read it before you start, close or respawn a session, remove a worktree, or update Claude Code.
 - [DISPATCH.md](DISPATCH.md): how the dispatcher, the Planner and the leads route a new ask, bundle work and fill the slots.
-  Read it when you are one of them and an ask arrives; when Slack mode is on and the owner's DM speaks to you, its Slack mode section points to the `slack` skill.
+  Read it when you are one of them and an ask arrives; when Slack or WhatsApp mode is on and the owner's message reaches you, its Slack mode or WhatsApp mode section points to that mode's skill.
 - [SWEEP.md](SWEEP.md): the leads' sweep, step by step.
   Read it at each sweep.
-- [SESSIONS.md](SESSIONS.md): the commands to spawn, brief, rename, check and end a session, and the headless run that writes Notion for a session with no Notion tools.
+- [SESSIONS.md](SESSIONS.md): the commands to spawn, brief, rename, check and end a session, how a worker answers a review round (Fix pushes and nits), and the headless run that writes a docs tool's pages for a session without its MCP server.
 - [SPAWN.md](SPAWN.md): each spawn mode's command and the gates, flags and launch spawn.sh applies to a start, which SESSIONS.md's Spawn step 2 points to.
 - [ROSTER.md](ROSTER.md): what to write to the roster, and when.
-- [CHANNEL.md](CHANNEL.md): the factory channel's lists, limits and triage.
 - [VERCEL.md](VERCEL.md): the Vercel CLI's traps: the env `vercel link` and `vercel integration add` pull, `vercel api`'s first line and an empty `vercel logs`.
   Read it before you run any `vercel` command.
 

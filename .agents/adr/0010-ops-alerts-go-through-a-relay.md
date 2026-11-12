@@ -10,7 +10,7 @@ The relay stays. Claude Code documents the inbox socket ([cross-session messagin
 
 `crossSessionInbound: accept` in `scripts/factory-settings.json` is the one alternative: every factory session would then take any local sender's message, a prompting session's included. It is a permission boundary, so only the owner opens it; this decision changes nothing there. Channels, which push events into a session from an MCP server, are a research preview that needs a channel server loaded into every session, too much for an alert line.
 
-The dashboard's `deliver()` types only for the owner's own clicks: the composer, the Linear app's row actions and the owner's answer to an inbox item. Tests fail when any other file calls it (`tests/api/hono/src/lib/dashboard/deliver.test.ts`) or any text in the repo types into a pane (`tests/api/hono/src/lib/dashboard/herdr.test.ts`), Escape on a permission prompt aside, since it types no text. Since then, a manager's `playground picker` also presses Yes or Escape on its own session's permission prompt, tied to the call its alert named.
+The dashboard's `deliver()` types only for the owner's own clicks: the composer, a board's row actions and the owner's answer to an inbox item. Tests fail when any other file calls it (`tests/api/hono/src/lib/dashboard/deliver.test.ts`) or any text in the repo types into a pane (`tests/api/hono/src/lib/dashboard/herdr.test.ts`), Escape on a permission prompt aside, since it types no text. Since then, a manager's `playground picker` also presses Yes or Escape on its own session's permission prompt, tied to the call its alert named.
 
 ## Consequences
 

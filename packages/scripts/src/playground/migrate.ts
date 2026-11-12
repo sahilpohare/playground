@@ -18,7 +18,6 @@ import {
 
 import { herdrPath, PIN_SOURCE } from "../ops-herdr/pin"
 import { OLD_TREE_PATHS } from "../rename/rules"
-import { TODAY_PUBLIC } from "../trace-count/kinds"
 import { pinHere, type Result } from "./herdr-pin"
 import { moveDataFolder, moveMachine, type Step, TABLE, type Table } from "./migrate-machine"
 import { originRepo } from "./setting"
@@ -206,7 +205,7 @@ export const SEEDS = (
     read: {
       at: "checkoutOrigin",
       path: "this checkout's origin",
-      take: (repo) => [...new Set([repo.toLowerCase(), ...TODAY_PUBLIC])],
+      take: (repo) => repo.toLowerCase(),
     },
     type: "setting",
   },

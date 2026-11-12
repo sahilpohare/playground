@@ -1,4 +1,4 @@
-import { afterAll } from "bun:test"
+import { afterAll, expect } from "bun:test"
 import {
   chmodSync,
   existsSync,
@@ -404,6 +404,40 @@ esac
   }
 }
 
+// each wait gives up at WITHIN_MS, just under bun's 60 s hang ceiling, or at the chain's end when given, failing with the bound it used, both queues' waiter names and the log's start lines, so a hang says what it waited on (issues 1723 and 1725: hangs that said nothing); a chain of waits shares one deadline(), since two chained waits of this budget can outlast the ceiling and the second wait's message would never fire
+const WITHIN_MS = 45_000
+// the one budget a chain of waits shares
+export const deadline = () => ({ end: Date.now() + WITHIN_MS })
+// a runs.log start line's who, pid and lane, or null when the line is not one; the one parser the wait messages and the rows read
+export const startOf = (line: string): string[] | null => {
+  const fields = line.split(" ")
+  return fields[1] === "start" ? fields.slice(2, 5) : null
+}
+export const within = async (
+  ok: () => boolean,
+  what: string,
+  m: { ops: string },
+  chain?: { end: number },
+) => {
+  const from = Date.now()
+  const end = chain ? chain.end : from + WITHIN_MS
+  while (!ok() && Date.now() < end) await Bun.sleep(50)
+  if (ok()) return
+  const names = (dir: string) =>
+    existsSync(join(m.ops, dir)) ? readdirSync(join(m.ops, dir)).sort() : []
+  const waiters = [...names("run-slot.waiters"), ...names("run-slot.clone-waiters")]
+  const starts = existsSync(join(m.ops, "run-slot.runs.log"))
+    ? readFileSync(join(m.ops, "run-slot.runs.log"), "utf8")
+        .split("\n")
+        .map(startOf)
+        .filter((f) => f !== null)
+        .map((f) => f.join(" "))
+    : []
+  throw new Error(
+    `${what} within ${Math.round((end - from) / 1000)}s; waiters: ${waiters.join(", ") || "none"}; starts: ${starts.join(", ") || "none"}`,
+  )
+}
+
 // Playground's own lefthook.yml, whose pre-commit runs the build, as the commit-lane tests read it
 export const LEFTHOOK = readFileSync(join(import.meta.dir, "../../../lefthook.yml"), "utf8")
 // A machine whose fake git fails on a `-C` folder that is not one, answers `git config --get alias.<verb>` from a folder whose top level is the root by whether the root's `aliases` file lists that key, answers `git rev-parse --show-toplevel` with its folder's physical path, as git does (the root's, from `docs`, `web` or a folder under it), which holds `lefthook` unless it is null, `git diff --cached --name-only` with `staged`, a plain `git diff --name-only` with `unstaged`, a `git diff --name-only [HEAD] -- <paths>` with each of either under one of the paths (each pathspec read from the `-C` folder, `.` included), `git ls-files --others` with `untracked` (under the paths after a `--`, relative to a `-C` folder under the root unless `--full-name`, every one for `:/`, as git prints them), and touches its last argument for anything else, as a commit's marker
@@ -536,4 +570,106 @@ export const set = async (m: ReturnType<typeof machine>, ...args: string[]) => {
     ops: m.ops,
   })
   return { code: await p.exited, err: await new Response(p.stderr).text() }
+}
+
+// the poll-cost files' shims, waiters and the trace readers that count what the waiters start
+// every external command run-slot.sh calls by name; a shim for each counts its start, so a start the shims miss is a fork that runs bash alone, which the trace's subshell levels count
+export const COMMANDS =
+  "awk basename bun cat cut date diff dirname docker env find getconf git grep head id iostat ls mkdir mktemp mv nice ps python3 readlink realpath rm rmdir sed seq setsid sleep sort ssh stat sysctl tail timeout top touch tr uname uptime vm_stat wc xargs".split(
+    " ",
+  )
+
+// shims ahead of the machine's PATH, each a perl script, which the waiters' xtrace leaves untraced, that writes its name to the count file and runs the command the machine's PATH finds
+export const shim = (m: ReturnType<typeof machine>) => {
+  const dir = join(m.root, "shims")
+  const count = join(m.root, "starts")
+  mkdirSync(dir)
+  writeFileSync(count, "")
+  const rest = m.env().PATH
+  for (const name of COMMANDS) {
+    writeFileSync(
+      join(dir, name),
+      `#!/usr/bin/perl\nopen(my $f, ">>", "${count}"); print $f "${name}\\n"; close $f;\n$ENV{PATH} = "${rest}";\nexec { "${name}" } "${name}", @ARGV or exit 127;\n`,
+    )
+    chmodSync(join(dir, name), 0o755)
+  }
+  return { count, path: `${dir}:${rest}` }
+}
+// starts a waiter under xtrace, its PS4 the subshell level, and keeps its stderr
+export const waiter = (
+  m: ReturnType<typeof machine>,
+  path: string,
+  who: string,
+  command: string[],
+  extra: Record<string, string>,
+) => {
+  const marker = join(m.root, `ran-${who}`)
+  const p = runSlot(["bash", SCRIPT, who, "--", ...command, marker], {
+    cwd: m.root,
+    env: m.env({ ...extra, PATH: path, PS4: "+$BASH_SUBSHELL ", SHELLOPTS: "xtrace" }),
+    stderr: "pipe",
+    ops: m.ops,
+  })
+  const w = { err: "", marker, p }
+  void (async () => {
+    const text = new TextDecoder()
+    for await (const chunk of p.stderr) w.err += text.decode(chunk, { stream: true })
+  })()
+  return w
+}
+export type Waiter = ReturnType<typeof waiter>
+// whether the waiter has ended a look since `at` in its trace: a look_mark, then a sleep after it
+export const lookedSince = (w: Waiter, at: number) =>
+  /^\++\d+ look_mark$[\s\S]*^\+0 sleep \S+$/m.test(w.err.slice(at))
+// the subshells a trace shows entered: each line at a deeper level than the line before it
+export const subshells = (trace: string) => {
+  let n = 0
+  let last = 0
+  for (const line of trace.split("\n")) {
+    const level = line.match(/^\++(\d+) /)?.[1]
+    if (level === undefined) continue
+    if (Number(level) > last) n++
+    last = Number(level)
+  }
+  return n
+}
+// whether a waiter has ended its last look: a sleep follows its last look_mark, or it has none (the clone loop never calls look_mark)
+export const settled = (trace: string) => {
+  const at = trace.lastIndexOf(" look_mark\n")
+  return at < 0 || /^\+0 sleep \S+$/m.test(trace.slice(at))
+}
+// whether a whole poll ran in this part of a trace: a sleep, the wake after it, and the next sleep
+export const polled = (trace: string) =>
+  /^\+0 sleep \S+$[\s\S]*?^\+0 (?!sleep )[\s\S]*?^\+0 sleep \S+$/m.test(trace)
+// the processes the waiters started together each second over `window` seconds, once each has printed its first wait line and then a round has passed that began with no look under way, in which each waiter ran a whole poll and none began a look, since a waiter whose first look ran before the others had joined looks once more at them; a fixed round of a poll and a second, 16 s at a 15 s poll, ended at load5 about 20 before a loaded Mac woke the waiters, so their look at the oldest's first run-slot.next landed in the window (issue 1612, measured)
+export const starts = async (
+  count: string,
+  waiters: Waiter[],
+  waits: RegExp,
+  window: number,
+  during: () => Promise<unknown> = async () => {},
+) => {
+  for (const w of waiters) while (!waits.test(w.err)) await Bun.sleep(50)
+  for (let quiet = false; !quiet;) {
+    const at = waiters.map((w) => w.err.length)
+    const idle = waiters.every((w) => settled(w.err))
+    while (!waiters.every((w, i) => polled(w.err.slice(at[i])))) await Bun.sleep(50)
+    quiet = idle && waiters.every((w, i) => !/^\++\d+ look_mark$/m.test(w.err.slice(at[i])))
+  }
+  const from = waiters.map((w) => w.err.length)
+  const before = readFileSync(count, "utf8").split("\n").length
+  await Promise.all([Bun.sleep(window * 1000), during()])
+  const execs = readFileSync(count, "utf8").split("\n").length - before
+  const forks = waiters.reduce((n, w, i) => n + subshells(w.err.slice(from[i])), 0)
+  const rate = (execs + forks) / window
+  if (rate >= 5)
+    console.error(
+      "looks in the window:",
+      waiters
+        .map((w, i) => (w.err.slice(from[i]).match(/^\++\d+ look_mark$/gm) ?? []).length)
+        .join(","),
+    )
+  await Promise.all(waiters.map((w) => stop(w.p)))
+  expect(waiters.every((w) => !existsSync(w.marker))).toBe(true)
+  return rate
 }

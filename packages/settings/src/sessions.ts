@@ -2,6 +2,7 @@ import type { RosterKind } from "@packages/config/kinds"
 import { z } from "zod"
 
 import { type Account, accountKey, accountsOf } from "@/accounts"
+import { type Backend, GLM_MODEL } from "@/harnesses"
 import { readPolicyOrDefaults } from "@/rendered"
 import { defineSettings, type Refusal } from "@/settings"
 
@@ -27,16 +28,17 @@ export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
 // A brief is one file's name, under the data folder or scripts/briefs, so no template reaches outside either.
 export const BRIEF_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-// One template the sidebar's plus starts a session from: every value checked here, so none reaches spawn.sh's argv unread. account is a usage.accounts email, Claude alone; none takes the first account that is not this machine's own login, for a second dispatcher, which spawn.sh never starts on the first's.
+// One template the sidebar's plus starts a session from: every value checked here, so none reaches spawn.sh's argv unread. account is a usage.accounts email, Claude alone; none takes the first account that is not this machine's own login, for a second dispatcher, which spawn.sh never starts on the first's. harness is the one it runs in, and model a Claude id, or glm for models.glm.
 export const sessionTemplate = z
   .strictObject({
     account: z.string().email().optional(),
-    backend: z.enum(["claude", "glm"]),
     brief: z
       .string()
       .regex(BRIEF_NAME, "a brief is a file name, with no /")
       .refine((brief) => !brief.includes(".."), "a brief is a file name, with no .."),
     effort: z.enum(EFFORTS).optional(),
+    // Claude Code's alone: Codex starts only the first dispatcher, which no template starts.
+    harness: z.literal("claude-code"),
     id: name,
     kind: z.enum(TEMPLATE_KINDS),
     label: z.string().min(1).max(40),
@@ -45,17 +47,30 @@ export const sessionTemplate = z
       .regex(/^[a-z0-9][a-z0-9.-]*$/, "a model id")
       .optional(),
   })
-  .refine(
-    (t) =>
-      t.backend === "claude" ||
-      (t.account === undefined && t.effort === undefined && t.model === undefined),
-    {
-      message:
-        "a GLM template runs on models.glm and its first GLM row, so it takes no account, effort or model",
-    },
-  )
+  .refine((t) => t.model !== GLM_MODEL || (t.account === undefined && t.effort === undefined), {
+    message:
+      "a GLM template runs on models.glm and its first GLM row, so it takes no account or effort",
+  })
 
 export type SessionTemplate = z.infer<typeof sessionTemplate>
+
+// Pure: the backend spawn.sh's --backend takes for a template: glm for a GLM model, else claude.
+export const templateBackend = (template: { model?: string }): Backend =>
+  template.model === GLM_MODEL ? "glm" : "claude"
+
+// Pure: a stored list as it reads now: a row saved before the harness split names a backend, which reads as Claude Code with glm as its model on GLM; a Claude row that named glm as its model, which spawn.sh refused, reads with that model dropped, so it never reads as GLM and the rest of the list still reads; a row naming another backend keeps it for the schema to refuse.
+export const storedTemplates = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map((row) => {
+        if (typeof row !== "object" || row === null || !("backend" in row) || "harness" in row)
+          return row
+        const { backend, ...rest } = row as { backend: unknown; model?: unknown }
+        const { model, ...modelless } = rest
+        if (backend === "glm") return { ...rest, harness: "claude-code", model: GLM_MODEL }
+        if (backend !== "claude") return { ...rest, backend, harness: "claude-code" }
+        return { ...(model === GLM_MODEL ? modelless : rest), harness: "claude-code" }
+      })
+    : value
 
 // The setting's list, each id once.
 export const sessionTemplates = z
@@ -99,37 +114,39 @@ export const sessionSettings = defineSettings({
       unknownAccounts(templates as SessionTemplate[], read("usage.accounts") as Account[]),
     default: [
       {
-        backend: "claude",
         brief: "assistant.md",
+        harness: "claude-code",
         id: "assistant",
         kind: "assistant",
         label: "Assistant",
       },
       {
-        backend: "claude",
         brief: "orchestrator.md",
+        harness: "claude-code",
         id: "orchestrator",
         kind: "orchestrator",
         label: "Orchestrator",
       },
       {
-        backend: "claude",
         brief: "dispatcher-2.md",
+        harness: "claude-code",
         id: "second-dispatcher-claude",
         kind: "dispatcher",
         label: "Second dispatcher on Claude",
       },
       {
-        backend: "glm",
         brief: "dispatcher-2.md",
+        harness: "claude-code",
         id: "second-dispatcher-glm",
         kind: "dispatcher",
         label: "Second dispatcher on GLM",
+        model: GLM_MODEL,
       },
     ] as SessionTemplate[],
     description:
-      "The templates the sidebar's plus starts a dispatcher or an orchestrator from, A to Z by label: each one's kind, backend, model, effort, account (a Claude row of usage.accounts) and brief. A dispatcher template starts the second dispatcher; any other kind starts a new <id>-<kind> lead reporting to the dispatcher.",
+      "The templates the sidebar's plus starts a dispatcher or an orchestrator from, A to Z by label: each one's kind, harness, model (a Claude id, or glm), effort, account (a Claude row of usage.accounts) and brief. A dispatcher template starts the second dispatcher; any other kind starts a new <id>-<kind> lead reporting to the dispatcher.",
     schema: sessionTemplates,
+    stored: storedTemplates,
   },
 })
 

@@ -1,0 +1,26 @@
+name: zsh-cache
+
+# A cache a pull request saves serves that pull request alone, and every pull request reads its base's: this run saves zsh's packages on canary, so each PR's Install zsh takes them with no apt call. Dispatch it by hand after an apt outage to seed the cache before the next merge does.
+on:
+  push:
+    branches: ["canary"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  zsh-cache:
+    name: zsh cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install zsh
+        uses: ./.github/actions/install-zsh

@@ -11,7 +11,7 @@ import { machine, type Reader } from "@/lib/onboard/machine"
 import type { SetupState } from "@/lib/setup/app"
 import { hasLogin } from "@/lib/store/extensions"
 
-// The first run's checks, read by the API for the chat pane and Settings' Things to fix: each row says what is there and what is missing, a missing row names the fix the app runs for it (fix-ids.ts) or says in plain words what happens instead, and no row's words name a command. Every probe is a fixed argv from COMMANDS or a fixed path, each only reports, and nothing comes from a request; a fixture stack runs none and answers its fixture's rows.
+// The first run's checks, read by the API for the chat pane and Settings' Things to fix (the harnesses Alpha runs on have their own cards, harness.ts): each row says what is there and what is missing, a missing row names the fix the app runs for it (fix-ids.ts) or says in plain words what happens instead, and no row's words name a command. Every probe is a fixed argv from COMMANDS or a fixed path, each only reports, and nothing comes from a request; a fixture stack runs none and answers its fixture's rows.
 
 export type Check = {
   action: { id: FixId | "settings"; label: string } | null
@@ -22,30 +22,13 @@ export type Check = {
   status: "MISSING" | "ok" | "optional" | "waiting"
 }
 
-type Tool =
-  | "bun"
-  | "claude"
-  | "claude-codex"
-  | "docker"
-  | "gh"
-  | "git"
-  | "herdr"
-  | "node"
-  | "python3"
-  | "uv"
+type Tool = "bun" | "claude-codex" | "docker" | "gh" | "git" | "herdr" | "node" | "python3" | "uv"
 
 type Action = NonNullable<Check["action"]>
 
 // [tool, required, what it is needed for, the fix that installs it, the note when it is missing]
 const TOOLS: [Tool, boolean, string, Action | null, string][] = [
   ["bun", true, `runs ${site.name}`, null, `Bun is not installed, and ${site.name} runs on it.`],
-  [
-    "claude",
-    true,
-    "every session",
-    { id: "claude", label: "Install Claude Code" },
-    "Claude Code is not installed.",
-  ],
   [
     "claude-codex",
     false,

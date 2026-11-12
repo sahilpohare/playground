@@ -206,3 +206,38 @@ test("the script exits 2 with the reason on stderr", async () => {
   expect(await proc.exited).toBe(2)
   expect(await new Response(proc.stderr).text()).toContain("no-false-green hook refuses")
 })
+
+describe("a git push piped with no pipefail is refused, naming the bare push and its check (#1764)", () => {
+  test.each([
+    { $label: "into grep", command: "git push origin feat-quill-77 | grep error" },
+    { $label: "into tail", command: "git push -u origin feat-quill-77 2>&1 | tail -3" },
+    { $label: "through git -C", command: "git -C /w/wt push origin feat-quill-77 | tail -5" },
+    { $label: "through git -c", command: "git -c push.default=current push | grep -v hint" },
+    { $label: "inside bash -c", command: "bash -c 'git push origin feat-quill-77 | tail'" },
+    { $label: "through run-slot", command: `${slot} git push origin feat-quill-77 | tail` },
+  ])("$label", async ({ command }) => {
+    const reason = await bash(command)
+    expect(reason).toContain("no-false-green hook refuses a git push piped into")
+    expect(reason).toContain("git ls-remote origin refs/heads/<branch>")
+  })
+
+  test.each([
+    { $label: "a bare push", command: "git push origin feat-quill-77" },
+    { $label: "a bare push with its output", command: "git push -u origin feat-quill-77 2>&1" },
+    {
+      $label: "a piped push under pipefail",
+      command: "set -o pipefail; git push origin feat-quill-77 | tail -3",
+    },
+    {
+      $label: "a piped push under pipefail inside bash -c",
+      command: "bash -c 'set -o pipefail; git push origin feat-quill-77 | tail -3'",
+    },
+    {
+      $label: "the check after it, piped",
+      command: "git ls-remote origin refs/heads/feat-quill-77 | cut -f1",
+    },
+    { $label: "another git command piped", command: "git log --oneline | head -3" },
+  ])("allowed: $label", async ({ command }) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+})

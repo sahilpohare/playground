@@ -30,6 +30,7 @@ const AVAILABILITY: Record<Agent["state"], Availability> = {
   down: "down",
   idle: "free",
   "needs-you": "busy",
+  unknown: "busy",
   working: "busy",
 }
 

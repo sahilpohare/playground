@@ -8,6 +8,10 @@ import { leadOf } from "../ops-tick/tick"
 import { writeAtomic } from "../write-atomic"
 
 const LOAD_LINE = 15
+// run-slot.sh's load_line and lifted: single stands lifted once load5 has read under its cap (run-slot.load5-cap's last line while it stands, else 22, 22 at most) for LIFT_HOLD s, from the first of the readings run-slot.under holds no more than LIFT_GAP s apart; a test holds them equal to run-slot.sh's
+export const LOAD_CAP = 22
+export const LIFT_HOLD = 300
+export const LIFT_GAP = 90
 const HOUR = 3_600_000
 // scripts/ops/run-slot.sh's SWITCHES, and the hours one with no expiry line stands from its mtime
 export const SWITCHES = [
@@ -25,16 +29,19 @@ export const SWITCHES = [
 ]
 export const SWITCH_HOURS = 4
 
-// What the last sweep saw, kept in the lead's own state file: the alerts and passed ETAs it printed (a parked row's as `parked <name> <eta>`), the closed and unreadable holds it printed, the queue line, which side of 15 the load was on, whether the single-slot flag was set and when it last listed the switches on.
+// What the last sweep saw, kept in the lead's own state file: the alerts and passed ETAs it printed (a parked row's as `parked <name> <eta>`), the closed and unreadable holds it printed, the queue line, which side of 15 the load was on, which state the single-slot flag was in and when it last listed the switches on.
 type SweepState = {
   alerts: string[]
   etas: string[]
   holds?: string[]
   loadHigh: boolean
   queue: string
-  single: boolean
+  single: Single | boolean
   switchesAt?: number
 }
+
+// The single-slot flag: off, on and holding slots 2 to 4, or on and lifted by the load (issue 1737)
+type Single = "held" | "lifted" | "off"
 
 type Switch = { by: string; name: string; reason: string; set: number; until: number }
 
@@ -43,12 +50,13 @@ export type HoldState = "closed" | "open" | null
 
 type Readings = {
   alerts: unknown
+  cap: number
   holds: Record<string, HoldState>
   load5: number
   now: Date
   queue: unknown
   roster: unknown
-  single: boolean
+  single: Single
   switches: Switch[]
 }
 
@@ -100,7 +108,18 @@ function sweep(
     lines.push(
       `load5 ${r.load5.toFixed(1)}, ${loadHigh ? "at or above" : "back under"} ${LOAD_LINE}`,
     )
-  if (r.single !== (prev?.single ?? false)) lines.push(`single slot: ${r.single ? "on" : "off"}`)
+  // a cursor from before issue 1737 kept the flag as a boolean
+  const was = typeof prev?.single === "string" ? prev.single : prev?.single ? "held" : "off"
+  if (r.single !== was) {
+    const load = `load5 ${r.load5.toFixed(1)}`
+    lines.push(
+      r.single === "off"
+        ? "single slot: off"
+        : r.single === "held"
+          ? `single slot: on, held by load until load5 holds under ${r.cap} for 5 min (${load})`
+          : `single slot: on, lifted under the cap: ${load} has held under ${r.cap} for 5 min`,
+    )
+  }
 
   const agents = listOf(r.roster, "agents") as Row[]
   const mine = agents.filter(
@@ -259,6 +278,33 @@ const switchesOn = (ops: string, now: Date): Switch[] =>
     return s.until > now.getTime() ? [s] : []
   })
 
+// run-slot.sh's load_line: the cap single's lift reads
+const capOf = (ops: string, switches: Switch[]): number => {
+  if (!switches.some((s) => s.name === "run-slot.load5-cap")) return LOAD_CAP
+  try {
+    const last = readFileSync(join(ops, "run-slot.load5-cap"), "utf8").trimEnd().split("\n").at(-1)
+    return last && /^\d{1,3}$/.test(last) ? Math.min(Number(last), LOAD_CAP) : LOAD_CAP
+  } catch {
+    return LOAD_CAP
+  }
+}
+
+// run-slot.sh's lifted, read with no write: whether load5 under the cap has held LIFT_HOLD s from run-slot.under's first second, its last reading no more than LIFT_GAP s back
+const singleOf = (ops: string, on: boolean, cap: number, load5: number, now: Date): Single => {
+  if (!on) return "off"
+  let first = NaN
+  let last = NaN
+  try {
+    const parts = readFileSync(join(ops, "run-slot.under"), "utf8").trim().split(" ")
+    first = Number(parts[0])
+    last = Number(parts[1])
+  } catch {
+    // no reading under the cap yet
+  }
+  const at = now.getTime() / 1000
+  return load5 < cap && at - last <= LIFT_GAP && at - first >= LIFT_HOLD ? "lifted" : "held"
+}
+
 // `playground sweep <lead>`: one read of what changed since that lead's last sweep (and, for ops' lead, each switch on, once an hour), `quiet` when nothing did, its cursor in sweep/<lead>.json in the data folder.
 export async function runSweep(
   lead: string,
@@ -274,7 +320,9 @@ export async function runSweep(
     throw new Error(`playground sweep takes a lead's name (${leads.join(" or ")}), not ${lead}`)
   const statePath = join(dir, "sweep", `${lead}.json`)
   const prev = isState(readJson(statePath))
-  const switches = switchesOn(join(dir, "ops"), now)
+  const ops = join(dir, "ops")
+  const switches = switchesOn(ops, now)
+  const cap = capOf(ops, switches)
   // only the lead's own parked rows' holds are read, and none already known closed
   const agents = listOf(roster, "agents") as Row[]
   const holds: Record<string, HoldState> = {}
@@ -293,12 +341,19 @@ export async function runSweep(
     lead,
     {
       alerts: readJson(join(dir, "ops", "alerts-pending.json")),
+      cap,
       holds,
       load5,
       now,
       queue: readJson(join(dir, "merge-queue.json")),
       roster,
-      single: switches.some((s) => s.name === "run-slot.single"),
+      single: singleOf(
+        ops,
+        switches.some((s) => s.name === "run-slot.single"),
+        cap,
+        load5,
+        now,
+      ),
       switches: lead === opsLead ? switches : [],
     },
     prev,

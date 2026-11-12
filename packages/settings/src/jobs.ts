@@ -173,6 +173,11 @@ export const JOBS: Record<string, Job> = {
     neverPause: true,
     schedule: { every: 300 },
   }),
+  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
+    description:
+      "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
+    schedule: { always: true },
+  }),
   "ops-zai-usage": launchd("ops-zai-usage", {
     description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
     schedule: { every: 300 },
