@@ -6,9 +6,10 @@ import { z } from "zod"
 import { processStarts } from "@/lib/dashboard/peers"
 import { dataDir } from "@/lib/sessions/paths"
 
-// The ops jobs Ops runs as scripts in its own terminals, with no Claude session behind them: each writes a heartbeat, ops/<job>.json under Claude Code's config folder, every beat (atomically, through ops/beat.py), and the dashboard only reads it. The board lists the jobs so what keeps the app running shows even with no runner session up: every ops-*.json there is a job, so a new one shows with no change here, the ops-report job (ops-report.json) among them; report.json and alerts.log beside them are not.
+// The ops jobs Ops runs as scripts in its own terminals, with no Claude session behind them: each writes a heartbeat, ops/<job>.json under Claude Code's config folder, every beat (atomically, through ops/beat.py), and the dashboard only reads it. The board lists the jobs so what keeps the app running shows even with no runner session up: every ops-*.json there is a job, so a new one shows with no change here, the ops-report job (ops-report.json) among them, and so is every job jobs.json lists, whatever its prefix; report.json, alerts.log and any other file no row names are not.
 const HEARTBEAT_FILES = "ops-*.json"
-const JOB_NAME = /^ops-[\w-]+$/
+// A job's name, with or without the ops- prefix, since an org's job may take any name of this shape; it holds no dot or slash, so its <name>.json heartbeat stays in the folder.
+const JOB_NAME = /^[a-z][\w-]*$/
 
 // Ops' list of every job beside the heartbeats: one marked `disabled` is paused on purpose, so the sidebar leaves it out rather than calling it down, a deliberate pause not being a fault; and one listed but never beaten is down.
 export const JOBS_FILE = "jobs.json"
@@ -88,7 +89,7 @@ export type OpsRow = {
   callsModel: boolean
   // the job's last refusal of its config, as its heartbeat's configRefused says, which Settings > Jobs' card shows beside the config; absent while it holds none
   configRefused?: string
-  does: string | null
+  does: string
   job: string
   lastBeatAt: string | null
   model: string | null
@@ -192,7 +193,7 @@ const pidOf = (text: string | null): number | null => {
 
 const jobEntry = z.object({
   callsModel: z.boolean().optional(),
-  description: z.string().min(1).optional(),
+  description: z.unknown().optional(),
   disabled: z.boolean().optional(),
   heartbeat: z.string().optional(),
   model: z.string().optional(),
@@ -207,7 +208,7 @@ const scheduleSchema = z.union([
   z.strictObject({ cron: z.string().min(1) }),
 ])
 
-// Pure: what jobs.json lists, by heartbeat name: the jobs it pauses, the ones it expects to run, each job's callsModel mark with its model, its description and its schedule. Each entry is read on its own, so one off its shape drops alone, and a schedule off its shape drops while its job stays; a file that is missing or does not read lists nothing and pauses nothing.
+// Pure: what jobs.json lists, by heartbeat name: the jobs it pauses, the ones it expects to run, each job's callsModel mark with its model, its description and its schedule. Each entry is read on its own, so one off its shape drops alone, and a description or schedule off its shape drops while its job stays; a file that is missing or does not read lists nothing and pauses nothing.
 export function jobsListed(text: string | null): {
   calls: Map<string, JobCalls>
   descriptions: Map<string, string>
@@ -235,7 +236,8 @@ export function jobsListed(text: string | null): {
       callsModel: parsed.data.callsModel === true,
       model: parsed.data.model ?? null,
     })
-    if (parsed.data.description) descriptions.set(job, parsed.data.description)
+    const description = z.string().min(1).safeParse(parsed.data.description)
+    if (description.success) descriptions.set(job, description.data)
     if (parsed.data.disabled === true) paused.add(job)
     else enabled.push(job)
     const schedule = scheduleSchema.safeParse(parsed.data.schedule)

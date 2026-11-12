@@ -29,6 +29,12 @@ const nodeAtLeast = (version: string): boolean => {
 const TOOLS: [string, boolean, string, string][] = [
   ["bun", true, "curl -fsSL https://bun.sh/install | bash", "runs playground"],
   ["claude", true, "install Claude Code: https://claude.com/claude-code", "every session"],
+  [
+    "claude-codex",
+    false,
+    "curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash",
+    "routes Claude Code to a Codex (ChatGPT) subscription too",
+  ],
   ["docker", false, "install Docker Desktop", "a database in a container; PGlite needs none"],
   ["gh", true, "brew install gh", "clones, PRs and ext sync"],
   ["git", true, "brew install git", "the checkout"],

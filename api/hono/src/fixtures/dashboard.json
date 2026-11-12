@@ -16,6 +16,14 @@
       },
       {
         "action": null,
+        "detail": "installed",
+        "name": "claude-codex",
+        "need": "a Codex (ChatGPT) subscription alongside Claude's",
+        "note": null,
+        "status": "ok"
+      },
+      {
+        "action": null,
         "detail": "28.3.1",
         "name": "docker",
         "need": "a database in a container",
@@ -115,6 +123,14 @@
         "need": "runs Playground",
         "note": null,
         "status": "ok"
+      },
+      {
+        "action": null,
+        "detail": "not found",
+        "name": "claude-codex",
+        "need": "a Codex (ChatGPT) subscription alongside Claude's",
+        "note": "claude-codex is not installed. Only useful with a Codex CLI login too.",
+        "status": "optional"
       },
       {
         "action": {
@@ -3778,6 +3794,14 @@
     "playground/ops/jobs.json": {
       "jobs": [
         {
+          "description": "Sends a digest of the night's merges",
+          "heartbeat": "nightly-digest",
+          "name": "nightly-digest",
+          "schedule": {
+            "cron": "0 6 * * *"
+          }
+        },
+        {
           "heartbeat": "ops-awake",
           "name": "ops-awake",
           "schedule": {
@@ -4453,6 +4477,14 @@
       "lastResult": "ok",
       "pid": 900045,
       "startedAt": "2026-01-01T08:00:00.000Z"
+    },
+    "playground/ops/nightly-digest.json": {
+      "cycleSeconds": 86400,
+      "job": "nightly-digest",
+      "lastBeatAt": "2026-01-01T06:00:00.000Z",
+      "lastResult": "ok",
+      "pid": 900055,
+      "startedAt": "2026-01-01T06:00:00.000Z"
     },
     "playground/ops/ops-merge-watch.json": {
       "cycleSeconds": 3600,
@@ -5516,6 +5548,10 @@
     "900054": {
       "command": "codex --dangerously-bypass-hook-trust resume 0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2c",
       "start": "Thu Jan  1 08:00:00 2026"
+    },
+    "900055": {
+      "command": "python3 ops/loop.py nightly-digest",
+      "start": "Thu Jan  1 06:00:00 2026"
     }
   },
   "pulls": {

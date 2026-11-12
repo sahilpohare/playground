@@ -2,7 +2,7 @@
 const __CHECKOUT = import.meta.dir.slice(0, import.meta.dir.lastIndexOf("/scripts/hooks/bundled"));
 
 // scripts/hooks/no-main-checkout.ts
-import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, realpathSync as realpathSync2, statSync } from "fs";
+import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, realpathSync as realpathSync2 } from "fs";
 import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute4, join as join5, normalize, resolve as resolve4, sep } from "path";
 
 // packages/env/src/aliases.ts
@@ -4906,7 +4906,7 @@ function sessionOf(raw) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
-import { realpathSync } from "fs";
+import { realpathSync, statSync } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename, dirname, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var UNKNOWN = "\x00";
@@ -6388,15 +6388,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
-  const or = env.cwdOr;
+  const lineOr = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
   env.cwdOr = undefined;
   try {
     return await body();
   } finally {
-    const own = env.cwdOr;
-    env.cwdOr = own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or;
+    const scriptOr = env.cwdOr;
+    env.cwdOr = scriptOr && scriptOr.orChain === undefined ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope } : lineOr;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -6456,7 +6456,7 @@ async function cdTarget(name, args, env) {
 async function folder(path) {
   if (!path)
     return;
-  return await isFolder(path) ? path : undefined;
+  return isFolder(path) ? path : undefined;
 }
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -6536,7 +6536,7 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   const chained = cmd.chained && !negated(cmd);
-  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || await isFolder(paths[0]))) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
@@ -6551,7 +6551,7 @@ async function chdirTo(name, cmd, parsed, env) {
   }
   env.cwdSure = undefined;
   env.cwdOr = undefined;
-  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
+  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || paths.every(isFolder));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
@@ -6607,9 +6607,9 @@ function keep(folders, env) {
   env.cwdUnread = true;
   return folders.slice(0, MAX_FOLDERS);
 }
-async function isFolder(path) {
+function isFolder(path) {
   try {
-    return (await Bun.file(path).stat()).isDirectory();
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -7502,15 +7502,8 @@ function inWorktree(path, worktrees) {
   if (!path.startsWith(worktrees))
     return false;
   const tree = join5(worktrees, path.slice(worktrees.length).split(sep)[0]);
-  return existsSync2(join5(tree, ".git")) || !isFolder2(tree);
+  return existsSync2(join5(tree, ".git")) || !isFolder(tree);
 }
-var isFolder2 = (path) => {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-};
 function real(path) {
   const found = resolved(path);
   if (found !== undefined || !isAbsolute4(path))
@@ -7628,14 +7621,9 @@ function bunCall(args, env) {
 var landing = (word, env, from) => {
   if (!word || pathOf(word, { ...env, cwd: from }) === undefined)
     return;
-  const path = isAbsolute4(word.value) ? word.value : `${from}${sep}${word.value}`;
-  try {
-    return realpathSync2.native(path);
-  } catch {
-    return real(resolve4(path));
-  }
+  return kernelPath(word, from, real(resolve4(from ?? "", word.value)));
 };
-function gitCall(args, env) {
+function gitCall(args, env, local) {
   let cwd = env.cwd;
   let gitDir;
   let workTree;
@@ -7658,9 +7646,25 @@ function gitCall(args, env) {
     } else if (GIT_TAKES.has(v))
       k++;
   }
-  const repo = gitDir?.replace(/\/+$/, "");
-  const tree = repo?.endsWith(`${sep}.git`) ? dirname2(repo) : workTree ?? cwd;
-  return { cwd: tree, rest: args.slice(k + 1).map((a) => a.value), sub: args[k]?.value };
+  const checkout = (dir) => {
+    const repo = dir?.replace(/\/+$/, "");
+    return repo?.endsWith(`${sep}.git`) ? dirname2(repo) : undefined;
+  };
+  const also = [];
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const set = local?.get(key) ?? env.vars.get(key);
+    if (!set || set.value === "")
+      continue;
+    const word = { ...set, quoted: true };
+    const at = unreadWord(word) ? undefined : landing(word, env, cwd);
+    also.push(key === "GIT_DIR" ? checkout(at) ?? at : at);
+  }
+  return {
+    also,
+    cwd: checkout(gitDir) ?? workTree ?? cwd,
+    rest: args.slice(k + 1).map((a) => a.value),
+    sub: args[k]?.value
+  };
 }
 var GIT_MOVES = new Set([
   "am",
@@ -7681,10 +7685,10 @@ var APPLY_READS = new Set(["--check", "--numstat", "--stat", "--summary"]);
 var STEP_FIVE = /^(?:-q |--quiet )?--ff-only (?:-q |--quiet )?origin\/main$/;
 var GIT_FIX = `it moves the HEAD, index or files of the main checkout, which every installed skill, hook and ops job runs from. Name your own tree on every git call, git -C <your worktree> ..., after git -C <your worktree> rev-parse --show-toplevel names it; the main checkout moves only by the release skill's step 5, git -C <main checkout> fetch -q origin main && git -C <main checkout> merge --ff-only -q origin/main, a stray local commit on its main goes by git -C <main checkout> reset --keep origin/main while its tree is clean, and a worktree is made by absolute path under the main checkout's .claude/worktrees/, so it nests in no other worktree, by git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" -b <branch> origin/canary.`;
 var LIVE_FIX = "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each canary head, and a change it needs goes through a PR into canary.";
-function liveWrite(args, env) {
-  const { cwd, rest, sub } = gitCall(args, env);
+function liveWrite(args, env, local) {
+  const { also, cwd, rest, sub } = gitCall(args, env, local);
   if (sub && (sub === "commit" || sub === "merge" || gitMoves(sub, rest)))
-    return { cwd, what: `git ${sub}` };
+    return { also, cwd, what: `git ${sub}` };
 }
 async function liveWriter(raw, environment) {
   try {
@@ -7824,12 +7828,12 @@ function runs(name, args, local, env) {
       return { cwd: cwdFlag(args, env), what: `${name} ${tool}` };
   }
   if (name === "git") {
-    const { cwd, rest, sub } = gitCall(args, env);
+    const { also, cwd, rest, sub } = gitCall(args, env, local);
     if (sub === "commit")
-      return { cwd, what: "git commit, which runs lefthook's pre-commit" };
+      return { also, cwd, what: "git commit, which runs lefthook's pre-commit" };
     if (keepReset(sub, rest, cwd))
       return;
-    return sub && gitMoves(sub, rest) ? { cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined;
+    return sub && gitMoves(sub, rest) ? { also, cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined;
   }
   if (name !== "bun")
     return;
@@ -8006,9 +8010,11 @@ async function inspect(raw, environment, main) {
     return live !== undefined && path !== undefined && (path === live || path.startsWith(live + sep));
   };
   let writer;
-  const liveRefusal = async (args, env, lands, fix) => {
-    const move = liveWrite(args, env);
-    if (!move || !lands(move.cwd) || await (writer ??= liveWriter(raw, environment)))
+  const liveRefusal = async (args, local, env, lands, fix) => {
+    const move = liveWrite(args, env, local);
+    if (!move || !(ranIn(move.cwd, move.also).some(lands) || unreadFolder(move.also)))
+      return;
+    if (await (writer ??= liveWriter(raw, environment)))
       return;
     return refuse(`${move.what} in the live Dashboard's checkout`, fix);
   };
@@ -8058,7 +8064,7 @@ async function inspect(raw, environment, main) {
       });
       if (blindWrite)
         return refuse(`a write to ${blindWrite.value}`, ANYWHERE_FIX);
-      const blindLive = name === "git" ? await liveRefusal(args, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX) : undefined;
+      const blindLive = name === "git" ? await liveRefusal(args, local, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX) : undefined;
       if (blindLive)
         return blindLive;
     }
@@ -8078,7 +8084,7 @@ async function inspect(raw, environment, main) {
       const ran = runs(name, args, local, here);
       if (ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)))
         return refuse(ran.what, fixFor2(sure, ran.fix));
-      const moved = name === "git" ? await liveRefusal(args, here, inLive, fixFor2(sure, LIVE_FIX)) : undefined;
+      const moved = name === "git" ? await liveRefusal(args, local, here, inLive, fixFor2(sure, LIVE_FIX)) : undefined;
       if (moved)
         return moved;
       const wrote = writeTargets(cmd, name, args).find((t) => inMain(pathOf(t, here)));

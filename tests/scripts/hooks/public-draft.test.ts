@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { TODAY_PUBLIC } from "../../../packages/scripts/src/trace-count/kinds"
+import { UNSET_REPOS } from "../../../packages/scripts/src/trace-count/kinds"
 import { FIGURE, publicDraftHit, publicRefusal } from "../../../scripts/hooks/public-draft"
 import { storeWith } from "./render-set"
 
@@ -118,13 +118,14 @@ describe("publicDraftHit", () => {
     expect(await hit(OWN_WORDS)).toEqual({})
   })
 
-  test("with factory.publicRepo unset, its default still names the factory's own repository", async () => {
+  test("with factory.publicRepo unset, its default names the checkout's own origin", async () => {
     const unset = join(scratch, "unset")
     storeWith(unset, {
       "no-public-leak.json": JSON.stringify(PUBLIC),
       "playground-terms.json": JSON.stringify(terms),
     })
-    for (const repo of TODAY_PUBLIC) {
+    expect(UNSET_REPOS.public).toHaveLength(1)
+    for (const repo of UNSET_REPOS.public) {
       const checked = await publicDraftHit(
         `The code is in ${repo}.`,
         { PLAYGROUND_DATA_DIR: unset },

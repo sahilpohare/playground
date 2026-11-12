@@ -224,7 +224,8 @@
   under the collapsed label (`scriptsShown` in `web/next/src/lib/ops.ts`; its open state lives in `DashboardProvider`, as Other's does, kept across reloads as every group's is).
   On the collapsed rail the group is one icon (`scriptsRail`), red while any script it lists is failing or down, its tooltip the label's count and how many are failing or down; a click opens the sidebar on the scripts.
   They are read by `GET /api/v1/ops` from the heartbeat each writes to `~/.playground/ops/<job>.json` (`api/hono/src/lib/dashboard/ops.ts`, zod-checked, read-only): every `ops-*.json` there is a job, so a new one (ops-report, ops-sweep) shows with no code change,
-  while `report.json` and `alerts.log` beside them are not jobs, which is why they show in no runner row.
+  and so is every job `jobs.json` lists, an org's job without the `ops-` prefix included (`JOB_NAME`),
+  while `report.json`, `alerts.log` and any other file no `jobs.json` row names are not jobs, which is why they show in no runner row.
   Ops' `playground/ops/jobs.json` beside them lists every job, each with its `schedule` (`{"every": <seconds>}`, `{"cron": "<5 fields>"}` or `{"always": true}`): one it marks `disabled` is paused and left out of the sidebar (`shownOps`, since a listed job that cannot run reads as down), a row still, heartbeat or not,
   so the System page's Paused table holds it, and one it expects to run with no heartbeat file reads as Down; a Down job's mark is red, since a listed job should be running.
   Each row has two lines: its plain name (`RUNNER_NAMES` for a job core's registry holds, else its id without `ops-`, in words) truncates on its first line, and its second is `SecondLine`, its state `Script · <state>` never cut, red while it is failing or down and muted while it is running or waiting:

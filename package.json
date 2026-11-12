@@ -72,8 +72,7 @@
     "trace-count": "bun packages/scripts/src/trace-count/cli.ts",
     "vendor:upstream": "bun packages/scripts/src/vendor-upstream/cli.ts",
     "verify": "bun packages/scripts/src/verify/prebuild.ts && bun packages/scripts/src/verify/cli.ts",
-    "wa": "bun --no-env-file packages/scripts/src/wa/cli.ts",
-    "wispr:latest": "bun packages/scripts/src/wispr/latest.ts"
+    "wa": "bun --no-env-file packages/scripts/src/wa/cli.ts"
   },
   "devDependencies": {
     "@babel/core": "catalog:",

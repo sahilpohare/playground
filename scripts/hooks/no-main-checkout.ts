@@ -1,5 +1,5 @@
 // PreToolUse hook: refuses a build, a test run, lefthook, turbo (but for the packages build a pull needs, run with env validation off), a git command that moves HEAD, the index or the files (but for the release skill's step 5 fast-forward and the keep reset off a stray local commit; a worker's hard reset there ran another branch's code under every hook for 3.5 minutes) or a file write (a Bash command's, or a Write, Edit, MultiEdit or NotebookEdit), run-slot.sh's command read as typed bare, in the main checkout, which every installed skill follows and so stays clean (a reviewer's `lefthook run pre-commit` from the Bash tool's default cwd rebuilt packages' dist and wrote .turbo/runs there). It also refuses a git write in the live Dashboard's checkout to every factory session but its runner and the ops lead, since that checkout serves the owner's Dashboard.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path"
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
@@ -13,6 +13,8 @@ import {
   type Env,
   examine,
   GIT_TAKES,
+  isFolder,
+  kernelPath,
   knownVariables,
   lex,
   marked,
@@ -25,6 +27,7 @@ import {
   stdinOf,
   stdinShell,
   type Text,
+  unreadWord,
   type Visit,
   type Word,
 } from "./shell"
@@ -80,14 +83,6 @@ function inWorktree(path: string, worktrees: string): boolean {
   if (!path.startsWith(worktrees)) return false
   const tree = join(worktrees, path.slice(worktrees.length).split(sep)[0])
   return existsSync(join(tree, ".git")) || !isFolder(tree)
-}
-
-const isFolder = (path: string): boolean => {
-  try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
-  }
 }
 
 // A path with its nearest existing folder's links followed, so a write through a link into the checkout (link-skills' ~/.claude/skills) is judged where it lands.
@@ -245,19 +240,21 @@ export function bunCall(
 // Where git lands on a path, read as the kernel reads it: a link is followed before a `..` after it, so `<link>/..` is the folder above the link's target; a path that is not there yet is read by real().
 const landing = (word: Word | undefined, env: Env, from: string | undefined) => {
   if (!word || pathOf(word, { ...env, cwd: from }) === undefined) return undefined
-  const path = isAbsolute(word.value) ? word.value : `${from}${sep}${word.value}`
-  try {
-    return realpathSync.native(path)
-  } catch {
-    return real(resolve(path))
-  }
+  return kernelPath(word, from, real(resolve(from ?? "", word.value)))
 }
 
 // git's subcommand and its words, and the tree it acts on: the checkout a --git-dir of `<checkout>/.git` names, whose HEAD and index move, else its --work-tree, else the folder its -C options name (each from where the one before lands, by landing()); each counts only before the subcommand.
+// `also` holds the trees GIT_DIR and GIT_WORK_TREE name, read the same way from where the -C options land, from the call's own assignments and env wrapper (`local`) or the line's earlier ones; a value the hook cannot read is undefined there, since it may name any tree.
 export function gitCall(
   args: Word[],
   env: Env,
-): { cwd: string | undefined; rest: string[]; sub: string | undefined } {
+  local?: Map<string, Text>,
+): {
+  also: (string | undefined)[]
+  cwd: string | undefined
+  rest: string[]
+  sub: string | undefined
+} {
   let cwd = env.cwd
   let gitDir: string | undefined
   let workTree: string | undefined
@@ -279,9 +276,24 @@ export function gitCall(
       workTree = landing(word, env, cwd)
     } else if (GIT_TAKES.has(v)) k++
   }
-  const repo = gitDir?.replace(/\/+$/, "")
-  const tree = repo?.endsWith(`${sep}.git`) ? dirname(repo) : (workTree ?? cwd)
-  return { cwd: tree, rest: args.slice(k + 1).map((a) => a.value), sub: args[k]?.value }
+  const checkout = (dir: string | undefined) => {
+    const repo = dir?.replace(/\/+$/, "")
+    return repo?.endsWith(`${sep}.git`) ? dirname(repo) : undefined
+  }
+  const also: (string | undefined)[] = []
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const set = local?.get(key) ?? env.vars.get(key)
+    if (!set || set.value === "") continue
+    const word = { ...set, quoted: true }
+    const at = unreadWord(word) ? undefined : landing(word, env, cwd)
+    also.push(key === "GIT_DIR" ? (checkout(at) ?? at) : at)
+  }
+  return {
+    also,
+    cwd: checkout(gitDir) ?? workTree ?? cwd,
+    rest: args.slice(k + 1).map((a) => a.value),
+    sub: args[k]?.value,
+  }
 }
 
 // these subcommands move HEAD, the index or the files, whatever their words
@@ -310,10 +322,14 @@ const LIVE_FIX =
   "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each canary head, and a change it needs goes through a PR into canary."
 
 // A git call that writes the live Dashboard's checkout: a commit, or any move gitMoves reads, every merge and reset included, since step 5 and the keep reset are the main checkout's own.
-function liveWrite(args: Word[], env: Env): { cwd: string | undefined; what: string } | undefined {
-  const { cwd, rest, sub } = gitCall(args, env)
+function liveWrite(
+  args: Word[],
+  env: Env,
+  local: Map<string, Text>,
+): { also: (string | undefined)[]; cwd: string | undefined; what: string } | undefined {
+  const { also, cwd, rest, sub } = gitCall(args, env, local)
   if (sub && (sub === "commit" || sub === "merge" || gitMoves(sub, rest)))
-    return { cwd, what: `git ${sub}` }
+    return { also, cwd, what: `git ${sub}` }
 }
 
 // Whether a session writes the live Dashboard's checkout by its role: the runner holding it, or the ops lead, whose name in Claude Code's registry has the roster's ops kind; a read that throws (no registry folder) names no writer, so check()'s fail-open never lets the call through.
@@ -481,10 +497,10 @@ function runs(
     if (tool) return { cwd: cwdFlag(args, env), what: `${name} ${tool}` }
   }
   if (name === "git") {
-    const { cwd, rest, sub } = gitCall(args, env)
-    if (sub === "commit") return { cwd, what: "git commit, which runs lefthook's pre-commit" }
+    const { also, cwd, rest, sub } = gitCall(args, env, local)
+    if (sub === "commit") return { also, cwd, what: "git commit, which runs lefthook's pre-commit" }
     if (keepReset(sub, rest, cwd)) return
-    return sub && gitMoves(sub, rest) ? { cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined
+    return sub && gitMoves(sub, rest) ? { also, cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined
   }
   if (name !== "bun") return
   const { at, chained, cwd, filtered, sub, words } = bunCall(args, env)
@@ -693,15 +709,17 @@ async function inspect(raw: string, environment: Record<string, string | undefin
     )
   }
   let writer: Promise<boolean> | undefined
-  // a git write whose tree lands in the live checkout, by the caller's test of its tree, refused unless the session writes it
+  // a git write whose tree lands in the live checkout, by the caller's test of its trees, or that a GIT_DIR or GIT_WORK_TREE the hook cannot read may land anywhere, refused unless the session writes it
   const liveRefusal = async (
     args: Word[],
+    local: Map<string, Text>,
     env: Env,
     lands: (cwd: string | undefined) => boolean,
     fix: string,
   ) => {
-    const move = liveWrite(args, env)
-    if (!move || !lands(move.cwd) || (await (writer ??= liveWriter(raw, environment)))) return
+    const move = liveWrite(args, env, local)
+    if (!move || !(ranIn(move.cwd, move.also).some(lands) || unreadFolder(move.also))) return
+    if (await (writer ??= liveWriter(raw, environment))) return
     return refuse(`${move.what} in the live Dashboard's checkout`, fix)
   }
   const file = typeof tool === "string" ? input[FILE_TOOLS[tool]] : undefined
@@ -755,7 +773,13 @@ async function inspect(raw: string, environment: Record<string, string | undefin
       if (blindWrite) return refuse(`a write to ${blindWrite.value}`, ANYWHERE_FIX)
       const blindLive =
         name === "git"
-          ? await liveRefusal(args, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX)
+          ? await liveRefusal(
+              args,
+              local,
+              blind,
+              (cwd) => cwd === undefined || inLive(cwd),
+              ANYWHERE_FIX,
+            )
           : undefined
       if (blindLive) return blindLive
     }
@@ -780,7 +804,9 @@ async function inspect(raw: string, environment: Record<string, string | undefin
       if (ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)))
         return refuse(ran.what, fixFor(sure, ran.fix))
       const moved =
-        name === "git" ? await liveRefusal(args, here, inLive, fixFor(sure, LIVE_FIX)) : undefined
+        name === "git"
+          ? await liveRefusal(args, local, here, inLive, fixFor(sure, LIVE_FIX))
+          : undefined
       if (moved) return moved
       const wrote = writeTargets(cmd, name, args).find((t) => inMain(pathOf(t, here)))
       if (wrote) return refuse(`a write to ${pathOf(wrote, here)}`, fixFor(sure))

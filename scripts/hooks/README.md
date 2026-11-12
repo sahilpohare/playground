@@ -149,11 +149,11 @@ Done when your plan names the hook script, whether it is on `origin/main`, and t
   The commands after that run keep both where the `||` follows the `cd` itself (`cd <path> || echo no; git commit -m x`), and go back to the folder the `cd` named where it follows a later command of the run, or runs an `exit` in the line's own shell, which ends the line where the `cd` failed (`cd <path> || exit; git commit -m x` runs).
   A `return` there keeps both folders, since `bash -c` fails a top-level `return` and carries on (`cd <path> || return; git commit -m x`, refused from the main checkout).
   An `exit` in a subshell or a pipeline ends that alone, a brace group piped on included, so the line keeps both folders after it (`cd <path> || (exit); …`, `cd <path> || exit | cat; …`, `cd <path> || { exit; } | cat; …`).
-  A `cd -P` takes the folder the kernel lands in, each link followed before a `..` after it, where a plain `cd` folds the `..` by text (`cd -P <link>/..`); any `-P` among a `cd`'s or `pushd`'s options counts, whatever else is there (`-qP`, `-PL`, `-P -L`), since zsh lands physical for each.
   A `!` in front of the `cd` keeps the folders from before it from the start, since it turns the `cd`'s own failure into success and the run carries on with the shell where it was (`! cd <path> && git commit -m x`); an even count of them reads as none.
   A script a command reads (`sh -c`, `eval`, `source`) reads with no run of the line's, since every command in it runs because that command ran; what the script's own trailing run leaves joins the line's on the way out, under the reading command's run,
   since a `cd` an `&&` made sure at the end of an `eval` or a `source` may not have run either (`eval 'true && cd <path>'; git commit -m x`, refused in both folders).
   A sure `cd` the script ends on is the line's for an `||` after the reading command (`eval 'cd <path>' || git commit -m x`, refused from the main checkout).
+- A `cd -P` takes the folder the kernel lands in, each link followed before a `..` after it, where a plain `cd` folds the `..` by text (`cd -P <link>/..`); any `-P` among a `cd`'s or `pushd`'s options counts, whatever else is there (`-qP`, `-PL`, `-P -L`), since zsh lands physical for each.
 - Every other `cd` leaves `Env.cwdSure` unnamed and keeps each folder the shell may be in: the folder before it, and each folder its target names, read against every folder the shell may already be in (`Env.cwdMaybe`).
   A relative target that climbs adds every folder above it wherever the shell may run that `cd` more than once: under a count (`repeat`, `timeout`), in a loop's body, between a loop's head and its `do` (a `while`'s or `until`'s condition, the body of zsh's short `for`, `select` and `foreach`), in a function's body, and in the script an `eval` or a `source` reads in such a place.
   A function's body, a brace group or any compound (`f() if …; fi`), runs once when the line names the function just twice, by its definition and one call outside every loop and body, a redirect's target being a file rather than a call.
@@ -486,9 +486,20 @@ Done when your plan names the hook script, whether it is on `origin/main`, and t
   and `settings import-jobs` but its `--dry-run`, which writes a `jobs.<name>` for each job its file lists,
   whose refusal names the Inbox guard decision whose Approve writes it.
   A test holds that list to every key a hook names, to `ext.order`, which orders the extensions every guard reads, and to spawn.sh's `paths.codeRoot`; spawn.sh's `gates.*` stay open, as capacity tuning Ops adjusts in normal upkeep.
+  Two of them only tune a number, so the Ops lead sets them as it sets spawn.sh's `gates.*`, on a line that holds the `playground` call alone.
+  The Ops lead is `opsLead` in `role.ts`: the lead role, whose name in Claude Code's registry has the roster's `ops` kind.
+  It sets `glm.readOnlyLoad5` to a positive number.
+  It sets a `jobs.<name>` whose new row equals the row the login's scope stores (`{}` when it stores none), field for field, but a `schedule` of `{"every": <positive integer>}`.
+  That needs the job's rendered row (`policy.json`'s, else the registry's entry) to run on an interval already.
+  A set replaces the stored row, and the render reads each field it leaves out from the registry's entry, since a job's setting merges over it.
+  So the hook compares the stored row, never the rendered one, whose copy would pin the registry's fields.
+  A row that drops a field, turns a job on or off, moves its command, program or folder, or changes a `config` number stays the owner's.
+  So do a reset, `import-jobs`, a `--scope`, a job another scope stores a row for or any scope stores under an old name, and a job neither `policy.json` nor the registry holds.
+  So do an `always` schedule, and a login, `settings.json` or `policy.json` that does not read.
+  A line holding more than the call (an assignment, `export`, `env`, wrapper, group, substitution or second command) tunes nothing, since `PLAYGROUND_LOGIN` or the data folder set there would move the write to another scope than the one the hook reads.
   A command, verb, kind or key word it cannot read, or any such word among the words of `ext put` or `settings set` or `reset`, counts as the write.
   `ext put` of a doc, a rule or any other reviewed kind, every read, `ext score` and `reject`, a score of 5 included, which accepts the proposal itself (`judgeItem` in `packages/settings/src/items.ts`) with no `accept` card after it, `settings set` of any other key, `settings import-jobs --dry-run` and writes elsewhere in the data folder (handoffs, the roster) run.
-  Its refusal names the one route: the owner types the command as a `!` command in the dispatcher's terminal window, which runs without hooks and which the dispatcher hands the owner when a session tells its lead; no flag, environment variable, role or note in a session's own call frees it.
+  Its refusal names the one route: the owner types the command as a `!` command in the dispatcher's terminal window, which runs without hooks and which the dispatcher hands the owner when a session tells its lead; no flag, environment variable, role or note in a session's own call frees it, the Ops lead's two tuning sets above alone running.
   A `settings set` or `reset` of `owner.names` or `factory.archiveRepo` with no `--scope` names Privacy on the Dashboard's Settings page instead, which saves both at your login's scope: the dispatcher asks the owner to save it there.
   An accept's refusal names its own route: the session posts an `accept` decision with `playground ask new` (`.agents/dashboard/asks.md`), and the owner's Approve has the Dashboard run the accept with no role.
   The CLI refuses an accept with a role set too, for a caller no hook reads (a script run by its path, an ops job), naming the same decision.
@@ -683,7 +694,7 @@ Done when your plan names the hook script, whether it is on `origin/main`, and t
 ## no-public-leak
 
 - ALWAYS: Write each public repository's pull requests, issues, reviews and comments in plain words, naming no person, company or private record, since everything written there is public once the repository is and stays cached after.
-  `scripts/hooks/no-public-leak.ts`, run on Bash by [guards](#guards) and registered in both settings files on the GitHub MCP tools, refuses a write to a public repository (`factory.publicRepo`, one or a list, or while unset `TODAY_PUBLIC` in trace-count's `kinds.ts`, the factory's and Yard's)
+  `scripts/hooks/no-public-leak.ts`, run on Bash by [guards](#guards) and registered in both settings files on the GitHub MCP tools, refuses a write to a public repository (`factory.publicRepo`, one or a list, or while unset the main checkout's origin, as trace-count's `kinds.ts` reads it)
   whose text holds a name, a handle, a company term, a Slack id or a Linear key from its list, or any email address or link into the archive repository (`factory.archiveRepo`).
   An extensions root whose policy.json it cannot read for those two refuses the write, as a list it cannot trust does.
   Its reason names the kind and the plain-words fix, never the text.
@@ -771,6 +782,7 @@ Done when your plan names the hook script, whether it is on `origin/main`, and t
   A command run through `run-slot.sh`, typed bare or as a shell's script (`bash <path>/run-slot.sh <who> -- <command>`, `shellSlot`), is read as the words after its `--` (`slotWords` in `scripts/hooks/shell.ts`, which no-glm-heavy-path and no-false-green read it by too), so a commit, a build or a write through run-slot is refused as the same command typed bare.
   It refuses a git move there too: `add` (but `-n` or `--dry-run`), `am`, `apply` (but `--check`, `--numstat`, `--stat` or `--summary` without `--apply`), `bisect`, `branch -f`, `checkout`, `cherry-pick`, `clean` (but `-n`), `merge`, `mv`, `pull`, `rebase`, `reset` (but the one below), `restore`, `revert`, `rm`, `stash` (but `list` and `show`), `switch` and `update-ref`,
   whose tree it reads from a `--git-dir` of `<checkout>/.git`, else `--work-tree`, else the cwd after every `-C` in turn, each read where git lands (`landing`), naming the fix: `git -C <your worktree>`, after `git -C <your worktree> rev-parse --show-toplevel` names it.
+  It judges the trees `GIT_DIR` and `GIT_WORK_TREE` name beside that one, read the same way from where the `-C` options land, whether set for the call, through `env` or earlier on the line (`GIT_DIR=<main>/.git git commit`, `export GIT_WORK_TREE=<main>; git reset --hard`), and refuses a value it cannot read, since it may name any tree.
   It finds the subcommand past git's other options through `GIT_TAKES` in `scripts/hooks/shell.ts`, as [no-playground-leak](#no-playground-leak) does, so `git --attr-source HEAD checkout <ref>` reads as a checkout.
   The one reset it lets through is exactly `git reset --keep origin/main`, on the main checkout's `main`, while `git status --porcelain` is empty and no remote-tracking ref holds any commit of `origin/main..main`.
   It is the way back from a stray local commit there, which `playground update`'s fast-forward stops on, since `--keep` keeps uncommitted work and the check keeps every commit someone else holds.
@@ -801,7 +813,7 @@ Done when your plan names the hook script, whether it is on `origin/main`, and t
   A ship's pull is a fast-forward and runs no pre-commit, and the step's test is in `tests/lefthook.test.ts`.
 - The same hook keeps the live Dashboard's checkout to the sessions that own it: a git write there (a commit, a merge, a reset and every other git move above, step 5's fast-forward and the keep reset included, since those two are the main checkout's own) is refused to every factory session but the runner that holds it, by `PLAYGROUND_ROLE` `runner`, and the ops lead,
   a `lead` whose name in Claude Code's registry has the roster's `ops` kind, naming the route: ask Ops.
-  The live checkout is the worktree of the main checkout's repository on the branch `live.branch` names (`liveCheckout`, read from `.git/worktrees`), judged by the same folder reading as the main checkout: the cwd, `git -C`, `--git-dir`, `--work-tree`, run-slot and a shell's script.
+  The live checkout is the worktree of the main checkout's repository on the branch `live.branch` names (`liveCheckout`, read from `.git/worktrees`), judged by the same folder reading as the main checkout: the cwd, `git -C`, `--git-dir`, `--work-tree`, `GIT_DIR`, `GIT_WORK_TREE`, run-slot and a shell's script.
   Reads there (`status`, `log`, `diff`, `fetch`) run for every session, and so does every write outside it.
   The ops-dashboard supervisor's roll and `playground update`'s pull are shell processes that no Claude Code hook sees, so they move the checkout as before.
   Its tests are in `bun run test:file tests/scripts/hooks/no-main-checkout.test.ts`.

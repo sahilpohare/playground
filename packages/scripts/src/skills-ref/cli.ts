@@ -17,8 +17,9 @@ export const CLAUDE_CODE_KEYS = [
   "user-invocable",
 ]
 
-// ZeroStarter's own keys on the skills its bucket syncs from upstream, which a local edit would lose at the next sync.
+// Upstream's own keys on the skills synced or vendored from it, which a local edit would lose at the next sync: ZeroStarter's bucket, and impeccable in core.
 export const UPSTREAM_KEYS: [RegExp, string[]][] = [
+  [/^extensions\/core\/skills\/impeccable\//, ["version"]],
   [/^skills\/zerostarter\//, ["files", "hidden", "source"]],
 ]
 

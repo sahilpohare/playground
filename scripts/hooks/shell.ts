@@ -1,6 +1,6 @@
 // The Bash reader the PreToolUse hooks share: it lexes a command and walks it as the shell would run it, reading the heredocs, files and substitutions it can see and marking the rest unknown.
 import { AsyncLocalStorage } from "node:async_hooks"
-import { realpathSync } from "node:fs"
+import { realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
@@ -1831,7 +1831,7 @@ async function nested<T>(cmd: Command, env: Env, body: () => Promise<T>): Promis
   const chain = env.cwdChain
   const token = env.cwdChainToken
   // the script's commands carry runs of their own, so a cd's `||` the line holds stays where it was until the line's next command, and a sure cd the script ends on is the line's, under the reading command's run
-  const or = env.cwdOr
+  const lineOr = env.cwdOr
   env.cwdChain = []
   env.cwdChainToken = undefined
   env.cwdOr = undefined
@@ -1839,9 +1839,11 @@ async function nested<T>(cmd: Command, env: Env, body: () => Promise<T>): Promis
     return await body()
   } finally {
     // the body moved it, which the narrowing after `env.cwdOr = undefined` above cannot see
-    const own = env.cwdOr as CdOr | undefined
+    const scriptOr = env.cwdOr as CdOr | undefined
     env.cwdOr =
-      own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or
+      scriptOr && scriptOr.orChain === undefined
+        ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope }
+        : lineOr
     const left = [...new Set([...(chain ?? []), ...(env.cwdChain ?? [])])]
     env.cwdChain = keep(left, env)
     env.cwdChainToken = left.length > 0 ? (chain?.length ? token : cmd.chain) : undefined
@@ -1947,7 +1949,7 @@ async function cdTarget(name: string, args: Word[], env: Env): Promise<string | 
 
 async function folder(path: string | undefined): Promise<string | undefined> {
   if (!path) return undefined
-  return (await isFolder(path)) ? path : undefined
+  return isFolder(path) ? path : undefined
 }
 
 // Where a cd or pushd may leave the shell: each folder its own words name, whether its target names a folder the reader cannot read at all, and `back` for a form that returns to a folder the line named before, so every one of those is a candidate too. `cd -` and a bare `pushd` are such forms, and so is zsh's two-operand cd, which replaces part of the path the shell is in: its operands go in as candidates, since one of them is the folder a one-operand reading would reach. A bare `pushd` takes the home as well, which zsh's PUSHD_TO_HOME makes it reach.
@@ -1992,8 +1994,8 @@ function cdTargets(name: string, cmd: Command, parsed: Parsed, env: Env, from: s
 const physicalCd = (args: Word[]): boolean =>
   args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"))
 
-// Where a physical cd from `base` lands on a word it has read as `lexical`: the kernel's path, each link followed, else `lexical` when it is not there
-function kernelPath(word: Word, base: string | undefined, lexical: string): string {
+// Where a physical cd from `base` lands on a word it has read as `lexical`, as git's -C lands too: the kernel's path, each link followed, else `lexical` when it is not there
+export function kernelPath(word: Word, base: string | undefined, lexical: string): string {
   try {
     return realpathSync.native(isAbsolute(word.value) ? word.value : `${base}/${word.value}`)
   } catch {
@@ -2053,12 +2055,7 @@ async function chdirTo(name: string, cmd: Command, parsed: Parsed, env: Env): Pr
   }
   // a cd an `&&` joins to what follows needs no folder there to read: one into a folder that is not there fails, and then nothing the chain joins after it runs
   const chained = cmd.chained && !negated(cmd)
-  if (
-    sureToRun(cmd, parsed) &&
-    !unread &&
-    paths.length === 1 &&
-    (chained || (await isFolder(paths[0])))
-  ) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0]
     env.cwdMaybe = []
     env.cwdUnread = false
@@ -2079,7 +2076,7 @@ async function chdirTo(name: string, cmd: Command, parsed: Parsed, env: Env): Pr
     !unread &&
     !move.back &&
     paths.length > 0 &&
-    (chained || (await Promise.all(paths.map(isFolder))).every(Boolean))
+    (chained || paths.every(isFolder))
   // a form that returns to a folder the line named before takes every one of them, since the reader cannot tell which the shell goes back to
   env.cwdMaybe = keep([...new Set([...(move.back ? back : behind ? [] : from), ...paths])], env)
   env.cwdUnread = env.cwdUnread || unread || (from.length === 0 && paths.length === 0)
@@ -2160,9 +2157,9 @@ function keep(folders: string[], env: Env): string[] {
   return folders.slice(0, MAX_FOLDERS)
 }
 
-async function isFolder(path: string): Promise<boolean> {
+export function isFolder(path: string): boolean {
   try {
-    return (await Bun.file(path).stat()).isDirectory()
+    return statSync(path).isDirectory()
   } catch {
     return false
   }

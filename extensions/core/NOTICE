@@ -1,10 +1,17 @@
 Playground core
 
-Everything in this folder is Playground's own, covered by the repository's NOTICE, except the ten upstream skills below.
+Everything in this folder is Playground's own, covered by the repository's NOTICE, except the twelve upstream skills below.
 
 Upstream skills
 
-code-review, codebase-design, diagnosing-bugs, domain-modeling, handoff, pr, research, tdd, to-spec and writing-for-agents come from mattpocock/skills, by Matt Pocock, at the commit upstream/SOURCE names.
-Nine are copied byte for byte, upstream/MANIFEST holding each file's sha; pr is upstream's text with a TL;DR block and a Links block added.
-They are used under the MIT License, whose full text is upstream/LICENSE.
+code-review, codebase-design, diagnosing-bugs, domain-modeling, handoff, pr, research, tdd, to-spec and writing-for-agents come from mattpocock/skills, by Matt Pocock, at the commit upstream/mattpocock/SOURCE names.
+Nine are copied byte for byte, upstream/mattpocock/MANIFEST holding each file's sha; pr is upstream's text with a TL;DR block and a Links block added.
+They are used under the MIT License, whose full text is upstream/mattpocock/LICENSE.
 Copyright (c) 2026 Matt Pocock.
+
+graphify comes from Graphify-Labs/graphify at the commit upstream/graphify/SOURCE names, copied byte for byte, upstream/graphify/MANIFEST holding each file's sha.
+It is used under the Apache License, Version 2.0, whose full text is upstream/graphify/LICENSE; portions contributed earlier remain under the MIT License in upstream/graphify/LICENSE-MIT, and upstream/graphify/NOTICE is its own notice.
+Copyright 2026 Safi Shamsi and the Graphify contributors.
+
+impeccable comes from pbakaus/impeccable at the commit upstream/impeccable/SOURCE names, copied byte for byte, upstream/impeccable/MANIFEST holding each file's sha.
+It is used under the Apache License, Version 2.0, whose full text is upstream/impeccable/LICENSE; upstream/impeccable/NOTICE.md carries its third-party notices.

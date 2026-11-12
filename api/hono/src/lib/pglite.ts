@@ -1,6 +1,17 @@
 import { spawn } from "node:child_process"
-import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
-import { type AddressInfo, createServer, type Socket } from "node:net"
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { type AddressInfo, connect, createServer, type Socket } from "node:net"
+import { uptime } from "node:os"
 import { join } from "node:path"
 
 import { PGlite } from "@electric-sql/pglite"
@@ -12,10 +23,14 @@ export type Record = { home: string; name: string; pid: number; port: number }
 
 const SERVER = join(import.meta.dir, "../bin/pglite.ts")
 const START_TRIES = 60
+// serve()'s exit code when another server holds the lock.
+const HELD = 3
 
 const SSL_REQUEST = 80877103
 const GSS_REQUEST = 80877104
 const CANCEL_REQUEST = 80877102
+// A message's length past which the connection is dropped rather than buffered, as Postgres caps a message at 1 GB.
+const MAX_MESSAGE = 2 ** 30
 
 const frame = (type: string, body = ""): Uint8Array => {
   const bytes = Buffer.alloc(5 + Buffer.byteLength(body))
@@ -41,6 +56,20 @@ const alive = (pid: number): boolean => {
     return false
   }
 }
+
+// Whether 127.0.0.1:port takes a connection: a pid alone may be another process's after a reboot.
+const listening = (port: number): Promise<boolean> =>
+  new Promise((done) => {
+    const socket = connect(port, "127.0.0.1")
+    socket.once("connect", () => {
+      socket.destroy()
+      done(true)
+    })
+    socket.once("error", () => done(false))
+  })
+
+const running = async (record: { pid: number; port: number } | null): Promise<boolean> =>
+  record !== null && alive(record.pid) && (await listening(record.port))
 
 const readRecord = (home: string): { pid: number; port: number } | null => {
   try {
@@ -80,8 +109,8 @@ export async function startPglite(
   }: { root?: string; wait?: (ms: number) => Promise<void> } = {},
 ): Promise<string> {
   const home = join(root, name)
-  const running = readRecord(home)
-  if (running && alive(running.pid)) return urlOf(running.port)
+  const before = readRecord(home)
+  if (await running(before)) return urlOf(before!.port)
   mkdirSync(home, { recursive: true })
   const log = openSync(join(home, "server.log"), "a")
   const child = spawn(process.execPath, [SERVER, home], {
@@ -92,23 +121,71 @@ export async function startPglite(
   for (let tries = 0; tries < START_TRIES; tries++) {
     const record = readRecord(home)
     if (record && record.pid === child.pid) return urlOf(record.port)
-    if (child.exitCode !== null) break
+    // A start that lost serve()'s lock waits for the winner's server and takes it.
+    if (
+      child.exitCode === HELD &&
+      record &&
+      record.pid !== before?.pid &&
+      (await running(record))
+    ) {
+      return urlOf(record.port)
+    }
+    if (child.exitCode !== null && child.exitCode !== HELD) break
     await wait(500)
   }
   const said = readFileSync(join(home, "server.log"), "utf8").trim().split("\n").at(-1)
   throw new Error(`PGlite in ${home} did not start${said ? `: ${said}` : ""}`)
 }
 
-// Restarts the PGlite a URL names when its server has stopped (after a reboot), as `docker start` would its container; a URL no PGlite record names is left alone.
+// Restarts the PGlite a URL names when its server has stopped (after a reboot), as `docker start` would its container; a URL no PGlite record names is left alone, and one two records name is refused, since either could be a stale checkout's.
 export async function ensurePglite(url: string, root?: string): Promise<void> {
   if (!URL.canParse(url)) return
   const port = Number(new URL(url).port || 5432)
-  const record = records(root).find((r) => r.port === port)
-  if (record && !alive(record.pid)) await startPglite(record.name, { root })
+  const named = records(root).filter((r) => r.port === port)
+  if (named.length > 1) {
+    throw new Error(
+      `PGlite databases ${named.map((r) => r.name).join(" and ")} both record port ${port}, so POSTGRES_URL could name either; remove the stale one's folder under ${root ?? pgliteRoot()}`,
+    )
+  }
+  const [record] = named
+  if (record && !(await running(record))) await startPglite(record.name, { root })
+}
+
+// Takes home's server.lock (O_EXCL), so two starts racing on one name never run two servers on one data folder; a lock whose pid is gone or that predates this boot is stale and taken over, and the lock goes when the server exits. Exits HELD when a live server holds it.
+const lock = (home: string): void => {
+  const file = join(home, "server.lock")
+  const drop = () => {
+    try {
+      unlinkSync(file)
+    } catch {}
+  }
+  for (let tries = 0; tries < 3; tries++) {
+    try {
+      const fd = openSync(file, "wx")
+      writeFileSync(fd, String(process.pid))
+      closeSync(fd)
+      process.on("exit", drop)
+      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+    }
+    try {
+      const holder = Number(readFileSync(file, "utf8"))
+      const booted = Date.now() - uptime() * 1000
+      if (alive(holder) && statSync(file).mtimeMs > booted) break
+    } catch {
+      continue
+    }
+    // ponytail: two starts taking over one stale lock at once can both win; a flock would close that.
+    drop()
+  }
+  console.error(`pglite: ${home} is already served (server.lock)`)
+  process.exit(HELD)
 }
 
 // The server: PGlite has one session, so a connection holds it from its first message to its Sync or simple Query, and for as long as a transaction it opened stays open; no other client's message lands inside its statement or its transaction.
 export async function serve(home: string): Promise<void> {
+  lock(home)
   const pg = await PGlite.create(join(home, "data"))
   let owner: Socket | null = null
   let waiting: (() => void)[] = []
@@ -166,7 +243,7 @@ export async function serve(home: string): Promise<void> {
         if (!started) {
           if (buffer.length < 8) return
           const length = buffer.readInt32BE(0)
-          if (length < 8) return void conn.destroy()
+          if (length < 8 || length > MAX_MESSAGE) return void conn.destroy()
           if (buffer.length < length) return
           const code = buffer.readInt32BE(4)
           const message = buffer.subarray(0, length)
@@ -181,7 +258,7 @@ export async function serve(home: string): Promise<void> {
         }
         if (buffer.length < 5) return
         const length = 1 + buffer.readInt32BE(1)
-        if (length < 5) return void conn.destroy()
+        if (length < 5 || length > MAX_MESSAGE) return void conn.destroy()
         if (buffer.length < length) return
         run(String.fromCharCode(buffer[0]!), buffer.subarray(0, length))
         buffer = buffer.subarray(length)

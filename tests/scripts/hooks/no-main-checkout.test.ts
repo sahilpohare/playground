@@ -1026,6 +1026,12 @@ describe("a git write in the live Dashboard's checkout is refused to every sessi
     ["--git-dir", `git --git-dir=${LIVE}/.git checkout canary`],
     ["--work-tree", `git --work-tree=${LIVE} checkout canary`],
     ["a cd", `cd ${LIVE} && git commit -m x`],
+    // #1326: GIT_DIR and GIT_WORK_TREE name git's tree as --git-dir and --work-tree do
+    ["a GIT_DIR set for the call", `GIT_DIR=${LIVE}/.git git checkout canary`],
+    ["a GIT_WORK_TREE set through env", `env GIT_WORK_TREE=${LIVE} git reset --hard`],
+    ["a GIT_DIR exported earlier", `export GIT_DIR=${LIVE}/.git; git merge canary`],
+    // the main checkout's guard lets step 5's merge through, so only the live checkout's refuses it
+    ["a GIT_DIR the hook cannot read", 'GIT_DIR="$(cat dir)" git merge --ff-only -q origin/main'],
   ])(
     "a git write that names the live checkout from another worktree by %s, from a worker",
     async (_, command) => {
@@ -1167,5 +1173,16 @@ describe("a file in the worktrees folder", () => {
     ["one not there yet", `echo x > ${MAIN}/.claude/worktrees/new.log`],
   ])("from the main checkout, a write to %s runs", async (_name, command) => {
     expect(await bash(command)).toBeUndefined()
+  })
+})
+
+describe("a GIT_DIR or GIT_WORK_TREE that names your own worktree", () => {
+  test.each([
+    ["set for the call", `GIT_DIR=${WORKTREE}/.git git commit -m x`],
+    ["set through env", `env GIT_WORK_TREE=${WORKTREE} git reset --hard`],
+    ["exported earlier", `export GIT_WORK_TREE=${WORKTREE}; git commit -m x`],
+    ["by a relative path", "GIT_WORK_TREE=. git reset --hard"],
+  ])("from the worktree, %s, runs", async (_name, command) => {
+    expect(await bash(command, WORKTREE)).toBeUndefined()
   })
 })

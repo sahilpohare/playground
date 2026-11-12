@@ -189,7 +189,6 @@
     "tests/web/next/src/components/dashboard/viewer/viewer.test.ts": 46,
     "tests/web/next/src/lib/markdown.test.ts": 46,
     "tests/web/next/src/components/dashboard/pages.test.ts": 42,
-    "tests/packages/scripts/src/wispr/latest.test.ts": 40,
     "tests/scripts/hooks/no-bare-slack-link.test.ts": 40,
     "tests/web/next/src/lib/inbox.test.ts": 40,
     "tests/web/next/src/components/dashboard/mode-picker.test.ts": 37,

@@ -15,7 +15,9 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import { MARKER } from "../../../../../../packages/safe-delete/src"
+import { triageSignature } from "../../../../../../packages/scripts/src/parity/replay/compare"
 import {
+  comparators,
   fixtureDir,
   mcpConfig,
   problems,
@@ -24,6 +26,7 @@ import {
   replayEnv,
   replayOutcome,
   runSide,
+  schemaFile,
   type Replay,
   type Replays,
   type Side,
@@ -35,7 +38,7 @@ const HERE = join(REPO, "packages/scripts/src/parity/replay")
 const scratch = mkdtempSync(join(tmpdir(), "parity-replay-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
-// A made-up scope holding one replay, as an extension keeps it: its skill and a sibling, and replays/ with the replay, its map and its recordings.
+// A made-up scope holding one replay, as an extension keeps it: its skill and a sibling, replays/ with the replay, its map and its recordings, and its layouts in scripts/parity-replay/: a schema per server and a compare.ts.
 const SCOPE = join(scratch, "extensions", "acme")
 const TRIAGE: Replay = {
   allowed: ["Read", "Bash(gh search:*)", "mcp__linear-shared__get_issue"],
@@ -57,6 +60,13 @@ for (const [path, text] of Object.entries({
   "replays/fixtures/made-up-triage/slack-shared.json": "{}",
   "replays/map.json": JSON.stringify(MAP),
   "replays/replays.json": JSON.stringify(REPLAYS),
+  "scripts/parity-replay/compare.ts":
+    "export const comparators = { echo: (report: string) => report.trim() }\n",
+  "scripts/parity-replay/schemas/github-shared.json": "[]",
+  "scripts/parity-replay/schemas/linear-shared.json": JSON.stringify([
+    { inputSchema: { type: "object" }, name: "get_issue" },
+  ]),
+  "scripts/parity-replay/schemas/slack-shared.json": "[]",
   "skills/claim/SKILL.md": "# claim\n",
   "skills/triage/SKILL.md": "# triage\n",
 })) {
@@ -96,7 +106,7 @@ describe("replayArgv", () => {
 
 describe("mcpConfig", () => {
   test("names each server the replay reads as a stub under that name", () => {
-    const servers = JSON.parse(mcpConfig(FIXTURES, TRIAGE.servers, "/m.jsonl")).mcpServers
+    const servers = JSON.parse(mcpConfig(SCOPE, FIXTURES, TRIAGE.servers, "/m.jsonl")).mcpServers
     expect(Object.keys(servers)).toEqual(["github-shared", "linear-shared", "slack-shared"])
     expect(servers["linear-shared"].args).toEqual([
       join(HERE, "stub-mcp.ts"),
@@ -106,7 +116,12 @@ describe("mcpConfig", () => {
         "--recording",
         join(SCOPE, "replays/fixtures/made-up-triage/linear-shared.json"),
       ],
-      ...["--schemas", join(HERE, "schemas/linear-shared.json"), "--log", "/m.jsonl"],
+      ...[
+        "--schemas",
+        join(SCOPE, "scripts/parity-replay/schemas/linear-shared.json"),
+        "--log",
+        "/m.jsonl",
+      ],
     ])
   })
 })
@@ -159,6 +174,7 @@ describe("problems", () => {
       }),
     ).toEqual([
       "made-up-triage: no skills/none/SKILL.md",
+      "made-up-triage: no layout for notion-shared: the scope holds no scripts/parity-replay/schemas/notion-shared.json",
       "made-up-triage: no recording for notion-shared",
     ])
     writeFileSync(join(FIXTURES, "slack-shared.json"), JSON.stringify({ no_such_tool: [] }))
@@ -167,6 +183,57 @@ describe("problems", () => {
     ])
     writeFileSync(join(FIXTURES, "slack-shared.json"), "{}")
     expect(await problems(SCOPE, "nameless", TRIAGE, MAP)).toEqual(["nameless: not in map.json"])
+  })
+})
+
+describe("a scope's layouts", () => {
+  const result = (text: string) => JSON.stringify({ result: text, type: "result" })
+
+  test("a replay finds its layout in its scope: each server's schema and the comparators its compare.ts names", async () => {
+    expect(schemaFile(SCOPE, "linear-shared")).toBe(
+      join(SCOPE, "scripts/parity-replay/schemas/linear-shared.json"),
+    )
+    const found = await comparators(SCOPE)
+    expect(Object.keys(found).sort()).toEqual(["echo", "triage"])
+    expect(found.echo!.sign([result("  a made-up report  ")])).toBe("a made-up report")
+    expect(await problems(SCOPE, "made-up-triage", { ...TRIAGE, compare: "echo" }, MAP)).toEqual([])
+  })
+
+  test("a scope that holds no layout says so plainly", async () => {
+    const bare = join(scratch, "extensions", "bare")
+    mkdirSync(join(bare, "skills/triage"), { recursive: true })
+    writeFileSync(join(bare, "skills/triage/SKILL.md"), "# triage\n")
+    for (const [path, text] of Object.entries({
+      "gh.json": "[]",
+      "github-shared.json": "{}",
+      "linear-shared.json": "{}",
+      "slack-shared.json": "{}",
+    })) {
+      mkdirSync(fixtureDir(bare, "made-up-triage"), { recursive: true })
+      writeFileSync(join(fixtureDir(bare, "made-up-triage"), path), text)
+    }
+    expect(Object.keys(await comparators(bare))).toEqual(["triage"])
+    expect(await problems(bare, "made-up-triage", { ...TRIAGE, compare: "board" }, MAP)).toEqual([
+      "made-up-triage: no layout for github-shared: the scope holds no scripts/parity-replay/schemas/github-shared.json",
+      "made-up-triage: no layout for linear-shared: the scope holds no scripts/parity-replay/schemas/linear-shared.json",
+      "made-up-triage: no layout for slack-shared: the scope holds no scripts/parity-replay/schemas/slack-shared.json",
+      "made-up-triage: no comparator board: core has triage, and the scope's scripts/parity-replay/compare.ts names no board",
+    ])
+  })
+
+  test("a compare.ts with no comparators export names no comparator, so the missing one is said plainly", async () => {
+    const partial = join(scratch, "extensions", "partial")
+    mkdirSync(join(partial, "scripts/parity-replay"), { recursive: true })
+    writeFileSync(
+      join(partial, "scripts/parity-replay/compare.ts"),
+      "export const boardSignature = (report: string) => report\n",
+    )
+    expect(Object.keys(await comparators(partial))).toEqual(["triage"])
+    expect(
+      await problems(partial, "made-up-triage", { ...TRIAGE, compare: "board" }, MAP),
+    ).toContain(
+      "made-up-triage: no comparator board: core has triage, and the scope's scripts/parity-replay/compare.ts names no board",
+    )
   })
 })
 
@@ -192,7 +259,9 @@ console.log(JSON.stringify({ permission_denials: [], result: searched, type: "re
       fixtures: FIXTURES,
       replay: TRIAGE,
       runs: 2,
+      scope: SCOPE,
       scratch: join(scratch, dir),
+      sign: triageSignature,
       skillDir: join(SCOPE, MAP["made-up-triage"]!.skill),
       token: "t",
     })

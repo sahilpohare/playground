@@ -50,7 +50,7 @@ const bash = (command: string) =>
 const run = (raw: string, data = stored) => check(raw, env(data))
 
 const R = "--repo quillco/playground"
-// The factory's repository, the first the guard keeps while factory.publicRepo is unset.
+// The checkout's origin, the one repository the guard keeps while factory.publicRepo is unset.
 const UNSET_R = `--repo ${UNSET_REPOS.public[0]}`
 
 // A made-up owner, Quilla (@qmarsh), whose names owner.names lists, and an outside contributor, Ostra Vell (@ovell).
@@ -257,18 +257,20 @@ describe("what it lets through", () => {
     ).toContain("a person's name")
   })
 
-  test("while factory.publicRepo is unset it guards Yard's repository too", async () => {
+  // issue 1454: unset, the guard keeps the checkout's origin alone, with no fixed second repository
+  test("while factory.publicRepo is unset it guards the origin alone, and another repository's write passes", async () => {
     const empty = storeWith(
-      join(scratch, "unset-yard"),
+      join(scratch, "unset-other"),
       { "no-public-leak.json": JSON.stringify(TERMS) },
       { "factory.publicRepo": "" },
     )
+    expect(UNSET_REPOS.public).toHaveLength(1)
     expect(
       await run(
-        bash(`gh pr comment 1 --repo nrjdalal/playground-yard --body "Quilla Marsh asked"`),
+        bash(`gh pr comment 1 --repo quillco/made-up-yard --body "Quilla Marsh asked"`),
         empty,
       ),
-    ).toContain("a person's name")
+    ).toBeUndefined()
   })
 
   test("factory.publicRepo set to a list guards each, and reads past each one's name", async () => {

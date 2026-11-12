@@ -22,13 +22,20 @@ export type Check = {
   status: "MISSING" | "ok" | "optional" | "waiting"
 }
 
-type Tool = "bun" | "docker" | "gh" | "git" | "herdr" | "node" | "python3" | "uv"
+type Tool = "bun" | "claude-codex" | "docker" | "gh" | "git" | "herdr" | "node" | "python3" | "uv"
 
 type Action = NonNullable<Check["action"]>
 
 // [tool, required, what it is needed for, the fix that installs it, the note when it is missing]
 const TOOLS: [Tool, boolean, string, Action | null, string][] = [
   ["bun", true, `runs ${site.name}`, null, `Bun is not installed, and ${site.name} runs on it.`],
+  [
+    "claude-codex",
+    false,
+    "a Codex (ChatGPT) subscription alongside Claude's",
+    null,
+    "claude-codex is not installed. Only useful with a Codex CLI login too.",
+  ],
   [
     "docker",
     false,

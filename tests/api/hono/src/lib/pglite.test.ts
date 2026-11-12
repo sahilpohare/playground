@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { connect } from "node:net"
 import { join } from "node:path"
 
@@ -19,8 +20,12 @@ import { type Docker, provenLocal } from "../../../../../api/hono/src/lib/sessio
 const root = pgliteRoot()
 const name = `pglite-test-${process.pid}`
 const mine = () => records(root).filter((record) => record.name === name)
+// A pid no process can hold, so alive() reads it gone.
+const GONE = 2 ** 30
+const home = () => join(root, name)
 
 const stop = async (pid: number) => {
+  if (pid === process.pid) return
   process.kill(pid, "SIGTERM")
   for (let tries = 0; tries < 50; tries++) {
     try {
@@ -183,6 +188,71 @@ describe("a PGlite database", () => {
       await sql.close()
     }
   }, 30_000)
+
+  test("revives a server whose recorded pid another process took after a reboot", async () => {
+    const [record] = mine()
+    await stop(record!.pid)
+    writeFileSync(
+      join(home(), "server.json"),
+      JSON.stringify({ pid: process.pid, port: record!.port }),
+    )
+    await ensurePglite(url, root)
+    const revived = servingPort(record!.port, root)
+    expect(revived?.pid).not.toBe(process.pid)
+    expect(revived?.pid).not.toBe(record!.pid)
+  }, 60_000)
+
+  test("refuses a second server on a data folder a live one holds, and takes over a stale lock", async () => {
+    const [record] = mine()
+    await stop(record!.pid)
+    writeFileSync(join(home(), "server.lock"), String(process.pid))
+    await expect(startPglite(name, { root, wait: () => Bun.sleep(50) })).rejects.toThrow(
+      "already served",
+    )
+    expect(servingPort(record!.port, root)).toBeUndefined()
+    writeFileSync(join(home(), "server.lock"), String(GONE))
+    await ensurePglite(url, root)
+    expect(servingPort(record!.port, root)?.pid).not.toBe(record!.pid)
+  }, 60_000)
+
+  test("runs one server for two starts racing on one name", async () => {
+    const [record] = mine()
+    await stop(record!.pid)
+    const [a, b] = await Promise.all([startPglite(name, { root }), startPglite(name, { root })])
+    expect(a).toBe(b)
+    expect(a).toBe(url)
+    const sql = new SQL(url, { max: 1 })
+    try {
+      const [row] = await sql`select count(*)::int as n from tx_probe`
+      expect(row.n).toBe(2)
+    } finally {
+      await sql.close()
+    }
+  }, 60_000)
+
+  test("ensurePglite refuses a port two records name, since either could be a stale checkout's", async () => {
+    const twins = [`${name}-a`, `${name}-b`].map((twin) => join(root, twin))
+    try {
+      for (const twin of twins) {
+        mkdirSync(twin, { recursive: true })
+        writeFileSync(join(twin, "server.json"), JSON.stringify({ pid: GONE, port: 2 }))
+      }
+      await expect(ensurePglite(urlOf(2), root)).rejects.toThrow("both record port 2")
+    } finally {
+      for (const twin of twins) rmSync(twin, { force: true, recursive: true })
+    }
+  })
+
+  test("drops a connection whose message claims more than 1 GB", async () => {
+    const socket = connect(Number(new URL(url).port), "127.0.0.1")
+    const head = Buffer.alloc(8)
+    head.writeInt32BE(2 ** 30 + 1, 0)
+    head.writeInt32BE(196608, 4)
+    await new Promise((done) => socket.once("connect", done))
+    const closed = new Promise<void>((done) => socket.on("close", () => done()))
+    socket.write(head)
+    await closed
+  })
 
   test("ensurePglite leaves alone a URL no PGlite record names", async () => {
     await ensurePglite("postgres://postgres@127.0.0.1:1/postgres", root)

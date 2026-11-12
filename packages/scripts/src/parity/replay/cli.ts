@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs"
+import { cpSync, existsSync, readdirSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -6,13 +6,13 @@ import { dataDir } from "@packages/env/data-dir"
 import { extensionsDir } from "@packages/settings"
 
 import {
+  comparators,
   fixtureDir,
+  LAYOUTS,
   problems,
-  MAJORITIES,
   replayOutcome,
   replaysDir,
   runSide,
-  schemaFile,
   skillFile,
   type Replay,
   type Replays,
@@ -41,7 +41,7 @@ const entriesIn = async (root: string): Promise<Entry[]> => {
   return entries
 }
 
-// `bun run parity replay [--only <name>] [--runs <n>] [--base <ref>] [--snapshot]`: replays each skill a scope's replays.json names before (its folder at --base in the scope's own git, HEAD by default) and after (the scope's working tree) on its made-up fixtures, and exits 1 on any change, noise or miss. `--runs 0` checks every replay's setup and runs no model; `--snapshot` refreshes each server's schema from one live tools/list.
+// `bun run parity replay [--only <name>] [--runs <n>] [--base <ref>] [--snapshot]`: replays each skill a scope's replays.json names before (its folder at --base in the scope's own git, HEAD by default) and after (the scope's working tree) on its made-up fixtures, and exits 1 on any change, noise or miss. `--runs 0` checks every replay's setup and runs no model; `--snapshot` writes a copy of each scope's layouts with each server's schema from one live tools/list into a scratch folder, for `playground ext put`, since only its verbs write the extensions.
 export const replay = async (args: string[]): Promise<number> => {
   const option = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
   const all = await entriesIn(extensionsDir(dataDir()))
@@ -63,11 +63,26 @@ export const replay = async (args: string[]): Promise<number> => {
       string,
       Server
     >
-    for (const server of [...new Set(entries.flatMap((e) => e.replay.servers))].sort()) {
-      if (!servers[server]) throw new Error(`parity replay: ~/.mcp.json names no ${server}`)
-      const tools = await listTools(servers[server])
-      await Bun.write(schemaFile(server), `${JSON.stringify(tools, null, 2)}\n`)
-      console.log(`parity replay: ${server} lists ${tools.length} tools`)
+    const out = join(tmpdir(), `parity-snapshot-${process.pid}`)
+    for (const scopeName of [...new Set(entries.map((e) => e.scopeName))]) {
+      const scope = entries.find((e) => e.scopeName === scopeName)!.scope
+      const copy = join(out, scopeName)
+      if (existsSync(join(scope, LAYOUTS))) cpSync(join(scope, LAYOUTS), copy, { recursive: true })
+      const named = entries
+        .filter((e) => e.scopeName === scopeName)
+        .flatMap((e) => e.replay.servers)
+      for (const server of [...new Set(named)].sort()) {
+        if (!servers[server]) throw new Error(`parity replay: ~/.mcp.json names no ${server}`)
+        const tools = await listTools(servers[server])
+        await Bun.write(
+          join(copy, "schemas", `${server}.json`),
+          `${JSON.stringify(tools, null, 2)}\n`,
+        )
+        console.log(`parity replay: ${server} lists ${tools.length} tools`)
+      }
+      console.log(
+        `parity replay: put it with playground ext put ${scopeName} script parity-replay ${copy} --reason "<why>"`,
+      )
     }
     return 0
   }
@@ -102,6 +117,7 @@ export const replay = async (args: string[]): Promise<number> => {
     const before = join(scratch, "before", e.scopeName)
     await Bun.$`mkdir -p ${before} && git -C ${e.scope} archive ${base} skills | tar -x -C ${before}`
     const runs = runsOption ? Number(runsOption) : e.replay.runs
+    const comparator = (await comparators(e.scope))[e.replay.compare]!
     const outcome = await replayOutcome(
       e.name,
       (side, n) =>
@@ -112,12 +128,14 @@ export const replay = async (args: string[]): Promise<number> => {
           fixtures: fixtureDir(e.scope, e.name),
           replay: e.replay,
           runs: n,
+          scope: e.scope,
           scratch: join(scratch, e.name, side),
+          sign: comparator.sign,
           skillDir: join(side === "before" ? before : e.scope, skill),
           token,
         }),
       runs,
-      MAJORITIES[e.replay.compare],
+      comparator.majority,
     )
     const ok = outcome.outcome === "same" && outcome.misses.length === 0
     failed ||= !ok
