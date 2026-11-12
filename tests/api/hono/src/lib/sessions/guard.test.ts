@@ -176,6 +176,23 @@ const failure = (act: () => unknown): GuardError => {
 }
 
 describe("locate", () => {
+  test("a PGlite server on the URL's port owns it, with no Docker call", () => {
+    const docker = scripted([], [], {})
+    const pglite = (port: number) =>
+      port === 55432 ? { home: "/data/pglite/playground-a-db", name: "playground-a-db" } : undefined
+    expect(locate(URL_55432, docker.run, pglite)).toEqual({
+      owner: {
+        addresses: ["127.0.0.1"],
+        id: "/data/pglite/playground-a-db",
+        image: "pglite",
+        name: "playground-a-db",
+      },
+      pglite: "/data/pglite/playground-a-db",
+      target: { database: "postgres", host: "127.0.0.1", port: 55432 },
+    })
+    expect(docker.calls).toEqual([])
+  })
+
   test("a container gone between the list and the inspect is skipped by one re-list", () => {
     const docker = scripted([["a", "checks"], ["a"]], [["checks"]], { a: ownDb })
     expect(locate(URL_55432, docker.run).owner.name).toBe("playground-a-db")

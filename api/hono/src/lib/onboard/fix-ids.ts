@@ -7,6 +7,7 @@ export const FIX_IDS = [
   "git",
   "herdr",
   "node",
+  "pglite",
   "proxy",
   "python",
   "trust",

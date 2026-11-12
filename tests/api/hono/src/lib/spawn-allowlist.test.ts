@@ -25,6 +25,7 @@ const ALLOWLIST = [
   "keychain.ts",
   "onboard/fix.ts",
   "onboard/machine.ts",
+  "pglite.ts",
   "sessions/guard.ts",
   "setup/container.ts",
   "store/extensions.ts",

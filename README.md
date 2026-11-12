@@ -1,9 +1,5 @@
 # Playground
 
-> [!WARNING]
-> Playground is experimental. It changes every day and can break.
-> The main product is [ZeroSDK](https://github.com/nrjdalal/zerosdk), which comes later in 2027.
-
 Run a team of Claude agents.
 
 Playground runs the Claude Code sessions on your Mac as a team, with a Dashboard to watch and steer it.
@@ -22,7 +18,7 @@ Built on top of [ZeroStarter](https://zerostarter.dev).
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nrjdalal/playground/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sahilpohare/playground/main/install.sh | bash
 ```
 
 `install.sh` installs every tool Playground needs that is missing (`bun`, `claude`, `docker`, `gh`, `git`, `node`, `python3`, `uv` and herdr, the terminal your sessions run in), signs Claude Code and GitHub in when it runs in a terminal, clones Playground into `~/playground`, builds it, links the `playground` command into `~/.bun/bin`, and starts it once every required tool is there. It prints a **Left for you** list of anything it could not do. A second run changes nothing.
@@ -32,9 +28,9 @@ You need a Mac, a Claude account and a GitHub account.
 ## Get started
 
 1. Install starts Playground and opens the Dashboard; the first start takes a few minutes. After that, `playground` in a new terminal starts whatever is down and opens it.
-2. On a first run, the Dashboard's chat checks this Mac: each missing thing the app can set up has a button that does it, the database's **Start a local container** among them. Once nothing is missing, click **Continue**. You are now this Mac's owner, signed in with no password, and later starts skip the checks.
+2. On a first run, the Dashboard's chat checks this Mac: each missing thing the app can set up has a button that does it, the database's **Start a local container** among them, or **Start without Docker** while Docker is not running, which keeps the database as PGlite in `~/.playground/pglite/` with no container, so Docker is optional. Once nothing is missing, click **Continue**. You are now this Mac's owner, signed in with no password, and later starts skip the checks.
 
-   > **Warning**: the local database listens on every interface with the user, password and database `postgres`. Anyone who can reach this Mac on its port can sign in to it.
+   > **Warning**: a database from **Start a local container** listens on every interface with the user, password and database `postgres`. Anyone who can reach this Mac on its port can sign in to it. One from **Start without Docker** listens on this Mac alone.
 
 3. The same chat then lists the steps left, each ticked once done: GitHub, **Set up settings** (your settings in a private repo under your GitHub login), a Claude account, and **Start Alpha**.
 

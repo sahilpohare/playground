@@ -1,6 +1,8 @@
 import { SQL } from "bun"
 
-// Transcripts hold secrets and customer data, so the importer writes only to a Postgres it can prove is a container on this machine: the URL names a loopback host, a local Docker container publishes the URL's port on loopback alone (but first run's own, below), and the server the URL reaches is that container's own (the same system identifier). A tunnel to a remote database (an SSH forward, cloud-sql-proxy, a Neon pooler) bound to 127.0.0.1 fails the last two.
+import { identifierOf, servingPort } from "@/lib/pglite"
+
+// Transcripts hold secrets and customer data, so the importer writes only to a Postgres it can prove is on this machine: the URL names a loopback host, a local Docker container publishes the URL's port on loopback alone (but first run's own, below) or this machine's PGlite server listens on it (lib/pglite.ts, which binds 127.0.0.1 alone), and the server the URL reaches is that one's own (the same system identifier). A tunnel to a remote database (an SSH forward, cloud-sql-proxy, a Neon pooler) bound to 127.0.0.1 fails the last two.
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"])
 
@@ -120,7 +122,8 @@ const docker: Docker = (args, failure = "docker-down") => {
   return result.stdout.toString()
 }
 
-export type Located = { owner: Published; target: Target }
+// pglite names the PGlite folder that owns the port, whose identifier the proof reads in place of the container's.
+export type Located = { owner: Published; pglite?: string; target: Target }
 
 const VANISHED = /no such (?:object|container):\s*(\S+)/i
 
@@ -144,9 +147,18 @@ const publishers = (port: number, run: Docker): Published[] => {
   }
 }
 
-// The one running container that publishes the URL's port, on loopback alone but for first run's own, read from Docker's metadata: nothing runs inside it and nothing connects to it, so a caller can refuse a container by name before touching it.
-export const locate = (url: string, run: Docker = docker): Located => {
+// The running PGlite server on the URL's port, else the one running container that publishes it, on loopback alone but for first run's own, read from Docker's metadata: nothing runs inside it and nothing connects to it, so a caller can refuse a container by name before touching it.
+export const locate = (
+  url: string,
+  run: Docker = docker,
+  pglite: (port: number) => { home: string; name: string } | undefined = servingPort,
+): Located => {
   const target = targetOf(url)
+  const lite = pglite(target.port)
+  if (lite) {
+    const owner = { addresses: ["127.0.0.1"], id: lite.home, image: "pglite", name: lite.name }
+    return { owner, pglite: lite.home, target }
+  }
   const owners = publishers(target.port, run)
   const [owner] = owners
   if (!owner || owners.length > 1) {
@@ -165,15 +177,18 @@ export const locate = (url: string, run: Docker = docker): Located => {
   return { owner, target }
 }
 
-// Proves the server the URL reaches is the located container's own Postgres, by the system identifier in its pg_controldata, and returns the proof the importer prints before its first write.
+// Proves the server the URL reaches is the located container's own Postgres, by the system identifier in its pg_controldata (a PGlite's, in its data folder's pg_control), and returns the proof the importer prints before its first write.
 export async function prove(
   url: string,
-  { owner, target }: Located,
+  { owner, pglite, target }: Located,
   run: Docker = docker,
+  pgliteId: (home: string) => string = identifierOf,
 ): Promise<string> {
-  const expected = systemIdentifierOf(
-    run(["exec", owner.id, "sh", "-c", 'pg_controldata "$PGDATA"'], "not-postgres"),
-  )
+  const expected = pglite
+    ? pgliteId(pglite)
+    : systemIdentifierOf(
+        run(["exec", owner.id, "sh", "-c", 'pg_controldata "$PGDATA"'], "not-postgres"),
+      )
   if (!expected) {
     throw new GuardError(
       "not-postgres",

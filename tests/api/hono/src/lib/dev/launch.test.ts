@@ -822,6 +822,28 @@ describe("preflight", () => {
     }
   })
 
+  test("revives a stopped PGlite before locating the database, and refuses with why its restart failed", async () => {
+    const order: string[] = []
+    const { prove } = proving()
+    const checked = await preflight(BRANCH, read(URL), {
+      locate: () => (order.push("locate"), located("playground-a-db")),
+      pending: current,
+      prove,
+      revive: async (url) => void order.push(`revive ${url}`),
+      tables: seeded,
+    })
+    expect(checked.ok).toBe(true)
+    expect(order).toEqual([`revive ${URL}`, "locate"])
+    const refused = await preflight(BRANCH, read(URL), {
+      locate: () => located("playground-a-db"),
+      revive: async () => {
+        throw new Error("PGlite in /x did not start: EADDRINUSE")
+      },
+    })
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) expect(refused.refusal).toContain("PGlite in /x did not start: EADDRINUSE")
+  })
+
   test("refuses a fixture that does not load, before locating the database", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dev-fixture-"))
     writeFileSync(join(dir, "broken.json"), "{ not json")

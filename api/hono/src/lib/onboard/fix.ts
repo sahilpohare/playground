@@ -84,7 +84,7 @@ const PASSED = [
   "no_proxy",
 ]
 
-// Each fix's steps, from what is on PATH now, each with the most it may take; the database's start is the setup app's own, so it has none here.
+// Each fix's steps, from what is on PATH now, each with the most it may take; the database's two starts (a container, or PGlite with no Docker) are the setup app's own, so they have none here.
 const PLANS: Record<FixId, ((has: (tool: string) => boolean, dir: string) => Step[]) | null> = {
   claude: (_, dir) => [
     {
@@ -140,6 +140,7 @@ const PLANS: Record<FixId, ((has: (tool: string) => boolean, dir: string) => Ste
       ? { argv: ["brew", "upgrade", "node"], label: "Updating Node.js", ms: 20 * MINUTE }
       : { argv: ["brew", "install", "node"], label: "Installing Node.js", ms: 20 * MINUTE },
   ],
+  pglite: null,
   proxy: () => [
     {
       admin: true,
@@ -206,6 +207,11 @@ export const adminLine = (
 }
 
 export const isFixId = (id: string): id is FixId => (FIX_IDS as readonly string[]).includes(id)
+
+// The database's fixes: a container (database) or PGlite with no Docker (pglite), each started by the setup app.
+export type DatabaseFix = Extract<FixId, "database" | "pglite">
+export type StartDatabase = (line: (text: string) => void, engine: DatabaseFix) => Promise<void>
+const isDatabaseFix = (id: FixId): id is DatabaseFix => id === "database" || id === "pglite"
 
 const linesOf = (text: string) =>
   Bun.stripANSI(text)
@@ -368,14 +374,11 @@ export const createFixes = ({
   }
 
   // Starts id's fix, the database's from start; false while any fix runs.
-  const start = (
-    id: FixId,
-    database?: (line: (text: string) => void) => Promise<void>,
-  ): boolean => {
+  const start = (id: FixId, database?: StartDatabase): boolean => {
     if (current?.state === "running") return false
     const job: FixRead = { device: null, id, lines: [], reason: null, state: "running" }
     current = job
-    const work = id === "database" ? database!((text) => add(job, text)) : steps(job)
+    const work = isDatabaseFix(id) ? database!((text) => add(job, text), id) : steps(job)
     work.then(
       () => {
         job.state = "ok"
@@ -412,12 +415,11 @@ export const busy = () => new ApiError(409, "CONFLICT", "A fix is already runnin
 export const readFix = (runner: Fixes) => (c: Context) => c.json({ data: runner.read(idOf(c)) })
 
 // Starts the fix the path names; the database's runs database, and with none (the app runs on one) is refused.
-export const startFix =
-  (runner: Fixes, database?: (line: (text: string) => void) => Promise<void>) => (c: Context) => {
-    const id = idOf(c)
-    if (id === "database" && !database) {
-      throw new ApiError(409, "CONFLICT", "The database is already running")
-    }
-    if (!runner.start(id, database)) throw busy()
-    return c.json({ data: runner.read(id) }, 202)
+export const startFix = (runner: Fixes, database?: StartDatabase) => (c: Context) => {
+  const id = idOf(c)
+  if (isDatabaseFix(id) && !database) {
+    throw new ApiError(409, "CONFLICT", "The database is already running")
   }
+  if (!runner.start(id, database)) throw busy()
+  return c.json({ data: runner.read(id) }, 202)
+}
