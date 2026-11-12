@@ -89,7 +89,7 @@ function agent(roster: Roster, name: string, pairs: [string, string][], task?: s
   const given = pairs.find(([k]) => k === "kind")?.[1]
   const kind = kindOf(name, given)
   const role = kind ? ROSTER_ROLE_OF_KIND[kind] : slotOfName(name) !== null ? "manager" : "worker"
-  const fresh: Agent = { name, role, status: "starting", task: "", title: "" }
+  const fresh: Agent = { name, role, status: "starting", task: "" }
   if (kind) fresh.kind = kind
   roster.agents.push(fresh)
   return fresh

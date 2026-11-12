@@ -263,6 +263,25 @@ claude_sign_in() {
   left "Claude sign-in: claude auth login"
 }
 
+# Bun puts every parent folder's node_modules/.bin first on the PATH of what it runs, so a claude there, such as one an npm or bun install in HOME left, runs in Playground's place of yours.
+claude_shadows() {
+  local d="$DIR"
+  while [ "$d" != / ] && [ "$d" != . ]; do
+    d=$(dirname "$d")
+    [ -e "$d/node_modules/.bin/claude" ] || continue
+    [ -z "$CHECK" ] && (cd "$d" && "$BUN" remove --ignore-scripts @anthropic-ai/claude-code >/dev/null 2>&1)
+    if [ -e "$d/node_modules/.bin/claude" ]; then
+      echo "An older claude at $d/node_modules/.bin/claude runs in Playground's sessions before yours, and Playground could not remove it, so it stops here. Run: cd $d && bun remove @anthropic-ai/claude-code, then run bash $DIR/install.sh again."
+      [ -n "$CHECK" ] && { left "the older claude at $d/node_modules/.bin/claude: cd $d && bun remove @anthropic-ai/claude-code"; continue; }
+      finish
+      exit 1
+    else
+      echo "Removed the older claude in $d/node_modules, which ran in Playground's sessions before yours."
+    fi
+  done
+  return 0
+}
+
 # playground ext init itself, its words shown; when it stops, its last line is the reason on the list.
 ext_init_run() {
   local err
@@ -347,6 +366,7 @@ main() {
       gh_sign_in
       herdr_pin --check
       claude_sign_in
+      claude_shadows
       proxy_service || true
     else
       left "the rest of the check: it runs once Playground is cloned into $DIR"
@@ -412,7 +432,12 @@ EOF
   fi
   (cd "$DIR" && "$BUN" install --frozen-lockfile)
   env NODE_ENV=production SKIP_ENV_VALIDATION=true "$DIR/node_modules/.bin/turbo" run build --filter='./packages/*' --cwd "$DIR"
-  bash "$DIR/scripts/link-skills.sh"
+  if ! bash "$DIR/scripts/link-skills.sh"; then
+    echo "Playground could not link its skills, so it stops here. Do what its \"skipped\" line above says, then run bash $DIR/install.sh again."
+    finish
+    exit 1
+  fi
+  claude_shadows
   on_path "$HOME/.bun/bin" BUN_INSTALL
   # With gh signed in, your extensions get their private repo and your login's folder; without it they stay on this machine, and doctor says sync is off.
   ext_init

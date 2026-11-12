@@ -90,12 +90,24 @@ describe("link-skills.sh links the factory's settings", () => {
     expect(readlinkSync(settings)).toBe(join(repo, "scripts", "factory-settings.json"))
   })
 
-  test("a hand-made real file is left alone and named", async () => {
+  test("a hand-made real file moves to .mine and the link takes its place", async () => {
     const { home, repo, settings } = setup()
     writeFileSync(settings, "{}")
     const result = await run(repo, home)
+    expect(result.code).toBe(0)
+    expect(readFileSync(`${settings}.mine`, "utf8")).toBe("{}")
+    expect(lstatSync(settings).isSymbolicLink()).toBe(true)
+  })
+
+  test("with .mine taken too, it stops and names both", async () => {
+    const { home, repo, settings } = setup()
+    writeFileSync(settings, "{}")
+    writeFileSync(`${settings}.mine`, "old")
+    const result = await run(repo, home)
     expect(result.code).toBe(1)
-    expect(result.stderr).toContain(`${settings} is a real file`)
+    expect(result.stderr).toContain(
+      `skipped ${settings}: a real file, and ${settings}.mine is taken`,
+    )
     expect(readFileSync(settings, "utf8")).toBe("{}")
   })
 })
@@ -203,15 +215,15 @@ describe("link-skills.sh links the playground command and its brief templates", 
     expect(readFileSync(join(ops, kept[0]!), "utf8")).toBe("old copy")
   })
 
-  test("a real file at ~/.bun/bin/playground is left alone and named", async () => {
+  test("a real file at ~/.bun/bin/playground moves to .mine and the link takes its place", async () => {
     const { home, repo } = setup()
     const bin = join(home, ".bun", "bin", "playground")
     mkdirSync(join(home, ".bun", "bin"), { recursive: true })
     writeFileSync(bin, "mine")
     const result = await run(repo, home)
-    expect(result.code).toBe(1)
-    expect(result.stderr).toContain(`${bin}: a real file`)
-    expect(readFileSync(bin, "utf8")).toBe("mine")
+    expect(result.code).toBe(0)
+    expect(readFileSync(`${bin}.mine`, "utf8")).toBe("mine")
+    expect(lstatSync(bin).isSymbolicLink()).toBe(true)
   })
 })
 
@@ -266,14 +278,15 @@ describe("link-skills.sh leaves no personal skill at a name playground's set shi
     expect(readlinkSync(join(skills, "pr"))).toBe(join(cache, "pr"))
   })
 
-  test("a real folder at a name the set ships is left alone and named", async () => {
+  test("a real folder at a name the set ships moves to my-skills and links back", async () => {
     const { home, repo } = setup()
     const mine = join(home, ".claude", "skills", "pr")
     mkdirSync(mine, { recursive: true })
     const result = await run(repo, home)
-    expect(result.code).toBe(1)
-    expect(result.stderr).toContain(`skipped pr: ${mine} is a real folder`)
-    expect(lstatSync(mine).isDirectory()).toBe(true)
+    expect(result.code).toBe(0)
+    const kept = join(home, ".claude", "my-skills", "pr")
+    expect(readlinkSync(mine)).toBe(kept)
+    expect(lstatSync(kept).isDirectory()).toBe(true)
   })
 
   test("the home skill set is written and installed at user scope through the ws marketplace", async () => {

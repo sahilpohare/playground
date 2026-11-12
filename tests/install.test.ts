@@ -247,6 +247,7 @@ const setup = ({
       // the workspace packages the home skill set's resolver imports, from this checkout's install
       `if [ "$1" = install ]; then echo "bun $*" >> ${log}; mkdir -p node_modules/.bin packages/scripts/node_modules; ln -sfn ${join(root, "packages", "scripts", "node_modules", "@packages")} packages/scripts/node_modules/@packages`,
       `  printf '#!/bin/sh\\necho "turbo $*" >> ${log}\\n' > node_modules/.bin/turbo; chmod +x node_modules/.bin/turbo; cp ${store}/portless node_modules/.bin/portless; exit 0; fi`,
+      `if [ "$1" = remove ]; then echo "bun $*" >> ${log}; rm node_modules/.bin/claude; exit 0; fi`,
       `exec ${process.execPath} "$@"`,
     ].join("\n"),
     claude: [
@@ -557,6 +558,41 @@ describe("install.sh", () => {
     expect(out).toContain("Playground is ready.")
     expect(code).toBe(0)
     expect(out).toEndWith("playground started\n")
+  }, 60_000)
+
+  test("a claude in a parent folder's node_modules/.bin is removed, and the run says so", () => {
+    const { home, run } = setup()
+    mkdirSync(join(home, "node_modules/.bin"), { recursive: true })
+    writeFileSync(join(home, "node_modules/.bin/claude"), "#!/bin/sh\n", { mode: 0o755 })
+    const { calls, left, out } = run()
+    expect(calls).toContain("bun remove --ignore-scripts @anthropic-ai/claude-code")
+    expect(existsSync(join(home, "node_modules/.bin/claude"))).toBe(false)
+    expect(out).toContain(`Removed the older claude in ${home}/node_modules`)
+    expect(left.some((item) => item.includes("older claude"))).toBe(false)
+  }, 60_000)
+
+  test("a real file where a link goes moves to .mine and the install carries on with nothing left", () => {
+    const { home, run } = setup()
+    mkdirSync(join(home, ".playground"), { recursive: true })
+    writeFileSync(join(home, ".playground/factory-settings.json"), "{}\n")
+    const { code, left, out } = run()
+    expect(readFileSync(join(home, ".playground/factory-settings.json.mine"), "utf8")).toBe("{}\n")
+    expect(lstatSync(join(home, ".playground/factory-settings.json")).isSymbolicLink()).toBe(true)
+    expect(out).toContain("factory-settings.json.mine")
+    expect(left).toEqual([])
+    expect(code).toBe(0)
+  }, 60_000)
+
+  test("a link it cannot place stops the install with what to do", () => {
+    const { dir, home, run } = setup()
+    mkdirSync(join(home, ".playground"), { recursive: true })
+    writeFileSync(join(home, ".playground/factory-settings.json"), "{}\n")
+    writeFileSync(join(home, ".playground/factory-settings.json.mine"), "{}\n")
+    const { code, out } = run()
+    expect(out).toContain("Playground could not link its skills, so it stops here.")
+    expect(out).toContain(`then run bash ${dir}/install.sh again.`)
+    expect(out).not.toContain("playground ext init")
+    expect(code).toBe(1)
   }, 60_000)
 
   test("a failed install goes on the list and the run carries on to the next tool and the build", () => {

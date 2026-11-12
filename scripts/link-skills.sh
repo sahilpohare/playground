@@ -46,27 +46,35 @@ for dir in "$HOME/.bun/bin" "$DATA" "$DATA/handoffs" "$DATA/ops" "$DATA"/ops/*/;
 done
 
 # Links the factory's settings, which every factory session is spawned with
-# (--settings), so a pull updates its hooks too. A real file there is left alone.
+# (--settings), so a pull updates its hooks too. A real file there moves to <name>.mine first.
+# A real file at a link's place moves to <name>.mine and the link goes in; with <name>.mine taken too, it stops the run naming both.
+set_aside() {
+  [ -e "$1" ] && [ ! -L "$1" ] || return 0
+  if [ -e "$1.mine" ]; then
+    echo "skipped $1: a real file, and $1.mine is taken; move one of them out of $(dirname "$1"), then run bash $REPO/scripts/link-skills.sh" >&2
+    return 1
+  fi
+  mv "$1" "$1.mine"
+  echo "moved your $1 to $1.mine, so Playground's link takes its place"
+}
 SETTINGS="$DATA/factory-settings.json"
 mkdir -p "$(dirname "$SETTINGS")"
-if [ -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ]; then
-  echo "skipped factory settings: $SETTINGS is a real file, move it aside first" >&2
-  status=1
-else
+if set_aside "$SETTINGS"; then
   ln -sfn "$REPO/scripts/factory-settings.json" "$SETTINGS"
   echo "linked factory settings -> $REPO/scripts/factory-settings.json"
+else
+  status=1
 fi
 
-# Links the brief templates and the `playground` command (into ~/.bun/bin, on a login shell's PATH), leaving a real file alone
+# Links the brief templates and the `playground` command (into ~/.bun/bin, on a login shell's PATH)
 link_file() {
   local src="$1" target="$2"
   mkdir -p "$(dirname "$target")"
-  if [ -e "$target" ] && [ ! -L "$target" ]; then
-    echo "skipped $target: a real file, move it aside first" >&2
-    status=1
-  else
+  if set_aside "$target"; then
     ln -sfn "$src" "$target"
     echo "linked $target -> $src"
+  else
+    status=1
   fi
 }
 for brief in new-reviewer new-tester new-worker; do
