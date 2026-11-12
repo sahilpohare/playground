@@ -223,8 +223,8 @@ export function DashboardAside({ children, split }: { children: ReactNode; split
   // the bar hides as a dock does, shown only while the pointer is near the bottom or a key has focus in it
   const [barHidden, setBarHidden] = useState(true)
   // the bar hides as a dock unless the owner turns that off in its menu, kept for this browser; read after mount, so a bar kept shown starts hidden for one paint, the same as a server render would
-  const [autoHide, setAutoHide] = useState(true)
-  useEffect(() => setAutoHide(localStorage.getItem(AUTO_HIDE_KEY) !== "0"), [])
+  const [autoHide, setAutoHide] = useState(false)
+  useEffect(() => setAutoHide(localStorage.getItem(AUTO_HIDE_KEY) === "1"), [])
   const hidden = autoHide && barHidden
   const paneBottom = autoHide ? PANE_BOTTOM : BAR_ROOM
   const setAutoHideKept = (on: boolean) => {
