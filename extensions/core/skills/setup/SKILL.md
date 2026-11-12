@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "Check and set up what the skills need on this machine: the command-line tools and the gh login, the home skill set, the Linear connection, and each extension's own needs through its setup check. Run once on a new machine, or when a skill fails for a missing tool or connection."
+description: "Check and set up what the skills need on this machine: the command-line tools and the gh login, the home skill set, and each extension's own needs through its setup check. Run once on a new machine, or when a skill fails for a missing tool or connection."
 license: Complete terms in the repository's NOTICE
 disable-model-invocation: true
 allowed-tools: "Bash(${CLAUDE_SKILL_DIR}/scripts/check.sh)"
@@ -14,15 +14,9 @@ Get this machine ready for Playground's skills and each extension's: check, show
 
 Run `${CLAUDE_SKILL_DIR}/scripts/check.sh`. It prints one line per command-line need: `ok`, `MISSING` with its fix, or `optional`. Its last lines are each extension's own, from its `scripts/setup/check.sh` (`<data>/extensions/<scope>/scripts/setup/check.sh`).
 
-Then check the connections only Claude Code can see, with one cheap read each. Load each tool with ToolSearch first; a tool that does not load means its server is not connected.
+Then check the connections only Claude Code can see. An extension's check prints each connection its skills need as a line `mcp <label> <tool>, <tool>...`, which leaves its exit code alone: load each named tool with ToolSearch, since a tool that does not load means its server is not connected, and report a missing one beside the script's failures.
 
-| Connection | Read                                             | Needed by                                          |
-| ---------- | ------------------------------------------------ | -------------------------------------------------- |
-| Linear     | `mcp__linear-shared__list_teams` with `limit: 1` | a ticket the owner approved (the **tickets** rule) |
-
-An extension's check prints each connection its skills need as a line `mcp <label> <tool>, <tool>...`, which leaves its exit code alone: load each named tool the same way, and report a missing one beside the script's failures.
-
-**Done when** every line of the script, every connection above and every `mcp` line's tool has a result.
+**Done when** every line of the script and every `mcp` line's tool has a result.
 
 ## 2. Show
 

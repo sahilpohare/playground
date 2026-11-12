@@ -182,7 +182,7 @@ export const holderTag = (
   if (held.length) return [held.join(", "), false]
   if (author && me && author !== me)
     return [
-      "outside author {AUTHOR}: the builder triages (a colleague's: the dispatcher decides per CHANNEL.md's Triage; another's app PR: read-only review then the gate; skills/factory: closed)".replace(
+      "outside author {AUTHOR}: the builder triages (a colleague's: the dispatcher decides per the org's channel triage; another's app PR: read-only review then the gate; skills/factory: closed)".replace(
         "{AUTHOR}",
         author,
       ),

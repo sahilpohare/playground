@@ -72,7 +72,7 @@ export async function keepAlive(dir: string, now: number, remind: () => Promise<
   await writeOwn(path, { ...link, remindedAt: now })
 }
 
-// One process holds the auth state: the lock is created exclusively with the holder's pid and removed by its holder on exit; a gone holder's lock is moved aside and checked, so a takeover never removes a newer lock; it answers why the lock is not this process's.
+// One process holds the auth state: the lock is linked into place with the holder's pid already in it and removed by its holder on exit; a gone holder's lock is moved aside and checked, so a takeover never removes a newer lock; it answers why the lock is not this process's.
 export async function takeLock(
   path: string,
   pid: number,

@@ -25,6 +25,11 @@ const CARVE_OUTS: Record<string, { lines: number; reason: string }> = {
     reason:
       "bun run clean removes gitignored build outputs by name, node_modules among them, far past the trash's 2 GB and 5000-file limits, and never enters a dot-folder",
   },
+  "packages/scripts/src/hooks-bundle.ts": {
+    lines: 2,
+    reason:
+      "--check's mirror is a temp folder the process made itself one call ago, in the OS's tmpdir, holding the merged tree's own sources and never a worktree file; mirrorOf removes it when its own write or link throws, bundle when the build over it does",
+  },
   "packages/scripts/src/pr-merge/README.md": {
     lines: 1,
     reason:

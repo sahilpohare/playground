@@ -18,7 +18,7 @@ One new comment per round, never an edit of an earlier one: the record of what w
 ## ReviewBot · round <r>: <s>/5 at <sha7> · <b> blocking, <f> should-fix, <k> nits
 ```
 
-On an outside author's PR, the verdict also carries need, hit and factory lines ([CHANNEL.md](../../../../../extensions/core/skills/playbook/CHANNEL.md)).
+On an outside author's PR, the verdict also carries three lines: need (do we need it), hit (do we hit the problem it fixes, with evidence) and factory (does it upgrade or degrade the factory, and why).
 
 Then, in this order:
 
@@ -26,7 +26,7 @@ Then, in this order:
 - **Standards** (built well): the same shape, citing the rule (`AGENTS.md`, a skill, your brief) or naming the smell as a judgement call.
 - **Threads**: how many you closed and at which commit, and how many stay open.
 - **Checked** and **Not verified**: what was read in full, skimmed and run (VERIFY.md).
-- On a 5/5 that was a candidate: one line saying the fresh full read found nothing blocking or should-fix, its nits listed above for the worker's follow-up PR.
+- On a 5/5 that was a candidate: one line saying the fresh full read found nothing blocking or should-fix, its nits listed above for the worker to sort by playbook's SESSIONS.md, Fix pushes and nits.
 - Last line: `ReviewBot · round <r>. Push back on any finding you think is wrong.` The account is shared, so this line, not the author field, says who wrote it.
 
 A round on a base merge alone says so in one line under the header (`Base merge only: the PR's own work is unchanged since <sha7>.`), keeping the PR's standing score.

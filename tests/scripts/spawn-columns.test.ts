@@ -2,6 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, readdirSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
 
+import { KINDS } from "../../packages/settings/src/settings"
 import { OLD } from "../session-names"
 import { bin, launchAfterRm, placing, root, scratch, script, spawn } from "./spawn-fake"
 
@@ -323,6 +324,39 @@ describe("under the gates it spawns", () => {
       expect(placing(r)).toEqual([])
     },
   )
+
+  // a checker scoring an extension item could not start, since --pr took a GitHub pull request alone, and a restart of one holding an item in its prs closed its pane, then failed its resume (#1851).
+  const ITEM = "acme/script/start-up"
+
+  test("a checker's start naming only an extension item passes, its row's prs the item and its pr unset (#1851)", async () => {
+    const r = await checkerStart("column", null, ["--pr", ITEM])
+    expect(r.code).toBe(0)
+    expect(statusAndPrs(r)).toEqual([`prs+=${ITEM}`, "pr="])
+  })
+
+  test("a checker's restart naming a pull request and an extension item passes, its pr the pull request (#1851)", async () => {
+    const r = await checkerStart("resume", { pr: PR_A, prs: [PR_A, ITEM], status: "ended" }, [
+      "--pr",
+      `${PR_A},${ITEM}`,
+    ])
+    expect(r.code).toBe(0)
+    expect(statusAndPrs(r)).toEqual(["status=starting", `prs=${PR_A},${ITEM}`, `pr=${PR_A}`])
+  })
+
+  test.each(["-acme/script/start-up", "acme/widget/start-up", "acme/script/Start-Up"])(
+    "--pr refuses the extension item %s before any pane opens (#1851)",
+    async (bad) => {
+      const r = await checkerStart("column", null, ["--pr", bad])
+      expect(r.code).not.toBe(0)
+      expect(r.err).toContain("<scope>/<kind>/<key>")
+      expect(placing(r)).toEqual([])
+    },
+  )
+
+  test("spawn.sh's extension item form names the kinds playground ext takes (#1851)", async () => {
+    const source = await Bun.file(script).text()
+    expect(source).toContain(`/(${KINDS.join("|")})/`)
+  })
 
   test("a checker's failed roster write refuses its start before its pane opens (#1400)", async () => {
     const r = await spawn(

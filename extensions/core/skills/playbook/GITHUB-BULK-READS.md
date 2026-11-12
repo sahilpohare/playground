@@ -117,7 +117,7 @@ A held run is no failure: an audit of canary's runs over 25 hours on 31 Oct and 
   gh api "repos/<owner>/<repo>/commits/$sha/check-runs" --jq '.check_runs[] | [.name, .conclusion] | @tsv'
   ```
 
-- **A past window**: keep each red run with at least one job, then read its failing step with `gh run view <id> --log-failed`.
+- **A past window**: keep each red run with at least one job, then read its failing step with `gh run view <id> --log-failed`; `gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<job id>/logs` reads a job's whole log, where `--log-failed` cuts it.
   Done when every red run in the window is kept or set aside as a held run.
 
   ```bash

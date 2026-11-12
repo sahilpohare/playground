@@ -378,6 +378,25 @@ describe("the tripwire", () => {
     })
   })
 
+  test("a legacy mark whose clear is refused still alerts: the folder's make answers, not its EEXIST", () => {
+    const roots = machine()
+    for (const name of ["a", "b", "c"])
+      expect(quarantine(file(join(roots.home, name)), opts, roots, { now: NOW })).toHaveProperty(
+        "id",
+      )
+    const toldDir = join(roots.trash, ".cap-told")
+    mkdirSync(toldDir, { recursive: true })
+    writeFileSync(join(toldDir, opts.session), "2026-11-01T00:00:00.000Z")
+    chmodSync(toldDir, 0o555)
+    try {
+      expect(quarantine(file(join(roots.home, "x")), opts, roots, { now: NOW })).toMatchObject({
+        kind: "tripwire",
+      })
+    } finally {
+      chmodSync(toldDir, 0o755)
+    }
+  })
+
   test("a .cap-told that is a file does not throw out of quarantine: the burst alerts", () => {
     const roots = machine()
     for (const name of ["a", "b", "c"])
@@ -575,9 +594,9 @@ describe("a carve-out", () => {
   })
 })
 
-// Every real carve-out: one exact folder in the data folder, a cap within the tripwire's, its own entry let through, and its parent, a sibling and an entry over its cap refused.
+// Every real carve-out: one exact folder in the data folder or HOME, a cap within the tripwire's, its own entry let through, and its parent, a sibling and an entry over its cap refused.
 describe.each(Object.entries(CARVE_OUTS))("the %s carve-out", (name, carve) => {
-  test("names one exact folder in the data folder, beside the trash, under a cap within the tripwire's", () => {
+  test("names one exact folder in the data folder or HOME, beside the trash, under a cap within the tripwire's", () => {
     const parts = carve.folder.split("/")
     expect(parts.every((part) => part && part !== "." && part !== "..")).toBe(true)
     expect(parts[0]).not.toBe("trash")
@@ -587,12 +606,14 @@ describe.each(Object.entries(CARVE_OUTS))("the %s carve-out", (name, carve) => {
 
   test("lets its own entry through and refuses its parent, a sibling and an entry over its cap", () => {
     const roots = machine()
-    const folder = join(roots.home, ".playground", carve.folder)
-    const own = file(join(folder, "own"))
+    const folder = join(roots.home, carve.home ? "" : ".playground", carve.folder)
+    const own = file(join(folder, carve.name ? "com.playground.own.plist" : "own"))
     const sibling = file(join(folder, "..", "sibling-of-carve-out", "own"))
-    const over = join(folder, "over")
-    file(join(over, "big"), "x".repeat(Math.min(carve.bytes + 1, 4096)))
-    if (carve.bytes >= 4096) for (let i = 0; i <= carve.files; i++) file(join(over, `f${i}`))
+    const over = join(folder, carve.name ? "com.playground.over.plist" : "over")
+    if (carve.name) file(over, "x".repeat(carve.bytes + 1))
+    else file(join(over, "big"), "x".repeat(Math.min(carve.bytes + 1, 4096)))
+    if (!carve.name && carve.bytes >= 4096)
+      for (let i = 0; i <= carve.files; i++) file(join(over, `f${i}`))
     const named = { ...opts, carveOut: name }
     expect(quarantine(own, named, roots, { now: NOW })).toMatchObject({ files: 1 })
     expect(quarantine(join(folder, ".."), named, roots, { now: NOW })).toMatchObject({
@@ -603,6 +624,31 @@ describe.each(Object.entries(CARVE_OUTS))("the %s carve-out", (name, carve) => {
       kind: "tripwire",
     })
   })
+})
+
+// jobs.ts boots out a turned-off launchd job and moves its installed plist from HOME's LaunchAgents, which holds every other app's agents too.
+test("the jobs-installed carve-out moves only a plain com.playground plist, and restore puts it back", () => {
+  const roots = machine()
+  const agents = join(roots.home, "Library", "LaunchAgents")
+  const named = { ...opts, carveOut: "jobs-installed" }
+  const ours = file(join(agents, "com.playground.ops-x.plist"), "ours")
+  const theirs = file(join(agents, "com.other.agent.plist"), "theirs")
+  const folder = join(agents, "com.playground.ops-dir.plist")
+  file(join(folder, "a"))
+  const link = join(agents, "com.playground.ops-link.plist")
+  symlinkSync(theirs, link)
+  for (const path of [theirs, folder, link])
+    expect(quarantine(path, named, roots, { now: NOW })).toMatchObject({
+      kind: "protected",
+      refused: expect.stringContaining("not a file the jobs-installed carve-out names"),
+    })
+  expect(readFileSync(theirs, "utf8")).toBe("theirs")
+  expect(existsSync(join(folder, "a"))).toBe(true)
+  expect(quarantine(ours, named, roots, { now: NOW })).toMatchObject({ files: 1 })
+  expect(existsSync(ours)).toBe(false)
+  const [entry] = listTrash(roots.trash)
+  expect(restore(entry!.id, roots)).toEqual({ path: ours })
+  expect(readFileSync(ours, "utf8")).toBe("ours")
 })
 
 test("linkPlaces lists each marked scratch folder in a temp folder, and each session's scratchpad with the folders directly in it", () => {
@@ -1086,6 +1132,30 @@ describe("purgeTrash", () => {
     purgeTrash(trash, { free: () => 100 * GB, now: NOW })
     expect(existsSync(old)).toBe(false)
     expect(existsSync(fresh)).toBe(true)
+  })
+
+  test("keeps a session's empty folder, which a concurrent try may be about to fill", () => {
+    const { trash } = machine()
+    const told = join(trash, ".cap-told", "j6rjgy-worker")
+    mkdirSync(told, { recursive: true })
+    purgeTrash(trash, { free: () => 100 * GB, now: NOW })
+    expect(existsSync(told)).toBe(true)
+  })
+
+  test("carries on past a told mark it cannot remove", () => {
+    const { trash } = machine()
+    const toldDir = join(trash, ".cap-told", "j6rjgy-worker")
+    mkdirSync(toldDir, { recursive: true })
+    const old = join(toldDir, "2026-11-01T00:00:00.000Z")
+    writeFileSync(old, "")
+    utimesSync(old, new Date(NOW.getTime() - 61_000), new Date(NOW.getTime() - 61_000))
+    chmodSync(toldDir, 0o555)
+    try {
+      const done = purgeTrash(trash, { free: () => 100 * GB, now: NOW })
+      expect(done.removed).toEqual([])
+    } finally {
+      chmodSync(toldDir, 0o755)
+    }
   })
 
   test("removes the oldest batches early while free space is under 50 GB", () => {

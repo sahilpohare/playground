@@ -4,6 +4,7 @@ import { homedir } from "node:os"
 import { resolve } from "node:path"
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
+import { eachInput } from "./codex"
 import { fromFactory } from "./role"
 import {
   knownVariables,
@@ -171,7 +172,7 @@ export async function check(
   environment: Environment = process.env,
 ): Promise<string | undefined> {
   try {
-    return await inspect(raw, environment)
+    return await eachInput(raw, "no-raw-wa", (one) => inspect(one, environment))
   } catch {
     return undefined
   }

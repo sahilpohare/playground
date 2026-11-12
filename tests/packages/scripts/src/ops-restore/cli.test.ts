@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -334,5 +343,89 @@ describe("ops-restore puts a lost main checkout back (#1354)", () => {
     await git(m.main, "checkout", "--", ".")
     await beat(m.ctx(later(900_000)))
     expect(existsSync(join(m.ops, "restore", "state.json"))).toBe(false)
+  })
+})
+
+describe("ops-restore puts back a tracked file modified in the main checkout (#1840)", () => {
+  const rootsOf = (m: { main: string; root: string }) => () => ({
+    home: join(m.root, "home"),
+    main: m.main,
+    trash: join(m.root, "data", "trash"),
+  })
+  const logOf = async (ops: string) =>
+    (
+      await Bun.file(join(ops, "log", "ops-restore.log"))
+        .text()
+        .catch(() => "")
+    )
+      .split("\n")
+      .filter(Boolean)
+  const readme = (main: string) => readFileSync(join(main, "README.md"), "utf8")
+
+  test("a file modified on two looks in a row comes back as HEAD's copy, its stray copy in the trash, with one log line", async () => {
+    const m = await machine()
+    writeFileSync(join(m.main, "README.md"), "stray\n")
+    const beat = restoreBeat({ guards: GUARDS, main: m.main, roots: rootsOf(m), upkeep: noUpkeep })
+    await beat(m.ctx(T0))
+    expect(readme(m.main)).toBe("stray\n")
+    await beat(m.ctx(later(300_000)))
+    expect(readme(m.main)).toBe("origin\n")
+    expect(await git(m.main, "status", "--porcelain")).toBe("")
+    const lines = await logOf(m.ops)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain("restored README.md from HEAD")
+    const trashed = /in the trash at (.+) \(playground rm --restore /.exec(lines[0]!)![1]!
+    expect(trashed.startsWith(realpathSync(join(m.root, "data", "trash")))).toBe(true)
+    expect(readFileSync(trashed, "utf8")).toBe("stray\n")
+  })
+
+  test("a staged modification is put back from HEAD too", async () => {
+    const m = await machine()
+    writeFileSync(join(m.main, "README.md"), "stray\n")
+    await git(m.main, "add", "README.md")
+    const beat = restoreBeat({ guards: GUARDS, main: m.main, roots: rootsOf(m), upkeep: noUpkeep })
+    await beat(m.ctx(T0))
+    await beat(m.ctx(later(300_000)))
+    expect(readme(m.main)).toBe("origin\n")
+    expect(await git(m.main, "status", "--porcelain")).toBe("")
+    expect(await logOf(m.ops)).toHaveLength(1)
+  })
+
+  test("a file modified on one look only is left as it is", async () => {
+    const m = await machine()
+    writeFileSync(join(m.main, "README.md"), "stray\n")
+    const beat = restoreBeat({ guards: GUARDS, main: m.main, roots: rootsOf(m), upkeep: noUpkeep })
+    await beat(m.ctx(T0))
+    await beat(m.ctx(later(SECOND_LOOK_MS - 10_000)))
+    expect(readme(m.main)).toBe("stray\n")
+    expect(await logOf(m.ops)).toEqual([])
+  })
+
+  test("an untracked file and a staged add stay as they are", async () => {
+    const m = await machine()
+    writeFileSync(join(m.main, "new.txt"), "new\n")
+    writeFileSync(join(m.main, "added.txt"), "added\n")
+    await git(m.main, "add", "added.txt")
+    const beat = restoreBeat({ guards: GUARDS, main: m.main, roots: rootsOf(m), upkeep: noUpkeep })
+    await beat(m.ctx(T0))
+    await beat(m.ctx(later(300_000)))
+    expect(await git(m.main, "status", "--porcelain")).toBe("A  added.txt\n?? new.txt\n")
+    expect(await logOf(m.ops)).toEqual([])
+    expect(existsSync(join(m.root, "data", "trash"))).toBe(false)
+  })
+
+  test("while upkeep holds the main checkout, a modified file waits", async () => {
+    const m = await machine()
+    writeFileSync(join(m.main, "README.md"), "stray\n")
+    const beat = restoreBeat({
+      guards: GUARDS,
+      main: m.main,
+      roots: rootsOf(m),
+      upkeep: async () => true,
+    })
+    await beat(m.ctx(T0))
+    await beat(m.ctx(later(300_000)))
+    expect(readme(m.main)).toBe("stray\n")
+    expect(await logOf(m.ops)).toEqual([])
   })
 })

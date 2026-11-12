@@ -16,13 +16,13 @@ import { readPolicy } from "../../packages/settings/src/rendered"
 import { loadNames, MANAGER_ROLES, registryName, roleOfName, rosterNames, rosterRole } from "./role"
 
 export const REASON =
-  "name the open #iN on the same thing if one exists (bun run ask open lists them), else post it with bun run ask new, then say in chat that it's in the inbox as #iN"
+  "name the open #iN on the same thing if one exists (playground ask open lists them), else post it with playground ask new, then say in chat that it's in the inbox as #iN"
 // A lead's line: a lead sends an owner decision up the chain, and the dispatcher posts it (playbook's Chain)
 export const LEAD_REASON =
   "send the decision to the dispatcher with SendMessage, which posts it to the Inbox, and keep the question out of chat; once the dispatcher names its #iN, say in chat that it's in the inbox as #iN"
 // Chat scrolls, so steps the owner comes back to go in one card whose progress is edited in place.
 export const STEPS_REASON =
-  "put these steps in one Inbox card (bun run ask new; the open #iN on the same thing if one exists, bun run ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line"
+  "put these steps in one Inbox card (playground ask new; the open #iN on the same thing if one exists, playground ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line"
 // git worktree list, then each bun run ask get (all at once), is killed past its limit; one bun run ask get took 5.9s under load.
 const GIT_TIMEOUT_MS = 3000
 const READ_TIMEOUT_MS = 10_000

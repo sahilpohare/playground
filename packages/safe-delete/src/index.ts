@@ -84,10 +84,13 @@ export const PURGE = { days: 7, minFree: 50e9 }
 // The cap's window, which a burst's recent moves read and a told mark outlives by at most: past it no try can meet the key again, since the key is a stamp that never recurs.
 const CAP_WINDOW_MS = 60_000
 
-// One script's exception to the protected list: the entries directly in one exact folder in the data folder (the trash's parent, so it follows PLAYGROUND_DATA_DIR), each at most its files and bytes; the folder itself, its parent, a sibling and anything deeper stay protected.
-export type CarveOut = { bytes: number; files: number; folder: string }
+// One script's exception to the protected list: the entries directly in one exact folder in the data folder (the trash's parent, so it follows PLAYGROUND_DATA_DIR), or in HOME with home set, each at most its files and bytes, and with name set only a plain file whose name it matches; the folder itself, its parent, a sibling and anything deeper stay protected.
+export type CarveOut = { bytes: number; files: number; folder: string; home?: true; name?: RegExp }
 
-// Each script's carve-out by the script's name, one entry per script, A to Z, which only that script passes as quarantine's carveOut; playground rm takes none.
+// The file name of a LaunchAgent that is Playground's own, which the jobs render installs and removes, and no other.
+export const PLAYGROUND_AGENT = /^com\.playground\.[\w.-]+\.plist$/
+
+// Each script's carve-outs by the script's name, one entry per folder it removes from, A to Z, which only that script passes as quarantine's carveOut; playground rm takes none.
 export const CARVE_OUTS: Record<string, CarveOut> = {
   // scripts/ops/dashboard/supervisor.sh's production builds, one folder per head; one measured 2,251 files and 78 MB on 2 Nov
   "dashboard-supervisor": {
@@ -97,6 +100,14 @@ export const CARVE_OUTS: Record<string, CarveOut> = {
   },
   // packages/scripts/src/playground/jobs.ts's rendered LaunchAgent plists, one file each, for a job jobs.json no longer holds
   jobs: { bytes: 64 * 1024, files: 1, folder: "ops/launch-agents" },
+  // the same render's installed copies, for a launchd job now turned off: Playground's own plists alone, never another app's agent
+  "jobs-installed": {
+    bytes: 64 * 1024,
+    files: 1,
+    folder: "Library/LaunchAgents",
+    home: true,
+    name: PLAYGROUND_AGENT,
+  },
 }
 
 const HOME_DIRS = [".claude", ".config", ".gnupg", ".playground", ".ssh", "Library", "Music"]
@@ -192,11 +203,15 @@ const carveOutAt = (
 ): CarveOut | string => {
   const carve = Object.hasOwn(table, name) ? table[name]! : undefined
   if (!carve) return `no carve-out is named ${name}`
-  const folder = real(join(dirname(roots.trash), carve.folder))
+  const folder = real(join(carve.home ? roots.home : dirname(roots.trash), carve.folder))
   const abs = resolve(path)
   const own = join(real(dirname(abs)), basename(abs))
   if (dirname(own) !== folder || dirname(real(abs)) !== folder)
     return `${abs} is not directly in ${folder}, the ${name} carve-out's folder`
+  // a restore checks a path that is gone, so only an entry that stands must be a plain file
+  const stat = lstat(own)
+  if (carve.name && (!carve.name.test(basename(own)) || (stat && !stat.isFile())))
+    return `${abs} is not a file the ${name} carve-out names`
   return whyHolds(own, roots) ?? carve
 }
 
@@ -282,7 +297,7 @@ const recentMoves = (trash: string, session: string, now: Date): TrashEntry[] =>
     .filter((entry) => Date.parse(entry.at) > since)
 }
 
-// Whether a cap refusal is its burst's first, so it alerts once: a burst is the moves that filled the cap, keyed by the newest of them, and the told mark is a file named for that key, made with wx, so of two tries at the same instant the first alone creates it and alerts, and every later try inside the burst, whose key is already told, is a plain refusal. A mark of the old shape, a content file at the session's own path, is cleared at the session's first burst, since left alone it turns every write ENOTDIR and silences the session; the folder's removal runs for that case alone, since a concurrent try's fresh folder must stand and its wx answer decide.
+// Whether a cap refusal is its burst's first, so it alerts once: the told mark is a file named for the burst's key, made with wx, so of two tries at one instant the first alone creates it and alerts, and a later try inside the burst, whose key is already told, is a plain refusal. A mark of the old shape, a content file at the session's own path, is cleared at the session's first burst, the removal for that case alone, so a concurrent try's fresh folder stands; the design's history is in the PG-1733 commits.
 const firstOfBurst = (trash: string, session: string, recent: TrashEntry[]): boolean => {
   const key =
     recent
@@ -306,10 +321,14 @@ const firstOfBurst = (trash: string, session: string, recent: TrashEntry[]): boo
   }
   try {
     mkdirSync(join(trash, ".cap-told", session), { recursive: true })
+  } catch {
+    return true
+  }
+  try {
     writeFileSync(told, "", { flag: "wx" })
     return true
   } catch (err) {
-    return (err as { code?: string }).code === "EEXIST" ? false : true
+    return (err as { code?: string }).code !== "EEXIST"
   }
 }
 
@@ -678,19 +697,27 @@ export function purgeTrash(
     if (stampMs(BATCH.exec(batch)![1]!) < cutoff) remove(batch)
     else young.push(batch)
   while (young.length && io.free() < PURGE.minFree) remove(young.shift()!)
-  // A told mark no try can meet again: a burst's key is a stamp that never recurs, so a mark older than the cap's window is swept, and an empty session folder with it.
+  // A told mark no try can meet again: a burst's key is a stamp that never recurs, so a mark older than the cap's window is swept, and the session's folder stays, since a concurrent try may be about to fill it.
   const toldCutoff = io.now.getTime() - CAP_WINDOW_MS
+  const stale = (at: string) => (lstat(at)?.mtimeMs ?? Infinity) < toldCutoff
   for (const session of entriesOf(join(root, ".cap-told"))) {
     const at = join(root, ".cap-told", session.name)
     if (!session.isDirectory()) {
-      if ((lstat(at)?.mtimeMs ?? Infinity) < toldCutoff) rmSync(at, { force: true })
+      if (stale(at)) {
+        try {
+          rmSync(at, { force: true })
+        } catch {}
+      }
       continue
     }
     for (const mark of entriesOf(at)) {
       const markAt = join(at, mark.name)
-      if ((lstat(markAt)?.mtimeMs ?? Infinity) < toldCutoff) rmSync(markAt, { force: true })
+      if (stale(markAt)) {
+        try {
+          rmSync(markAt, { force: true })
+        } catch {}
+      }
     }
-    if (!entriesOf(at).length) rmSync(at, { force: true, recursive: true })
   }
   return { removed, skipped }
 }

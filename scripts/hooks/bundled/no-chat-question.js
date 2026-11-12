@@ -6151,9 +6151,9 @@ async function rosterNames(environment = process.env) {
 }
 
 // scripts/hooks/no-chat-question.ts
-var REASON = "name the open #iN on the same thing if one exists (bun run ask open lists them), else post it with bun run ask new, then say in chat that it's in the inbox as #iN";
+var REASON = "name the open #iN on the same thing if one exists (playground ask open lists them), else post it with playground ask new, then say in chat that it's in the inbox as #iN";
 var LEAD_REASON = "send the decision to the dispatcher with SendMessage, which posts it to the Inbox, and keep the question out of chat; once the dispatcher names its #iN, say in chat that it's in the inbox as #iN";
-var STEPS_REASON = "put these steps in one Inbox card (bun run ask new; the open #iN on the same thing if one exists, bun run ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line";
+var STEPS_REASON = "put these steps in one Inbox card (playground ask new; the open #iN on the same thing if one exists, playground ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line";
 var GIT_TIMEOUT_MS = 3000;
 var READ_TIMEOUT_MS = 1e4;
 var DASHBOARD_DEADLINE_MS = GIT_TIMEOUT_MS + READ_TIMEOUT_MS;

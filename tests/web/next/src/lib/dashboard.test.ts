@@ -81,6 +81,7 @@ describe("LIGHT_LABELS", () => {
     expect(LIGHT_LABELS).toEqual({
       idle: "Idle",
       "needs-you": "Waiting on you",
+      unknown: "State unknown",
       working: "Working",
     })
     for (const label of Object.values(LIGHT_LABELS)) expect(label).toMatch(/^\p{Lu}/u)
@@ -737,7 +738,9 @@ process.exit(0)
 
   test("shows a session in each light, a reviewer, a tester and a name outside the factory's, and an agent that is down", async () => {
     const { board, workers } = await fixture()
-    expect(new Set(workers.map((w) => w.light))).toEqual(new Set(["idle", "needs-you", "working"]))
+    expect(new Set(workers.map((w) => w.light))).toEqual(
+      new Set(["idle", "needs-you", "unknown", "working"]),
+    )
     const names = workers.map((w) => w.name)
     for (const name of [
       "h4n8zt-reviewer",

@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { inboxInputSchema } from "../../api/hono/src/lib/dashboard/inbox"
 import { dataDir } from "../../packages/env/src/data-dir"
 import { UNSET_REPOS } from "../../packages/scripts/src/trace-count/kinds"
+import { GUARDS } from "../../scripts/hooks/guards"
 import { mainCheckout } from "../../scripts/hooks/no-main-checkout"
 import {
   askInbox,
@@ -59,6 +60,7 @@ const PATHS: Paths = {
   MAIN: NONE,
   ROOT: NONE,
   SCOPE: NONE,
+  TREE_LINK: NONE,
   WORDS: NONE,
   WORK: NONE,
 }
@@ -240,14 +242,19 @@ const rowsFor = (guard: string): string[] => [
 const REGISTERED = await bashGuards(CHECKOUT)
 
 describe("run screens the command through every registered Bash guard before it types", () => {
-  test("the guards come from the factory settings' Bash matchers", () => {
-    expect(REGISTERED).toContain("no-raw-spawn")
-    expect(REGISTERED).toContain("no-unslotted-run")
-    expect(REGISTERED).not.toContain("writing-first")
-    expect(REGISTERED).not.toContain("no-bare-slack-link")
+  test("the guards come from the factory settings' Bash matchers: guards alone, which runs every Bash guard", () => {
+    expect(REGISTERED).toEqual(["guards"])
   })
 
-  test.each(REGISTERED.map((guard) => [guard]))(
+  test("guards, registered as the factory registers it, refuses through run, and nothing is typed", async () => {
+    const { calls, herdr } = stubHerdr()
+    const message = await refusal(run("w1:p1", "git stash", herdr, repoOf("guards")))
+    expect(message).toContain("no-stash hook ")
+    expect(typed(calls)).toEqual([])
+  })
+
+  // each guard guards runs, registered alone, refuses one of its rows through run
+  test.each(GUARDS.map(({ name }) => [name]))(
     "%s refuses one of its rows through run, and nothing is typed",
     async (guard) => {
       const repo = repoOf(guard)

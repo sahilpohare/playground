@@ -319,6 +319,7 @@ export const STATUS_RANK: Record<SortState, number> = {
   working: 1,
   paused: 2,
   idle: 2,
+  unknown: 2,
   down: 3,
 }
 
@@ -450,6 +451,7 @@ export const oneLine = (text: string, max = 80): string => {
 export const LIGHT_LABELS: Record<Worker["light"], string> = {
   idle: "Idle",
   "needs-you": "Waiting on you",
+  unknown: "State unknown",
   working: "Working",
 }
 

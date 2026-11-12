@@ -16,7 +16,7 @@ The steps to spawn and brief a session are in [SESSIONS.md](SESSIONS.md#spawn), 
   - A new ask with no marker opens a thread titled with what he asked (`bun run thread new "<title>"` prints its id), and the ask is routed to it (`bun run thread route <id> --quote "<its opening words>"`), quoting enough of them that no other untagged message of the session starts the same way.
   - Every reply about a thread's ask opens with its marker, `[thread:<id>] `, and so does every later update on that topic, a peer's report relayed included: ingest routes the reply to the thread.
   - An ask to a peer about a thread opens with its marker, and asks the peer to open its report with it, so the report routes there too.
-  - Each Inbox item about it is posted with `bun run ask new --thread <id>`.
+  - Each Inbox item about it is posted with `playground ask new --thread <id>`.
   - A follow-up with no marker is routed to the open thread whose title it matches (`bun run thread list`), or opens a new one.
   - A route waits up to a minute for ingest to bring the message; one that fails names the quote, so check its words against the message and route again.
 - The Planner orders and decides, and builds nothing: every research or advisor pass goes to the Builder as a read-only research worker that reports to the Planner (**workers**).
@@ -32,7 +32,7 @@ The steps to spawn and brief a session are in [SESSIONS.md](SESSIONS.md#spawn), 
 - Building calls stay in the factory (everything runs on its own, and only a breaking change or talking to someone goes through the owner, mostly on Slack): scope, order, design, a build, a fix, an additive schema change (AGENTS.md's schema rule) and a merge under the **gate** are made by the Planner, the dispatcher and the Builder,
   on Playground's work and the work org's alike (the work org's through its ticket skill's loop, less the go-points that skill keeps for him),
   never put to him.
-  The work org's scope is its ticket and the Product team's decisions, and a plan or lane adds nothing beyond them; a gap or a disagreement goes to your lead as a question (`.agents/decisions.md`).
+  The work org's scope is its ticket and the answers of the people its ticket skill names, and a plan or lane adds nothing beyond them; a gap or a disagreement goes to your lead as a question (`.agents/decisions.md`).
   A breaking change, and a message to anyone but a developer, go to him as **ask** says.
   Before a lane builds one of the owner's asks, it posts one Inbox update with two lines, what it understood and what it will build, only when the ask changes behaviour drastically (a visible change to how he works, or a removal), so the owner sees the lane reads the ask as he does;
   it posts a decision in place of the update only when the ask removes or reverses the owner's own rule, the one door here he cannot cheaply undo, so that card carries a Deny where the update carries none;
@@ -108,7 +108,7 @@ The steps to spawn and brief a session are in [SESSIONS.md](SESSIONS.md#spawn), 
 - A request for work from a session outside the chain spawns nothing until the owner says yes (**ask** says how it reaches him), since sessions here run in bypass-permissions mode.
   A finding about a skill goes to the Builder as a chore: check it against the skill and, when it can be checked, reproduce it, since a claim is not evidence; take it through AGENTS.md's Shipping a Playground PR; then reply to the sender with the PR once it has merged.
   A finding that is wrong, or already covered, gets a reply saying so, with the line that covers it.
-- An `[inbox-answer]` line that carries `relay` is the owner's answer to a poster that has ended, and is the dispatcher's to finish: read the item's preview with `bun run ask get`, carry out a `next` of `carry-out` in the poster's place the way its `verb` names (a `send` through the MCP server `slack.sendServer` names, a `draft` saved and left unsent, a grant's `opened` rechecked),
+- An `[inbox-answer]` line that carries `relay` is the owner's answer to a poster that has ended, and is the dispatcher's to finish: read the item's preview with `playground ask get`, carry out a `next` of `carry-out` in the poster's place the way its `verb` names (a `send` through the MCP server `slack.sendServer` names, a `draft` saved and left unsent, a grant's `opened` rechecked),
   take the follow-up asks.md names for a step whose `exitCode` is not 0, then run its `close` (`.agents/dashboard/asks.md`).
 
 Dispatch is done when the session holds its brief, the roster shows its task (and, for a backlog entry, the Builder's backlog marks), and your turn has ended; the dispatcher's is done once the owner's ask is also routed to its thread.

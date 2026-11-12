@@ -162,6 +162,25 @@ describe("lightOf", () => {
   })
 })
 
+describe("a Codex session's light", () => {
+  // It writes no state record (its hooks.json leaves session-state out), so a light that would read idle is unknown.
+  test("reads unknown where it would read idle, and herdr's working and waiting as they are", () => {
+    const light = (agent: string, lifecycle: string) =>
+      fromRecords(
+        { sessions: [session({ agent, agent_lifecycle: lifecycle })] },
+        workspaces,
+        new Map(),
+        new Map(),
+      ).workers[0]?.light
+    expect(light("codex", "idle")).toBe("unknown")
+    expect(light("codex", "unknown")).toBe("unknown")
+    expect(light("codex", "running")).toBe("working")
+    expect(light("codex", "needsInput")).toBe("needs-you")
+    expect(light("claude", "idle")).toBe("idle")
+    expect(light("claude", "unknown")).toBe("idle")
+  })
+})
+
 describe("DISPATCHER", () => {
   test("is the dispatcher role word unless PLAYGROUND_DISPATCHER names a test stack's throwaway session", () => {
     expect(DISPATCHER).toBe(process.env.PLAYGROUND_DISPATCHER || "dispatcher")

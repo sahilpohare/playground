@@ -15,6 +15,7 @@ const script = join(root, "scripts", "hooks", "no-main-checkout.ts")
 const MAIN = mkdtempSync(join(tmpdir(), "no-main-checkout-main-"))
 const WORKTREE = `${MAIN}/.claude/worktrees/a`
 mkdirSync(join(WORKTREE, "api", "hono"), { recursive: true })
+writeFileSync(join(WORKTREE, ".git"), `gitdir: ${MAIN}/.git/worktrees/a\n`)
 afterAll(() => rmSync(MAIN, { force: true, recursive: true }))
 // the settings the main checkout's packages build needs, as the release skill's step 5 types them
 const OFF = "env NODE_ENV=production SKIP_ENV_VALIDATION=true"
@@ -630,14 +631,20 @@ describe("what keeps the main checkout up to date, or only reads it, runs", () =
     expect(await bash(command, WORKTREE)).toContain("no-main-checkout hook refuses")
   })
 
-  // #623: a climb the shell runs at most once reaches one folder up, the worktrees folder, so each stays running
+  // #1663: a climb the shell runs once reaches the worktrees folder, which no worktree holds, so git walks up to the main checkout from there
   test.each([
     ["a function whose cd climbs, called once", "f() { cd ..; }; f; git commit -m x"],
     ["an if condition that climbs", "if cd ..; then git commit -m x; fi"],
     ["a single eval of a climb", "eval 'cd ..'; git commit -m x"],
     ["one climb through a variable", "U=..; cd $U; git commit -m x"],
-    ["a function called once beside a file of its name", "f() { cd ..; }; f; echo x > f"],
     ["a function called once beside a variable argument", 'f() { cd ..; }; f; git commit -m "$m"'],
+  ])("from a worktree, %s is refused", async (_name, command) => {
+    expect(await bash(command, WORKTREE)).toContain("no-main-checkout hook refuses")
+  })
+
+  // #623: a file a climb writes in the worktrees folder lands in no checkout, and a line with no climb stays where it started
+  test.each([
+    ["a function called once beside a file of its name", "f() { cd ..; }; f; echo x > f"],
     ["an if condition with a brace argument", "if grep -q { f; then :; fi; git commit -m x"],
     ["a for loop with no cd", "for i in 1 2 3; do echo $i; done; git commit -m x"],
   ])("from a worktree, %s runs", async (_name, command) => {
@@ -666,6 +673,34 @@ describe("what keeps the main checkout up to date, or only reads it, runs", () =
   test("from a worktree, bun's --cwd into another worktree runs", async () => {
     expect(await bash(`bun run --cwd ${MAIN}/.claude/worktrees/b build`, WORKTREE)).toBeUndefined()
   })
+
+  // #1663: what a cd's || runs, runs where the cd failed; after an exit there, or an || that answers a later command of the cd's run, what follows runs where the cd landed
+  test.each([
+    ["an exit", `cd ${WORKTREE} || exit; git commit -m x`],
+    ["an exit with a status", `cd ${WORKTREE} || exit 1; git commit -m x`],
+    [
+      "a true after a later command of its run",
+      `cd ${WORKTREE} && echo x || true; git commit -m x`,
+    ],
+  ])(
+    "from the main checkout, a commit after a cd whose || runs %s runs",
+    async (_name, command) => {
+      expect(await bash(command)).toBeUndefined()
+    },
+  )
+
+  test.each([
+    ["an echo", `cd ${WORKTREE} || echo no; git commit -m x`],
+    ["a cd back", `cd ${WORKTREE} || cd ${MAIN}; git commit -m x`],
+    // bash -c carries on past a top-level return, which fails there
+    ["a return", `cd ${WORKTREE} || return; git commit -m x`],
+    ["a commit after a later command of its run", `cd ${WORKTREE} && echo x || git commit -m x`],
+  ])(
+    "from the main checkout, a commit after a cd whose || runs %s is refused",
+    async (_name, command) => {
+      expect(await bash(command)).toContain("no-main-checkout hook refuses")
+    },
+  )
 })
 
 // Each git command that moves HEAD, the index or the files, as a session would type it
@@ -916,6 +951,10 @@ describe("a git write in the live Dashboard's checkout is refused to every sessi
     ["b", "PG-1-b"],
   ]) {
     mkdirSync(join(LMAIN, ".git", "worktrees", name), { recursive: true })
+    writeFileSync(
+      join(LMAIN, ".claude", "worktrees", name, ".git"),
+      `gitdir: ${join(LMAIN, ".git", "worktrees", name)}\n`,
+    )
     writeFileSync(join(LMAIN, ".git", "worktrees", name, "HEAD"), `ref: refs/heads/${branch}\n`)
     writeFileSync(
       join(LMAIN, ".git", "worktrees", name, "gitdir"),
@@ -1049,6 +1088,7 @@ describe("the live checkout's reading", () => {
   const RMAIN = mkdtempSync(join(tmpdir(), "no-main-checkout-live-read-"))
   const DESK = join(RMAIN, ".claude", "worktrees", "desk")
   mkdirSync(DESK, { recursive: true })
+  writeFileSync(join(DESK, ".git"), "gitdir: ../../../.git/worktrees/desk\n")
   mkdirSync(join(RMAIN, ".git", "worktrees", "desk"), { recursive: true })
   writeFileSync(
     join(RMAIN, ".git", "worktrees", "desk", "HEAD"),
@@ -1082,5 +1122,50 @@ describe("the live checkout's reading", () => {
     expect(await at("lefthook run pre-commit", RMAIN, BAD)).toContain(
       "no-main-checkout hook refuses",
     )
+  })
+})
+
+// #1663: git lands where the kernel takes a -C, so a -C through a link out of the main checkout that then climbs runs, as git runs it outside the main checkout; a logical cd folds its `..` by text
+describe("a -C or a cd read where it lands", () => {
+  const OUTSIDE = mkdtempSync(join(tmpdir(), "no-main-checkout-outside-"))
+  mkdirSync(join(OUTSIDE, "deep"))
+  symlinkSync(join(OUTSIDE, "deep"), join(MAIN, "out"))
+  symlinkSync(join(WORKTREE, "api"), join(MAIN, "towt"))
+  symlinkSync(join(MAIN, ".claude"), join(WORKTREE, "into-main"))
+  afterAll(() => rmSync(OUTSIDE, { force: true, recursive: true }))
+
+  test.each([
+    ["a -C through a link out of it, then a -C that climbs", "git -C out -C .. commit -m x"],
+    ["a -C that climbs out of a link out of it", "git -C out/.. commit -m x"],
+    [
+      "a -C through a link into a worktree's folder, then a -C that climbs",
+      "git -C towt -C .. commit -m x",
+    ],
+    ["a -C that climbs out of a link into a worktree's folder", "git -C towt/.. commit -m x"],
+  ])("from the main checkout, %s runs", async (_name, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    ["a logical cd that climbs out of a link", "cd -L into-main/.. && git commit -m x"],
+    ["a physical cd into a folder of its own", "cd -P api && git commit -m x"],
+  ])("from a worktree, %s runs", async (_name, command) => {
+    expect(await bash(command, WORKTREE)).toBeUndefined()
+  })
+
+  test("from the main checkout, a commit after a cd whose || runs an exit in a brace group runs", async () => {
+    expect(await bash(`cd ${WORKTREE} || { exit; }; git commit -m x`)).toBeUndefined()
+  })
+})
+
+// #1663: a file in the worktrees folder is no folder git, turbo or bun can walk up from, so a write to it runs whether or not it is there yet, as the folder is git-ignored
+describe("a file in the worktrees folder", () => {
+  writeFileSync(join(MAIN, ".claude", "worktrees", "there.log"), "x\n")
+
+  test.each([
+    ["one that is there", `echo x > ${MAIN}/.claude/worktrees/there.log`],
+    ["one not there yet", `echo x > ${MAIN}/.claude/worktrees/new.log`],
+  ])("from the main checkout, a write to %s runs", async (_name, command) => {
+    expect(await bash(command)).toBeUndefined()
   })
 })

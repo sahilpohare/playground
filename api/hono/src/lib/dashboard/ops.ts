@@ -13,67 +13,50 @@ const JOB_NAME = /^ops-[\w-]+$/
 // Ops' list of every job beside the heartbeats: one marked `disabled` is paused on purpose, so the sidebar leaves it out rather than calling it down, a deliberate pause not being a fault; and one listed but never beaten is down.
 export const JOBS_FILE = "jobs.json"
 
-// What each job does, in one line for its row's hover; a job not named here shows none.
+// What each job core's registry holds does, in one line for its row's hover; any other job, an org's, shows its own jobs.json description, which its jobs setting gives, else NO_DESCRIPTION.
 export const OPS_DOES: Record<string, string> = {
   "ops-awake": "Keeps this Mac awake on power and on battery",
   "ops-changelog": "Adds new merges to the Changelog",
-  "ops-channel-watch": "Passes each new or edited factory channel post to Playground",
-  "ops-checks": "Runs each open pull request's checks",
-  "ops-consultant": "Starts a code consultant after 10 merges",
   "ops-dashboard": "Keeps the Dashboard on its branch's latest head",
   "ops-dm-watch": "Passes your DM messages to Playground in Slack mode",
   "ops-ext-sync": "Syncs each extension with its private repo each night",
-  "ops-fixture": "Runs a Dashboard on made-up data for checks",
   "ops-flow": "Tells the leads when a run slot is held too long",
   "ops-herdr": "Keeps the herdr terminal servers up",
-  "ops-linear-dm": "Reads your Linear app messages",
   "ops-machine": "Saves this Mac's load and memory",
   "ops-merge-train": "Merges ready pull requests together",
-  "ops-merge-watch": "Tests merges made outside the merge tools",
-  "ops-report": "Writes the report for the Plan app",
   "ops-restore": "Puts a lost main checkout back once its guards are gone",
   "ops-session-resume": "Tells each session to carry on once its usage limit resets",
-  "ops-slack-watch": "Tells Playground about watched Slack DMs and work messages to you",
   "ops-sweep": "Checks runners, probes, asks and heartbeats",
   "ops-tick": "Runs the timed checks and passes on what they find",
-  "ops-tickets": "Reads the Linear tickets, even in a usage pause",
   "ops-unstick": "Finds stuck sessions no hook reported, and clears the usage-limit dialog",
   "ops-usage": "Reads Claude's 5-hour and week usage",
-  "ops-usage-post": "Keeps your usage post in Slack up to date",
   "ops-wa": "Passes your WhatsApp messages to Playground and sends its replies",
   "ops-zai-usage": "Reads GLM's 5-hour and week usage",
 }
 
-// Each job's shown name, in plain words with no "ops" in it; its id shows on hover alone.
+// Each registry job's shown name, in plain words with no "ops" in it; its id shows on hover alone.
 export const RUNNER_NAMES: Record<string, string> = {
   "ops-awake": "Keep Mac awake",
   "ops-changelog": "Changelog",
-  "ops-channel-watch": "Factory channel watcher",
-  "ops-checks": "Pull request checks",
-  "ops-consultant": "Code consultant starts",
   "ops-dashboard": "Dashboard updates",
   "ops-dm-watch": "Your DM watcher",
   "ops-ext-sync": "Extensions sync",
-  "ops-fixture": "Test Dashboard",
   "ops-flow": "Run slot alarm",
   "ops-herdr": "Herdr servers",
-  "ops-linear-dm": "Linear DM watcher",
   "ops-machine": "Machine readings",
   "ops-merge-train": "Merge train",
-  "ops-merge-watch": "Outside merge checker",
-  "ops-report": "Factory report",
   "ops-restore": "Checkout restore",
   "ops-session-resume": "Usage-limit resumes",
-  "ops-slack-watch": "Slack watcher",
   "ops-sweep": "Cleanup sweep",
   "ops-tick": "Timed checks",
-  "ops-tickets": "Linear ticket read",
   "ops-unstick": "Stuck session watcher",
   "ops-usage": "Claude usage readings",
-  "ops-usage-post": "Slack usage post",
   "ops-wa": "WhatsApp link",
   "ops-zai-usage": "GLM usage readings",
 }
+
+// The hover line of a job outside the registry whose own setting gives no description.
+export const NO_DESCRIPTION = "No description in this job's settings"
 
 // Pure: a job's shown name: RUNNER_NAMES's, else its id without the prefix, in words (ops-new-thing reads New thing), so a new job never shows "ops".
 export const jobName = (job: string): string => {
@@ -134,10 +117,11 @@ export function opsRowOf(
   paused = false,
   calls: JobCalls = { callsModel: false, model: null },
   schedule: Schedule | null = null,
+  description: string | null = null,
 ): OpsRow {
   const row = {
     ...calls,
-    does: OPS_DOES[job] ?? null,
+    does: OPS_DOES[job] ?? description ?? NO_DESCRIPTION,
     job,
     name: jobName(job),
     paused,
@@ -208,6 +192,7 @@ const pidOf = (text: string | null): number | null => {
 
 const jobEntry = z.object({
   callsModel: z.boolean().optional(),
+  description: z.string().min(1).optional(),
   disabled: z.boolean().optional(),
   heartbeat: z.string().optional(),
   model: z.string().optional(),
@@ -222,14 +207,16 @@ const scheduleSchema = z.union([
   z.strictObject({ cron: z.string().min(1) }),
 ])
 
-// Pure: what jobs.json lists, by heartbeat name: the jobs it pauses, the ones it expects to run, each job's callsModel mark with its model, and each one's schedule. Each entry is read on its own, so one off its shape drops alone, and a schedule off its shape drops while its job stays; a file that is missing or does not read lists nothing and pauses nothing.
+// Pure: what jobs.json lists, by heartbeat name: the jobs it pauses, the ones it expects to run, each job's callsModel mark with its model, its description and its schedule. Each entry is read on its own, so one off its shape drops alone, and a schedule off its shape drops while its job stays; a file that is missing or does not read lists nothing and pauses nothing.
 export function jobsListed(text: string | null): {
   calls: Map<string, JobCalls>
+  descriptions: Map<string, string>
   enabled: string[]
   paused: Set<string>
   schedules: Map<string, Schedule>
 } {
   const calls = new Map<string, JobCalls>()
+  const descriptions = new Map<string, string>()
   const enabled: string[] = []
   const paused = new Set<string>()
   const schedules = new Map<string, Schedule>()
@@ -237,7 +224,7 @@ export function jobsListed(text: string | null): {
   try {
     jobs = (JSON.parse(text ?? "") as { jobs?: unknown })?.jobs
   } catch {
-    return { calls, enabled, paused, schedules }
+    return { calls, descriptions, enabled, paused, schedules }
   }
   for (const entry of Array.isArray(jobs) ? jobs : []) {
     const parsed = jobEntry.safeParse(entry)
@@ -248,12 +235,13 @@ export function jobsListed(text: string | null): {
       callsModel: parsed.data.callsModel === true,
       model: parsed.data.model ?? null,
     })
+    if (parsed.data.description) descriptions.set(job, parsed.data.description)
     if (parsed.data.disabled === true) paused.add(job)
     else enabled.push(job)
     const schedule = scheduleSchema.safeParse(parsed.data.schedule)
     if (schedule.success) schedules.set(job, schedule.data)
   }
-  return { calls, enabled, paused, schedules }
+  return { calls, descriptions, enabled, paused, schedules }
 }
 
 const readText = async (path: string): Promise<string | null> => {
@@ -301,6 +289,7 @@ export async function readOps(dir = opsDir(), now = Date.now()): Promise<OpsRow[
       listed.paused.has(job),
       listed.calls.get(job),
       listed.schedules.get(job) ?? null,
+      listed.descriptions.get(job) ?? null,
     )
   })
 }

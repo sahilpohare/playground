@@ -435,8 +435,32 @@ const FILED: Record<SessionState["state"], string> = {
   working: "running",
 }
 
+// Pure: the program an argv runs is codex, run directly or as npm's launcher under node.
+const runsCodex = (argv: string[]) => {
+  const program = /(^|\/)node$/.test(argv[0] ?? "") ? argv[1] : argv[0]
+  return /(^|\/)codex$/.test(program ?? "")
+}
+
+// The session a pane holds, its agent and the process that runs it, or null. A Codex session writes no Claude registry file, so its pane holds it when the pane's label has a Codex launch record (codexLaunches) and a codex process runs in its foreground.
+function paneSession(
+  pane: Pane,
+  registry: Registry,
+  codex: CodexLaunches,
+): { agent: "claude" | "codex"; proc: Pane["processes"][number]; sessionId: string } | null {
+  const thread = pane.label ? codex.get(pane.label) : undefined
+  const codexProc = thread ? pane.processes.find((p) => runsCodex(p.argv ?? [])) : undefined
+  if (thread && codexProc) return { agent: "codex", proc: codexProc, sessionId: thread }
+  const registered = pane.processes.find((p) => registry?.get(p.pid))
+  const registeredId = registered && registry?.get(registered.pid)?.sessionId
+  if (registered)
+    return registeredId ? { agent: "claude", proc: registered, sessionId: registeredId } : null
+  const unread = pane.processes.find((p) => registry === null || registry.get(p.pid) === null)
+  return unread && pane.agent_session?.kind === "id" && pane.agent_session.value
+    ? { agent: "claude", proc: unread, sessionId: pane.agent_session.value }
+    : null
+}
+
 // Pure but for the change times (state.changed: when each session's herdr state last changed, as this process saw it, by its terminal and session, which a move does not change; herdr keeps no such time, and answeredSince() compares a picker's answer with it): every server's panes as the session records liveRecords() and composeWorkers() read. A pane holds a session when a process in its foreground has a registry file naming one, so a pane whose Claude has exited, or one never registered, is no session (St3); a file mid-rewrite leaves herdr's own agent_session, when it has one.
-// A Codex session writes no Claude registry file, so its pane holds it when the pane's label has a Codex launch record (codexLaunches) and a codex process runs in its foreground.
 export function herdrRecords(
   reads: ServerRead[],
   registry: Registry,
@@ -446,23 +470,9 @@ export function herdrRecords(
   const changes = new Map<string, Change>()
   const records = reads.flatMap((read) =>
     read.panes.flatMap((pane) => {
-      const thread = pane.label ? codex.get(pane.label) : undefined
-      const codexProc = thread
-        ? pane.processes.find((p) => (p.argv ?? []).some((word) => /(^|\/)codex$/.test(word)))
-        : undefined
-      const registered = codexProc ? undefined : pane.processes.find((p) => registry?.get(p.pid))
-      const unread = codexProc
-        ? undefined
-        : pane.processes.find((p) => registry === null || registry.get(p.pid) === null)
-      const proc = codexProc ?? registered ?? unread
-      const sessionId = codexProc
-        ? (thread ?? "")
-        : registered
-          ? (registry?.get(registered.pid)?.sessionId ?? "")
-          : unread && pane.agent_session?.kind === "id"
-            ? pane.agent_session.value
-            : ""
-      if (!proc || !sessionId) return []
+      const held = paneSession(pane, registry, codex)
+      if (!held) return []
+      const { agent, proc, sessionId } = held
       const key = `${read.server}:${pane.terminal_id}:${sessionId}`
       const known = state.changed.get(key)
       // a read more than SEEN_SLACK_MS after the last can hide a change and back (a picker answered, then a permission raised), so its state began at some time unknown, as on a fresh process
@@ -475,7 +485,7 @@ export function herdrRecords(
       const cwd = proc.cwd ?? ""
       return [
         {
-          agent: codexProc ? "codex" : "claude",
+          agent,
           agent_lifecycle: LIFECYCLE[pane.agent_status],
           cwd,
           herdr_seen_at: seen ? at : null,
@@ -487,7 +497,8 @@ export function herdrRecords(
           started_at: null,
           stored_pid_exists: true,
           surface_id: herdrSurface(read.server, pane.pane_id),
-          transcript_path: !codexProc && cwd ? transcriptPath(claudeDir(), cwd, sessionId) : "",
+          transcript_path:
+            agent === "claude" && cwd ? transcriptPath(claudeDir(), cwd, sessionId) : "",
           updated_at: at,
           workspace_id: herdrSurface(read.server, pane.workspace_id),
         },

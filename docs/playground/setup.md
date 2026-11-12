@@ -11,7 +11,6 @@ It checks every tool and connection they need, shows one table of what is missin
 | `uv`, `pnpm`                                                                                                             | this repo's Python tests, and a pnpm repo's gates                                     |
 | Claude Code 2.1.224 or later                                                                                             | the forked skills, and messages between sessions                                      |
 | the home skill set, `ws-home@ws`, at user scope                                                                          | everything                                                                            |
-| Linear connected                                                                                                         | a ticket the owner approved (the **tickets** rule)                                    |
 | bypass mode as the default in `settings.json` (`~/.claude`, or `$CLAUDE_CONFIG_DIR`), with its prompt skipped (optional) | the factory's sessions, so messages between them are never held for approval          |
 | each extension's `scripts/setup/check.sh`, and the tools its `mcp <label> <tool>, ...` lines name                        | that extension's skills                                                               |
 

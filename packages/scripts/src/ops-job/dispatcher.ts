@@ -19,6 +19,21 @@ export const WAIT_S = 180
 
 export type Stuck = { at: string; state: string } | null
 
+// Pure: the hand-on step both relays share, the WhatsApp bridge and the Slack DM watch, so its why reads the same on both ("no reply has gone out"): the waiting messages due for the assistant seat, any while the dispatcher reads stuck or failed, else each unanswered for WAIT_S while it is not mid-turn.
+export function handOn<T>(
+  waiting: T[],
+  waitedS: (message: T) => number,
+  blocked: Stuck,
+  working: boolean,
+): { due: T[]; why: string } {
+  return {
+    due: waiting.filter((m) => blocked !== null || (waitedS(m) >= WAIT_S && !working)),
+    why: blocked
+      ? `the dispatcher has read ${blocked.state} since ${blocked.at}`
+      : `no reply has gone out in ${WAIT_S / 60} minutes`,
+  }
+}
+
 // The session in the assistant seat, by the roster as roster.ts who assistant reads it; undefined while none holds it or the roster does not read.
 export async function assistantOf(data: string): Promise<string | undefined> {
   const roster = await Bun.file(join(data, "roster.json"))

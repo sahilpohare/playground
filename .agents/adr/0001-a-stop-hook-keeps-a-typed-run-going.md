@@ -1,0 +1,3 @@
+# A skill-scoped Stop hook keeps a typed run going
+
+This decision was an org's ticket skill's, so it lives in that org's extension (`playground ext show <org> doc adr-0001`), and core keeps its findings, measured on Claude Code 2.1.286: a skill's `hooks:` stay registered for the session once it loads, so the hook gates its typed-only parts on the user row's `<command-name>`; a Stop hook reads the hook input's `last_assistant_message`, since the transcript can lag the turn's last message; and one that returns `hookSpecificOutput.additionalContext` continues the turn with no "Stop hook error" notice, which `decision: "block"` shows.

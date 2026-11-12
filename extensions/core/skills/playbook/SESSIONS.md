@@ -25,6 +25,7 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    the factory's `no-raw-spawn` hook refuses every cmux call but its help or version, a `claude --resume` or `--continue`, and every herdr call but its reads (`get`, `list`, `read`, `agent wait`, `pane wait-output` and the like)
    and a scratch world's of the session's own ([scripts/README.md](../../../../scripts/README.md#spawnsh)),
    naming the script; type every program by its literal name, since one held in a variable (`$V integration add`) reads as herdr when a herdr command group follows it.
+   A lead starting a checker runs `roster.ts assign <checker> "Review: <its worker's title>" <task> worker=<live worker> pr=<n>` (`Test: ` for a tester) before spawn.sh, since spawn.sh writes `worker=` only for a worker's column and roster.ts refuses a checker's PR with no live worker (step 4).
    Read [SPAWN.md](SPAWN.md) for the command of the mode you start (a worker, a runner, a checker's or probe's column, a manager) and for each flag you pass,
    and before you act on a refusal: it holds the capacity gate, the launch line with its model and effort, the resume, `--account`, `--backend glm`, `--runtime herdr` with `spawn.sh restore`, `--check`, and the role and settings every launch carries.
    Done when spawn.sh has printed herdr's `herdr pane <id> workspace <id>` line for the session, or a refusal you have acted on by its gate's section in SPAWN.md.
@@ -67,7 +68,8 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    A lead's instruction or a reviewer's brief leaves any raise of a ratchet, or bend of a check whose own rule says it never rises, to that rule's owner, asked on the PR or directly, before the code relies on it, and lists one as agreed only with the owner's words quoted (23 Oct: a raise a brief listed as agreed reached 5/5, and the code owner blocked it).
    A worker started `--in` another repository takes that folder's MCP tools, so its brief names the capability it needs (search Slack, read Datadog logs) and has the worker find the tool with its own `ToolSearch` (21 Oct: a brief named a Slack tool by the factory's own server, and the worker found it under its folder's server).
    A worker briefs its checker by filling a template: it copies `~/.playground/handoffs/new-reviewer.md`, or `new-tester.md` for a Playground PR, to a file of its own under `~/.playground/`, since the linked template is the main checkout's file, fills each slot and passes that file to spawn.sh as `<brief>`.
-   The fill rule: a slot is a word of capitals and digits with two underscores on each side, in backticks since the formatter turns a bare one bold, such as `__NAME__` for the session's own name, and a fill replaces those tokens alone.
+   The fill rule: a slot is a word of capitals and digits with two underscores on each side, in backticks since the formatter turns a bare one bold, such as `__NAME__` for the session's own name, and a fill replaces those tokens alone, every one of them:
+   a `sed` fill takes `/g`, since a slot can sit twice on one line (`__PR__` does in both templates) and a bare `s/…/…/` fills only the first, which spawn.sh then refuses as a slot left.
    So `<owner>/<name>` and every other angle-bracket word stays as written for the reader (22 Oct: a fill of `<name>` by `sed` also rewrote `--repo <owner>/<name>`), and a brief or template that names a token in its own text spells it in words (two underscores, NAME, two underscores), so a fill leaves that text alone.
    Fill the brief and read it back in one call, then run spawn.sh in a later call, once the read shows every slot filled: spawn.sh refuses a brief still holding a slot of its role's template, naming each one, and a fill a hook refused in the same batch as the spawn would leave one.
    The template points at code-review-loop, dev and ui-verify for every step, so the filled brief adds only what its PR needs beyond them.
@@ -81,9 +83,21 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    A rule that changes while a checker is live goes to it at once from its worker's lead by `SendMessage`, as an addition to its brief, since a checker that never heard of the change scores it as a finding (12 Oct).
 4. Record the start by [ROSTER.md](ROSTER.md)'s start rows (a session respawned after a restore, by the respawned-session row, which keeps the entry's work).
    A worker that spawned a checker or a probe sends the Builder its name, and adds `pr=<its PR's URL>` to a checker's entry beside the `worker=` spawn.sh wrote, which the Dashboard nests it under its worker by.
+   A checker's next PR goes on its row with `roster.ts assign <checker> <title> <task> worker=<live worker> pr=<n>` whenever its row's `worker` is unset or ended, since the checker reaper ends a checker whose worker has gone (`checker-worker-gone`).
+   roster.ts refuses `prs+=`, `prs=` or a new `pr` on such a row, spawn.sh's restart of an ended checker included, naming that assign.
 
 Send the brief with `notify_when_idle: true`, so its next idle arrives as a notice.
 Done when `ListAgents` shows the session busy on the brief and the roster shows the task.
+
+## Fix pushes and nits
+
+A reviewer's round sorts its findings into blocking, should-fix and nits; the worker's answer follows these rules, so a PR's rounds stay short and its nits land where they cost nothing.
+
+- A fix push carries only blocking and should-fix items, plus the `canary` merge the reviewer asks for (code-review-loop's step 8), and a body-only fix is a `gh pr edit` with no push, so a push always moves the head for a reason the reviewer named.
+- Keep a nit only if it fixes a wrong statement, a misleading name or comment, or a real readability problem; drop a style-only nit with a one-line note.
+- A head at 5/5 with green checks merges as it stands; fold each kept nit into the next PR that touches the same file, never a nits-only PR.
+- Post one sort comment per PR, naming each nit kept, with the PR it waits for, or dropped, with why.
+  Done when every finding of the round is fixed in the push, kept in the sort comment with its PR, or dropped there with its reason.
 
 ## Write a handoff
 
@@ -123,13 +137,13 @@ Done when the send, or its one re-send, returns success.
 
 ## A headless run
 
-A Claude session whose own toolset holds no Notion tools writes Notion through headless `claude -p` runs from `~`, which loads `notion-shared` (the path is a Claude session's alone, the **glm** rule).
+A Claude session whose own toolset lacks a docs tool's MCP server writes that tool's pages through headless `claude -p` runs from `~`, which loads the server (`<server>` below, with its `<fetch>` and `<update>` tools; the path is a Claude session's alone, the **glm** rule).
 Every run takes the shape the [no-headless-login](../../../../scripts/hooks/README.md#no-headless-login) hook's refusal gives: `CLAUDE_CODE_OAUTH_TOKEN` read from the Keychain item its account names, `PLAYGROUND_ROLE=<your role>` and `env -u CLAUDE_CONFIG_DIR -u ANTHROPIC_API_KEY`.
 Every run also carries `--permission-mode dontAsk`, since the machine's bypass default leaves `--allowedTools` blocking nothing, and puts `--allowedTools` last, after the prompt, since that flag takes every word after it.
 A run from `~` loads none of the factory's hooks, so `dontAsk` with `--allowedTools` is the only limit on what the run writes.
-The write run's `--allowedTools` is `"mcp__notion-shared__notion-fetch,mcp__notion-shared__notion-update-*"`, and its prompt tells the run not to quote the page text in its reply, which a safety-classifier cut-off otherwise stops mid-way.
-Before the write, the worker takes the backup itself, in a first, fetch-only run whose `--allowedTools` carries `mcp__notion-shared__notion-fetch` alone and whose prompt calls `notion-fetch` on the page and replies with nothing, on `--output-format stream-json --verbose`:
-the worker copies that call's `tool_result` content into `<scratchpad>/notion-backup-<page id>-<utc>.md`, reading the page into neither its own context nor a message, and the model never repeats the page, so a reply cut-off has nothing to stop.
+The write run's `--allowedTools` is `"mcp__<server>__<fetch>,mcp__<server>__<update>"`, and its prompt tells the run not to quote the page text in its reply, which a safety-classifier cut-off otherwise stops mid-way.
+Before the write, the worker takes the backup itself, in a first, fetch-only run whose `--allowedTools` carries `mcp__<server>__<fetch>` alone and whose prompt calls `<fetch>` on the page and replies with nothing, on `--output-format stream-json --verbose`:
+the worker copies that call's `tool_result` content into `<scratchpad>/backup-<page id>-<utc>.md`, reading the page into neither its own context nor a message, and the model never repeats the page, so a reply cut-off has nothing to stop.
 The backup outlives a stop because the worker writes the file, not the run.
 The worker writes nothing until the fetch call's `tool_result` carries no error and the file passes `test -s` and a grep for the page's id; a cut-off, an empty file or a missing id means no write, and the worker reports it.
 After the write, a second fetch-only run copies the page to an after-file the same way, and the worker checks the after-file with a grep for the change.
@@ -191,7 +205,12 @@ A lead waits on the signals the **polling** rule names, never a `sleep` loop or 
 A signal that stops coming may be the Mac asleep: read `pmset -g log | grep -E ' (Sleep|Wake) {2,}'` before you name a gap in a relay, a tick or a sampled series, and leave the sleep out of any rate.
 A Monitor or watch script runs under zsh, which does not word-split `$list`: loop over literal values or write `${=list}`, since zsh reads `$list` as one item.
 Run each measurement as its own background task, since a chained task signals only when the whole chain ends, and a stall in its first stage once stayed hidden for 41 minutes.
-Done when every wait ends on a signal, each background task holds one measurement, and every gap you name is checked against the sleep log.
+A wait on an owner step starts with two checks: the step's card is open in the Inbox as an ask the owner can answer, and its precondition can come true (whatever writes the file or state it waits on is running).
+When either check fails, report it to your lead at once, since a dead waiter, one whose condition can never come true, waits for good: one sat about 3 hours on a file only a job that was off could write.
+Wait on CI with `gh run watch <run id> --interval 300`; `gh pr checks --watch --required` exits 1 here, since the repo reports no required checks.
+Before you report CI green, read the check-runs at the head sha once in the foreground (`gh api repos/<repo>/commits/<head sha>/check-runs`).
+A background or Monitor event alone is not a green.
+Done when every wait ends on a signal, each background task holds one measurement, every wait on an owner step has its open card and a precondition that can come true, every CI green you report was read in the foreground at the head, and every gap you name is checked against the sleep log.
 
 ## Answer a picker
 
@@ -227,7 +246,7 @@ A finished worker, reviewer or tester ends automatically (`scripts/ops/optimizer
   A session clears its own scratch itself before it ends, with `playground rm <path>`: its `~/.playground/scratch/<name>/` and `scratchpad/<name>/`, each path resolved past symlinks, are the one place `playground rm` clears there, for that session alone, and every other path there, another session's scratch included, stays refused.
   A `scratch/` folder left once its session is gone, with no live session and no roster row naming it that has not ended, the nightly clean moves to the trash ([LIFECYCLE.md](LIFECYCLE.md)).
 - Guards: only a worker, reviewer or tester, not busy for 10+ minutes, with no uncommitted or unpushed work in a worktree it used (the main checkout, where every session starts, is not one, nor a Playground worktree whose PR `playground rm` confirms merged or closed, which the cleanup discards); otherwise its lead gets a `Not ended` line saying why, and the session waits.
-- A reviewer ended idle is resumed by its worker on the next push, under the same name (**rounds**): `"${PLAYGROUND_REPO:?}/scripts/spawn.sh" resume <name> <dir> --pr <its PR's URL>` (the `--pr` rule is [SPAWN.md](SPAWN.md#modes)'s); its `Ended` line goes to its worker too.
+- A reviewer ended idle is resumed by its worker on the next push, under the same name (**rounds**): `"${PLAYGROUND_REPO:?}/scripts/spawn.sh" resume <name> <dir> --pr <its PR's URL>`, or its extension item as `<scope>/<kind>/<key>` (the `--pr` rule is [SPAWN.md](SPAWN.md#modes)'s); its `Ended` line goes to its worker too.
 
 A session ends by closing its pane, so the workspace's other sessions live on, by the one it reports to, through spawn.sh, since the `no-raw-spawn` hook refuses `herdr pane close` to every factory session (herdr's socket has no access control):
 

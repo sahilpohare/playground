@@ -9,7 +9,7 @@
   {
     "hits": 1,
     "kind": "issueRefs",
-    "line": "- Labs is the spec for behaviour and the Product team answers its product questions, as triage-and-implement's Labs line holds -> #714",
+    "line": "- An org's ticket skill names its spec for behaviour and who answers its product questions -> #714",
     "path": ".agents/decisions.md",
     "reason": "switch step 8: a link to an issue the issue re-file moves; that commit puts the new number in and drops this entry"
   },

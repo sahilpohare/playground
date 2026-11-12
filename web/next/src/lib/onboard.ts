@@ -15,9 +15,9 @@ export type Check = {
 // The checks read: every row, or none once the done mark is written, and the mark itself.
 export type ChecksRead = { checks: Check[]; done: boolean }
 
-// One fix as the API reads it back: its last output lines, gh's one-time code and link while it waits for the owner, and a failure's reason.
+// One fix as the API reads it back: its last output lines, a sign-in's link and one-time code (none for Claude Code's) while it waits for the owner, and a failure's reason.
 export type FixJob = {
-  device: { code: string; url: string } | null
+  device: { code: string | null; url: string } | null
   id: string
   lines: string[]
   reason: string | null
@@ -85,15 +85,19 @@ export const fixJobOf = (body: unknown): FixJob | undefined => {
     job.lines.every(isText) &&
     isTextOrNull(job.reason) &&
     JOB_STATES.includes(job.state as FixJob["state"]) &&
-    (device === null || (isText(device.code) && isText(device.url)))
+    (device === null || (isTextOrNull(device.code) && isText(device.url)))
     ? ({ ...job, device } as FixJob)
     : undefined
 }
 
+// Pure: the button that opens a sign-in's page: GitHub's for gh, the sign-in page for the harnesses'.
+export const deviceLabel = (id: string): string =>
+  id === "gh-login" ? "Open GitHub" : "Open the sign-in page"
+
 // Pure: whether a fix has ended, so the checks are read again.
 export const settled = (job: FixJob): boolean => job.state === "ok" || job.state === "failed"
 
-// Pure: the last lines of a fix's output the pane shows, none while gh waits on its code, since the code and Open GitHub say it in the app's words and gh's lines speak to a terminal.
+// Pure: the last lines of a fix's output the pane shows, none while a sign-in waits on the owner, since its link and code say it in the app's words and its lines speak to a terminal.
 export const linesOf = (job: FixJob): string[] => (job.device ? [] : job.lines.slice(-3))
 
 // Pure: Settings' heading over the rows still missing.

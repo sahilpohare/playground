@@ -66,7 +66,7 @@ const probe = async (codes: Record<string, number>, sendOk = true) => {
 test("the guards are the factory settings' PreToolUse hooks, each once", async () => {
   expect(await preToolUseGuards(repo)).toEqual(["no-stash", "no-env-dump", "no-kill-by-name"])
   const real = await preToolUseGuards(root)
-  expect(real).toContain("no-stash")
+  expect(real).toContain("guards")
   expect(real).not.toContain("session-state")
 })
 

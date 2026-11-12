@@ -149,7 +149,8 @@ describe("AGENTS.md", () => {
       ),
     ]
     const agents = await Bun.file(join(ROOT, "AGENTS.md")).text()
-    expect(hooks.length).toBeGreaterThan(20)
+    expect(hooks.length).toBeGreaterThan(10)
+    expect(hooks).toContain("guards")
     expect(hooks.filter((hook) => !agents.includes(`\`${hook}\``))).toEqual([])
   })
 

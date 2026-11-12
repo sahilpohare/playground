@@ -61,6 +61,8 @@ export type Paths = {
   MAIN: string
   ROOT: string
   SCOPE: string
+  // a link inside the main checkout's worktree that names a folder of the main checkout
+  TREE_LINK: string
   WORDS: string
   WORK: string
 }

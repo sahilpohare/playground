@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
+import { WhatsappNumbers } from "@/components/settings/whatsapp-numbers"
 import {
   Item,
   ItemActions,
@@ -20,7 +21,7 @@ type Bundled = { bundled: BundledRow[] | null }
 const readBundled = async (): Promise<Bundled> =>
   answer(unwrap(apiClient.v1.extensions.bundled.$get()))
 
-// Settings > Extensions' bundled group: each extension Playground ships under extensions/, off until its switch turns it on, read after your own extensions and before core. Nothing shows before ext init names a login, since the switch is a setting at the login's scope.
+// Settings > Extensions' bundled group: each extension Playground ships under extensions/, off until its switch turns it on, read after your own extensions and before core; WhatsApp's card also holds its two numbers. Nothing shows before ext init names a login, since the switch is a setting at the login's scope.
 export function BundledExtensions() {
   const queryClient = useQueryClient()
   const { data } = useQuery({ queryFn: readBundled, queryKey: BUNDLED_QUERY_KEY })
@@ -62,6 +63,7 @@ export function BundledExtensions() {
                 {words && (
                   <ItemDescription className="text-xs">{words.description}</ItemDescription>
                 )}
+                {row.name === "whatsapp" && <WhatsappNumbers />}
               </ItemContent>
               <ItemActions>
                 <Switch

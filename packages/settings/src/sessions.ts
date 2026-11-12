@@ -58,18 +58,17 @@ export type SessionTemplate = z.infer<typeof sessionTemplate>
 export const templateBackend = (template: { model?: string }): Backend =>
   template.model === GLM_MODEL ? "glm" : "claude"
 
-// Pure: a stored list as it reads now: a row saved before the harness split names a backend, which reads as Claude Code with glm as its model on GLM.
+// Pure: a stored list as it reads now: a row saved before the harness split names a backend, which reads as Claude Code with glm as its model on GLM; a Claude row that named glm as its model, which spawn.sh refused, reads with that model dropped, so it never reads as GLM and the rest of the list still reads; a row naming another backend keeps it for the schema to refuse.
 export const storedTemplates = (value: unknown): unknown =>
   Array.isArray(value)
     ? value.map((row) => {
         if (typeof row !== "object" || row === null || !("backend" in row) || "harness" in row)
           return row
-        const { backend, ...rest } = row as { backend: unknown }
-        return {
-          ...rest,
-          harness: "claude-code",
-          ...(backend === "glm" ? { model: GLM_MODEL } : backend === "claude" ? {} : { backend }),
-        }
+        const { backend, ...rest } = row as { backend: unknown; model?: unknown }
+        const { model, ...modelless } = rest
+        if (backend === "glm") return { ...rest, harness: "claude-code", model: GLM_MODEL }
+        if (backend !== "claude") return { ...rest, backend, harness: "claude-code" }
+        return { ...(model === GLM_MODEL ? modelless : rest), harness: "claude-code" }
       })
     : value
 

@@ -1,4 +1,4 @@
-// A session's factory role, which the hooks read: PLAYGROUND_ROLE, else the role its name in Claude Code's registry gives, through the roster's kind for that name first and the name itself second, since a session resumed without its settings (playbook's SPAWN.md, Role and settings) lacks the env var, else "" for a session outside the factory.
+// A session's factory role, which the hooks read: PLAYGROUND_ROLE, else the role its name in Claude Code's registry, or a Codex thread's name, gives, through the roster's kind for that name first and the name itself second, since a session resumed without its settings (playbook's SPAWN.md, Role and settings) lacks the env var, else "" for a session outside the factory.
 import "../../packages/env/src/aliases"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -57,6 +57,26 @@ export async function registryName(
   }
 }
 
+// A Codex thread's name, the last one Codex's session index holds for its id, or undefined when CODEX_HOME is unset or the index cannot be read.
+export async function codexName(
+  sessionId: string,
+  environment: Environment = process.env,
+): Promise<string | undefined> {
+  if (!environment.CODEX_HOME) return
+  let name: string | undefined
+  try {
+    const index = await Bun.file(join(environment.CODEX_HOME, "session_index.jsonl")).text()
+    for (const line of index.split("\n")) {
+      try {
+        const entry = JSON.parse(line) as { id?: unknown; thread_name?: unknown }
+        if (entry.id === sessionId && typeof entry.thread_name === "string")
+          name = entry.thread_name
+      } catch {}
+    }
+  } catch {}
+  return name
+}
+
 // The roster's kind for a name, or undefined when the roster has no entry of that name with a kind on the list, or cannot be read.
 export async function rosterKind(
   name: string,
@@ -108,7 +128,10 @@ export async function sessionRole(environment: Environment, sessionId: unknown):
   if (environment.PLAYGROUND_ROLE) return environment.PLAYGROUND_ROLE
   if (typeof sessionId !== "string") return ""
   try {
-    const name = (await registryName(sessionId, environment)) ?? ""
+    const name =
+      (await registryName(sessionId, environment)) ??
+      (await codexName(sessionId, environment)) ??
+      ""
     const role = name && (await rosterRole(name, environment))
     if (role) return role
     await loadNames(environment)

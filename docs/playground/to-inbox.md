@@ -34,6 +34,8 @@ A decision or a draft the session decided another way is settled.
 An update its session has settled is resolved by that session: an alert that fixed itself, a progress card whose last step is done.
 Until then an update stays editable, unless you dismiss it, so a card the session will replace, such as a mock's first version, is edited in place before then.
 
+An ask or an update about the factory's own work carries `scope: "factory"`, so it can reach you on WhatsApp too; any other card stays in the Inbox.
+
 ## The card it writes for
 
 ```

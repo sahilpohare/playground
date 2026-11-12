@@ -2220,7 +2220,7 @@ describe("a factory session's ext accept is refused, since accepting a proposal 
     ],
   ])("%s", async (_, command) => {
     expect(await bash(command)).toContain(
-      "refuses playground ext accept, the owner's own call: post it as an accept decision with bun run ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role",
+      "refuses playground ext accept, the owner's own call: post it as an accept decision with playground ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role",
     )
   })
 })
@@ -2414,7 +2414,7 @@ describe("a job's setting is the owner's alone (PG-1196)", () => {
   ])("a session's own %s is refused, naming the guard decision", async (command) => {
     const refusal = await bash(command)
     expect(refusal).toContain("no-extensions-write hook refuses")
-    expect(refusal).toContain("post a guard decision with bun run ask new")
+    expect(refusal).toContain("post a guard decision with playground ask new")
   })
 })
 

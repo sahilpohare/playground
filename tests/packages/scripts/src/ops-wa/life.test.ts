@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, spyOn, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import * as fsp from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -164,7 +164,7 @@ describe("ops-wa's ban-safety habits", () => {
 
   test("holds the auth state in one process: an exclusive lock a live holder keeps and a gone one gives up", async () => {
     const dir = scratch()
-    await Bun.write(join(dir, "x"), "")
+    mkdirSync(dir, { recursive: true })
     const lock = join(dir, "lock")
     expect(await takeLock(lock, 101, () => true)).toBeUndefined()
     expect(await takeLock(lock, 202, (pid) => pid === 101)).toBe("pid 101 holds the auth state")
@@ -179,7 +179,7 @@ describe("ops-wa's ban-safety habits", () => {
   test("gives a gone holder's lock to one of two starts that race for it, never both", async () => {
     for (let round = 0; round < 50; round++) {
       const dir = scratch()
-      await Bun.write(join(dir, "x"), "")
+      mkdirSync(dir, { recursive: true })
       const lock = join(dir, "lock")
       await Bun.write(lock, "999")
       const live = (pid: number) => pid === 101 || pid === 202
@@ -188,6 +188,8 @@ describe("ops-wa's ban-safety habits", () => {
       expect([a, b].filter((r) => r === undefined)).toHaveLength(1)
       expect(await Bun.file(lock).text()).toBe(String(winner))
       expect(a ?? b).toBe(`pid ${winner} holds the auth state`)
+      // each start's private <lock>.<pid>.new goes on every exit, the winner's and the loser's
+      expect(readdirSync(dir).filter((name) => name.endsWith(".new"))).toEqual([])
     }
   })
 
@@ -210,13 +212,14 @@ describe("ops-wa's ban-safety habits", () => {
     try {
       for (let round = 0; round < 20; round++) {
         const dir = scratch()
-        await Bun.write(join(dir, "x"), "")
+        mkdirSync(dir, { recursive: true })
         const lock = join(dir, "lock")
         await Bun.write(lock, "999")
         const live = (pid: number) => pid === 101 || pid === 202
         const [a, b] = await Promise.all([takeLock(lock, 101, live), takeLock(lock, 202, live)])
         expect([a, b].filter((r) => r === undefined)).toHaveLength(1)
         expect(await Bun.file(lock).text()).toBe(a === undefined ? "101" : "202")
+        expect(readdirSync(dir).filter((name) => name.endsWith(".new"))).toEqual([])
       }
       expect(slow).toHaveBeenCalled()
     } finally {

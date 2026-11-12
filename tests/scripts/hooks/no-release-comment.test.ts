@@ -802,10 +802,9 @@ describe("as Claude Code runs it", () => {
     return found
   }
 
-  test("the matcher takes Bash and every GitHub MCP comment tool, and nothing else", async () => {
+  test("the matcher takes every GitHub MCP comment tool, and nothing else, Bash reaching it through guards", async () => {
     const matcher = new RegExp((await entry()).matcher)
     for (const tool of [
-      "Bash",
       "mcp__github-shared__add_comment_to_pending_review",
       "mcp__github-shared__add_issue_comment",
       "mcp__github-shared__add_reply_to_pull_request_comment",
@@ -817,6 +816,7 @@ describe("as Claude Code runs it", () => {
       expect(matcher.test(tool)).toBe(true)
     }
     for (const tool of [
+      "Bash",
       "Read",
       "BashOutput",
       "mcp__github-shared__issue_read",

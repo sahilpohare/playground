@@ -1,13 +1,16 @@
 import { existsSync } from "node:fs"
-import { mkdir } from "node:fs/promises"
+import { appendFile, cp, mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import { opsDir, REPO, scheduled } from "../ops-job/job"
+import { quarantine, type Roots } from "@packages/safe-delete"
+
+import { opsDir, REPO, run, scheduled } from "../ops-job/job"
 import { preToolUseGuards } from "../ops-tick/guard-probe"
 import type { Beat, Context } from "../ops-tick/tick"
+import { machineRoots } from "../trash"
 import { writeAtomic } from "../write-atomic"
 
-// ops-restore: puts a lost main checkout back by the playbook's restore steps (LIFECYCLE.md, Restoring the main checkout), from the Dashboard's checkout, which a loss of the main checkout's tracked files leaves standing, and with no hook, since every guard runs from the main checkout and fails closed once it is gone.
+// ops-restore: puts a lost main checkout back by the playbook's restore steps (LIFECYCLE.md, Restoring the main checkout), from the Dashboard's checkout, which a loss of the main checkout's tracked files leaves standing, and with no hook, since every guard runs from the main checkout and fails closed once it is gone; with every guard there, it puts back a tracked file modified in place, which no session may restore.
 
 // Two looks this far apart, each finding a guard gone, before it acts: a pull or an install can leave a bundle missing for a moment.
 export const SECOND_LOOK_MS = 290_000
@@ -19,6 +22,9 @@ export const IN_A_ROW_MS = 600_000
 const UPKEEP = /playground update|playground\/update\.ts|link-skills\.sh|bun install/
 
 type State = { failed?: string; last: string; since: string }
+
+// Each modified file's first look in the current run of looks in a row.
+type Modified = { last: string; since: Record<string, string> }
 
 // The file a healthy look keeps origin's URL in, since a lost .git takes the URL with it, and the Dashboard's checkout, a worktree of the main checkout, reads its git through that .git too.
 export const originPath = (ops: string): string => join(ops, "restore", "origin.txt")
@@ -47,15 +53,107 @@ export const upkeepHeld = async (ctx: Context): Promise<boolean> => {
   return false
 }
 
+// with its .git gone or broken, git walks up to a parent repository the checkout sits in, so every git call stops at the checkout's own folder
+const gitIn = (main: string, ...args: string[]) => [
+  "env",
+  `GIT_CEILING_DIRECTORIES=${dirname(main)}`,
+  "git",
+  "-C",
+  main,
+  ...args,
+]
+
+// The tracked files git status reads as modified in the work tree, the index or both; an untracked file, an add, a delete and a rename stay as they are. Read outside ctx.run, as missingGuards reads the disk, since every healthy look reads it, and with no optional lock, so the read never holds index.lock against an upkeep's git.
+const modifiedFiles = async (main: string): Promise<string[]> => {
+  const status = await run(
+    gitIn(main, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=no"),
+    30_000,
+  )
+  if (status.code !== 0) return []
+  const entries = status.out.split("\0")
+  const files: string[] = []
+  for (let i = 0; i < entries.length; i++) {
+    // a rename or a copy names its source in the entry after it
+    if (/^[RC]/.test(entries[i]!)) i++
+    else if (/^(M[ M]| M) /.test(entries[i]!)) files.push(entries[i]!.slice(3))
+  }
+  return files
+}
+
+// A tracked file modified on two looks in a row, with no upkeep holding the main checkout, goes back to HEAD's copy: the stray copies are copied into ops-restore's own scratch folder, which safe-delete moves to the trash in one move, the undo, and one line to the ops log names each file and its copy's trash path.
+const putBack = async (
+  ctx: Context,
+  main: string,
+  roots: () => Roots,
+  upkeep: (ctx: Context) => Promise<boolean>,
+) => {
+  const dir = join(ctx.ops, "restore")
+  const path = join(dir, "modified.json")
+  const files = await modifiedFiles(main)
+  const prior = (await Bun.file(path)
+    .json()
+    .catch(() => null)) as Modified | null
+  if (!files.length) {
+    if (prior) await Bun.file(path).delete()
+    return
+  }
+  const now = ctx.now.toISOString()
+  const fresh = !prior || ctx.now.getTime() - Date.parse(prior.last) > IN_A_ROW_MS
+  const since = Object.fromEntries(
+    files.map((file) => [file, (!fresh && prior.since[file]) || now]),
+  )
+  await mkdir(dir, { recursive: true })
+  await writeAtomic(path, JSON.stringify({ last: now, since } satisfies Modified))
+  const due = files.filter((file) => ctx.now.getTime() - Date.parse(since[file]!) >= SECOND_LOOK_MS)
+  if (!due.length || (await upkeep(ctx))) return
+  const at = roots()
+  const copies = join(
+    at.home,
+    ".playground",
+    "scratch",
+    "ops-restore",
+    now.replace(/[-:]|\.\d{3}/g, ""),
+  )
+  for (const file of due) await cp(join(main, file), join(copies, file), { verbatimSymlinks: true })
+  const moved = quarantine(
+    copies,
+    {
+      reason: `ops-restore: the stray copies of tracked files modified in ${main}, each put back from HEAD`,
+      session: "ops-restore",
+    },
+    at,
+    { now: ctx.now },
+  )
+  const lines: string[] = []
+  if ("refused" in moved)
+    lines.push(
+      `${now} kept ${due.join(", ")} as modified, since the trash refused its stray copies: ${moved.refused}`,
+    )
+  else
+    for (const file of due) {
+      const back = await ctx.run(gitIn(main, "checkout", "HEAD", "--", file), 30_000)
+      const copy = `its stray copy is in the trash at ${join(moved.to, file)} (playground rm --restore ${moved.id})`
+      const why = back.out.trim().split("\n").at(-1) ?? ""
+      lines.push(
+        back.code === 0
+          ? `${now} restored ${file} from HEAD; ${copy}`
+          : `${now} could not restore ${file} from HEAD (${why}); ${copy}`,
+      )
+    }
+  await mkdir(join(ctx.ops, "log"), { recursive: true })
+  await appendFile(join(ctx.ops, "log", "ops-restore.log"), `${lines.join("\n")}\n`)
+}
+
 export type Restore = {
   guards: string[] | (() => Promise<string[]>)
   main: string
+  roots?: () => Roots
   upkeep?: (ctx: Context) => Promise<boolean>
 }
 
-// One look: a guard gone on two looks in a row, with no upkeep holding the main checkout, runs the restore once, records what the checkout held before it, and tells ops and the dispatcher what it did; a failed step is told once and runs no step again until the guards have come back.
+// One look: with every guard there, it puts back each tracked file modified on two looks in a row (putBack); a guard gone on two looks in a row, with no upkeep holding the main checkout, runs the restore once, records what the checkout held before it, and tells ops and the dispatcher what it did; a failed step is told once and runs no step again until the guards have come back.
 export const restoreBeat =
-  ({ guards, main, upkeep = upkeepHeld }: Restore) =>
+  ({ guards, main, roots = machineRoots, upkeep = upkeepHeld }: Restore) =>
   async (ctx: Context) => {
     const dir = join(ctx.ops, "restore")
     const statePath = join(dir, "state.json")
@@ -65,15 +163,7 @@ export const restoreBeat =
       .json()
       .catch(() => null)) as State | null
     const now = ctx.now.toISOString()
-    // with its .git gone or broken, git walks up to a parent repository the checkout sits in, so every git call stops at the checkout's own folder
-    const inMain = (...args: string[]) => [
-      "env",
-      `GIT_CEILING_DIRECTORIES=${dirname(main)}`,
-      "git",
-      "-C",
-      main,
-      ...args,
-    ]
+    const inMain = (...args: string[]) => gitIn(main, ...args)
     if (!missing.length) {
       if (state) await Bun.file(statePath).delete()
       const url = await ctx.run(inMain("remote", "get-url", "origin"), 30_000)
@@ -84,7 +174,7 @@ export const restoreBeat =
         await mkdir(dir, { recursive: true })
         await writeAtomic(originPath(ctx.ops), `${url.out.trim()}\n`)
       }
-      return
+      return putBack(ctx, main, roots, upkeep)
     }
     await mkdir(dir, { recursive: true })
     const fresh = !state || ctx.now.getTime() - Date.parse(state.last) > IN_A_ROW_MS

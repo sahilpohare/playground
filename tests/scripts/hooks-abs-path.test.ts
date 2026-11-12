@@ -124,14 +124,14 @@ describe("the two settings files carry one command per factory hook", () => {
   })
 })
 
-// Each case runs the real command under the shells Claude Code may use, in scratch folders whose no-stash bundle prints the folder it ran from.
+// Each case runs the real command under the shells Claude Code may use, in scratch folders whose guards bundle prints the folder it ran from.
 describe("the command finds the checkout", () => {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "hooks-917-")))
   afterAll(() => rmSync(scratch, { force: true, recursive: true }))
   const withHook = (
     dir: string,
     body = "console.log(process.cwd())\n",
-    file = join("scripts", "hooks", "bundled", "no-stash.js"),
+    file = join("scripts", "hooks", "bundled", "guards.js"),
   ) => {
     mkdirSync(join(dir, file, ".."), { recursive: true })
     writeFileSync(join(dir, file), body)
@@ -139,7 +139,7 @@ describe("the command finds the checkout", () => {
   }
   const git = (cwd: string, ...args: string[]) =>
     Bun.spawnSync(["git", ...args], { cwd, stderr: "ignore", stdout: "ignore" }).exitCode
-  // A scratch repo whose own no-stash bundle is committed, and a worktree of it, which holds a copy.
+  // A scratch repo whose own guards bundle is committed, and a worktree of it, which holds a copy.
   const main = withHook(join(scratch, "main"))
   git(main, "init", "-q", "-b", "main")
   git(main, "add", ".")
@@ -158,10 +158,10 @@ describe("the command finds the checkout", () => {
   const sourceOnly = withHook(
     join(scratch, "source-only"),
     'console.log("source")\n',
-    join("scripts", "hooks", "no-stash.ts"),
+    join("scripts", "hooks", "guards.ts"),
   )
   const both = withHook(join(scratch, "both"), 'console.log("bundle")\n')
-  withHook(both, 'console.log("source")\n', join("scripts", "hooks", "no-stash.ts"))
+  withHook(both, 'console.log("source")\n', join("scripts", "hooks", "guards.ts"))
 
   const command = async (file: string, hook: string, event: string) => {
     const found = (await entries(file)).find(
@@ -176,7 +176,7 @@ describe("the command finds the checkout", () => {
     shell: string,
     cwd: string,
     env: Record<string, string>,
-    hook = "no-stash",
+    hook = "guards",
     event = "PreToolUse",
   ) => {
     const proc = Bun.spawn([shell, "-c", await command(file, hook, event)], {
@@ -243,7 +243,7 @@ describe("the command finds the checkout", () => {
         PLAYGROUND_REPO: crashing,
       })
       expect(code).toBe(2)
-      expect(stderr).toContain("no-stash: crashed (exit 1)")
+      expect(stderr).toContain("guards: crashed (exit 1)")
       expect(stderr).toContain(`bun install in ${crashing}`)
     })
 
@@ -292,7 +292,7 @@ describe("the command finds the checkout", () => {
           PLAYGROUND_ROLE: "worker",
         })
         expect(code).toBe(2)
-        expect(stderr).toContain("no-stash: ")
+        expect(stderr).toContain("guards: ")
         expect(stderr).toContain(
           "ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout",
         )

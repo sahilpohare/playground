@@ -5,6 +5,7 @@ import { join } from "node:path"
 
 const { dispatcherArgv, startDispatcher } =
   await import("../../../../../../api/hono/src/lib/dashboard/dispatcher-start")
+const { CODEX_LIVE_REFUSAL } = await import("../../../../../../api/hono/src/lib/onboard/harness")
 const { loadFixture, writeFixture } =
   await import("../../../../../../api/hono/src/lib/dashboard/fixture")
 const { isLiveRecord } = await import("../../../../../../api/hono/src/lib/dashboard/workers")
@@ -49,6 +50,59 @@ describe("startDispatcher on a stack reading its own machine", () => {
     expect(refused.status).toBe("refused")
     expect("detail" in refused && refused.detail).toBe(reason)
     expect((await live(cli({ code: 2 }).run)).status).toBe("failed")
+  })
+
+  test("Claude Code, harness.alpha's default, starts exactly as today: no --harness on the argv", async () => {
+    const { calls, run } = cli({ code: 0 })
+    const answer = await startDispatcher({
+      harness: "claude-code",
+      live: true,
+      name: "dispatcher",
+      root: "/fixture/playground",
+      run,
+    })
+    expect(answer.status).toBe("started")
+    expect(calls).toEqual([
+      ["bun", "/fixture/playground/packages/scripts/src/playground/cli.ts", "dispatcher"],
+    ])
+  })
+
+  test("Codex on a scratch data folder runs the CLI's dispatcher step with --harness codex (#1835)", async () => {
+    const { calls, run } = cli({ code: 0 })
+    const answer = await startDispatcher({
+      env: { HOME: join(scratch, "home"), PLAYGROUND_DATA_DIR: join(scratch, "data") },
+      harness: "codex",
+      live: true,
+      name: "dispatcher",
+      root: "/fixture/playground",
+      run,
+    })
+    expect(answer.status).toBe("started")
+    expect(calls).toEqual([
+      [
+        "bun",
+        "/fixture/playground/packages/scripts/src/playground/cli.ts",
+        "dispatcher",
+        "--harness",
+        "codex",
+      ],
+    ])
+  })
+
+  test("Codex on the live data folder is refused in plain words, and runs nothing", async () => {
+    const { calls, run } = cli({ code: 0 })
+    for (const live of [true, false]) {
+      const answer = await startDispatcher({
+        env: { HOME: join(scratch, "home") },
+        harness: "codex",
+        live,
+        name: "dispatcher",
+        root: "/fixture/playground",
+        run,
+      })
+      expect(answer).toEqual({ detail: CODEX_LIVE_REFUSAL, name: "dispatcher", status: "refused" })
+    }
+    expect(calls).toEqual([])
   })
 
   test("with no checkout to run from, runs nothing and fails", async () => {

@@ -36,12 +36,15 @@ Playground checks only that it is a JSON object; the job checks each field itsel
 
 At the top of every pass, the ops runner (`scripts/ops/up.py`) renders the jobs from your extensions into `<data>/ops/jobs.json` and writes a plist for each launchd job that is on into `<data>/ops/launch-agents`.
 A machine with no extensions keeps its own `jobs.json`.
-A plist whose job is now off moves to the trash under the `jobs` carve-out ([CLI](/docs/cli)); one the trash refuses stays, and the runner writes why to `<data>/ops/up.log`.
+A plist whose job is now off moves to the trash under the `jobs` carve-out ([CLI](/docs/cli)), and its installed copy under `jobs-installed`, as below; one the trash refuses stays, and the runner writes why to `<data>/ops/up.log`.
 When that render cannot be trusted, the runner keeps the last `jobs.json` and writes why to `<data>/ops/up.log`.
 A job the registry does not know, such as one of your own scripts, stays in `jobs.json` as it is, unless an org's own job of its name ([below](#an-orgs-own-job)) replaces it.
 Each `script` item an org holds as a folder is installed into `<data>/ops/<key>/` in the same pass, beside the state its job keeps there, which the render never touches.
 
-launchd reads `~/Library/LaunchAgents`, not `<data>/ops/launch-agents`: at the switch to settings, each rendered plist is copied into `~/Library/LaunchAgents` and loaded with one `launchctl bootstrap` per plist, by its own label, in place of the plists kept by hand.
+launchd reads `~/Library/LaunchAgents`, not `<data>/ops/launch-agents`, so the same pass installs each launchd job you turn on: while launchd has not loaded it, its rendered plist is copied into `~/Library/LaunchAgents` when none is there and loaded with `launchctl bootstrap`, tried again on the next pass when launchd refuses, and a plist already there stays as it is.
+Only Playground's own labels (`com.playground.*`) are installed or removed, so no other app's agent is touched.
+A launchd job you turn off has its plist in `~/Library/LaunchAgents` moved to the trash under the `jobs-installed` carve-out, beside the `jobs` one above, and is unloaded with `launchctl bootout` while launchd still holds it, tried again on the next pass when launchd refuses.
+A launchd job still down after 3 passes in a row is told to Ops once, and again only after it has run healthy in between.
 
 ## Bring an existing jobs.json in
 
@@ -74,6 +77,8 @@ An org runs a job of its own, one the registry does not know, by shipping its sc
 
 - the script as `<org>/scripts/<key>/`, which each pass installs into `<data>/ops/<key>/`;
 - the row as `jobs.<camelName>` in `<org>/settings.json`, with every field a job has: `callsModel`, `command`, `description`, `enabled`, `heartbeat` and `schedule`, and `cwd` and `config` when it needs them.
+
+Its `description`, which every row needs, is the line the Dashboard shows for what the job does, since core names no org's job.
 
 You place the row, turn the job on or off and change its `config` with `playground settings set jobs.<camelName> '<row>' --scope <org> --reason "<why>"`, or by approving a guard decision that carries the row, or its `enabled` or `config` alone over the row the org holds; Settings > Jobs' switch and config card change the job in place, and take it out with `playground settings reset jobs.<camelName> --scope <org>`.
 The write checks the row as the render reads it (below), against the script folders that org's extensions hold at the time, and refuses it at your login's scope or when another org already adds the job.

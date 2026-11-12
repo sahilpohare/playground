@@ -140,6 +140,186 @@ test("a dropped job's plist the trash refuses stays, is named, and the render ex
   expect(existsSync(join(odd, "a"))).toBe(true)
 })
 
+// A render with install, in a HOME of the test's own whose LaunchAgents folder is the one launchd would load, every launchctl call recorded: print answers whether a label is loaded, bootstrap loads one and bootout unloads it (each refusing while refusals given remain), or ends the render as launchd ends a job that boots itself out (killed).
+const installRun = async (
+  name: string,
+  values: Record<string, unknown>,
+  launchd: { killed?: boolean; loaded?: string[]; refusals?: number } = {},
+) => {
+  const data = storeWith(name, values)
+  const home = join(scratch, name, "home")
+  const agents = join(home, "Library", "LaunchAgents")
+  mkdirSync(agents, { recursive: true })
+  const calls: string[][] = []
+  const loaded = new Set(launchd.loaded ?? [])
+  let refusals = launchd.refusals ?? 0
+  const labelOf = (arg: string) =>
+    arg
+      .split("/")
+      .at(-1)!
+      .replace(/\.plist$/, "")
+  const install = {
+    agents,
+    launchctl: async (args: string[]) => {
+      calls.push(args)
+      const label = labelOf(args.at(-1)!)
+      if (args[0] === "print") return { code: loaded.has(label) ? 0 : 113, out: "" }
+      if (refusals > 0) {
+        refusals--
+        return { code: 5, out: "nope" }
+      }
+      if (args[0] === "bootstrap") loaded.add(label)
+      if (args[0] === "bootout" && launchd.killed) throw new Error("killed by its own bootout")
+      if (args[0] === "bootout") loaded.delete(label)
+      return { code: 0, out: "" }
+    },
+    uid: 501,
+  }
+  const options = {
+    data,
+    fill,
+    install,
+    jobs: join(data, "ops", "jobs.json"),
+    roots: { home, main: CHECKOUT, trash: join(data, "trash") },
+  }
+  const render = async () => {
+    const out: string[] = []
+    const err: string[] = []
+    const exit = await renderJobsFile(
+      options,
+      (l) => out.push(l),
+      (l) => err.push(l),
+    )
+    return { code: exit, err: err.join("\n"), out: out.join("\n") }
+  }
+  const changes = () => calls.filter((args) => args[0] !== "print")
+  return { agents, calls, changes, data, render }
+}
+
+test("a launchd job turned on is installed into LaunchAgents and bootstrapped once, and one already installed and loaded stays as it stands", async () => {
+  const { agents, changes, render } = await installRun(
+    "install-on",
+    {
+      "jobs.opsHerdr": {
+        ...tick,
+        heartbeat: "ops-herdr",
+        launchd: "com.playground.ops-herdr",
+        program: ["{bun}", "{checkout}/packages/scripts/src/ops-herdr/cli.ts"],
+      },
+      "jobs.opsTick": tick,
+    },
+    { loaded: ["com.playground.ops-herdr"] },
+  )
+  const herdr = join(agents, "com.playground.ops-herdr.plist")
+  writeFileSync(herdr, "installed by hand")
+  const first = await render()
+  expect(first).toMatchObject({ code: 0, err: "" })
+  expect(first.out).toContain("+com.playground.ops-tick")
+  const tickPlist = join(agents, "com.playground.ops-tick.plist")
+  expect(readFileSync(tickPlist, "utf8")).toContain(
+    "<string>/c/packages/scripts/src/ops-tick/cli.ts</string>",
+  )
+  expect(changes()).toEqual([["bootstrap", "gui/501", tickPlist]])
+  expect(readFileSync(herdr, "utf8")).toBe("installed by hand")
+  expect((await render()).out).toBe("jobs: unchanged")
+  expect(changes()).toHaveLength(1)
+})
+
+test("a launchd job turned off is booted out and its installed plist moved to the trash, another app's agent left alone", async () => {
+  const { agents, changes, data, render } = await installRun(
+    "install-off",
+    { "jobs.opsTick": { ...tick, enabled: false } },
+    { loaded: ["com.playground.ops-tick"] },
+  )
+  const tickPlist = join(agents, "com.playground.ops-tick.plist")
+  writeFileSync(tickPlist, "installed")
+  writeFileSync(join(agents, "com.other.agent.plist"), "theirs")
+  const done = await render()
+  expect(done).toMatchObject({ code: 0, err: "" })
+  expect(done.out).toContain("-com.playground.ops-tick")
+  expect(changes()).toEqual([["bootout", "gui/501/com.playground.ops-tick"]])
+  expect(existsSync(tickPlist)).toBe(false)
+  const [batch] = readdirSync(join(data, "trash"))
+  expect(
+    readFileSync(join(data, "trash", batch!, "1", "com.playground.ops-tick.plist"), "utf8"),
+  ).toBe("installed")
+  expect(readFileSync(join(agents, "com.other.agent.plist"), "utf8")).toBe("theirs")
+  expect((await render()).out).toBe("jobs: unchanged")
+  expect(changes()).toHaveLength(1)
+})
+
+// ops-tick runs the render through up.py, so turning ops-tick off boots out the job the render runs under, which ends the render inside that call.
+test("a launchd job whose bootout ends the render has its plist in the trash already", async () => {
+  const { agents, changes, data, render } = await installRun(
+    "install-self",
+    { "jobs.opsTick": { ...tick, enabled: false } },
+    { killed: true, loaded: ["com.playground.ops-tick"] },
+  )
+  const tickPlist = join(agents, "com.playground.ops-tick.plist")
+  writeFileSync(tickPlist, "installed")
+  await expect(render()).rejects.toThrow("killed by its own bootout")
+  expect(changes()).toEqual([["bootout", "gui/501/com.playground.ops-tick"]])
+  expect(existsSync(tickPlist)).toBe(false)
+  const [batch] = readdirSync(join(data, "trash"))
+  expect(
+    readFileSync(join(data, "trash", batch!, "1", "com.playground.ops-tick.plist"), "utf8"),
+  ).toBe("installed")
+})
+
+test("a launchd job turned off that launchd still holds with no plist installed is booted out, and a refused bootout is named and tried again", async () => {
+  const { changes, render } = await installRun(
+    "install-off-loaded",
+    { "jobs.opsTick": { ...tick, enabled: false } },
+    { loaded: ["com.playground.ops-tick"], refusals: 1 },
+  )
+  const first = await render()
+  expect(first.code).toBe(1)
+  expect(first.err).toBe("jobs: refused bootout of com.playground.ops-tick, exit 5: nope")
+  expect(await render()).toMatchObject({ code: 0, err: "" })
+  expect(changes()).toEqual([
+    ["bootout", "gui/501/com.playground.ops-tick"],
+    ["bootout", "gui/501/com.playground.ops-tick"],
+  ])
+  expect((await render()).out).toBe("jobs: unchanged")
+  expect(changes()).toHaveLength(2)
+})
+
+test("a bootstrap launchctl refuses is named on stderr, exits 1, and is tried again on the next pass", async () => {
+  const { agents, changes, render } = await installRun(
+    "install-refused",
+    { "jobs.opsTick": tick },
+    { refusals: 1 },
+  )
+  const tickPlist = join(agents, "com.playground.ops-tick.plist")
+  const first = await render()
+  expect(first.code).toBe(1)
+  expect(first.err).toBe("jobs: refused bootstrap of com.playground.ops-tick, exit 5: nope")
+  const second = await render()
+  expect(second).toMatchObject({ code: 0, err: "", out: "jobs: rendered +com.playground.ops-tick" })
+  expect(changes()).toEqual([
+    ["bootstrap", "gui/501", tickPlist],
+    ["bootstrap", "gui/501", tickPlist],
+  ])
+})
+
+test("a launchd label that is not Playground's own gets no launchctl call and no write, on or off", async () => {
+  const { agents, calls, data, render } = await installRun("install-foreign", {
+    "jobs.opsTick": { ...tick, launchd: "com.example.tick" },
+  })
+  mkdirSync(join(data, "ops"), { recursive: true })
+  writeFileSync(
+    join(data, "ops", "jobs.json"),
+    JSON.stringify({ jobs: [{ disabled: true, launchd: "com.example.sync", name: "my-sync" }] }),
+  )
+  const theirs = join(agents, "com.example.sync.plist")
+  writeFileSync(theirs, "theirs")
+  const done = await render()
+  expect(done).toMatchObject({ code: 0, err: "" })
+  expect(calls.filter((args) => args.at(-1)!.includes("com.example"))).toEqual([])
+  expect(readFileSync(theirs, "utf8")).toBe("theirs")
+  expect(existsSync(join(agents, "com.example.tick.plist"))).toBe(false)
+})
+
 test("each org's script folder is installed under ops beside the state its job keeps, and the login's own scripts are not", async () => {
   const data = storeWith("scripts", {}, [
     ["acme/scripts/watch/config.json", '{"places":[]}'],

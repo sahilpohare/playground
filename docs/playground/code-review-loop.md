@@ -1,7 +1,7 @@
 ## What it does
 
 `code-review-loop` is how a reviewer session scores one PR out of 5, round by round, until nothing but nits is left to change.
-Each round reads what was asked (the plan item and the brief for a Playground PR, the Linear ticket and its comments for an org's one), reviews the change on two axes, posts a verdict and inline comments, and closes the threads the new head settles.
+Each round reads what was asked (the plan item and the brief for a Playground PR, the ticket and its comments for an org's one), reviews the change on two axes, posts a verdict and inline comments, and closes the threads the new head settles.
 
 It treats a review as a **subscription**, not a one-off: every push gets a round, a finding stays open until a round sees it fixed in the code, and a faultless push does not raise the score while anyone's finding is still open.
 The score is the PR's, never the delta's.
@@ -24,7 +24,7 @@ It is model-invoked: a reviewer session loads it from its brief, and you can typ
 
 ## Two axes
 
-The review itself is core's `code-review`, loaded by name and never copied: a **Spec** axis (is this the right thing: every requirement delivered, nothing unasked, and in an org's PR nothing beyond its ticket and the Product team's answers) and a **Standards** axis (is it built well, against AGENTS.md, the skills it touches and the reviewer's brief).
+The review itself is core's `code-review`, loaded by name and never copied: a **Spec** axis (is this the right thing: every requirement delivered, nothing unasked, and in an org's PR nothing beyond its ticket and the answers of the people its ticket skill names) and a **Standards** axis (is it built well, against AGENTS.md, the skills it touches and the reviewer's brief).
 A changed skill, agent guide or docs page is also held to core's `writing-for-agents`, which the reviewer loads first, so an agent doc that sprawls or leaves a step with no completion criterion costs the score as code would.
 The two stay apart in the verdict, so a well-built change that misses the ask cannot hide behind its quality.
 Its two sub-agents start with no memory of earlier rounds, which is what makes the read before the last 5/5 fresh.
@@ -82,7 +82,7 @@ While the head's `Audit, Lint, and Build` and `test` checks are not both green, 
 - A test that fails only on the runner box counts against the score once a rerun on the Mac fails too, so a difference in the box alone never lowers a score.
 - A report that fails to send by name reaches the worker anyway, sent again to the `uds:` address its newest message came from.
 - The reviewer's small fix goes to the worker as a patch, never as a commit of its own, since ADR 0004 makes the gate a reviewer independent of the code it scores: save `git -C <clone> diff > <scratch>/fix.patch`, restore the clone, check it with `git -C <clone> apply --check <scratch>/fix.patch`,
-  and hand it over inline in the verdict, which the message to the worker links, since a restart clears `/tmp`: that `fix.patch` as a `diff` block, pasted whole and unedited with every context line kept so `git apply` takes it as it stands, which the worker applies word for word, on the PR for a blocking or should-fix finding and in its follow-up PR for a nit.
+  and hand it over inline in the verdict, which the message to the worker links, since a restart clears `/tmp`: that `fix.patch` as a `diff` block, pasted whole and unedited with every context line kept so `git apply` takes it as it stands, which the worker applies word for word, on the PR for a blocking or should-fix finding, and a nit's as playbook's SESSIONS.md, Fix pushes and nits sorts it.
   It applies a patch or a suggested wording in its clone and runs the checks its files call for before it posts, the trace ratchet's test and the em-dash check among them on any doc, so its own fix never costs the PR a round.
   Each patched test file outside `CLOCK_EXEMPT` also runs once under `CLOCK_AHEAD_DAYS=30`, since a file's mtime and a child process stay on the real clock, and an exempt file's run counts as a no-op, not a pass.
   A patch to a promoted skill's `SKILL.md` also greps each changed term over that skill's docs page and every README that lists it, and patches every hit.
@@ -90,12 +90,12 @@ While the head's `Audit, Lint, and Build` and `test` checks are not both green, 
 - After a compaction, a resume, or a notice that background tasks did not finish before the previous session ended, the reviewer runs `state.ts pr` for each PR it holds and re-arms a waiter wherever none is running, `state.ts checks` on a head whose two gate checks are not both green and `state.ts wait` on the rest, since an account flip kills the waiters with no notice.
 - A waiter starts from the tmp folder, and `state.ts wait` and `checks` move there as they start, so a waiter that outlives its PR holds no review worktree from the cleanup.
 - A finding that asks for a behaviour states the behaviour wanted, not only the defect.
-- On a collaborator's org PR whose review ask came to you, the session that posts your review turns at once to the work org's extension (triage-and-implement's PR.md) for what follows a review you were asked for.
+- On a collaborator's org PR whose review ask came to you, the session that posts your review turns at once to the work org's ticket skill, in its extension, for what follows a review you were asked for.
 - A reviewer agrees with an author's reply only once it has reproduced the author's reason with one command, named in its reply.
 - A 5/5 verdict says the fresh full read found nothing blocking or should-fix and `bun run check-types` ran green, or green CI at the head stood in for it; a red run is a blocking finding.
 - Before a 5/5 posts, `bun run pr:merge <n> --explain`, bare and unpiped, reads ✓ on every gate but ready, ci and review, since the body gate also needs a doc that a reviewer's patch or the last commit changed named in the Evidence; a ✗ is a finding for the worker.
 - The reviewer posts the 5/5 verdict and its `Review • 5/5` label; GitHub's two checks green at the head are the next gate, never an input to the score, and a run cited where CI stands in is evidence of the touched tests and check-types alone.
-- A round left with only nits scores 5/5: the reviewer lists them, or hands the small edit over as a patch, for the worker's follow-up PR, opened once the 5/5 head merges, since that head merges as it stands and a push after it would need a fresh full read.
+- A round left with only nits scores 5/5: the reviewer lists them, or hands the small edit over as a patch, for the worker to keep or drop by playbook's SESSIONS.md, Fix pushes and nits, since that head merges as it stands and a push after it would need a fresh full read.
   A nit that would widen a permission, a setting or a guard's reach if a rare event happens goes to the worker's lead first, and the 5/5 waits for the lead's ruling, since a worker can merge seconds after a 5/5 posts.
 - A PR body with no `test:skills` result in it is a nit, since GitHub Actions runs the suite at the head.
 - When the ticket carries samples, the verdict holds a samples table, and a sample left unhandled holds the score down.

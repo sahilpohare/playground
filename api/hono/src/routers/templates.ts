@@ -1,5 +1,4 @@
 import type { Session } from "@packages/auth"
-import { HARNESS_IDS } from "@packages/settings"
 import { Hono } from "hono"
 import { describeRoute, resolver } from "hono-openapi"
 import { z } from "zod"
@@ -17,7 +16,7 @@ import { authMiddleware, guardWrites, requireConsoleRole } from "@/middlewares"
 
 const templateSchema = z.object({
   effort: z.string().nullable(),
-  harness: z.enum(HARNESS_IDS),
+  harness: z.literal("claude-code"),
   id: z.string(),
   kind: z.string(),
   label: z.string(),

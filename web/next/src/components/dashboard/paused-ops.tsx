@@ -11,7 +11,7 @@ import { pausedOps, useOps, whenWords } from "@/lib/ops"
 import { relativeTime } from "@/lib/time"
 
 const pausedConfig: Record<string, ColumnConfig> = {
-  // room for the longest script's name, Code consultant starts
+  // room for the longest script's name, Claude usage readings
   name: { extra: 24 },
   does: { extra: 36, flex: true, wrap: true },
   runs: { extra: 12 },

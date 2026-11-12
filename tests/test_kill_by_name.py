@@ -21,8 +21,9 @@ not command substitution. Fenced and indented blocks are code like any script, a
 what an inline code span holds, for loops and captures. A loop's extent is read with its
 strings and comments blanked, so a "do" or "done" in them does not end it; its kill is read
 with only comments blanked, so `sh -c "kill $p"` counts. CHANGELOG.md is skipped: it records
-commit subjects. So are the no-kill-by-name hook, its test and the refused-forms fixture,
-which hold the commands it refuses as data.
+commit subjects. The no-kill-by-name hook, its test and the refused-forms fixture are
+skipped too, since they hold the commands it refuses as data. So is guards.js, the bundle
+that holds the hook beside every other Bash guard.
 
 Run: python3 tests/test_kill_by_name.py
 """
@@ -35,7 +36,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SELF = os.path.relpath(os.path.abspath(__file__), ROOT)
 SKIP = {
     "CHANGELOG.md",
-    "scripts/hooks/bundled/no-kill-by-name.js",
+    "scripts/hooks/bundled/guards.js",
     "scripts/hooks/no-kill-by-name.ts",
     "tests/scripts/hooks/no-kill-by-name.test.ts",
 }

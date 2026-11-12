@@ -1,5 +1,6 @@
 // The Bash reader the PreToolUse hooks share: it lexes a command and walks it as the shell would run it, reading the heredocs, files and substitutions it can see and marking the rest unknown.
 import { AsyncLocalStorage } from "node:async_hooks"
+import { realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
@@ -48,6 +49,8 @@ export type Command = {
   kept?: boolean
   // Set on a zsh head whose body is a brace group in its own words (`repeat 3 { cd ..; }`, `while true { … }`, `if true { … }`), which the reader does not read, so the shell reads as able to be in any folder after it (`Env.cwdAnywhere`)
   opaque?: boolean
+  // Set on each command of a run an `||` opened, those in a group or a substitution it holds included, so `orElse` finds what a cd's `||` runs whichever command of that run the walk reaches first
+  orRun?: boolean
   redirects: Redirect[]
   // Set when a count or a loop may run the command more than once, so a relative cd of its own may climb or descend any number of folders
   repeated?: boolean
@@ -64,6 +67,8 @@ type Lexer = {
   known: Record<string, string>
   scope: number
   scopes: number[]
+  // Whether an `||` opened the run the walk is in
+  orRun?: boolean
   src: string
   // The run of commands the walk is in, carried into every group and substitution it enters, so one reached through a chain keeps that chain's token
   token: number
@@ -86,6 +91,8 @@ export type Env = {
   cwdHeld?: string[]
   // The folders a cd the reader could not be sure of may have left the shell in, beside `cwdSure`; `cwdSure` is unnamed whenever one of them is the shell's instead
   cwdMaybe?: string[]
+  // A sure cd whose run an `||` may follow (`orElse`): the folders the shell was in before it, its run's token, and whether a later command joined that run; once the `||`'s command arrives, that command's token, where the shell was, and whether the commands after it return there
+  cwdOr?: CdOr
   // The folder the reader proved the shell is in: a cd it is sure the shell runs once, into one folder it reads. Unnamed wherever the reader cannot prove one, which is what `places` enumerates instead.
   cwdSure?: string
   // Set once a cd's landing folder cannot be named at all (`cd "$X"`, a popd, zsh's two-operand cd), so each hook reads it by its own fail-closed rule, through `places`'s fallback
@@ -977,6 +984,7 @@ function walk(lx: Lexer, scope: number, nested: boolean, inherit?: Command): voi
       if (after === "||" || depth > 0 || body) done.unsure = true
       if (after === "&&") done.chained = true
       done.chain = lx.token
+      if (lx.orRun) done.orRun = true
       // `f() if …`, a function whose body is a compound other than a brace group, keeps that body for each call as `f() {` keeps its own
       const last = lx.commands[lx.commands.length - 1]?.words
       const compound =
@@ -1009,7 +1017,10 @@ function walk(lx: Lexer, scope: number, nested: boolean, inherit?: Command): voi
       depth = Math.max(0, depth + opened - closed)
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0))
       // a run ends only at an operator that runs the next command whatever this one did, and only outside every body: a `|` keeps the pipeline in the run, and entering a group, a body or a script keeps the run it was reached through
-      if (depth === 0 && FREES.has(op)) lx.token = freshToken()
+      if (depth === 0 && FREES.has(op)) {
+        lx.token = freshToken()
+        lx.orRun = op === "||"
+      }
       after = op
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted) break
@@ -1623,6 +1634,7 @@ export async function examine(
   builtins: boolean,
 ): Promise<string | undefined> {
   tick()
+  orElse(cmd, env)
   unchain(cmd, env)
   if (cmd.opaque) {
     env.cwdAnywhere = true
@@ -1818,11 +1830,18 @@ function again(lexed: Lexed, cmd: Command, parsed: Parsed): Lexed {
 async function nested<T>(cmd: Command, env: Env, body: () => Promise<T>): Promise<T> {
   const chain = env.cwdChain
   const token = env.cwdChainToken
+  // the script's commands carry runs of their own, so a cd's `||` the line holds stays where it was until the line's next command, and a sure cd the script ends on is the line's, under the reading command's run
+  const or = env.cwdOr
   env.cwdChain = []
   env.cwdChainToken = undefined
+  env.cwdOr = undefined
   try {
     return await body()
   } finally {
+    // the body moved it, which the narrowing after `env.cwdOr = undefined` above cannot see
+    const own = env.cwdOr as CdOr | undefined
+    env.cwdOr =
+      own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or
     const left = [...new Set([...(chain ?? []), ...(env.cwdChain ?? [])])]
     env.cwdChain = keep(left, env)
     env.cwdChainToken = left.length > 0 ? (chain?.length ? token : cmd.chain) : undefined
@@ -1916,7 +1935,10 @@ const tildeSign = (name: string, dir: Word | undefined, env: Env): string | unde
 async function cdTarget(name: string, args: Word[], env: Env): Promise<string | undefined> {
   const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1))
   if (!dir) return homedir()
-  const typed = dir.value === "-" ? undefined : await folder(pathOf(dir, env))
+  const lexical = dir.value === "-" ? undefined : pathOf(dir, env)
+  const typed = await folder(
+    lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical,
+  )
   // in a hook that follows ~-, a cd's or pushd's unquoted ~- is the folder the shell last left and ~+ the current one, as the shell expands them; beside a folder named ~- or ~+ the typed reading stays, though the shell still expands the word
   const sign = typed ? undefined : tildeSign(name, dir, env)
   const base = sign && (sign === "-" ? env.old?.dir : env.cwd)
@@ -1942,6 +1964,7 @@ function cdTargets(name: string, cmd: Command, parsed: Parsed, env: Env, from: s
   if (dir.value === "-") return { back: true, paths: [], unread: true }
   const paths = new Set<string>()
   const many = manyTimes(cmd, parsed)
+  const physical = physicalCd(parsed.args)
   let unread = dirs.length > 1
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     // a steady variable's value is read in, so its target, and whether it climbs, is the folder it names; the unread reading the cd had stays beside it, so it is never read looser than before
@@ -1954,14 +1977,28 @@ function cdTargets(name: string, cmd: Command, parsed: Parsed, env: Env, from: s
         unread = true
         continue
       }
-      paths.add(path)
+      const landed = physical ? kernelPath(word, base, path) : path
+      paths.add(landed)
       // a loop or a count runs the cd again from wherever the last run left it, so a target that climbs reaches every folder above
       if (many && word.value.split("/").includes("..")) {
-        for (const up of ancestors(path)) paths.add(up)
+        for (const up of ancestors(landed)) paths.add(up)
       }
     }
   }
   return { back: dirs.length > 1, paths: [...paths], unread }
+}
+
+// Whether a cd or pushd is physical (`cd -P`), changing into the folder a link names before a `..` after it, as the kernel does, where a plain one folds the `..` by text; any -P among its options counts, whatever else is there (`-qP`, `-PL`, `-P -L`), since zsh lands physical for each and a guard fails closed
+const physicalCd = (args: Word[]): boolean =>
+  args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"))
+
+// Where a physical cd from `base` lands on a word it has read as `lexical`: the kernel's path, each link followed, else `lexical` when it is not there
+function kernelPath(word: Word, base: string | undefined, lexical: string): string {
+  try {
+    return realpathSync.native(isAbsolute(word.value) ? word.value : `${base}/${word.value}`)
+  } catch {
+    return lexical
+  }
 }
 
 // In a hook that follows zsh's ~- (`Env.old` set), a cd's or pushd's unquoted ~- returns to a folder the shell was in and ~+ stays in the one it is in; the reader takes every folder `cd -` would go back to, or each one the shell may be in, beside the typed reading and the folder `Env.cwd`'s own reading lands in, so it is never looser than that reading.
@@ -2025,6 +2062,7 @@ async function chdirTo(name: string, cmd: Command, parsed: Parsed, env: Env): Pr
     env.cwdSure = paths[0]
     env.cwdMaybe = []
     env.cwdUnread = false
+    env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope }
     if (env.old) env.oldFrom = bases
     // the chain holds only to the first command it does not reach, so the folders from before this cd are kept for that one
     if (chained) {
@@ -2034,6 +2072,7 @@ async function chdirTo(name: string, cmd: Command, parsed: Parsed, env: Env): Pr
     return
   }
   env.cwdSure = undefined
+  env.cwdOr = undefined
   // a while's or an until's condition runs at least once, so a cd there into folders that are there leaves the ones before it behind, and the shell is in one its passes reach
   const behind =
     onceOrMore(cmd, parsed) &&
@@ -2049,6 +2088,51 @@ async function chdirTo(name: string, cmd: Command, parsed: Parsed, env: Env): Pr
 // Whether a `!` inverts the command's own status, which an `&&` after it reads: a cd negated an odd number of times carries the chain on when it fails, so the commands after it run in the folder the shell never left and the reader keeps that folder a candidate.
 const negated = (cmd: Command): boolean =>
   markers(cmd.words).filter((word) => word === "!").length % 2 === 1
+
+// `before` the folders from before the cd, `cdChain` its run's token, `exits` whether the `||`'s run is an exit in the line's own shell, `joined` once a later command joins the cd's run, `landed` the folders the shell was in as the `||`'s run began, `orChain` that run's token, `scope` the cd's own
+type CdOr = {
+  before: string[]
+  cdChain: number | undefined
+  exits?: boolean
+  joined?: boolean
+  landed?: { maybe: string[]; sure?: string }
+  orChain?: number
+  scope: number
+}
+
+// The words that end the line where they run, so a cd's `||` that runs one leaves the commands after it where the cd landed; a top-level `return` is not one, since bash -c fails it and carries on
+const EXITS = new Set(["exit"])
+
+// What an `||` after a sure cd's run runs may run where the cd failed, so it and its own run, a subshell, a substitution or a script it holds included, are judged in the folders from before the cd too, beside where the shell was. The commands after that run keep both when the `||` follows the cd itself (`cd <path> || echo no; git commit`), and return to the folder the cd named when the `||` follows a later command of the cd's run, or what it runs is an exit in the line's own shell, which ends the line where the cd failed; one in a subshell or a pipeline ends that alone.
+function orElse(cmd: Command, env: Env): void {
+  const or = env.cwdOr
+  if (!or) return
+  if (cmd.chain === or.orChain) {
+    // a pipeline stage or a background runs in a subshell, a brace group's `}` among them, so an exit in that run ends that alone
+    if (or.exits && cmd.detached) env.cwdOr = { ...or, exits: false }
+    return
+  }
+  if (cmd.chain === or.cdChain) {
+    if (!or.joined) env.cwdOr = { ...or, joined: true }
+    return
+  }
+  if (or.orChain === undefined && cmd.orRun) {
+    env.cwdOr = {
+      ...or,
+      exits: EXITS.has(parse(cmd).name) && !cmd.detached && cmd.scope === or.scope,
+      landed: { maybe: env.cwdMaybe ?? [], sure: env.cwdSure },
+      orChain: cmd.chain,
+    }
+    env.cwdMaybe = keep([...new Set([...startFolders(env), ...or.before])], env)
+    env.cwdSure = undefined
+    return
+  }
+  if ((or.joined || or.exits) && or.landed) {
+    env.cwdMaybe = or.landed.maybe
+    env.cwdSure = or.landed.sure
+  }
+  env.cwdOr = undefined
+}
 
 // A cd an `&&` alone made sure holds for its own run of commands alone: any other command runs whether or not that cd did, so the folders from before it are the shell's again beside the one it named. A command keeps the folder only by proof, its own token matching the cd's, which every operator that frees a command takes away and no group, body, pipeline or script grants.
 function unchain(cmd: Command, env: Env): void {

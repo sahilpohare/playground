@@ -5,9 +5,9 @@ import { configDirOf, dataDirOf } from "../../../../../packages/env/src/data-dir
 import {
   assistantOf,
   busyOf,
+  handOn,
   type Stuck,
   stuckOf,
-  WAIT_S,
 } from "../../../../../packages/scripts/src/ops-job/dispatcher"
 import { sendAs } from "../../../../../packages/scripts/src/ops-job/job"
 import { writeAtomic } from "../../../../../packages/scripts/src/write-atomic"
@@ -61,7 +61,7 @@ export async function watch(io: Io) {
     read.some((m) => sent.has(m.ts) && m.text !== PLAYGROUND && Number(m.ts) > Number(ts))
   const waiting = state.handed.filter((h) => !h.bravo && !replied(h.ts))
   const working = !blocked && waiting.length > 0 && (await busy())
-  const due = waiting.filter((h) => blocked || (now - h.at >= WAIT_S && !working))
+  const { due, why } = handOn(waiting, (h) => now - h.at, blocked, working)
   const to = due.length > 0 ? await assistant() : undefined
   for (const h of due) {
     h.bravo = true
@@ -71,9 +71,6 @@ export async function watch(io: Io) {
       )
       continue
     }
-    const why = blocked
-      ? `the dispatcher has read ${blocked.state} since ${blocked.at}`
-      : `no reply has landed in ${WAIT_S / 60} minutes`
     await send(to, `The owner's DM at ${h.ts}, handed on since ${why}: ${h.text}\n${reply}`)
   }
   if (blocked && due.length > 0 && state.stuckTold !== blocked.at) {
