@@ -93,7 +93,6 @@ describe("set", () => {
       role: "worker",
       status: "starting",
       task: "Review #97",
-      title: "",
       worker: "x7mh4d-worker",
     })
     const runner = await run(configWith([]), ["set", "x7mh4d-runner", "kind=runner", "task=t"])
