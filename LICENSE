@@ -1,0 +1,40 @@
+Proprietary License
+
+Copyright (c) 2026 Sahil Pohare. All rights reserved.
+
+This repository, including its source code, documentation, configuration and
+every other file the copyright holder authored or modified (the "Software"),
+is proprietary and confidential.
+
+No license is granted. Without the copyright holder's prior written
+permission, you may not, in whole or in part:
+
+  1. use, run, copy or reproduce the Software;
+  2. modify, adapt, translate or create derivative works of it;
+  3. distribute, publish, sublicense, sell, rent, lease or lend it;
+  4. make it available to any third party, including as a hosted service;
+  5. reverse engineer, decompile or disassemble it, except where applicable
+     law expressly permits this despite this limitation;
+  6. use it, or any output generated from it, to train, fine-tune or
+     evaluate any machine learning model.
+
+Viewing the Software where it is publicly hosted grants no rights beyond
+those the hosting platform's terms of service require.
+
+Third-party material keeps its own license. Files that originate from
+another project remain under that project's terms, and nothing in this
+license restricts rights those terms grant. The vendored skills under
+extensions/core/skills/ and their licenses under extensions/core/upstream/
+are listed in extensions/core/NOTICE. Code inherited from the upstream project this
+repository was forked from remains the property of its respective authors.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Any unauthorized use is strictly prohibited and may result in civil and
+criminal liability.

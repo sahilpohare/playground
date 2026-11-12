@@ -6090,6 +6090,11 @@ var ownerSettings = defineSettings({
     default: [],
     description: "The owner's first name and handles as chat writes them, lowercase: the inbox gate refuses a manager's stop on a line that addresses one of them and asks for an action, and never reads @<handle> as an agent.",
     schema: array(string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a name or handle, lowercase"))
+  },
+  "owner.voice": {
+    default: "",
+    description: "The voice a draft or a slack decision speaks in as the owner: singular has bun run ask refuse one that says we, us, our, ours or ourselves; empty checks none.",
+    schema: _enum(["", "singular"])
   }
 });
 

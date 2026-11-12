@@ -13,7 +13,7 @@ type Row = Parameters<typeof shownOps>[0][number]
 
 const job = (job: string, fields: Partial<Row> = {}): Row => ({
   callsModel: false,
-  does: null,
+  does: "",
   job,
   lastBeatAt: null,
   model: null,

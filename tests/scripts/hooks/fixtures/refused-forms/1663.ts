@@ -110,6 +110,10 @@ export const groups: Group[] = [
         "pushd -qP into-main/.. && git commit -m x",
       ],
       ["a commit after a cd whose -P comes before -L", "cd -PL into-main/.. && git commit -m x"],
+      [
+        "a commit after a cd whose -P and -L are two words",
+        "cd -P -L into-main/.. && git commit -m x",
+      ],
     ],
   },
 ]

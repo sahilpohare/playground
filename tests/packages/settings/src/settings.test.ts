@@ -77,6 +77,7 @@ describe("defineSettings", () => {
       "models.glmKeychainService",
       "models.probe",
       "owner.names",
+      "owner.voice",
       "paths.codeRoot",
       "release.hours",
       "release.merges",

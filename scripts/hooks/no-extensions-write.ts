@@ -1,13 +1,23 @@
 // PreToolUse hook: refuses a factory session's write into the extensions root, where every guard's list, policy.json and each scope's sources live, and its playground CLI call that changes what a guard reads to allow or deny a call, so no session edits a list in one call and makes the guarded call in the next.
-import { existsSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 
 import { dataDir } from "../../packages/env/src/data-dir"
-import { extensionsDir } from "../../packages/settings/src/rendered"
+import { scopesIn } from "../../packages/settings/src/folder"
+// for its side effect: the job registry's settings, each job's default row and old names, which settingFields() then lists
+import "../../packages/settings/src/jobs"
+import {
+  CORE,
+  extensionsDir,
+  loginOf,
+  readPolicySync,
+  scopeDir,
+} from "../../packages/settings/src/rendered"
+import { settingFields } from "../../packages/settings/src/settings"
 import { eachInput } from "./codex"
 import { bunCall, FILE_TOOLS, gitCall, real } from "./no-main-checkout"
-import { fromFactory } from "./role"
+import { fromFactory, opsLead } from "./role"
 import {
   codeFed,
   type Command,
@@ -411,8 +421,107 @@ export const GUARD_KEYS = new Set([
   "slack.gatedSends",
   "usage.keychainService",
 ])
-// An ops job's setting turns it on or moves what it runs, so every jobs.<name> is refused, a name the registry lacks included: only the owner's Approve of a guard decision, or Settings > Jobs, sets one.
+// An ops job's setting turns it on or moves what it runs, so every jobs.<name> is refused, a name the registry lacks included, but the Ops lead's change of its interval alone (tunes()): only the owner's Approve of a guard decision, or Settings > Jobs, sets any other.
 const JOB_PREFIX = "jobs."
+// Whether a settings set the Ops lead makes only tunes a number, so it runs; a key that widens or names what a guard allows stays the owner's
+type Tuning = (key: string, value: string, scoped: boolean) => boolean
+const NO_TUNING: Tuning = () => false
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+const parsed = (text: string): unknown => {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
+// What a job's key holds: the row the login's scope stores, {} when it stores none, whether another scope stores one or any scope one under an old name, and the whole row policy.json renders over the registry's entry, the entry itself when no scope stores a row
+export type Held = { elsewhere: boolean; rendered: unknown; stored: Record<string, unknown> }
+
+// Pure: whether a set of the key to the value text, as the CLI parses it, only tunes a number: glm.readOnlyLoad5 to a positive load limit, or a job's row equal field for field to the row the login's scope stores but a schedule of a positive integer interval, where the rendered row already runs on one; a set replaces the stored row and the render reads each field it leaves out from the registry, so the stored row is what it must keep, and a --scope, a row another scope stores, a job neither policy.json nor the registry holds and any other key tune nothing
+export function tunes(
+  key: string,
+  text: string,
+  scoped: boolean,
+  held: (key: string) => Held | undefined,
+): boolean {
+  if (scoped) return false
+  const value = parsed(text)
+  if (key === "glm.readOnlyLoad5")
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+  if (!key.startsWith(JOB_PREFIX) || !isRecord(value)) return false
+  const row = held(key)
+  if (row === undefined || row.elsewhere || !isRecord(row.rendered)) return false
+  const ran = row.rendered.schedule
+  if (!isRecord(ran) || typeof ran.every !== "number") return false
+  const { schedule } = value
+  return (
+    isRecord(schedule) &&
+    Object.keys(schedule).length === 1 &&
+    typeof schedule.every === "number" &&
+    Number.isInteger(schedule.every) &&
+    schedule.every > 0 &&
+    Bun.deepEquals({ ...value, schedule: null }, { ...row.stored, schedule: null }, true)
+  )
+}
+
+const storedAt = (data: string, scope: string): Record<string, unknown> | undefined => {
+  const file = join(scopeDir(data, scope), "settings.json")
+  if (!existsSync(file)) return {}
+  try {
+    const values: unknown = JSON.parse(readFileSync(file, "utf8"))
+    return isRecord(values) ? values : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The Ops lead's tuning read against the login's stored rows, every other scope's and policy.json's, or none when the login, a scope's settings.json or policy.json does not read
+function tuningOf(environment: Environment): Tuning {
+  const data = dataDir(environment)
+  const policy = readPolicySync(data)
+  if (policy.refusal !== undefined) return NO_TUNING
+  let login: string
+  try {
+    login = loginOf(data, environment)
+  } catch {
+    return NO_TUNING
+  }
+  const others = [CORE, ...scopesIn(data)].filter((scope) => scope !== login)
+  const own = storedAt(data, login)
+  const theirs = others.map((scope) => storedAt(data, scope))
+  if (own === undefined || theirs.some((values) => values === undefined)) return NO_TUNING
+  const { values } = policy.settings
+  const held = (key: string): Held | undefined => {
+    const stored = own[key] ?? {}
+    if (!isRecord(stored)) return undefined
+    const field = settingFields().find((entry) => entry.key === key)?.field
+    const old = field?.aliases ?? []
+    return {
+      elsewhere:
+        old.some((name) => name in own) ||
+        theirs.some((at) => at !== undefined && [key, ...old].some((name) => name in at)),
+      rendered: values[key] ?? field?.default,
+      stored,
+    }
+  }
+  return (key, value, scoped) => tunes(key, value, scoped, held)
+}
+
+// Whether a line is one playground call alone, its first word the CLI's, so no assignment, export, env, wrapper, group, substitution or other command on it moves where its set lands (PLAYGROUND_LOGIN or the data folder) from the scope the hook reads
+const loneCall = (commands: Command[]): boolean => {
+  const [cmd] = commands
+  return (
+    commands.length === 1 &&
+    cmd.words[0]?.value === "playground" &&
+    !cmd.inner &&
+    [...cmd.words, ...cmd.redirects.flatMap((r) => (r.target ? [r.target] : []))].every(
+      (word) => !word.procs,
+    )
+  )
+}
+
 const BY_APPROVE =
   "a key only the owner sets: post a guard decision with playground ask new (.agents/dashboard/asks.md), whose Approve writes it"
 // ext verbs that change a scope's lists or settings, or which scopes the lists and policy.json render from
@@ -1002,7 +1111,7 @@ function runsOf(parsed: Parsed, vars: Text[], whole: boolean, rootLine: boolean)
 }
 
 // What of a playground call changes what a guard reads, or undefined; its words split as that command's parseWords splits them, and a word the hook cannot read taken as the worst.
-function cliWrite(words: Word[]): string | undefined {
+function cliWrite(words: Word[], tuning: Tuning): string | undefined {
   const [command, verb, ...rest] = words.map((w) => (marked(w.value) ? undefined : w.value))
   if (command === undefined)
     return words.length ? "playground with a command word it cannot read" : undefined
@@ -1036,6 +1145,8 @@ function cliWrite(words: Word[]): string | undefined {
     if (unread || key === undefined) return `playground settings ${verb} with a word it cannot read`
     const job = key.startsWith(JOB_PREFIX)
     if (!GUARD_KEYS.has(key) && !job) return
+    const value = positional[1]
+    if (verb === "set" && value !== undefined && tuning(key, value, scoped)) return
     return PRIVACY_KEYS.has(key) && !scoped
       ? `playground settings ${verb} of ${key}, a key a guard reads, ${PRIVACY}`
       : job
@@ -1089,6 +1200,7 @@ async function inspect(raw: string, environment: Environment, unknown = false) {
   if (tool !== "Bash") return
   const { command } = input
   if (typeof command !== "string") return
+  let tuning = (await opsLead(raw, environment)) ? tuningOf(environment) : NO_TUNING
   // nesting makes the lexer's time grow with the square of the length, so a longer command could outlast the hook's timeout
   if (command.length > 131_072) return refuse(TOO_LONG)
   // the root's path from a cwd above it, which a script may name it by
@@ -1263,7 +1375,7 @@ async function inspect(raw: string, environment: Environment, unknown = false) {
     const calls = reader ? [] : cliCalls(parsed, env)
     const write =
       calls
-        .map((words) => cliWrite(xargs?.replace ? words : [...words, ...stdinWords]))
+        .map((words) => cliWrite(xargs?.replace ? words : [...words, ...stdinWords], tuning))
         .find(Boolean) ??
       (calls.some((words) => scoreAsOther(words, cmd, parsed, env)) ? SCORE_AS_OTHER : undefined)
     if (write) return refuse(write)
@@ -1465,6 +1577,7 @@ async function inspect(raw: string, environment: Environment, unknown = false) {
   const steered = Object.keys(known).filter((key) => named.counts.has(key))
   if (unknown) for (const key of steered) delete known[key]
   const lexed = lex(command, known)
+  if (!loneCall(lexed.commands)) tuning = NO_TUNING
   steadyAt = steadyNames(named, lexed.commands)
   const env: Env = {
     cwd: directory,

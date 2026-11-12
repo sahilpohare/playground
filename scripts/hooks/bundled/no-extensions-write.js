@@ -2,9 +2,9 @@
 const __CHECKOUT = import.meta.dir.slice(0, import.meta.dir.lastIndexOf("/scripts/hooks/bundled"));
 
 // scripts/hooks/no-extensions-write.ts
-import { existsSync as existsSync2, statSync as statSync2 } from "fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, statSync as statSync3 } from "fs";
 import { homedir as homedir4 } from "os";
-import { dirname as dirname3, join as join6, resolve as resolve5, sep as sep2 } from "path";
+import { dirname as dirname4, join as join7, resolve as resolve5, sep as sep2 } from "path";
 
 // packages/env/src/aliases.ts
 var DESK_ENV = new Set([
@@ -61,65 +61,173 @@ var dataDirOf = (env, home = env.HOME || homedir()) => {
 };
 var dataDir = (env = process.env) => dataDirOf(env);
 
-// packages/settings/src/rendered.ts
-import { join as join2 } from "path";
-var CORE = "core";
-var extensionsDir = (data) => join2(data, "extensions");
+// packages/settings/src/folder.ts
+import {
+  existsSync as existsSync2,
+  mkdirSync,
+  readdirSync,
+  readFileSync as readFileSync2,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync
+} from "fs";
+import { basename, dirname, join as join3, relative } from "path";
 
-// scripts/hooks/codex.ts
-import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
-var HEADERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
-var SHELL_PATCH = /(?:^|[\n;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*\/)?(?:apply_patch|applypatch)(?=$|[\s;&|)<>'"`])/;
-var patchPaths = (text) => text.split(`
-`).flatMap((line) => {
-  const trimmed = line.trim();
-  const header = HEADERS.find((h) => trimmed.startsWith(h));
-  return header && trimmed.length > header.length ? [trimmed.slice(header.length)] : [];
-});
-var writeOf = (input, path, patch) => {
-  const cwd = typeof input.cwd === "string" ? input.cwd : "/";
-  return JSON.stringify({
-    ...input,
-    tool_input: { content: patch, file_path: isAbsolute2(path) ? path : resolve2(cwd, path) },
-    tool_name: "Write"
-  });
+// packages/config/src/kinds.ts
+var ROSTER_KINDS = [
+  "assistant",
+  "builder",
+  "dispatcher",
+  "ops",
+  "optimizer",
+  "orchestrator",
+  "planner",
+  "probe",
+  "researcher",
+  "reviewer",
+  "runner",
+  "tester",
+  "worker"
+];
+var isRosterKind = (value) => ROSTER_KINDS.includes(value);
+var FACTORY_ROLE_OF_KIND = {
+  assistant: "lead",
+  builder: "lead",
+  dispatcher: "dispatcher",
+  ops: "lead",
+  optimizer: "lead",
+  orchestrator: "lead",
+  planner: "lead",
+  probe: "probe",
+  researcher: "worker",
+  reviewer: "reviewer",
+  runner: "runner",
+  tester: "tester",
+  worker: "worker"
 };
-function guardInputs(raw) {
-  let input;
-  try {
-    input = JSON.parse(raw);
-  } catch {
-    return [raw];
-  }
-  if (typeof input !== "object" || input === null || typeof input.turn_id !== "string")
-    return [raw];
-  const tool = input.tool_name;
-  const command = input.tool_input?.command;
-  const text = typeof command === "string" ? command : "";
-  const shell = tool === "Bash" && SHELL_PATCH.test(text);
-  if (tool !== "apply_patch" && !shell)
-    return [raw];
-  const paths = patchPaths(text);
-  if (paths.length === 0)
-    return null;
-  return [...shell ? [raw] : [], ...paths.map((path) => writeOf(input, path, text))];
+var ID_ALPHABET = "23456789bcdfghjkmnpqrstvwxyz";
+var ID_NAME_SOURCE = `[${ID_ALPHABET}]{6}-(?:${ROSTER_KINDS.join("|")})`;
+var PREFIXED = /^(probe|reviewer|runner|tester|worker)-./;
+var ID_NAME = new RegExp(`^[${ID_ALPHABET}]{6}-(${ROSTER_KINDS.join("|")})$`);
+var kindOfName = (name) => (ID_NAME.exec(name) ?? PREFIXED.exec(name))?.[1] ?? null;
+var DEFAULT_SESSION_NAMES = {
+  aliases: {},
+  names: { builder: "builder", dispatcher: "dispatcher", ops: "ops", planner: "planner" }
+};
+var NAMES = Symbol.for("playground.sessionNames");
+var held = globalThis;
+var setSessionNames = (next) => {
+  held[NAMES] = next;
+};
+var getSessionNames = () => held[NAMES] ?? DEFAULT_SESSION_NAMES;
+var namedKinds = () => {
+  const { aliases, names } = getSessionNames();
+  return new Map([
+    ...Object.entries(names).map(([kind, name]) => [name, kind]),
+    [`${names.dispatcher}-2`, "dispatcher"],
+    ...Object.entries(aliases),
+    ["optimizer", "optimizer"]
+  ]);
+};
+var placedKindOfName = (name) => kindOfName(name) ?? namedKinds().get(name) ?? null;
+function roleOfName(name) {
+  const kind = placedKindOfName(name);
+  return kind ? FACTORY_ROLE_OF_KIND[kind] : "";
 }
-async function eachInput(raw, guard, judge) {
-  const inputs = guardInputs(raw);
-  if (!inputs)
-    return `${guard} hook refuses an apply_patch whose patch names no file it can read: give the patch whole in the call itself, with each file on its own *** Add File, *** Update File or *** Delete File line.`;
-  for (const input of inputs) {
-    const reason = await judge(input);
-    if (reason)
-      return reason;
-  }
-}
+var SEATLESS = new Set(["ended", "parked"]);
 
-// scripts/hooks/no-main-checkout.ts
-import { existsSync, readdirSync, readFileSync, realpathSync as realpathSync2, statSync } from "fs";
-import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute4, join as join5, normalize, resolve as resolve4, sep } from "path";
+// packages/safe-delete/src/index.ts
+var LIMITS = { bytes: 2 * 1024 ** 3, files: 5000, perMinute: 3 };
+var PLAYGROUND_AGENT = /^com\.playground\.[\w.-]+\.plist$/;
+var CARVE_OUTS = {
+  "dashboard-supervisor": {
+    bytes: 256 * 1024 ** 2,
+    files: 4000,
+    folder: "ops/dashboard/builds"
+  },
+  jobs: { bytes: 64 * 1024, files: 1, folder: "ops/launch-agents" },
+  "jobs-installed": {
+    bytes: 64 * 1024,
+    files: 1,
+    folder: "Library/LaunchAgents",
+    home: true,
+    name: PLAYGROUND_AGENT
+  }
+};
+
+// packages/settings/src/rendered.ts
+import { existsSync, readFileSync } from "fs";
+import { join as join2 } from "path";
+import { fileURLToPath } from "url";
+var CORE = "core";
+var coreDir = () => fileURLToPath(new URL("../../../extensions/core", import.meta.url));
+var extensionsDir = (data) => join2(data, "extensions");
+var scopeDir = (data, scope) => scope === CORE ? coreDir() : join2(data, "extensions", scope);
+var loginPath = (data) => join2(data, "extensions", "login");
+var loginOf = (data, env = process.env) => {
+  if (env.PLAYGROUND_LOGIN)
+    return env.PLAYGROUND_LOGIN;
+  try {
+    const login = readFileSync(loginPath(data), "utf8").trim();
+    if (login)
+      return login;
+  } catch {}
+  throw new Error(`no login for the extensions in ${loginPath(data)}: run playground ext init`);
+};
+var fixFor = (file) => {
+  const list = /^hooks\/(.+)\.json$/.exec(file)?.[1];
+  if (list && !existsSync(join2(coreDir(), "lists", `${list}.json`)))
+    return `tell your lead, and the dispatcher hands the owner ! playground ext put <login> list ${list} <file> --reason <why> to type in the dispatcher's terminal window, which writes it, since core ships no such list`;
+  return file.startsWith("hooks/") ? "tell your lead, and the dispatcher hands the owner ! playground ext import --from-tree extensions/core/lists to type in the dispatcher's terminal window, which seeds the guards' lists" : "tell your lead, and the dispatcher asks the owner to set up settings, then fill in and save Privacy on the Dashboard's Settings page, which writes it";
+};
+var readRenderedSync = (data, file) => {
+  const dir = extensionsDir(data);
+  if (!existsSync(dir))
+    return {};
+  const parts = file.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === ".."))
+    return { refusal: `${file} is not a path inside the extensions (${dir})` };
+  const path = parts[0] === CORE ? join2(coreDir(), ...parts.slice(1)) : join2(dir, file);
+  return existsSync(path) ? { path } : { refusal: `the extensions root (${dir}) holds no ${file}: ${fixFor(file)}` };
+};
+var readPolicySync = (data, org) => {
+  const read = readRenderedSync(data, "policy.json");
+  if (read.refusal)
+    return { refusal: read.refusal };
+  if (!read.path)
+    return { settings: { schemaVersion: 1, values: {} } };
+  let policy;
+  try {
+    policy = JSON.parse(readFileSync(read.path, "utf8"));
+  } catch {
+    return {
+      refusal: `the extensions' policy.json does not parse (${read.path}): ${fixFor("policy.json")}`
+    };
+  }
+  return {
+    settings: {
+      schemaVersion: 1,
+      values: { ...policy.values, ...org ? policy.orgs?.[org.toLowerCase()] : undefined }
+    }
+  };
+};
+
+// packages/settings/src/folder.ts
+var STALE_MS = 5 * 60000;
+var scopesIn = (data) => {
+  const root = extensionsDir(data);
+  return existsSync2(root) ? readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync2(join3(root, entry.name, ".git"))).map((entry) => entry.name).sort() : [];
+};
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js
+function getEnumValues(entries) {
+  const numericValues = Object.values(entries).filter((v) => typeof v === "number");
+  const values = Object.entries(entries).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
+  return values;
+}
 function joinValues(array, separator = "|") {
   return array.map((val) => stringifyPrimitive(val)).join(separator);
 }
@@ -128,6 +236,24 @@ function jsonStringifyReplacer(_, value) {
     return value.toString();
   return value;
 }
+
+class Cached {
+  constructor(getter) {
+    this._getter = getter;
+    this._value = undefined;
+  }
+  get value() {
+    const getter = this._getter;
+    if (getter !== undefined) {
+      this._value = getter();
+      this._getter = undefined;
+    }
+    return this._value;
+  }
+}
+function cached(getter) {
+  return new Cached(getter);
+}
 function nullish(input) {
   return input === null || input === undefined;
 }
@@ -135,6 +261,14 @@ function cleanRegex(source) {
   const start = source.startsWith("^") ? 1 : 0;
   const end = source.endsWith("$") ? source.length - 1 : source.length;
   return source.slice(start, end);
+}
+function floatSafeRemainder(val, step) {
+  const ratio = val / step;
+  const roundedRatio = Math.round(ratio);
+  const tolerance = 4 * Number.EPSILON * Math.max(Math.abs(ratio), 1);
+  if (Math.abs(ratio - roundedRatio) < tolerance)
+    return 0;
+  return ratio - roundedRatio;
 }
 function assignProp(target, prop, value) {
   Object.defineProperty(target, prop, {
@@ -148,6 +282,52 @@ function rawShape(def) {
   const desc = Object.getOwnPropertyDescriptor(def, "shape");
   return desc?.get ? desc.get.raw : desc?.value;
 }
+function sourceShape(schema) {
+  return rawShape(schema._zod.def) ?? schema._zod.def.shape;
+}
+function deferProp(target, key, getter) {
+  Object.defineProperty(target, key, {
+    get() {
+      const value = getter();
+      assignProp(this, key, value);
+      return value;
+    },
+    enumerable: true,
+    configurable: true
+  });
+}
+function putProp(target, key, value) {
+  if (key in target)
+    assignProp(target, key, value);
+  else
+    target[key] = value;
+}
+function mirrorShape(target, source, keys, wrap) {
+  const raw = sourceShape(source);
+  for (const key of keys) {
+    const desc = Object.getOwnPropertyDescriptor(raw, key);
+    if (!desc.enumerable)
+      continue;
+    if (desc.get) {
+      deferProp(target, key, () => {
+        const value = source._zod.def.shape[key];
+        return wrap ? wrap(value, key) : value;
+      });
+    } else
+      putProp(target, key, wrap ? wrap(desc.value, key) : desc.value);
+  }
+}
+function mirrorProps(target, source) {
+  for (const key of Reflect.ownKeys(source)) {
+    const desc = Object.getOwnPropertyDescriptor(source, key);
+    if (!desc.enumerable)
+      continue;
+    if (desc.get)
+      deferProp(target, key, () => source[key]);
+    else
+      putProp(target, key, desc.value);
+  }
+}
 function mergeDefs(...defs) {
   const mergedDescriptors = {};
   for (const def of defs) {
@@ -156,6 +336,9 @@ function mergeDefs(...defs) {
   }
   return Object.defineProperties({}, mergedDescriptors);
 }
+function esc(str) {
+  return JSON.stringify(str);
+}
 function slugify(input) {
   return input.toLowerCase().trim().replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -163,6 +346,21 @@ var captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace :
 function isObject(data) {
   return typeof data === "object" && data !== null && !Array.isArray(data);
 }
+var allowsEval = /* @__PURE__ */ cached(() => {
+  if (globalConfig.jitless) {
+    return false;
+  }
+  if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare")) {
+    return false;
+  }
+  try {
+    const F = Function;
+    new F("");
+    return true;
+  } catch (_) {
+    return false;
+  }
+});
 function isPlainObject(o) {
   if (isObject(o) === false)
     return false;
@@ -190,6 +388,7 @@ function shallowClone(o) {
     return new Set(o);
   return o;
 }
+var propertyKeyTypes = /* @__PURE__ */ new Set(["string", "number", "symbol"]);
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -222,6 +421,11 @@ function stringifyPrimitive(value) {
     return `"${value}"`;
   return `${value}`;
 }
+function optionalKeys(shape) {
+  return Object.keys(shape).filter((k) => {
+    return shape[k]._zod.optin !== undefined && shape[k]._zod.optout === "optional";
+  });
+}
 var NUMBER_FORMAT_RANGES = /* @__PURE__ */ (() => ({
   safeint: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
   int32: [-2147483648, 2147483647],
@@ -233,6 +437,106 @@ var BIGINT_FORMAT_RANGES = {
   int64: [/* @__PURE__ */ BigInt("-9223372036854775808"), /* @__PURE__ */ BigInt("9223372036854775807")],
   uint64: [/* @__PURE__ */ BigInt(0), /* @__PURE__ */ BigInt("18446744073709551615")]
 };
+function pick(schema, mask) {
+  const currDef = schema._zod.def;
+  const checks = currDef.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    throw new Error(".pick() cannot be used on object schemas containing refinements");
+  }
+  const newShape = {};
+  mirrorShape(newShape, schema, maskedKeys(schema, mask));
+  return clone(schema, mergeDefs(currDef, { shape: newShape, checks: [] }));
+}
+function maskedKeys(schema, mask) {
+  const raw = sourceShape(schema);
+  const keys = [];
+  for (const key of Reflect.ownKeys(mask)) {
+    if (!Object.getOwnPropertyDescriptor(raw, key)?.enumerable) {
+      throw new Error(`Unrecognized key: "${String(key)}"`);
+    }
+    if (mask[key])
+      keys.push(key);
+  }
+  return keys;
+}
+function omit(schema, mask) {
+  const currDef = schema._zod.def;
+  const checks = currDef.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    throw new Error(".omit() cannot be used on object schemas containing refinements");
+  }
+  const omitted = new Set(maskedKeys(schema, mask));
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)).filter((key) => !omitted.has(key)));
+  return clone(schema, mergeDefs(currDef, { shape: newShape, checks: [] }));
+}
+function extend(schema, shape) {
+  if (!isPlainObject(shape)) {
+    throw new Error("Invalid input to extend: expected a plain object");
+  }
+  const checks = schema._zod.def.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    const existingShape = sourceShape(schema);
+    for (const key of Reflect.ownKeys(shape)) {
+      if (Object.getOwnPropertyDescriptor(existingShape, key) !== undefined) {
+        throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
+      }
+    }
+  }
+  return clone(schema, mergeDefs(schema._zod.def, { shape: extended(schema, shape) }));
+}
+function extended(schema, shape) {
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)));
+  mirrorProps(newShape, shape);
+  return newShape;
+}
+function safeExtend(schema, shape) {
+  if (!isPlainObject(shape)) {
+    throw new Error("Invalid input to safeExtend: expected a plain object");
+  }
+  return clone(schema, mergeDefs(schema._zod.def, { shape: extended(schema, shape) }));
+}
+function merge(a, b) {
+  if (!b?._zod?.def) {
+    throw new Error("Invalid input to merge: expected an object schema. To merge a plain shape, use `.extend()`.");
+  }
+  if (a._zod.def.checks?.length) {
+    throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
+  }
+  const newShape = {};
+  mirrorShape(newShape, a, Reflect.ownKeys(sourceShape(a)));
+  mirrorShape(newShape, b, Reflect.ownKeys(sourceShape(b)));
+  const def = mergeDefs(a._zod.def, {
+    shape: newShape,
+    get catchall() {
+      return b._zod.def.catchall;
+    },
+    checks: b._zod.def.checks ?? []
+  });
+  return clone(a, def);
+}
+function partial(Class, schema, mask, name = "partial") {
+  const currDef = schema._zod.def;
+  const checks = currDef.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    throw new Error(`.${name}() cannot be used on object schemas containing refinements`);
+  }
+  const selected = mask ? new Set(maskedKeys(schema, mask)) : undefined;
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)), Class && ((value, key) => selected && !selected.has(key) ? value : new Class({ type: "optional", innerType: value })));
+  return clone(schema, mergeDefs(schema._zod.def, { shape: newShape, checks: [] }));
+}
+function required(Class, schema, mask) {
+  const selected = mask ? new Set(maskedKeys(schema, mask)) : undefined;
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)), (value, key) => selected && !selected.has(key) ? value : new Class({ type: "nonoptional", innerType: value }));
+  return clone(schema, mergeDefs(schema._zod.def, { shape: newShape }));
+}
 function aborted(x, startIndex = 0) {
   if (x.aborted === true)
     return true;
@@ -403,6 +707,10 @@ function defineBound(proto, key, fn) {
     }
   });
 }
+function claim(inst, sentinel) {
+  const proto = Object.getPrototypeOf(inst);
+  return sentinel in proto ? undefined : proto;
+}
 var installing;
 var broke = false;
 var breaker = {
@@ -441,6 +749,24 @@ function defineLazyInternal(inst, key, compute) {
     },
     set(value) {
       Object.defineProperty(this, key, { configurable: true, writable: true, value });
+    }
+  });
+}
+function installLazyProp(inst, key, make, enumerable) {
+  const proto = claim(inst, key);
+  if (!proto)
+    return;
+  Object.defineProperty(proto, key, {
+    configurable: true,
+    get() {
+      const desc = { configurable: true, writable: true, enumerable, value: undefined };
+      Object.defineProperty(this, key, desc);
+      desc.value = make(this);
+      Object.defineProperty(this, key, desc);
+      return desc.value;
+    },
+    set(value) {
+      Object.defineProperty(this, key, { configurable: true, writable: true, enumerable, value });
     }
   });
 }
@@ -885,6 +1211,7 @@ function datetime(args) {
 var anyString = /^[\s\S]{0,}$/;
 var integer = /^-?\d+$/;
 var number = /^-?\d+(?:\.\d+)?$/;
+var boolean = /^(?:true|false)$/i;
 var lowercase = /^[^A-Z]*$/;
 var uppercase = /^[^a-z]*$/;
 
@@ -899,6 +1226,136 @@ var _whenHasLength = (payload) => {
   const val = payload.value;
   return !nullish(val) && val.length !== undefined;
 };
+var numericOriginMap = {
+  number: "number",
+  bigint: "bigint",
+  object: "date"
+};
+var $ZodCheckLessThan = /* @__PURE__ */ $constructor("$ZodCheckLessThan", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  const origin = numericOriginMap[typeof def.value];
+  inst._zod.check = (payload) => {
+    if (def.inclusive ? payload.value <= def.value : payload.value < def.value) {
+      return;
+    }
+    payload.issues.push({
+      origin: numericOriginMap[typeof payload.value] ?? origin,
+      code: "too_big",
+      maximum: typeof def.value === "object" ? def.value.getTime() : def.value,
+      input: payload.value,
+      inclusive: def.inclusive,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodCheckGreaterThan = /* @__PURE__ */ $constructor("$ZodCheckGreaterThan", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  const origin = numericOriginMap[typeof def.value];
+  inst._zod.check = (payload) => {
+    if (def.inclusive ? payload.value >= def.value : payload.value > def.value) {
+      return;
+    }
+    payload.issues.push({
+      origin: numericOriginMap[typeof payload.value] ?? origin,
+      code: "too_small",
+      minimum: typeof def.value === "object" ? def.value.getTime() : def.value,
+      input: payload.value,
+      inclusive: def.inclusive,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodCheckMultipleOf = /* @__PURE__ */ $constructor("$ZodCheckMultipleOf", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  inst._zod.check = (payload) => {
+    if (typeof payload.value !== typeof def.value)
+      throw new Error("Cannot mix number and bigint in multiple_of check.");
+    const isMultiple = typeof payload.value === "bigint" ? def.value !== BigInt(0) && payload.value % def.value === BigInt(0) : floatSafeRemainder(payload.value, def.value) === 0;
+    if (isMultiple)
+      return;
+    payload.issues.push({
+      origin: typeof payload.value,
+      code: "not_multiple_of",
+      divisor: def.value,
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodCheckNumberFormat = /* @__PURE__ */ $constructor("$ZodCheckNumberFormat", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  def.format = def.format || "float64";
+  const isInt = def.format?.includes("int");
+  const origin = isInt ? "int" : "number";
+  const [minimum, maximum] = NUMBER_FORMAT_RANGES[def.format];
+  inst._zod.check = (payload) => {
+    const input = payload.value;
+    if (isInt) {
+      if (!Number.isInteger(input)) {
+        payload.issues.push({
+          expected: origin,
+          format: def.format,
+          code: "invalid_type",
+          continue: false,
+          input,
+          inst
+        });
+        return;
+      }
+      if (!Number.isSafeInteger(input)) {
+        if (input > 0) {
+          payload.issues.push({
+            input,
+            code: "too_big",
+            maximum: Number.MAX_SAFE_INTEGER,
+            note: "Integers must be within the safe integer range.",
+            inst,
+            origin,
+            inclusive: true,
+            continue: !def.abort
+          });
+        } else {
+          payload.issues.push({
+            input,
+            code: "too_small",
+            minimum: Number.MIN_SAFE_INTEGER,
+            note: "Integers must be within the safe integer range.",
+            inst,
+            origin,
+            inclusive: true,
+            continue: !def.abort
+          });
+        }
+        return;
+      }
+    }
+    if (input < minimum) {
+      payload.issues.push({
+        origin: "number",
+        input,
+        code: "too_small",
+        minimum,
+        inclusive: true,
+        inst,
+        continue: !def.abort
+      });
+    }
+    if (input > maximum) {
+      payload.issues.push({
+        origin: "number",
+        input,
+        code: "too_big",
+        maximum,
+        inclusive: true,
+        inst,
+        continue: !def.abort
+      });
+    }
+  };
+});
 var $ZodCheckMaxLength = /* @__PURE__ */ $constructor("$ZodCheckMaxLength", (inst, def) => {
   var _a;
   $ZodCheck.init(inst, def);
@@ -1073,6 +1530,48 @@ var $ZodCheckOverwrite = /* @__PURE__ */ $constructor("$ZodCheckOverwrite", (ins
     payload.value = def.tx(payload.value);
   };
 });
+
+// node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/doc.js
+class Doc {
+  constructor(args = [], closed = {}) {
+    this.content = [];
+    this.indent = 0;
+    this.args = args;
+    this.closed = closed;
+  }
+  indented(fn) {
+    this.indent += 1;
+    try {
+      fn(this);
+    } finally {
+      this.indent -= 1;
+    }
+  }
+  write(arg) {
+    if (typeof arg === "function") {
+      arg(this, { execution: "sync" });
+      arg(this, { execution: "async" });
+      return;
+    }
+    const content = arg;
+    const lines = content.split(`
+`).filter((x) => x);
+    const minIndent = Math.min(...lines.map((x) => x.length - x.trimStart().length));
+    const dedented = lines.map((x) => x.slice(minIndent)).map((x) => " ".repeat(this.indent * 2) + x);
+    for (const line of dedented) {
+      this.content.push(line);
+    }
+  }
+  compile() {
+    const F = Function;
+    const content = this?.content ?? [``];
+    const factory = new F(...Object.keys(this.closed), `return function (${this.args.join(", ")}) {
+${content.join(`
+`)}
+};`);
+    return factory(...Object.values(this.closed));
+  }
+}
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/versions.js
 var version = {
@@ -1567,6 +2066,69 @@ var $ZodJWT = /* @__PURE__ */ $constructor("$ZodJWT", (inst, def) => {
     });
   };
 });
+var $ZodNumber = /* @__PURE__ */ $constructor("$ZodNumber", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.pattern = number;
+  inst._zod.parse = (payload, _ctx) => {
+    if (def.coerce)
+      try {
+        payload.value = Number(payload.value);
+      } catch (_) {}
+    const input = payload.value;
+    if (typeof input === "number" && !Number.isNaN(input) && Number.isFinite(input)) {
+      return payload;
+    }
+    const received = typeof input === "number" ? Number.isNaN(input) ? "NaN" : !Number.isFinite(input) ? String(input) : undefined : undefined;
+    payload.issues.push({
+      expected: "number",
+      code: "invalid_type",
+      input,
+      inst,
+      ...received ? { received } : {}
+    });
+    return payload;
+  };
+});
+var $ZodNumberFormat = /* @__PURE__ */ $constructor("$ZodNumberFormat", (inst, def) => {
+  $ZodCheckNumberFormat.init(inst, def);
+  $ZodNumber.init(inst, def);
+});
+var $ZodBoolean = /* @__PURE__ */ $constructor("$ZodBoolean", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.pattern = boolean;
+  inst._zod.parse = (payload, _ctx) => {
+    if (def.coerce)
+      try {
+        payload.value = Boolean(payload.value);
+      } catch (_) {}
+    const input = payload.value;
+    if (typeof input === "boolean")
+      return payload;
+    payload.issues.push({
+      expected: "boolean",
+      code: "invalid_type",
+      input,
+      inst
+    });
+    return payload;
+  };
+});
+var $ZodUnknown = /* @__PURE__ */ $constructor("$ZodUnknown", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.parse = (payload) => payload;
+});
+var $ZodNever = /* @__PURE__ */ $constructor("$ZodNever", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.parse = (payload, _ctx) => {
+    payload.issues.push({
+      expected: "never",
+      code: "invalid_type",
+      input: payload.value,
+      inst
+    });
+    return payload;
+  };
+});
 function capSize(inst, size) {
   const caps = sizeCaps(inst._zod.def.checks);
   if (!caps.length)
@@ -1634,6 +2196,310 @@ var $ZodArray = /* @__PURE__ */ $constructor("$ZodArray", (inst, def) => {
     return payload;
   };
   capSize(inst, arraySize);
+});
+function handlePropertyResult(result, final, key, input, optin, optout) {
+  const isPresent = key in input;
+  const isOptionalOut = optout === "optional";
+  if (!isPresent && isOptionalOut && optin === "optional") {
+    return;
+  }
+  if (result.issues.length) {
+    if (optin !== undefined && isOptionalOut && !isPresent) {
+      return;
+    }
+    final.issues.push(...prefixIssues(key, result.issues));
+  }
+  if (!isPresent && optin === undefined) {
+    if (!result.issues.length) {
+      final.issues.push({
+        code: "invalid_type",
+        expected: "nonoptional",
+        input: undefined,
+        path: [key]
+      });
+    }
+    return;
+  }
+  if (result.value === undefined) {
+    if (isPresent || optin === "defaulted" && !isOptionalOut) {
+      final.value[key] = undefined;
+    }
+  } else {
+    final.value[key] = result.value;
+  }
+}
+var NO_SYMBOL_KEYS = [];
+function normalizeDef(def) {
+  const keys = Object.keys(def.shape);
+  const ownSymbols = Object.getOwnPropertySymbols(def.shape);
+  const symbolKeys = ownSymbols.length ? ownSymbols : NO_SYMBOL_KEYS;
+  const allKeys = symbolKeys.length ? [...keys, ...symbolKeys] : keys;
+  for (const k of allKeys) {
+    if (!def.shape?.[k]?._zod?.traits?.has("$ZodType")) {
+      throw new Error(`Invalid element at key "${String(k)}": expected a Zod schema`);
+    }
+  }
+  const okeys = optionalKeys(def.shape);
+  return {
+    ...def,
+    allKeys,
+    symbolKeys,
+    keySet: new Set(keys),
+    numKeys: keys.length,
+    optionalKeys: new Set(okeys)
+  };
+}
+function handleCatchall(proms, input, payload, ctx, def, inst, abortEarly) {
+  const unrecognized = [];
+  const keySet = def.keySet;
+  const _catchall = def.catchall._zod;
+  const t = _catchall.def.type;
+  const optin = _catchall.optin;
+  const optout = _catchall.optout;
+  let seen = 0;
+  for (const key in input) {
+    if (abortEarly && payload.issues.length !== seen) {
+      if (aborted(payload, seen))
+        break;
+      seen = payload.issues.length;
+    }
+    if (keySet.has(key))
+      continue;
+    if (key === "__proto__") {
+      if (t === "never")
+        unrecognized.push(key);
+      continue;
+    }
+    if (t === "never") {
+      unrecognized.push(key);
+      continue;
+    }
+    const r = _catchall.run({ value: input[key], issues: [] }, ctx);
+    if (r instanceof Promise) {
+      proms.push(r.then((r) => handlePropertyResult(r, payload, key, input, optin, optout)));
+    } else {
+      handlePropertyResult(r, payload, key, input, optin, optout);
+    }
+  }
+  if (unrecognized.length) {
+    payload.issues.push({
+      code: "unrecognized_keys",
+      keys: unrecognized,
+      input,
+      inst,
+      continue: true
+    });
+  }
+  if (!proms.length)
+    return payload;
+  return Promise.all(proms).then(() => {
+    return payload;
+  });
+}
+var $ZodObject = /* @__PURE__ */ $constructor("$ZodObject", (inst, def) => {
+  $ZodType.init(inst, def);
+  const desc = Object.getOwnPropertyDescriptor(def, "shape");
+  const sh = desc?.get ? desc.get.raw : def.shape ?? {};
+  if (sh) {
+    const get = () => {
+      const newSh = { ...sh };
+      Object.defineProperty(def, "shape", { value: newSh });
+      get.raw = newSh;
+      return newSh;
+    };
+    get.raw = sh;
+    Object.defineProperty(def, "shape", { get });
+  }
+  const _normalized = cached(() => normalizeDef(def));
+  defineLazyInternal(inst, "propValues", (zod) => {
+    const shape = zod.def.shape;
+    const propValues = {};
+    for (const key in shape) {
+      const field = shape[key]._zod;
+      if (field.values) {
+        if (!Object.prototype.hasOwnProperty.call(propValues, key)) {
+          assignProp(propValues, key, new Set);
+        }
+        for (const v of field.values)
+          propValues[key].add(v);
+        if (field.optin !== undefined)
+          propValues[key].add(undefined);
+      }
+    }
+    return propValues;
+  });
+  const isObject2 = isObject;
+  const catchall = def.catchall;
+  let value;
+  const memo = globalConfig.memoizer;
+  memo?.attach(inst);
+  inst._zod.parse = (payload, ctx) => {
+    value ?? (value = _normalized.value);
+    const input = payload.value;
+    if (!isObject2(input)) {
+      payload.issues.push({
+        expected: "object",
+        code: "invalid_type",
+        input,
+        inst
+      });
+      return payload;
+    }
+    payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+    const proms = [];
+    const shape = value.shape;
+    const abortEarly = ctx?.abortEarly;
+    let seen = payload.issues.length;
+    for (const key of value.allKeys) {
+      if (abortEarly && payload.issues.length !== seen) {
+        if (aborted(payload, seen))
+          break;
+        seen = payload.issues.length;
+      }
+      if (key === "__proto__")
+        continue;
+      const el = shape[key];
+      const optin = el._zod.optin;
+      const optout = el._zod.optout;
+      const r = el._zod.run({ value: input[key], issues: [] }, ctx);
+      if (r instanceof Promise) {
+        proms.push(r.then((r) => handlePropertyResult(r, payload, key, input, optin, optout)));
+      } else {
+        handlePropertyResult(r, payload, key, input, optin, optout);
+      }
+    }
+    if (!catchall) {
+      return proms.length ? Promise.all(proms).then(() => payload) : payload;
+    }
+    return handleCatchall(proms, input, payload, ctx, _normalized.value, inst, abortEarly === true);
+  };
+});
+var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) => {
+  $ZodObject.init(inst, def);
+  const superParse = inst._zod.parse;
+  const _normalized = cached(() => normalizeDef(def));
+  const memo = globalConfig.memoizer;
+  const generateFastpass = (shape) => {
+    const normalized = _normalized.value;
+    const syms = normalized.symbolKeys;
+    const doc = new Doc(["payload", "ctx"], { shape, inst, memo, syms });
+    const parseStr = (k) => `shape[${k}]._zod.run({ value: input[${k}], issues: [] }, ctx)`;
+    const prefixStr = (id, k) => `
+          let ${id}_ab = false;
+          for (let i = 0; i < ${id}.issues.length; i++) {
+            const iss = ${id}.issues[i];
+            iss.path = iss.path ? [${k}, ...iss.path] : [${k}];
+            payload.issues.push(iss);
+            if (iss.continue !== true) ${id}_ab = true;
+          }
+          if (${id}_ab && ctx && ctx.abortEarly) {
+            payload.value = newResult;
+            return payload;
+          }`;
+    doc.write(`const input = payload.value;`);
+    const ids = Object.create(null);
+    let counter = 0;
+    for (const key of normalized.allKeys) {
+      ids[key] = `key_${counter++}`;
+    }
+    doc.write(memo ? `const newResult = memo.alloc(inst, payload, {}, ctx);` : `const newResult = {};`);
+    for (const key of normalized.allKeys) {
+      if (key === "__proto__")
+        continue;
+      const id = ids[key];
+      const k = typeof key === "symbol" ? `syms[${syms.indexOf(key)}]` : esc(key);
+      const isPresent = `${k} in input`;
+      const schema = shape[key];
+      const optin = schema?._zod?.optin;
+      const isOptionalIn = optin !== undefined;
+      const isOptionalOut = schema?._zod?.optout === "optional";
+      doc.write(`const ${id} = ${parseStr(k)};`);
+      if (isOptionalIn && isOptionalOut) {
+        const assign = optin === "optional" ? `${id}_present` : `${id}.value !== undefined || ${id}_present`;
+        doc.write(`
+        const ${id}_present = ${isPresent};
+        if (!${id}.issues.length || ${id}_present) {
+          if (${id}.issues.length) {${prefixStr(id, k)}
+          }
+
+          if (${assign}) {
+            newResult[${k}] = ${id}.value;
+          }
+        }
+
+      `);
+      } else if (!isOptionalIn) {
+        doc.write(`
+        const ${id}_present = ${isPresent};
+        if (${id}.issues.length) {${prefixStr(id, k)}
+        }
+        if (!${id}_present && !${id}.issues.length) {
+          payload.issues.push({
+            code: "invalid_type",
+            expected: "nonoptional",
+            input: undefined,
+            path: [${k}]
+          });
+          if (ctx && ctx.abortEarly) {
+            payload.value = newResult;
+            return payload;
+          }
+        }
+
+        if (${id}_present) {
+          newResult[${k}] = ${id}.value;
+        }
+
+      `);
+      } else {
+        doc.write(`
+        if (${id}.issues.length) {${prefixStr(id, k)}
+        }
+      `);
+        if (optin === "defaulted") {
+          doc.write(`newResult[${k}] = ${id}.value;`);
+        } else {
+          doc.write(`
+        if (${id}.value !== undefined || ${isPresent}) {
+          newResult[${k}] = ${id}.value;
+        }
+      `);
+        }
+      }
+    }
+    doc.write(`payload.value = newResult;`);
+    doc.write(`return payload;`);
+    return doc.compile();
+  };
+  let fastpass;
+  const isObject2 = isObject;
+  const jit = !globalConfig.jitless;
+  const allowsEval2 = allowsEval;
+  const fastEnabled = jit && allowsEval2.value;
+  const catchall = def.catchall;
+  let value;
+  inst._zod.parse = (payload, ctx) => {
+    value ?? (value = _normalized.value);
+    const input = payload.value;
+    if (!isObject2(input)) {
+      payload.issues.push({
+        expected: "object",
+        code: "invalid_type",
+        input,
+        inst
+      });
+      return payload;
+    }
+    if (jit && fastEnabled && ctx?.async === false && ctx.jitless !== true) {
+      if (!fastpass)
+        fastpass = generateFastpass(def.shape);
+      payload = fastpass(payload, ctx);
+      if (!catchall)
+        return payload;
+      return handleCatchall([], input, payload, ctx, value, inst, ctx?.abortEarly === true);
+    }
+    return superParse(payload, ctx);
+  };
 });
 function handleUnionResults(results, final, inst, ctx) {
   for (const result of results) {
@@ -1966,6 +2832,51 @@ var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def) => {
     if (proms.length) {
       return Promise.all(proms).then(() => payload);
     }
+    return payload;
+  };
+});
+var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def) => {
+  $ZodType.init(inst, def);
+  const values = getEnumValues(def.entries);
+  const valuesSet = new Set(values);
+  inst._zod.values = valuesSet;
+  defineLazyInternal(inst, "pattern", (zod) => {
+    const patternValues = getEnumValues(zod.def.entries).filter((k) => propertyKeyTypes.has(typeof k));
+    return new RegExp(patternValues.length ? `^(${patternValues.map((o) => escapeRegex(o.toString())).join("|")})$` : "^[^\\s\\S]$");
+  });
+  inst._zod.parse = (payload, _ctx) => {
+    const input = payload.value;
+    if (valuesSet.has(input)) {
+      return payload;
+    }
+    payload.issues.push({
+      code: "invalid_value",
+      values,
+      input,
+      inst
+    });
+    return payload;
+  };
+});
+var $ZodLiteral = /* @__PURE__ */ $constructor("$ZodLiteral", (inst, def) => {
+  $ZodType.init(inst, def);
+  const values = new Set(def.values);
+  inst._zod.values = values;
+  defineLazyInternal(inst, "pattern", (zod) => {
+    const vals = zod.def.values;
+    return new RegExp(vals.length ? `^(${vals.map((o) => typeof o === "string" ? escapeRegex(o) : o ? escapeRegex(o.toString()) : String(o)).join("|")})$` : "^[^\\s\\S]$");
+  });
+  inst._zod.parse = (payload, _ctx) => {
+    const input = payload.value;
+    if (values.has(input)) {
+      return payload;
+    }
+    payload.issues.push({
+      code: "invalid_value",
+      values: def.values,
+      input,
+      inst
+    });
     return payload;
   };
 });
@@ -2906,6 +3817,74 @@ function _isoDuration(Class, params) {
     ...normalizeParams(params)
   });
 }
+function _number(Class, params) {
+  return new Class(snapshotChecks({ type: "number", checks: [], ...normalizeParams(params) }));
+}
+function _int(Class, params) {
+  return new Class({
+    type: "number",
+    check: "number_format",
+    abort: false,
+    format: "safeint",
+    ...normalizeParams(params)
+  });
+}
+function _boolean(Class, params) {
+  return new Class({
+    type: "boolean",
+    ...normalizeParams(params)
+  });
+}
+function _unknown(Class) {
+  return new Class({
+    type: "unknown"
+  });
+}
+function _never(Class, params) {
+  return new Class({
+    type: "never",
+    ...normalizeParams(params)
+  });
+}
+function _lt(value, params) {
+  return new $ZodCheckLessThan({
+    check: "less_than",
+    ...normalizeParams(params),
+    value,
+    inclusive: false
+  });
+}
+function _lte(value, params) {
+  return new $ZodCheckLessThan({
+    check: "less_than",
+    ...normalizeParams(params),
+    value,
+    inclusive: true
+  });
+}
+function _gt(value, params) {
+  return new $ZodCheckGreaterThan({
+    check: "greater_than",
+    ...normalizeParams(params),
+    value,
+    inclusive: false
+  });
+}
+function _gte(value, params) {
+  return new $ZodCheckGreaterThan({
+    check: "greater_than",
+    ...normalizeParams(params),
+    value,
+    inclusive: true
+  });
+}
+function _multipleOf(value, params) {
+  return new $ZodCheckMultipleOf({
+    check: "multiple_of",
+    ...normalizeParams(params),
+    value
+  });
+}
 function _maxLength(maximum, params) {
   const ch = new $ZodCheckMaxLength({
     check: "max_length",
@@ -3696,6 +4675,107 @@ var stringProcessor = (schema, ctx, _json, _params) => {
     }
   }
 };
+var numberProcessor = (schema, ctx, _json, params) => {
+  const json = _json;
+  const { minimum, maximum, multipleOf, exclusiveMaximum, exclusiveMinimum, isInt } = aggregateChecks(schema);
+  json.type = isInt ? "integer" : "number";
+  const exMin = typeof exclusiveMinimum === "number" && exclusiveMinimum >= (minimum ?? Number.NEGATIVE_INFINITY);
+  const exMax = typeof exclusiveMaximum === "number" && exclusiveMaximum <= (maximum ?? Number.POSITIVE_INFINITY);
+  const legacy = ctx.target === "draft-04" || ctx.target === "openapi-3.0";
+  if (exMin) {
+    if (legacy) {
+      json.minimum = exclusiveMinimum;
+      json.exclusiveMinimum = true;
+    } else {
+      json.exclusiveMinimum = exclusiveMinimum;
+    }
+  } else if (typeof minimum === "number") {
+    json.minimum = minimum;
+  }
+  if (exMax) {
+    if (legacy) {
+      json.maximum = exclusiveMaximum;
+      json.exclusiveMaximum = true;
+    } else {
+      json.exclusiveMaximum = exclusiveMaximum;
+    }
+  } else if (typeof maximum === "number") {
+    json.maximum = maximum;
+  }
+  if (multipleOf) {
+    const divisors = new Set;
+    for (const divisor of multipleOf) {
+      if (Number.isFinite(divisor) && divisor !== 0)
+        divisors.add(Math.abs(divisor));
+      else
+        handleUnrepresentable(schema, ctx, json, params, `A multipleOf divisor of ${divisor} cannot be represented in JSON Schema`);
+    }
+    const [first, ...rest] = divisors;
+    if (first !== undefined)
+      json.multipleOf = first;
+    if (rest.length)
+      json.allOf = [...json.allOf ?? [], ...rest.map((m) => ({ multipleOf: m }))];
+  }
+};
+var booleanProcessor = (_schema, _ctx, json, _params) => {
+  json.type = "boolean";
+};
+var neverProcessor = (_schema, _ctx, json, _params) => {
+  json.not = {};
+};
+var unknownProcessor = (_schema, _ctx, _json, _params) => {};
+var enumProcessor = (schema, _ctx, json, _params) => {
+  const def = schema._zod.def;
+  const values = getEnumValues(def.entries);
+  if (values.length === 0) {
+    json.not = {};
+    return;
+  }
+  if (values.every((v) => typeof v === "number"))
+    json.type = "number";
+  if (values.every((v) => typeof v === "string"))
+    json.type = "string";
+  json.enum = values;
+};
+var literalProcessor = (schema, ctx, json, params) => {
+  const def = schema._zod.def;
+  if (def.values.length === 0) {
+    json.not = {};
+    return;
+  }
+  const vals = [];
+  for (const val of def.values) {
+    if (val === undefined) {
+      if (handleUnrepresentable(schema, ctx, json, params, "Literal `undefined` cannot be represented in JSON Schema"))
+        return;
+    } else if (typeof val === "bigint") {
+      if (handleUnrepresentable(schema, ctx, json, params, "BigInt literals cannot be represented in JSON Schema"))
+        return;
+      vals.push(Number(val));
+    } else {
+      vals.push(val);
+    }
+  }
+  if (vals.length === 0) {} else if (vals.length === 1) {
+    const val = vals[0];
+    json.type = val === null ? "null" : typeof val;
+    if (ctx.target === "draft-04" || ctx.target === "openapi-3.0") {
+      json.enum = [val];
+    } else {
+      json.const = val;
+    }
+  } else {
+    if (vals.every((v) => typeof v === "number"))
+      json.type = "number";
+    if (vals.every((v) => typeof v === "string"))
+      json.type = "string";
+    if (vals.every((v) => typeof v === "boolean"))
+      json.type = "boolean";
+    if (vals.every((v) => v === null))
+      json.type = "null";
+    json.enum = vals;
+  }
+};
 var customProcessor = (schema, ctx, json, params) => {
   handleUnrepresentable(schema, ctx, json, params, "Custom types cannot be represented in JSON Schema");
 };
@@ -3726,6 +4806,44 @@ function inputOptin(schema) {
   }
   return schema._zod.optin;
 }
+var objectProcessor = (schema, ctx, _json, params) => {
+  const json = _json;
+  const def = schema._zod.def;
+  const shape = def.shape;
+  const symbolKeys = Object.getOwnPropertySymbols(shape);
+  if (symbolKeys.length && handleUnrepresentable(schema, ctx, json, params, "Symbol keys cannot be represented in JSON Schema")) {
+    return;
+  }
+  json.type = "object";
+  json.properties = {};
+  for (const key in shape) {
+    assignProp(json.properties, key, processSchema(shape[key], ctx, {
+      ...params,
+      path: [...params.path, "properties", key]
+    }));
+  }
+  const requiredKeys = [];
+  for (const key of Object.keys(shape)) {
+    const field = def.shape[key];
+    if (ctx.io === "input" ? inputOptin(field) === undefined : field._zod.optout === undefined) {
+      requiredKeys.push(key);
+    }
+  }
+  if (requiredKeys.length > 0) {
+    json.required = requiredKeys;
+  }
+  if (def.catchall?._zod.def.type === "never") {
+    json.additionalProperties = false;
+  } else if (!def.catchall) {
+    if (ctx.io === "output")
+      json.additionalProperties = false;
+  } else if (def.catchall) {
+    json.additionalProperties = processSchema(def.catchall, ctx, {
+      ...params,
+      path: [...params.path, "additionalProperties"]
+    });
+  }
+};
 var unionProcessor = (schema, ctx, json, params) => {
   const def = schema._zod.def;
   const isExclusive = def.inclusive === false;
@@ -4425,6 +5543,106 @@ var ZodJWT = /* @__PURE__ */ $constructor("ZodJWT", (inst, def) => {
   $ZodJWT.init(inst, def);
   ZodStringFormat.init(inst, def);
 });
+var ZodNumber = /* @__PURE__ */ $constructor("ZodNumber", (inst, def) => {
+  $ZodNumber.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => numberProcessor(inst, ctx, json, params);
+  inst.isFinite = true;
+}, /* @__PURE__ */ derived({
+  minValue: (inst) => {
+    const { minimum, exclusiveMinimum } = aggregateChecks(inst);
+    return Math.max(minimum ?? Number.NEGATIVE_INFINITY, exclusiveMinimum ?? Number.NEGATIVE_INFINITY);
+  },
+  maxValue: (inst) => {
+    const { maximum, exclusiveMaximum } = aggregateChecks(inst);
+    return Math.min(maximum ?? Number.POSITIVE_INFINITY, exclusiveMaximum ?? Number.POSITIVE_INFINITY);
+  },
+  isInt: (inst) => {
+    const { isInt, multipleOf } = aggregateChecks(inst);
+    return !!isInt || !!multipleOf?.some(Number.isSafeInteger);
+  },
+  format: (inst) => aggregateChecks(inst).format ?? null
+}, {
+  gt(value, params) {
+    return this.check(_gt(value, params));
+  },
+  gte(value, params) {
+    return this.check(_gte(value, params));
+  },
+  min(value, params) {
+    return this.check(_gte(value, params));
+  },
+  lt(value, params) {
+    return this.check(_lt(value, params));
+  },
+  lte(value, params) {
+    return this.check(_lte(value, params));
+  },
+  max(value, params) {
+    return this.check(_lte(value, params));
+  },
+  int(params) {
+    return this.check(int(params));
+  },
+  safe(params) {
+    return this.check(int(params));
+  },
+  positive(params) {
+    return this.check(_gt(0, params));
+  },
+  nonnegative(params) {
+    return this.check(_gte(0, params));
+  },
+  negative(params) {
+    return this.check(_lt(0, params));
+  },
+  nonpositive(params) {
+    return this.check(_lte(0, params));
+  },
+  multipleOf(value, params) {
+    return this.check(_multipleOf(value, params));
+  },
+  step(value, params) {
+    return this.check(_multipleOf(value, params));
+  },
+  finite() {
+    return this;
+  }
+}));
+function number2(params) {
+  return _number(ZodNumber, params);
+}
+var ZodNumberFormat = /* @__PURE__ */ $constructor("ZodNumberFormat", (inst, def) => {
+  $ZodNumberFormat.init(inst, def);
+  ZodNumber.init(inst, def);
+});
+function int(params) {
+  return _int(ZodNumberFormat, params);
+}
+var ZodBoolean = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def) => {
+  $ZodBoolean.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => booleanProcessor(inst, ctx, json, params);
+});
+function boolean2(params) {
+  return _boolean(ZodBoolean, params);
+}
+var ZodUnknown = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def) => {
+  $ZodUnknown.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => unknownProcessor(inst, ctx, json, params);
+});
+function unknown() {
+  return _unknown(ZodUnknown);
+}
+var ZodNever = /* @__PURE__ */ $constructor("ZodNever", (inst, def) => {
+  $ZodNever.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => neverProcessor(inst, ctx, json, params);
+});
+function never(params) {
+  return _never(ZodNever, params);
+}
 var ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodArray.init(inst, def);
@@ -4450,6 +5668,64 @@ var ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
 });
 function array(element, params) {
   return _array(ZodArray, element, params);
+}
+var ZodObject = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
+  _ensureDefaultMemoizer();
+  $ZodObjectJIT.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => objectProcessor(inst, ctx, json, params);
+  installLazyProp(inst, "shape", (self) => self._zod.def.shape, false);
+}, {
+  keyof() {
+    return _enum(Object.keys(this._zod.def.shape));
+  },
+  catchall(catchall) {
+    return this.clone(mergeDefs(this._zod.def, { catchall }));
+  },
+  passthrough() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: unknown() }));
+  },
+  loose() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: unknown() }));
+  },
+  strict() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: never() }));
+  },
+  strip() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: undefined }));
+  },
+  extend(incoming) {
+    return extend(this, incoming);
+  },
+  safeExtend(incoming) {
+    return safeExtend(this, incoming);
+  },
+  merge(other) {
+    return merge(this, other);
+  },
+  pick(mask) {
+    return pick(this, mask);
+  },
+  omit(mask) {
+    return omit(this, mask);
+  },
+  partial(...args) {
+    return partial(ZodOptional, this, args[0]);
+  },
+  exactPartial(...args) {
+    return partial(ZodExactOptional, this, args[0], "exactPartial");
+  },
+  required(...args) {
+    return required(ZodNonOptional, this, args[0]);
+  }
+});
+function strictObject(shape, params) {
+  return new ZodObject({
+    type: "object",
+    shape,
+    catchall: never(),
+    ...normalizeParams(params)
+  });
 }
 var ZodUnion = /* @__PURE__ */ $constructor("ZodUnion", (inst, def) => {
   $ZodUnion.init(inst, def);
@@ -4497,6 +5773,73 @@ function record(keyType, valueType, params) {
     type: "record",
     keyType,
     valueType,
+    ...normalizeParams(params)
+  });
+}
+var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
+  $ZodEnum.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => enumProcessor(inst, ctx, json, params);
+  inst.enum = def.entries;
+  inst.options = [...inst._zod.values];
+  const keys = new Set(Object.keys(def.entries));
+  inst.extract = (values, params) => {
+    const newEntries = {};
+    for (const value of values) {
+      if (keys.has(value)) {
+        newEntries[value] = def.entries[value];
+      } else
+        throw new Error(`Key ${value} not found in enum`);
+    }
+    return new ZodEnum({
+      ...def,
+      checks: [],
+      ...normalizeParams(params),
+      entries: newEntries
+    });
+  };
+  inst.exclude = (values, params) => {
+    const newEntries = { ...def.entries };
+    for (const value of values) {
+      if (keys.has(value)) {
+        delete newEntries[value];
+      } else
+        throw new Error(`Key ${value} not found in enum`);
+    }
+    return new ZodEnum({
+      ...def,
+      checks: [],
+      ...normalizeParams(params),
+      entries: newEntries
+    });
+  };
+});
+function _enum(values, params) {
+  const entries = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
+  return new ZodEnum({
+    type: "enum",
+    entries,
+    ...normalizeParams(params)
+  });
+}
+var ZodLiteral = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def) => {
+  $ZodLiteral.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => literalProcessor(inst, ctx, json, params);
+  inst.values = new Set(def.values);
+  Object.defineProperty(inst, "value", {
+    get() {
+      if (def.values.length > 1) {
+        throw new Error("This schema contains multiple valid literal values. Use `.values` instead.");
+      }
+      return def.values[0];
+    }
+  });
+});
+function literal(value, params) {
+  return new ZodLiteral({
+    type: "literal",
+    values: Array.isArray(value) ? value : [value],
     ...normalizeParams(params)
   });
 }
@@ -4697,9 +6040,214 @@ var defineSettings = (defined) => {
     get: (settings, key) => (key in settings.values) ? settings.values[key] : defined[key].default
   };
 };
+var settingFields = () => [...fields.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, field]) => ({ field, key }));
 var extLinkSchema = string2().regex(/^(?:\*|[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38})$/, "a link is a GitHub org, lowercase, or * for every repo");
 var extOrderSchema = array(extScopeSchema).refine((names) => new Set(names).size === names.length, "an extension is in the order once");
 var extLinksSchema = record(extScopeSchema, array(extLinkSchema));
+
+// packages/settings/src/jobs.ts
+var jobSchema = strictObject({
+  callsModel: boolean2(),
+  command: string2().min(1).optional(),
+  config: record(string2(), unknown()).optional(),
+  cwd: string2().min(1).optional(),
+  description: string2().min(1),
+  disabledWhy: string2().optional(),
+  enabled: boolean2(),
+  heartbeat: string2().min(1),
+  launchd: string2().min(1).optional(),
+  model: string2().min(1).optional(),
+  neverPause: boolean2().optional(),
+  pausedFor: string2().optional(),
+  program: array(string2().min(1)).min(1).optional(),
+  runtime: _enum(["herdr"]).optional(),
+  schedule: union([
+    strictObject({ always: literal(true) }),
+    strictObject({ every: number2().int().positive() })
+  ]),
+  stop: string2().min(1).optional()
+});
+var fromStored = (row) => {
+  if (!row || typeof row !== "object" || Array.isArray(row))
+    return row;
+  const kept = Object.fromEntries(Object.entries(row).filter(([key]) => Object.hasOwn(jobSchema.shape, key)));
+  return kept.runtime === undefined ? kept : { ...kept, runtime: "herdr" };
+};
+var jobRowSchema = jobSchema.partial();
+var jobKey = (name) => `jobs.${name.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase())}`;
+var terminal = (name, command, job) => ({
+  callsModel: false,
+  command,
+  cwd: "{checkout}",
+  enabled: false,
+  heartbeat: name,
+  runtime: "herdr",
+  ...job
+});
+var launchd = (name, job) => ({
+  callsModel: false,
+  cwd: "{checkout}",
+  enabled: false,
+  heartbeat: name,
+  launchd: `com.playground.${name}`,
+  program: ["{bun}", "--no-env-file", `{checkout}/packages/scripts/src/${name}/cli.ts`],
+  ...job
+});
+var bunJob = (name, root = "{checkout}") => `{bun} --no-env-file ${root}/packages/scripts/src/${name}/cli.ts`;
+var JOBS = {
+  "ops-awake": terminal("ops-awake", `${bunJob("ops-awake")} --data {data}`, {
+    description: "Keeps the Mac awake on AC power and on battery with caffeinate, display and lock unchanged.",
+    schedule: { always: true }
+  }),
+  "ops-changelog": terminal("ops-changelog", bunJob("ops-changelog", "{dashboard}"), {
+    cwd: "{dashboard}",
+    description: "Syncs new canary merges and main versions into the Changelog every 5 minutes.",
+    schedule: { every: 300 }
+  }),
+  "ops-dashboard": terminal("ops-dashboard", "{dashboard}/scripts/ops/dashboard/run.sh", {
+    cwd: "{dashboard}",
+    description: "Keeps the live dashboard running on its branch's latest head.",
+    enabled: true,
+    schedule: { every: 60 },
+    stop: "dashboard"
+  }),
+  "ops-dm-watch": terminal("ops-dm-watch", bunJob("ops-dm-watch"), {
+    description: "In Slack mode, hands each message in the owner's DM to the dispatcher, the session in the assistant seat too when no reply lands in 3 minutes.",
+    schedule: { every: 60 }
+  }),
+  "ops-ext-sync": terminal("ops-ext-sync", bunJob("ops-ext-sync"), {
+    description: "Syncs each extension with its private repository at 02:30, pushed only after a clean secrets scan.",
+    schedule: { every: 86400 }
+  }),
+  "ops-flow": launchd("ops-flow", {
+    description: "Tells the leads when a session holds a run slot over 15 minutes, or a model slot over 120.",
+    schedule: { every: 60 }
+  }),
+  "ops-herdr": launchd("ops-herdr", {
+    description: "Starts each herdr server that is down, on the pinned binary and the repo's config.",
+    schedule: { every: 60 }
+  }),
+  "ops-machine": terminal("ops-machine", `${bunJob("ops-machine")} --data {data}`, {
+    description: "Writes one line a minute of the machine's load, memory and live sessions to machine.jsonl.",
+    schedule: { every: 60 }
+  }),
+  "ops-merge-train": terminal("ops-merge-train", "python3 -I {checkout}/scripts/ops/merge-train/run.py", {
+    description: "Runs the merge train: builds a train of ready PRs and checks each step.",
+    neverPause: true,
+    schedule: { every: 60 }
+  }),
+  "ops-restore": {
+    ...launchd("ops-restore", {
+      description: "Restores a lost main checkout by the playbook's steps once a guard is gone on two looks 5 minutes apart.",
+      schedule: { every: 60 }
+    }),
+    cwd: "{dashboard}",
+    program: [
+      "{bun}",
+      "--no-env-file",
+      "{dashboard}/packages/scripts/src/ops-restore/cli.ts",
+      "--main",
+      "{checkout}"
+    ]
+  },
+  "ops-session-resume": launchd("ops-session-resume", {
+    description: "Queues a carry-on line for each factory session once its usage limit resets.",
+    schedule: { every: 60 }
+  }),
+  "ops-sweep": terminal("ops-sweep", bunJob("ops-sweep"), {
+    description: "The Ops lead's sweep: runners, probes, asks, heartbeats and the forecast.",
+    schedule: { every: 300 }
+  }),
+  "ops-tick": launchd("ops-tick", {
+    description: "The factory's timed beats: the roll gate, the tick, the usage-limit watch and the sweeps.",
+    schedule: { every: 60 }
+  }),
+  "ops-unstick": terminal("ops-unstick", "python3 -I {checkout}/scripts/ops/unstick/run.py", {
+    description: "Reads every live session's screen and clears a factory session stuck on a prompt.",
+    neverPause: true,
+    schedule: { every: 120 }
+  }),
+  "ops-usage": terminal("ops-usage", "python3 -I {checkout}/scripts/ops/usage/run.py", {
+    description: "Reads the account's usage windows into usage.json every 5 minutes.",
+    enabled: true,
+    neverPause: true,
+    schedule: { every: 300 }
+  }),
+  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
+    description: "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
+    schedule: { always: true }
+  }),
+  "ops-zai-usage": launchd("ops-zai-usage", {
+    description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
+    schedule: { every: 300 }
+  })
+};
+var OLD_KEYS = { "ops-dashboard": ["jobs.opsDesk"] };
+var jobSettings = defineSettings(Object.fromEntries(Object.entries(JOBS).map(([name, job]) => [
+  jobKey(name),
+  {
+    aliases: OLD_KEYS[name],
+    default: job,
+    description: `The ${name} ops job: ${job.description}`,
+    merge: true,
+    schema: jobRowSchema,
+    stored: fromStored
+  }
+])));
+var REGISTRY_KEYS = new Set([...Object.keys(JOBS).map(jobKey), ...Object.values(OLD_KEYS).flat()]);
+
+// scripts/hooks/codex.ts
+import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+var HEADERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
+var SHELL_PATCH = /(?:^|[\n;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*\/)?(?:apply_patch|applypatch)(?=$|[\s;&|)<>'"`])/;
+var patchPaths = (text) => text.split(`
+`).flatMap((line) => {
+  const trimmed = line.trim();
+  const header = HEADERS.find((h) => trimmed.startsWith(h));
+  return header && trimmed.length > header.length ? [trimmed.slice(header.length)] : [];
+});
+var writeOf = (input, path, patch) => {
+  const cwd = typeof input.cwd === "string" ? input.cwd : "/";
+  return JSON.stringify({
+    ...input,
+    tool_input: { content: patch, file_path: isAbsolute2(path) ? path : resolve2(cwd, path) },
+    tool_name: "Write"
+  });
+};
+function guardInputs(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return [raw];
+  }
+  if (typeof input !== "object" || input === null || typeof input.turn_id !== "string")
+    return [raw];
+  const tool = input.tool_name;
+  const command = input.tool_input?.command;
+  const text = typeof command === "string" ? command : "";
+  const shell = tool === "Bash" && SHELL_PATCH.test(text);
+  if (tool !== "apply_patch" && !shell)
+    return [raw];
+  const paths = patchPaths(text);
+  if (paths.length === 0)
+    return null;
+  return [...shell ? [raw] : [], ...paths.map((path) => writeOf(input, path, text))];
+}
+async function eachInput(raw, guard, judge) {
+  const inputs = guardInputs(raw);
+  if (!inputs)
+    return `${guard} hook refuses an apply_patch whose patch names no file it can read: give the patch whole in the call itself, with each file on its own *** Add File, *** Update File or *** Delete File line.`;
+  for (const input of inputs) {
+    const reason = await judge(input);
+    if (reason)
+      return reason;
+  }
+}
+
+// scripts/hooks/no-main-checkout.ts
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, realpathSync as realpathSync2 } from "fs";
+import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute4, join as join6, normalize, resolve as resolve4, sep } from "path";
 
 // packages/settings/src/live.ts
 var liveSettings = defineSettings({
@@ -4717,78 +6265,13 @@ var liveSettings = defineSettings({
 
 // scripts/hooks/role.ts
 import { homedir as homedir2 } from "os";
-import { join as join3 } from "path";
-
-// packages/config/src/kinds.ts
-var ROSTER_KINDS = [
-  "assistant",
-  "builder",
-  "dispatcher",
-  "ops",
-  "optimizer",
-  "orchestrator",
-  "planner",
-  "probe",
-  "researcher",
-  "reviewer",
-  "runner",
-  "tester",
-  "worker"
-];
-var isRosterKind = (value) => ROSTER_KINDS.includes(value);
-var FACTORY_ROLE_OF_KIND = {
-  assistant: "lead",
-  builder: "lead",
-  dispatcher: "dispatcher",
-  ops: "lead",
-  optimizer: "lead",
-  orchestrator: "lead",
-  planner: "lead",
-  probe: "probe",
-  researcher: "worker",
-  reviewer: "reviewer",
-  runner: "runner",
-  tester: "tester",
-  worker: "worker"
-};
-var ID_ALPHABET = "23456789bcdfghjkmnpqrstvwxyz";
-var ID_NAME_SOURCE = `[${ID_ALPHABET}]{6}-(?:${ROSTER_KINDS.join("|")})`;
-var PREFIXED = /^(probe|reviewer|runner|tester|worker)-./;
-var ID_NAME = new RegExp(`^[${ID_ALPHABET}]{6}-(${ROSTER_KINDS.join("|")})$`);
-var kindOfName = (name) => (ID_NAME.exec(name) ?? PREFIXED.exec(name))?.[1] ?? null;
-var DEFAULT_SESSION_NAMES = {
-  aliases: {},
-  names: { builder: "builder", dispatcher: "dispatcher", ops: "ops", planner: "planner" }
-};
-var NAMES = Symbol.for("playground.sessionNames");
-var held = globalThis;
-var setSessionNames = (next) => {
-  held[NAMES] = next;
-};
-var getSessionNames = () => held[NAMES] ?? DEFAULT_SESSION_NAMES;
-var namedKinds = () => {
-  const { aliases, names } = getSessionNames();
-  return new Map([
-    ...Object.entries(names).map(([kind, name]) => [name, kind]),
-    [`${names.dispatcher}-2`, "dispatcher"],
-    ...Object.entries(aliases),
-    ["optimizer", "optimizer"]
-  ]);
-};
-var placedKindOfName = (name) => kindOfName(name) ?? namedKinds().get(name) ?? null;
-function roleOfName(name) {
-  const kind = placedKindOfName(name);
-  return kind ? FACTORY_ROLE_OF_KIND[kind] : "";
-}
-var SEATLESS = new Set(["ended", "parked"]);
-
-// scripts/hooks/role.ts
+import { join as join4 } from "path";
 var MANAGER_ROLES = new Set(["dispatcher", "lead", "manager"]);
 var names;
 function loadNames(environment = process.env) {
   names ??= (async () => {
     try {
-      const setting = join3(__CHECKOUT + "/scripts/hooks", "../../packages/scripts/src/playground/setting.ts");
+      const setting = join4(__CHECKOUT + "/scripts/hooks", "../../packages/scripts/src/playground/setting.ts");
       const read = Bun.spawn(["bun", setting, "sessions.names", "sessions.aliases"], {
         env: { ...process.env, ...environment },
         stderr: "ignore",
@@ -4803,13 +6286,24 @@ function loadNames(environment = process.env) {
   return names;
 }
 async function registryName(sessionId, environment = process.env) {
-  const dir = join3(environment.CLAUDE_CONFIG_DIR || join3(homedir2(), ".claude"), "sessions");
+  const dir = join4(environment.CLAUDE_CONFIG_DIR || join4(homedir2(), ".claude"), "sessions");
   for await (const file of new Bun.Glob("*.json").scan(dir)) {
     try {
-      const entry = await Bun.file(join3(dir, file)).json();
+      const entry = await Bun.file(join4(dir, file)).json();
       if (entry.sessionId === sessionId && typeof entry.name === "string")
         return entry.name;
     } catch {}
+  }
+}
+async function opsLead(raw, environment = process.env) {
+  try {
+    const session = sessionOf(raw);
+    if (typeof session !== "string" || await sessionRole(environment, session) !== "lead")
+      return false;
+    const name = await registryName(session, environment);
+    return name !== undefined && await rosterKind(name, environment) === "ops";
+  } catch {
+    return false;
   }
 }
 async function codexName(sessionId, environment = process.env) {
@@ -4817,7 +6311,7 @@ async function codexName(sessionId, environment = process.env) {
     return;
   let name;
   try {
-    const index = await Bun.file(join3(environment.CODEX_HOME, "session_index.jsonl")).text();
+    const index = await Bun.file(join4(environment.CODEX_HOME, "session_index.jsonl")).text();
     for (const line of index.split(`
 `)) {
       try {
@@ -4830,7 +6324,7 @@ async function codexName(sessionId, environment = process.env) {
   return name;
 }
 async function rosterKind(name, environment = process.env) {
-  const path = join3(dataDirOf(environment), "roster.json");
+  const path = join4(dataDirOf(environment), "roster.json");
   try {
     const roster = await Bun.file(path).json();
     const kind = roster.agents?.find((agent) => agent?.name === name)?.kind;
@@ -4872,9 +6366,9 @@ function sessionOf(raw) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
-import { realpathSync } from "fs";
+import { realpathSync, statSync as statSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename, dirname, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var UNKNOWN = "\x00";
 var READ = "\x01";
 var MAX_BYTES = 1048576;
@@ -4905,7 +6399,7 @@ function filled(script, mark, value) {
     throw new RangeError("a script too large to read");
   return script.replaceAll(mark, value);
 }
-var held2 = (text) => text.value.length > MAX_BYTES ? unknown(LARGE) : text;
+var held2 = (text) => text.value.length > MAX_BYTES ? unknown2(LARGE) : text;
 var BREAK = new Set([" ", "\t", `
 `, ";", "&", "|", "<", ">", "(", ")"]);
 var REDIRECT = /^(\d*|&)(<<<|<<-|<<|<>|<&|>&!?|>>[!|]?|>[!|]|<|>)/;
@@ -5381,7 +6875,7 @@ var ESCAPES = {
   t: "\t",
   v: "\v"
 };
-var unknown = (why) => ({ unknown: why, value: UNKNOWN });
+var unknown2 = (why) => ({ unknown: why, value: UNKNOWN });
 var setLog = new WeakMap;
 var setVar = (vars, key, value) => {
   vars.set(key, value);
@@ -5395,7 +6889,7 @@ function varsSince(vars, cursor) {
   const log = setLog.get(vars) ?? [];
   return [cursor === undefined ? [...vars.keys()] : log.slice(cursor), log.length];
 }
-var merge = (out, part) => {
+var merge2 = (out, part) => {
   out.value += part.value;
   if (part.splits)
     out.splits = true;
@@ -5406,12 +6900,12 @@ var merge = (out, part) => {
   if (part.reads?.length)
     (out.reads ??= []).push(...part.reads);
 };
-var join4 = (parts, separator = "") => {
+var join5 = (parts, separator = "") => {
   const out = { value: "" };
   parts.forEach((part, k) => {
     if (k > 0)
       out.value += separator;
-    merge(out, part);
+    merge2(out, part);
   });
   return out;
 };
@@ -5482,7 +6976,7 @@ var G_WRAPPERS = new Map([
   ["gtimeout", "timeout"]
 ]);
 var program = (value) => {
-  const base = basename(value.replace(/^=/, ""));
+  const base = basename2(value.replace(/^=/, ""));
   const lower = base.toLowerCase();
   if (SHELL_OWN.has(lower) && value !== lower)
     return value;
@@ -5767,7 +7261,7 @@ function procSub(lx) {
   return {
     procs: topLevel(lx.commands.slice(from), scope),
     quoted: false,
-    ...unknown("a process substitution")
+    ...unknown2("a process substitution")
   };
 }
 function heredocs(lx, pending, nested) {
@@ -5847,15 +7341,15 @@ function word(lx) {
     } else if (c === '"') {
       out.quoted = true;
       lx.i++;
-      merge(out, double(lx));
+      merge2(out, double(lx));
     } else if (c === "$" && next === "'") {
       out.quoted = true;
-      merge(out, ansi(lx));
+      merge2(out, ansi(lx));
     } else if (c === "$" && next === '"')
       lx.i++;
     else if (c === "$" || c === "`") {
       const text = c === "$" ? dollar(lx) : backtick(lx);
-      merge(out, text);
+      merge2(out, text);
       if (GLOB_CHARS.test(text.value))
         out.glob = true;
       if (marked(text.value))
@@ -5899,7 +7393,7 @@ function double(lx) {
     } else if (c === "$" || c === "`") {
       const from = lx.i;
       const text = c === "$" ? dollar(lx, true) : backtick(lx);
-      merge(out, text);
+      merge2(out, text);
       if (marked(text.value) && !QUOTED_ONE_WORD.test(src.slice(from, lx.i)))
         out.splits = true;
     } else {
@@ -5924,12 +7418,12 @@ function dollar(lx, plain = false) {
   const { src } = lx;
   const readText = plain ? textCommands : inner;
   const next = src[lx.i + 1] ?? "";
-  const variable = (name) => name !== undefined && lx.known[name] !== undefined ? { value: lx.known[name], variable: name } : { ...unknown("a shell variable"), variable: name };
+  const variable = (name) => name !== undefined && lx.known[name] !== undefined ? { value: lx.known[name], variable: name } : { ...unknown2("a shell variable"), variable: name };
   if (src.startsWith("$((", lx.i)) {
     const end = balanced(src, lx.i + 1, "(", ")", plain);
     readText(lx, src.slice(lx.i + 3, end - 2));
     lx.i = end;
-    return unknown("an arithmetic expansion");
+    return unknown2("an arithmetic expansion");
   }
   if (next === "(") {
     lx.i += 2;
@@ -5958,7 +7452,7 @@ function dollar(lx, plain = false) {
   }
   if (/[\d@*#?$!-]/.test(next)) {
     lx.i += 2;
-    return unknown("a shell variable");
+    return unknown2("a shell variable");
   }
   lx.i++;
   return { value: "$" };
@@ -6006,13 +7500,13 @@ function backtick(lx) {
   }
   lx.i = i + 1;
   list({ ...lx, i: 0, src: inner }, lx.scopes.push(lx.scope) - 1, false);
-  return unknown("a command substitution");
+  return unknown2("a command substitution");
 }
 var echoes = false;
 function substituted(inner, known) {
   const [only] = inner;
   if (inner.length !== 1 || only.stdin || only.group)
-    return unknown("a command substitution");
+    return unknown2("a command substitution");
   const made = mktempPath(only, known);
   if (made)
     return { value: made };
@@ -6033,7 +7527,7 @@ function substituted(inner, known) {
   const words = args.every((w) => !w.unknown && !w.glob && !marked(w.value)) && printed.every((v) => !v.includes("\\"));
   if (echoes && first?.value === "echo" && !first.quoted && only.redirects.length === 0 && words && !args[0]?.value.startsWith("-"))
     return { value: printed.join(" ") };
-  return unknown("a command substitution");
+  return unknown2("a command substitution");
 }
 var MKTEMP_FLAGS = new Set(["d", "q"]);
 var MKTEMP_LONG = new Set(["--directory", "--quiet"]);
@@ -6363,15 +7857,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
-  const or = env.cwdOr;
+  const lineOr = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
   env.cwdOr = undefined;
   try {
     return await body();
   } finally {
-    const own = env.cwdOr;
-    env.cwdOr = own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or;
+    const scriptOr = env.cwdOr;
+    env.cwdOr = scriptOr && scriptOr.orChain === undefined ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope } : lineOr;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -6410,10 +7904,10 @@ function places(env, fallback) {
 }
 function ancestors(path) {
   const out = [];
-  for (let dir = dirname(path);; dir = dirname(dir)) {
+  for (let dir = dirname2(path);; dir = dirname2(dir)) {
     tick();
     out.push(dir);
-    if (dir === dirname(dir))
+    if (dir === dirname2(dir))
       return out;
   }
 }
@@ -6431,7 +7925,7 @@ async function cdTarget(name, args, env) {
 async function folder(path) {
   if (!path)
     return;
-  return await isFolder(path) ? path : undefined;
+  return isFolder(path) ? path : undefined;
 }
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -6511,7 +8005,7 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   const chained = cmd.chained && !negated(cmd);
-  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || await isFolder(paths[0]))) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
@@ -6526,7 +8020,7 @@ async function chdirTo(name, cmd, parsed, env) {
   }
   env.cwdSure = undefined;
   env.cwdOr = undefined;
-  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
+  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || paths.every(isFolder));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
@@ -6582,9 +8076,9 @@ function keep(folders, env) {
   env.cwdUnread = true;
   return folders.slice(0, MAX_FOLDERS);
 }
-async function isFolder(path) {
+function isFolder(path) {
   try {
-    return (await Bun.file(path).stat()).isDirectory();
+    return statSync2(path).isDirectory();
   } catch {
     return false;
   }
@@ -6628,13 +8122,13 @@ async function shell(name, args, cmd, env, visit, builtins, xargs) {
 var known = (script) => script.value.replaceAll(UNKNOWN, `
 `);
 async function scriptOf(operand, cmd, env) {
-  const scripts = !operand || STDIN_PATHS.has(operand.value) ? await scriptStdin(cmd, env) : [operand.procs ? await outputs(operand.procs, env) : unknown("a script file")];
+  const scripts = !operand || STDIN_PATHS.has(operand.value) ? await scriptStdin(cmd, env) : [operand.procs ? await outputs(operand.procs, env) : unknown2("a script file")];
   if (deadlines.getStore() !== undefined && scripts.some((s) => s.unknown === LARGE))
     throw new RangeError(LARGE);
   return scripts;
 }
 async function outputs(cmds, env) {
-  return join4(await Promise.all(cmds.map((c) => outputOf(c, env))));
+  return join5(await Promise.all(cmds.map((c) => outputOf(c, env))));
 }
 async function record2(cmd, name, args, env) {
   for (const r of cmd.redirects) {
@@ -6644,8 +8138,8 @@ async function record2(cmd, name, args, env) {
     if (!path)
       continue;
     const stdout = r.fd === "" || r.fd === "1" || r.fd === "&";
-    const out = stdout ? await outputOf(cmd, env) : unknown(`what ${name || "a command"} writes to stderr`);
-    env.files.set(path, held2(r.op === ">>" ? join4([await existing(path, env), out]) : out));
+    const out = stdout ? await outputOf(cmd, env) : unknown2(`what ${name || "a command"} writes to stderr`);
+    env.files.set(path, held2(r.op === ">>" ? join5([await existing(path, env), out]) : out));
   }
   if (name !== "tee")
     return;
@@ -6654,7 +8148,7 @@ async function record2(cmd, name, args, env) {
   for (const a of args) {
     const path = a.value.startsWith("-") ? undefined : pathOf(a, env);
     if (path)
-      env.files.set(path, held2(append ? join4([await existing(path, env), input]) : input));
+      env.files.set(path, held2(append ? join5([await existing(path, env), input]) : input));
   }
 }
 async function existing(path, env) {
@@ -6666,7 +8160,7 @@ async function outputOf(cmd, env) {
   if (name === "") {
     if (cmd.inner)
       return outputs(cmd.inner(), env);
-    return cmd.group || cmd.words.some((w) => GROUPING.has(w.value) && !w.quoted) ? unknown("the output of a command group") : { value: "" };
+    return cmd.group || cmd.words.some((w) => GROUPING.has(w.value) && !w.quoted) ? unknown2("the output of a command group") : { value: "" };
   }
   if (name === "cat") {
     const sources = args.filter((a) => a.value === "-" || !a.value.startsWith("-"));
@@ -6680,15 +8174,15 @@ async function outputOf(cmd, env) {
       const part = s.value !== "-" ? await readPath(s, env) : k === first ? await stdinOf(cmd, env) : { value: "" };
       size += part.value.length;
       if (size > MAX_BYTES)
-        return unknown(LARGE);
+        return unknown2(LARGE);
       parts.push(part);
     }
-    return join4(parts);
+    return join5(parts);
   }
   if (name === "tee")
     return stdinOf(cmd, env);
   if (!PRINTERS.has(name))
-    return unknown(`the output of ${name}`);
+    return unknown2(`the output of ${name}`);
   const values = await Promise.all(args.map((a) => resolveText(a, env)));
   const hidden = values.find((v) => v.unknown);
   if (hidden)
@@ -6725,7 +8219,7 @@ async function stdinOf(cmd, env) {
   tick();
   const input = cmd.redirects.findLast((r) => !r.bodyFed && ownFeed(r));
   if (!input)
-    return held2(cmd.stdin ? await outputOf(cmd.stdin, env) : unknown("stdin the hook cannot see"));
+    return held2(cmd.stdin ? await outputOf(cmd.stdin, env) : unknown2("stdin the hook cannot see"));
   return held2(await redirectText(input, env, false));
 }
 async function scriptStdin(cmd, env) {
@@ -6753,16 +8247,16 @@ var rootFed = (cmd) => stdinFed(cmd) && stdinShell(cmd) === "root";
 async function stdinText(cmd, env) {
   const input = stdinRedirect(cmd);
   if (!input)
-    return cmd.stdin ? outputOf(cmd.stdin, env) : unknown("stdin the hook cannot see");
+    return cmd.stdin ? outputOf(cmd.stdin, env) : unknown2("stdin the hook cannot see");
   return redirectText(input, env, true);
 }
 async function redirectText(input, env, shells) {
   if (input.target?.procs)
     return outputs(input.target.procs, env);
   if (input.op === "<" || input.op === "<>")
-    return input.target ? readPath(input.target, env) : unknown("an input redirect");
+    return input.target ? readPath(input.target, env) : unknown2("an input redirect");
   if (!input.body)
-    return unknown("a heredoc the hook could not read");
+    return unknown2("a heredoc the hook could not read");
   const set = shells && input.body.variable ? env.vars.get(input.body.variable) : undefined;
   if (input.body.unknown && input.body.value === `${UNKNOWN}
 ` && set && !set.unknown)
@@ -6795,7 +8289,7 @@ async function resolveText(text, env) {
     if (k + 1 < pieces.length)
       value += file.value + pieces[k + 1];
     if (value.length > MAX_BYTES)
-      return unknown(LARGE);
+      return unknown2(LARGE);
   }
   for (const piece of pieces.slice(text.reads.length + 1))
     value += READ + piece;
@@ -6813,23 +8307,23 @@ async function readFile(path) {
   try {
     const stats = await file.stat();
     if (!stats.isFile())
-      return unknown(`${path}, which is not a regular file`);
+      return unknown2(`${path}, which is not a regular file`);
     if (stats.size > MAX_BYTES)
-      return unknown(`${path}, which is too large to read`);
+      return unknown2(`${path}, which is too large to read`);
     return { value: await file.text() };
   } catch (error) {
     if (error.code === "ENOENT")
       return;
-    return unknown(`${path}, which the hook cannot read`);
+    return unknown2(`${path}, which the hook cannot read`);
   }
 }
 async function readPath(path, env) {
   const resolved = pathOf(path, env);
   if (!resolved && path.unknown)
-    return unknown(`a file path built from ${path.unknown}, which the hook cannot expand: name the file by its literal absolute path`);
+    return unknown2(`a file path built from ${path.unknown}, which the hook cannot expand: name the file by its literal absolute path`);
   if (!resolved)
-    return unknown("a file path the hook cannot resolve");
-  return env.files.get(resolved) ?? await readFile(resolved) ?? unknown(`${resolved}, which does not exist yet`);
+    return unknown2("a file path the hook cannot resolve");
+  return env.files.get(resolved) ?? await readFile(resolved) ?? unknown2(`${resolved}, which does not exist yet`);
 }
 function knownVariables(command, environment, cwd) {
   const values = {
@@ -7475,7 +8969,7 @@ function real(path) {
     else
       low = mid;
   }
-  return join5(resolved(sep + parts.slice(0, low).join(sep)) ?? sep, ...parts.slice(low));
+  return join6(resolved(sep + parts.slice(0, low).join(sep)) ?? sep, ...parts.slice(low));
 }
 var resolved = (path) => {
   try {
@@ -7486,13 +8980,13 @@ var resolved = (path) => {
 };
 function nearest(path) {
   const rest = [];
-  for (let dir = path;; dir = dirname2(dir)) {
+  for (let dir = path;; dir = dirname3(dir)) {
     const found = resolved(dir);
     if (found !== undefined)
-      return join5(found, ...rest.reverse());
-    if (dir === dirname2(dir))
+      return join6(found, ...rest.reverse());
+    if (dir === dirname3(dir))
       return path;
-    rest.push(basename2(dir));
+    rest.push(basename3(dir));
   }
 }
 var FILE_TOOLS = {
@@ -7545,14 +9039,9 @@ function bunCall(args, env) {
 var landing = (word, env, from) => {
   if (!word || pathOf(word, { ...env, cwd: from }) === undefined)
     return;
-  const path = isAbsolute4(word.value) ? word.value : `${from}${sep}${word.value}`;
-  try {
-    return realpathSync2.native(path);
-  } catch {
-    return real(resolve4(path));
-  }
+  return kernelPath(word, from, real(resolve4(from ?? "", word.value)));
 };
-function gitCall(args, env) {
+function gitCall(args, env, local) {
   let cwd = env.cwd;
   let gitDir;
   let workTree;
@@ -7575,9 +9064,25 @@ function gitCall(args, env) {
     } else if (GIT_TAKES.has(v))
       k++;
   }
-  const repo = gitDir?.replace(/\/+$/, "");
-  const tree = repo?.endsWith(`${sep}.git`) ? dirname2(repo) : workTree ?? cwd;
-  return { cwd: tree, rest: args.slice(k + 1).map((a) => a.value), sub: args[k]?.value };
+  const checkout = (dir) => {
+    const repo = dir?.replace(/\/+$/, "");
+    return repo?.endsWith(`${sep}.git`) ? dirname3(repo) : undefined;
+  };
+  const also = [];
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const set = local?.get(key) ?? env.vars.get(key);
+    if (!set || set.value === "")
+      continue;
+    const word = { ...set, quoted: true };
+    const at = unreadWord(word) ? undefined : landing(word, env, cwd);
+    also.push(key === "GIT_DIR" ? checkout(at) ?? at : at);
+  }
+  return {
+    also,
+    cwd: checkout(gitDir) ?? workTree ?? cwd,
+    rest: args.slice(k + 1).map((a) => a.value),
+    sub: args[k]?.value
+  };
 }
 var GIT_MOVES = new Set([
   "am",
@@ -7711,7 +9216,7 @@ function casePatterns(commands) {
 var GLOB = /[*?[{(]/;
 var RUNS = /^(?:EDITOR|GIT_[A-Z0-9_]+|HOME|LESSOPEN|PAGER|VISUAL|XDG_CONFIG_HOME)$/;
 var GIT_TEXT = /^GIT_(?:AUTHOR|COMMITTER)_/;
-var CLI = join6("packages", "scripts", "src", "playground", "cli.ts");
+var CLI = join7("packages", "scripts", "src", "playground", "cli.ts");
 var varsRun = new WeakMap;
 function runsVariable(vars) {
   const [cursor, found] = varsRun.get(vars) ?? [undefined, false];
@@ -7895,6 +9400,78 @@ var GUARD_KEYS = new Set([
   "usage.keychainService"
 ]);
 var JOB_PREFIX = "jobs.";
+var NO_TUNING = () => false;
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var parsed = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+};
+function tunes(key, text, scoped, held) {
+  if (scoped)
+    return false;
+  const value = parsed(text);
+  if (key === "glm.readOnlyLoad5")
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+  if (!key.startsWith(JOB_PREFIX) || !isRecord(value))
+    return false;
+  const row = held(key);
+  if (row === undefined || row.elsewhere || !isRecord(row.rendered))
+    return false;
+  const ran = row.rendered.schedule;
+  if (!isRecord(ran) || typeof ran.every !== "number")
+    return false;
+  const { schedule } = value;
+  return isRecord(schedule) && Object.keys(schedule).length === 1 && typeof schedule.every === "number" && Number.isInteger(schedule.every) && schedule.every > 0 && Bun.deepEquals({ ...value, schedule: null }, { ...row.stored, schedule: null }, true);
+}
+var storedAt = (data, scope) => {
+  const file = join7(scopeDir(data, scope), "settings.json");
+  if (!existsSync4(file))
+    return {};
+  try {
+    const values = JSON.parse(readFileSync4(file, "utf8"));
+    return isRecord(values) ? values : undefined;
+  } catch {
+    return;
+  }
+};
+function tuningOf(environment) {
+  const data = dataDir(environment);
+  const policy = readPolicySync(data);
+  if (policy.refusal !== undefined)
+    return NO_TUNING;
+  let login;
+  try {
+    login = loginOf(data, environment);
+  } catch {
+    return NO_TUNING;
+  }
+  const others = [CORE, ...scopesIn(data)].filter((scope) => scope !== login);
+  const own = storedAt(data, login);
+  const theirs = others.map((scope) => storedAt(data, scope));
+  if (own === undefined || theirs.some((values) => values === undefined))
+    return NO_TUNING;
+  const { values } = policy.settings;
+  const held = (key) => {
+    const stored = own[key] ?? {};
+    if (!isRecord(stored))
+      return;
+    const field = settingFields().find((entry) => entry.key === key)?.field;
+    const old = field?.aliases ?? [];
+    return {
+      elsewhere: old.some((name) => (name in own)) || theirs.some((at) => at !== undefined && [key, ...old].some((name) => (name in at))),
+      rendered: values[key] ?? field?.default,
+      stored
+    };
+  };
+  return (key, value, scoped) => tunes(key, value, scoped, held);
+}
+var loneCall = (commands) => {
+  const [cmd] = commands;
+  return commands.length === 1 && cmd.words[0]?.value === "playground" && !cmd.inner && [...cmd.words, ...cmd.redirects.flatMap((r) => r.target ? [r.target] : [])].every((word) => !word.procs);
+};
 var BY_APPROVE = "a key only the owner sets: post a guard decision with playground ask new (.agents/dashboard/asks.md), whose Approve writes it";
 var EXT_WRITES = new Set(["add", "import", "init", "link", "order", "remove", "sync", "unlink"]);
 var EXT_DRY = new Set(["add", "import", "init"]);
@@ -7908,7 +9485,7 @@ function isCli(word, dirs) {
     return false;
   const paths = dirs.map((dir) => pathOf(word, { cwd: dir }));
   if (program(word.value) === "playground")
-    return !word.value.includes("/") || !paths.some((path) => !!path && existsSync2(path) && statSync2(path).isDirectory());
+    return !word.value.includes("/") || !paths.some((path) => !!path && existsSync4(path) && statSync3(path).isDirectory());
   const cli = (sep2 + CLI).toLowerCase();
   return paths.some((path) => !!path && [path, `${path}.ts`].some((at) => real(at).toLowerCase().endsWith(cli)));
 }
@@ -8058,7 +9635,7 @@ function programLines({ args, first }, rooted) {
   return (awkPrograms(args) ?? []).filter(({ value }) => rooted || awkRuns(value)).flatMap(({ value }) => [...value.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]));
 }
 var SEDS = new Set(["gsed", "sed"]);
-var literal = (w) => !w.glob && !marked(w.value);
+var literal2 = (w) => !w.glob && !marked(w.value);
 var SED_FLAG = /^-[Enrsuz]+$|^--(?:null-data|posix|quiet|regexp-extended|separate|silent|unbuffered)$/;
 var SED_BRACKET = String.raw`\[\^?\]?[^\]/[\n]*\]`;
 var SED_BODY = String.raw`(?:[^/\\\n[]|\\.|${SED_BRACKET})*/`;
@@ -8087,7 +9664,7 @@ function sedReads(args) {
       operands.push(args[k]);
   }
   const read = scripts.length ? scripts : operands.slice(0, 1);
-  return read.length > 0 && read.every((w) => literal(w) && SED_SCRIPT.test(w.value));
+  return read.length > 0 && read.every((w) => literal2(w) && SED_SCRIPT.test(w.value));
 }
 var SED_IN_PLACE = /^-[Enrsuz]*i([\w.~-]*)$/;
 var SED_SUFFIX = /^(?:\.[\w.~-]*)?$/;
@@ -8116,7 +9693,7 @@ function sedInPlace(cmd, parsed) {
       if (suffix[1])
         continue;
       const word = args[++k];
-      if (!word || !literal(word) || !SED_SUFFIX.test(word.value))
+      if (!word || !literal2(word) || !SED_SUFFIX.test(word.value))
         return;
     } else if (value.startsWith("-") && value !== "-") {
       if (!/^-[Enrsuz]+$/.test(value))
@@ -8127,7 +9704,7 @@ function sedInPlace(cmd, parsed) {
   const read = scripts.length ? scripts : operands.slice(0, 1);
   if (!inPlace || read.length === 0)
     return;
-  if (!read.every((w) => literal(w) && SED_EDIT.test(w.value)))
+  if (!read.every((w) => literal2(w) && SED_EDIT.test(w.value)))
     return;
   return new Set(read);
 }
@@ -8163,7 +9740,7 @@ function perlReads({ args, local }, env) {
     }
   }
   const files = args.slice(k);
-  return scripts.length > 0 && scripts.every((w) => literal(w) && PERL_SCRIPT.test(w.value)) && files.every((w) => literal(w) && PERL_FILE.test(w.value));
+  return scripts.length > 0 && scripts.every((w) => literal2(w) && PERL_SCRIPT.test(w.value)) && files.every((w) => literal2(w) && PERL_FILE.test(w.value));
 }
 function ownProgram(cmd, { first, name }) {
   return ownFirst(cmd, first) && !marked(name) && /^(?:\/(?:bin|opt\/homebrew\/bin|usr\/bin|usr\/local\/bin)\/)?[^/]+$/.test(first.value);
@@ -8253,7 +9830,7 @@ function narrow(cmd, env) {
   }
   if (base === "cd") {
     const [folder] = args;
-    return args.length === 1 && literal(folder) && !/^(?:-|~[-+0-9])/.test(folder.value);
+    return args.length === 1 && literal2(folder) && !/^(?:-|~[-+0-9])/.test(folder.value);
   }
   if (base === "sort")
     return !args.some(({ value }) => /^-[a-zA-Z]*o|^--./.test(value));
@@ -8376,7 +9953,7 @@ function runsOf(parsed, vars, whole, rootLine) {
   values.push(...programLines(parsed, rootLine));
   return [...new Set(values)].filter((value) => /\s/.test(value) && !marked(value));
 }
-function cliWrite(words) {
+function cliWrite(words, tuning) {
   const [command, verb, ...rest] = words.map((w) => marked(w.value) ? undefined : w.value);
   if (command === undefined)
     return words.length ? "playground with a command word it cannot read" : undefined;
@@ -8413,6 +9990,9 @@ function cliWrite(words) {
       return `playground settings ${verb} with a word it cannot read`;
     const job = key.startsWith(JOB_PREFIX);
     if (!GUARD_KEYS.has(key) && !job)
+      return;
+    const value = positional[1];
+    if (verb === "set" && value !== undefined && tuning(key, value, scoped))
       return;
     return PRIVACY_KEYS.has(key) && !scoped ? `playground settings ${verb} of ${key}, a key a guard reads, ${PRIVACY}` : job ? `playground settings ${verb} of ${key}, ${BY_APPROVE}` : `playground settings ${verb} of ${key}, a key a guard reads`;
   }
@@ -8454,7 +10034,7 @@ async function inspect(raw, environment, unknown = false) {
   };
   const file = typeof tool === "string" ? input[FILE_TOOLS[tool]] : undefined;
   if (typeof file === "string") {
-    const expanded = /^~(?:\/|$)/.test(file) ? join6(home, file.slice(1)) : file;
+    const expanded = /^~(?:\/|$)/.test(file) ? join7(home, file.slice(1)) : file;
     return inRoot(resolve5(directory ?? "", expanded)) ? refuse(`a write to ${file}`) : undefined;
   }
   if (tool !== "Bash")
@@ -8462,6 +10042,7 @@ async function inspect(raw, environment, unknown = false) {
   const { command } = input;
   if (typeof command !== "string")
     return;
+  let tuning = await opsLead(raw, environment) ? tuningOf(environment) : NO_TUNING;
   if (command.length > 131072)
     return refuse(TOO_LONG);
   const relative = (env) => env.cwd && above(env.cwd, false) ? root.slice(real(env.cwd).length + 1) : undefined;
@@ -8492,7 +10073,7 @@ async function inspect(raw, environment, unknown = false) {
       const glob = GLOB.exec(text.value);
       if (glob && !quotedGlob && !marked(text.value)) {
         const dir = pathOf({ value: `${text.value.slice(0, glob.index)}x` }, env);
-        const folder = dir && dirname3(dir);
+        const folder = dir && dirname4(dir);
         if (folder && (inRoot(folder) || above(folder, true)))
           return `${text.value}, a glob in ${folder}`;
       }
@@ -8577,7 +10158,7 @@ async function inspect(raw, environment, unknown = false) {
     const fed = xargs ? await stdinOf(cmd, env) : undefined;
     const stdinWords = !fed ? [] : fed.unknown ? [{ quoted: false, value: UNKNOWN }] : fed.value.split(/\s+/).filter(Boolean).map((value) => ({ quoted: false, value }));
     const calls = reader ? [] : cliCalls(parsed, env);
-    const write = calls.map((words) => cliWrite(xargs?.replace ? words : [...words, ...stdinWords])).find(Boolean) ?? (calls.some((words) => scoreAsOther(words, cmd, parsed, env)) ? SCORE_AS_OTHER : undefined);
+    const write = calls.map((words) => cliWrite(xargs?.replace ? words : [...words, ...stdinWords], tuning)).find(Boolean) ?? (calls.some((words) => scoreAsOther(words, cmd, parsed, env)) ? SCORE_AS_OTHER : undefined);
     if (write)
       return refuse(write);
     const vars = !reader && first ? since(varsRead, env.vars, "") : [];
@@ -8695,6 +10276,8 @@ async function inspect(raw, environment, unknown = false) {
     for (const key of steered)
       delete known[key];
   const lexed = lex(command, known);
+  if (!loneCall(lexed.commands))
+    tuning = NO_TUNING;
   steadyAt = steadyNames(named, lexed.commands);
   const env = {
     cwd: directory,
@@ -8757,5 +10340,6 @@ if (import.meta.main) {
 export {
   GUARD_KEYS,
   check,
-  guarded
+  guarded,
+  tunes
 };

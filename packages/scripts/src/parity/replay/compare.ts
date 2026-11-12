@@ -1,5 +1,3 @@
-import { parseReport } from "./board"
-
 // What "the same" means for each replay: each signature is a string, so runs compare by equality and a majority is a count, triage's one count per read and per refusal.
 
 type Json = Record<string, unknown>
@@ -11,50 +9,6 @@ const parse = (line: string): Json | null => {
   } catch {
     return null
   }
-}
-
-const COUNT_RE = /\d+\s+(?:mine|free|to check|skipped)\b/
-const PERSON_RE = /\bAsk\s+([^:(]+?)\s*(?:\(|:)/
-
-// The board scan: per row its id, status, tier, priority, assignee and the person its Next cell asks, with the count line exact; titles, notes and the step are free text.
-export const boardSignature = (text: string): string => {
-  const report = parseReport(text)
-  if (!report) return "unreadable"
-  const rows = report
-    .map((t) => [
-      t.id,
-      t.status,
-      t.tier,
-      t.priority,
-      t.assignee,
-      PERSON_RE.exec(t.next ?? "")?.[1] ?? null,
-    ])
-    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-  const count =
-    text
-      .split("\n")
-      .find((line) => COUNT_RE.test(line))
-      ?.trim() ?? ""
-  return JSON.stringify({ count, rows })
-}
-
-const ID_RE = /\b[A-Z][A-Z0-9]*-\d+\b|#\d+\b/g
-
-// The end-of-day scan: each bullet line's ticket and PR ids as a set, with its no-ticket flag, and the lines as a set; order and wording are free.
-export const daySignature = (text: string): string => {
-  const lines = text
-    .split("\n")
-    .filter((line) => line.startsWith("• "))
-    .map((line) => ({
-      flagged: line.includes("[no ticket]"),
-      ids: [...new Set(line.match(ID_RE) ?? [])].sort(),
-    }))
-  return JSON.stringify(
-    lines
-      .map((l) => JSON.stringify(l))
-      .sort()
-      .map((l) => JSON.parse(l)),
-  )
 }
 
 const TARGET_KEYS = [
@@ -106,7 +60,7 @@ export const triageSignature = (lines: string[]): string => {
   return JSON.stringify({ denials: denials.sort(), reads: [...new Set(reads)].sort() })
 }
 
-// The run's last message, the report the board and end-of-day scans return.
+// The run's last message, the report a scope's own comparators sign.
 export const finalText = (lines: string[]): string => String(resultEvent(lines)?.result ?? "")
 
 // The signature more than half the runs share, or null.

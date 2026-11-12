@@ -11,6 +11,7 @@ type Check = import("../../../../../../api/hono/src/lib/onboard/checks").Check
 
 const ORDER = [
   "bun",
+  "claude-codex",
   "docker",
   "Database",
   "gh",
@@ -47,10 +48,22 @@ const machine = (
   return { ran, reader }
 }
 
-const TOOLS = ["brew", "bun", "docker", "gh", "git", "herdr", "node", "python3", "uv"]
+const TOOLS = [
+  "brew",
+  "bun",
+  "claude-codex",
+  "docker",
+  "gh",
+  "git",
+  "herdr",
+  "node",
+  "python3",
+  "uv",
+]
 
 const ANSWERS = {
   "bun --version": { stdout: "1.3.2\n" },
+  "claude-codex --version": { stdout: "claude-codex 0.3.0\n" },
   "docker info --format {{.ServerVersion}}": { stdout: "28.3.1\n" },
   "gh --version": { stdout: "gh version 2.80.0 (2026-09-01)\n" },
   "gh auth status --active -h github.com": {},
@@ -134,6 +147,7 @@ describe("onboardChecks on a machine it reads", () => {
     )
     expect(actions).toEqual({
       bun: null,
+      "claude-codex": null,
       Database: null,
       docker: "docker",
       gh: "gh-login",
@@ -455,7 +469,7 @@ describe("firstRunChecks and the done mark", () => {
     expect(mark.writes).toBe(0)
 
     const optional = machine(
-      TOOLS.filter((t) => t !== "uv" && t !== "brew"),
+      TOOLS.filter((t) => t !== "uv" && t !== "brew" && t !== "claude-codex"),
       ANSWERS,
       [CA],
     )

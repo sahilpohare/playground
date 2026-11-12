@@ -4,8 +4,9 @@ set -uo pipefail
 # ignored) files; a git or python error fails the check instead of passing it.
 # Two uses are not prose and are skipped: inline code, and a table cell holding
 # only an em-dash, the empty-cell marker in an output format the user specified.
+# Core's vendored graphify and impeccable, and upstream/, hold upstream's bytes.
 cd "$(dirname "$0")/.."
-hits="$(git grep --untracked -n -I "$(printf '\xe2\x80\x94')" -- ':!package-lock.json')"
+hits="$(git grep --untracked -n -I "$(printf '\xe2\x80\x94')" -- ':!package-lock.json' ':!extensions/core/skills/graphify' ':!extensions/core/skills/impeccable' ':!extensions/core/upstream')"
 case $? in
   0) ;;
   1) echo "no em-dashes"; exit 0 ;;

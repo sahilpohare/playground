@@ -168,7 +168,7 @@ var isRecord = (value) => typeof value === "object" && value !== null && !Array.
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
-import { realpathSync } from "fs";
+import { realpathSync, statSync } from "fs";
 import { homedir as homedir2 } from "os";
 import { basename, dirname as dirname2, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 var UNKNOWN = "\x00";
@@ -1663,15 +1663,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
-  const or = env.cwdOr;
+  const lineOr = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
   env.cwdOr = undefined;
   try {
     return await body();
   } finally {
-    const own = env.cwdOr;
-    env.cwdOr = own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or;
+    const scriptOr = env.cwdOr;
+    env.cwdOr = scriptOr && scriptOr.orChain === undefined ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope } : lineOr;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -1731,7 +1731,7 @@ async function cdTarget(name, args, env) {
 async function folder(path) {
   if (!path)
     return;
-  return await isFolder(path) ? path : undefined;
+  return isFolder(path) ? path : undefined;
 }
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -1811,7 +1811,7 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   const chained = cmd.chained && !negated(cmd);
-  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || await isFolder(paths[0]))) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
@@ -1826,7 +1826,7 @@ async function chdirTo(name, cmd, parsed, env) {
   }
   env.cwdSure = undefined;
   env.cwdOr = undefined;
-  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
+  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || paths.every(isFolder));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
@@ -1882,9 +1882,9 @@ function keep(folders, env) {
   env.cwdUnread = true;
   return folders.slice(0, MAX_FOLDERS);
 }
-async function isFolder(path) {
+function isFolder(path) {
   try {
-    return (await Bun.file(path).stat()).isDirectory();
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -2767,7 +2767,7 @@ import {
   renameSync,
   rmdirSync,
   rmSync,
-  statSync,
+  statSync as statSync2,
   utimesSync,
   writeFileSync
 } from "fs";
@@ -2836,7 +2836,7 @@ function remotes(cwd) {
 
 // scripts/hooks/no-playground-leak.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
-import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync3, statSync as statSync2 } from "fs";
+import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync3, statSync as statSync3 } from "fs";
 import { basename as basename3, join as join8 } from "path";
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js
@@ -8970,7 +8970,7 @@ var CHECKOUT = join8(__CHECKOUT + "/scripts/hooks", "..", "..");
 function rosterNames(environment) {
   const path = join8(dataDirOf(environment), "roster.json");
   try {
-    if (statSync2(path).size > MAX_ROSTER_BYTES)
+    if (statSync3(path).size > MAX_ROSTER_BYTES)
       return [];
     const agents = JSON.parse(readFileSync3(path, "utf8"))?.agents;
     if (!Array.isArray(agents))
@@ -10193,6 +10193,157 @@ if (false) {}
 // scripts/hooks/no-extensions-write.ts
 import { dirname as dirname5, join as join11, resolve as resolve6, sep as sep2 } from "path";
 
+// packages/settings/src/jobs.ts
+var jobSchema = strictObject({
+  callsModel: boolean2(),
+  command: string2().min(1).optional(),
+  config: record2(string2(), unknown2()).optional(),
+  cwd: string2().min(1).optional(),
+  description: string2().min(1),
+  disabledWhy: string2().optional(),
+  enabled: boolean2(),
+  heartbeat: string2().min(1),
+  launchd: string2().min(1).optional(),
+  model: string2().min(1).optional(),
+  neverPause: boolean2().optional(),
+  pausedFor: string2().optional(),
+  program: array(string2().min(1)).min(1).optional(),
+  runtime: _enum(["herdr"]).optional(),
+  schedule: union([
+    strictObject({ always: literal(true) }),
+    strictObject({ every: number2().int().positive() })
+  ]),
+  stop: string2().min(1).optional()
+});
+var fromStored = (row) => {
+  if (!row || typeof row !== "object" || Array.isArray(row))
+    return row;
+  const kept = Object.fromEntries(Object.entries(row).filter(([key]) => Object.hasOwn(jobSchema.shape, key)));
+  return kept.runtime === undefined ? kept : { ...kept, runtime: "herdr" };
+};
+var jobRowSchema = jobSchema.partial();
+var jobKey = (name) => `jobs.${name.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase())}`;
+var terminal = (name, command, job) => ({
+  callsModel: false,
+  command,
+  cwd: "{checkout}",
+  enabled: false,
+  heartbeat: name,
+  runtime: "herdr",
+  ...job
+});
+var launchd = (name, job) => ({
+  callsModel: false,
+  cwd: "{checkout}",
+  enabled: false,
+  heartbeat: name,
+  launchd: `com.playground.${name}`,
+  program: ["{bun}", "--no-env-file", `{checkout}/packages/scripts/src/${name}/cli.ts`],
+  ...job
+});
+var bunJob = (name, root = "{checkout}") => `{bun} --no-env-file ${root}/packages/scripts/src/${name}/cli.ts`;
+var JOBS = {
+  "ops-awake": terminal("ops-awake", `${bunJob("ops-awake")} --data {data}`, {
+    description: "Keeps the Mac awake on AC power and on battery with caffeinate, display and lock unchanged.",
+    schedule: { always: true }
+  }),
+  "ops-changelog": terminal("ops-changelog", bunJob("ops-changelog", "{dashboard}"), {
+    cwd: "{dashboard}",
+    description: "Syncs new canary merges and main versions into the Changelog every 5 minutes.",
+    schedule: { every: 300 }
+  }),
+  "ops-dashboard": terminal("ops-dashboard", "{dashboard}/scripts/ops/dashboard/run.sh", {
+    cwd: "{dashboard}",
+    description: "Keeps the live dashboard running on its branch's latest head.",
+    enabled: true,
+    schedule: { every: 60 },
+    stop: "dashboard"
+  }),
+  "ops-dm-watch": terminal("ops-dm-watch", bunJob("ops-dm-watch"), {
+    description: "In Slack mode, hands each message in the owner's DM to the dispatcher, the session in the assistant seat too when no reply lands in 3 minutes.",
+    schedule: { every: 60 }
+  }),
+  "ops-ext-sync": terminal("ops-ext-sync", bunJob("ops-ext-sync"), {
+    description: "Syncs each extension with its private repository at 02:30, pushed only after a clean secrets scan.",
+    schedule: { every: 86400 }
+  }),
+  "ops-flow": launchd("ops-flow", {
+    description: "Tells the leads when a session holds a run slot over 15 minutes, or a model slot over 120.",
+    schedule: { every: 60 }
+  }),
+  "ops-herdr": launchd("ops-herdr", {
+    description: "Starts each herdr server that is down, on the pinned binary and the repo's config.",
+    schedule: { every: 60 }
+  }),
+  "ops-machine": terminal("ops-machine", `${bunJob("ops-machine")} --data {data}`, {
+    description: "Writes one line a minute of the machine's load, memory and live sessions to machine.jsonl.",
+    schedule: { every: 60 }
+  }),
+  "ops-merge-train": terminal("ops-merge-train", "python3 -I {checkout}/scripts/ops/merge-train/run.py", {
+    description: "Runs the merge train: builds a train of ready PRs and checks each step.",
+    neverPause: true,
+    schedule: { every: 60 }
+  }),
+  "ops-restore": {
+    ...launchd("ops-restore", {
+      description: "Restores a lost main checkout by the playbook's steps once a guard is gone on two looks 5 minutes apart.",
+      schedule: { every: 60 }
+    }),
+    cwd: "{dashboard}",
+    program: [
+      "{bun}",
+      "--no-env-file",
+      "{dashboard}/packages/scripts/src/ops-restore/cli.ts",
+      "--main",
+      "{checkout}"
+    ]
+  },
+  "ops-session-resume": launchd("ops-session-resume", {
+    description: "Queues a carry-on line for each factory session once its usage limit resets.",
+    schedule: { every: 60 }
+  }),
+  "ops-sweep": terminal("ops-sweep", bunJob("ops-sweep"), {
+    description: "The Ops lead's sweep: runners, probes, asks, heartbeats and the forecast.",
+    schedule: { every: 300 }
+  }),
+  "ops-tick": launchd("ops-tick", {
+    description: "The factory's timed beats: the roll gate, the tick, the usage-limit watch and the sweeps.",
+    schedule: { every: 60 }
+  }),
+  "ops-unstick": terminal("ops-unstick", "python3 -I {checkout}/scripts/ops/unstick/run.py", {
+    description: "Reads every live session's screen and clears a factory session stuck on a prompt.",
+    neverPause: true,
+    schedule: { every: 120 }
+  }),
+  "ops-usage": terminal("ops-usage", "python3 -I {checkout}/scripts/ops/usage/run.py", {
+    description: "Reads the account's usage windows into usage.json every 5 minutes.",
+    enabled: true,
+    neverPause: true,
+    schedule: { every: 300 }
+  }),
+  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
+    description: "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
+    schedule: { always: true }
+  }),
+  "ops-zai-usage": launchd("ops-zai-usage", {
+    description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
+    schedule: { every: 300 }
+  })
+};
+var OLD_KEYS = { "ops-dashboard": ["jobs.opsDesk"] };
+var jobSettings = defineSettings(Object.fromEntries(Object.entries(JOBS).map(([name, job]) => [
+  jobKey(name),
+  {
+    aliases: OLD_KEYS[name],
+    default: job,
+    description: `The ${name} ops job: ${job.description}`,
+    merge: true,
+    schema: jobRowSchema,
+    stored: fromStored
+  }
+])));
+var REGISTRY_KEYS = new Set([...Object.keys(JOBS).map(jobKey), ...Object.values(OLD_KEYS).flat()]);
+
 // scripts/hooks/codex.ts
 import { isAbsolute as isAbsolute3, resolve as resolve4 } from "path";
 var HEADERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
@@ -10243,7 +10394,7 @@ async function eachInput(raw, guard, judge) {
 }
 
 // scripts/hooks/no-main-checkout.ts
-import { existsSync as existsSync7, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
+import { existsSync as existsSync7, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync as realpathSync3 } from "fs";
 import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute4, join as join10, normalize, resolve as resolve5, sep } from "path";
 
 // packages/settings/src/live.ts
@@ -10892,15 +11043,8 @@ function inWorktree(path, worktrees) {
   if (!path.startsWith(worktrees))
     return false;
   const tree = join10(worktrees, path.slice(worktrees.length).split(sep)[0]);
-  return existsSync7(join10(tree, ".git")) || !isFolder2(tree);
+  return existsSync7(join10(tree, ".git")) || !isFolder(tree);
 }
-var isFolder2 = (path) => {
-  try {
-    return statSync3(path).isDirectory();
-  } catch {
-    return false;
-  }
-};
 function real(path) {
   const found = resolved(path);
   if (found !== undefined || !isAbsolute4(path))
@@ -11018,14 +11162,9 @@ function bunCall(args, env) {
 var landing = (word, env, from) => {
   if (!word || pathOf(word, { ...env, cwd: from }) === undefined)
     return;
-  const path = isAbsolute4(word.value) ? word.value : `${from}${sep}${word.value}`;
-  try {
-    return realpathSync3.native(path);
-  } catch {
-    return real(resolve5(path));
-  }
+  return kernelPath(word, from, real(resolve5(from ?? "", word.value)));
 };
-function gitCall(args, env) {
+function gitCall(args, env, local) {
   let cwd = env.cwd;
   let gitDir;
   let workTree;
@@ -11048,9 +11187,25 @@ function gitCall(args, env) {
     } else if (GIT_TAKES.has(v))
       k++;
   }
-  const repo = gitDir?.replace(/\/+$/, "");
-  const tree = repo?.endsWith(`${sep}.git`) ? dirname4(repo) : workTree ?? cwd;
-  return { cwd: tree, rest: args.slice(k + 1).map((a) => a.value), sub: args[k]?.value };
+  const checkout = (dir) => {
+    const repo = dir?.replace(/\/+$/, "");
+    return repo?.endsWith(`${sep}.git`) ? dirname4(repo) : undefined;
+  };
+  const also = [];
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const set = local?.get(key) ?? env.vars.get(key);
+    if (!set || set.value === "")
+      continue;
+    const word = { ...set, quoted: true };
+    const at = unreadWord(word) ? undefined : landing(word, env, cwd);
+    also.push(key === "GIT_DIR" ? checkout(at) ?? at : at);
+  }
+  return {
+    also,
+    cwd: checkout(gitDir) ?? workTree ?? cwd,
+    rest: args.slice(k + 1).map((a) => a.value),
+    sub: args[k]?.value
+  };
 }
 var GIT_MOVES = new Set([
   "am",
@@ -11071,10 +11226,10 @@ var APPLY_READS = new Set(["--check", "--numstat", "--stat", "--summary"]);
 var STEP_FIVE = /^(?:-q |--quiet )?--ff-only (?:-q |--quiet )?origin\/main$/;
 var GIT_FIX = `it moves the HEAD, index or files of the main checkout, which every installed skill, hook and ops job runs from. Name your own tree on every git call, git -C <your worktree> ..., after git -C <your worktree> rev-parse --show-toplevel names it; the main checkout moves only by the release skill's step 5, git -C <main checkout> fetch -q origin main && git -C <main checkout> merge --ff-only -q origin/main, a stray local commit on its main goes by git -C <main checkout> reset --keep origin/main while its tree is clean, and a worktree is made by absolute path under the main checkout's .claude/worktrees/, so it nests in no other worktree, by git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" -b <branch> origin/canary.`;
 var LIVE_FIX = "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each canary head, and a change it needs goes through a PR into canary.";
-function liveWrite(args, env) {
-  const { cwd, rest, sub } = gitCall(args, env);
+function liveWrite(args, env, local) {
+  const { also, cwd, rest, sub } = gitCall(args, env, local);
   if (sub && (sub === "commit" || sub === "merge" || gitMoves(sub, rest)))
-    return { cwd, what: `git ${sub}` };
+    return { also, cwd, what: `git ${sub}` };
 }
 async function liveWriter(raw, environment) {
   try {
@@ -11214,12 +11369,12 @@ function runs(name, args, local, env) {
       return { cwd: cwdFlag(args, env), what: `${name} ${tool}` };
   }
   if (name === "git") {
-    const { cwd, rest, sub } = gitCall(args, env);
+    const { also, cwd, rest, sub } = gitCall(args, env, local);
     if (sub === "commit")
-      return { cwd, what: "git commit, which runs lefthook's pre-commit" };
+      return { also, cwd, what: "git commit, which runs lefthook's pre-commit" };
     if (keepReset(sub, rest, cwd))
       return;
-    return sub && gitMoves(sub, rest) ? { cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined;
+    return sub && gitMoves(sub, rest) ? { also, cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined;
   }
   if (name !== "bun")
     return;
@@ -11396,9 +11551,11 @@ async function inspect3(raw, environment, main) {
     return live !== undefined && path !== undefined && (path === live || path.startsWith(live + sep));
   };
   let writer;
-  const liveRefusal = async (args, env, lands, fix) => {
-    const move = liveWrite(args, env);
-    if (!move || !lands(move.cwd) || await (writer ??= liveWriter(raw, environment)))
+  const liveRefusal = async (args, local, env, lands, fix) => {
+    const move = liveWrite(args, env, local);
+    if (!move || !(ranIn(move.cwd, move.also).some(lands) || unreadFolder(move.also)))
+      return;
+    if (await (writer ??= liveWriter(raw, environment)))
       return;
     return refuse3(`${move.what} in the live Dashboard's checkout`, fix);
   };
@@ -11448,7 +11605,7 @@ async function inspect3(raw, environment, main) {
       });
       if (blindWrite)
         return refuse3(`a write to ${blindWrite.value}`, ANYWHERE_FIX);
-      const blindLive = name === "git" ? await liveRefusal(args, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX) : undefined;
+      const blindLive = name === "git" ? await liveRefusal(args, local, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX) : undefined;
       if (blindLive)
         return blindLive;
     }
@@ -11468,7 +11625,7 @@ async function inspect3(raw, environment, main) {
       const ran = runs(name, args, local, here);
       if (ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)))
         return refuse3(ran.what, fixFor2(sure, ran.fix));
-      const moved = name === "git" ? await liveRefusal(args, here, inLive, fixFor2(sure, LIVE_FIX)) : undefined;
+      const moved = name === "git" ? await liveRefusal(args, local, here, inLive, fixFor2(sure, LIVE_FIX)) : undefined;
       if (moved)
         return moved;
       const wrote = writeTargets(cmd, name, args).find((t) => inMain(pathOf(t, here)));
@@ -11820,7 +11977,7 @@ var ruleSettings = defineSettings({
       } catch {
         return false;
       }
-    }, "an IANA time zone, such as UTC or Asia/Kolkata")
+    }, "an IANA time zone, such as UTC or America/New_York")
   },
   "context.window": {
     default: 400000,
@@ -14099,157 +14256,6 @@ var contentFields = {
 };
 // packages/settings/src/items.ts
 var ATTACHMENT_LIMIT = 50 * 1024 * 1024;
-
-// packages/settings/src/jobs.ts
-var jobSchema = strictObject({
-  callsModel: boolean2(),
-  command: string2().min(1).optional(),
-  config: record2(string2(), unknown2()).optional(),
-  cwd: string2().min(1).optional(),
-  description: string2().min(1),
-  disabledWhy: string2().optional(),
-  enabled: boolean2(),
-  heartbeat: string2().min(1),
-  launchd: string2().min(1).optional(),
-  model: string2().min(1).optional(),
-  neverPause: boolean2().optional(),
-  pausedFor: string2().optional(),
-  program: array(string2().min(1)).min(1).optional(),
-  runtime: _enum(["herdr"]).optional(),
-  schedule: union([
-    strictObject({ always: literal(true) }),
-    strictObject({ every: number2().int().positive() })
-  ]),
-  stop: string2().min(1).optional()
-});
-var fromStored = (row) => {
-  if (!row || typeof row !== "object" || Array.isArray(row))
-    return row;
-  const kept = Object.fromEntries(Object.entries(row).filter(([key]) => Object.hasOwn(jobSchema.shape, key)));
-  return kept.runtime === undefined ? kept : { ...kept, runtime: "herdr" };
-};
-var jobRowSchema = jobSchema.partial();
-var jobKey = (name) => `jobs.${name.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase())}`;
-var terminal = (name, command, job) => ({
-  callsModel: false,
-  command,
-  cwd: "{checkout}",
-  enabled: false,
-  heartbeat: name,
-  runtime: "herdr",
-  ...job
-});
-var launchd = (name, job) => ({
-  callsModel: false,
-  cwd: "{checkout}",
-  enabled: false,
-  heartbeat: name,
-  launchd: `com.playground.${name}`,
-  program: ["{bun}", "--no-env-file", `{checkout}/packages/scripts/src/${name}/cli.ts`],
-  ...job
-});
-var bunJob = (name, root = "{checkout}") => `{bun} --no-env-file ${root}/packages/scripts/src/${name}/cli.ts`;
-var JOBS = {
-  "ops-awake": terminal("ops-awake", `${bunJob("ops-awake")} --data {data}`, {
-    description: "Keeps the Mac awake on AC power and on battery with caffeinate, display and lock unchanged.",
-    schedule: { always: true }
-  }),
-  "ops-changelog": terminal("ops-changelog", bunJob("ops-changelog", "{dashboard}"), {
-    cwd: "{dashboard}",
-    description: "Syncs new canary merges and main versions into the Changelog every 5 minutes.",
-    schedule: { every: 300 }
-  }),
-  "ops-dashboard": terminal("ops-dashboard", "{dashboard}/scripts/ops/dashboard/run.sh", {
-    cwd: "{dashboard}",
-    description: "Keeps the live dashboard running on its branch's latest head.",
-    enabled: true,
-    schedule: { every: 60 },
-    stop: "dashboard"
-  }),
-  "ops-dm-watch": terminal("ops-dm-watch", bunJob("ops-dm-watch"), {
-    description: "In Slack mode, hands each message in the owner's DM to the dispatcher, the session in the assistant seat too when no reply lands in 3 minutes.",
-    schedule: { every: 60 }
-  }),
-  "ops-ext-sync": terminal("ops-ext-sync", bunJob("ops-ext-sync"), {
-    description: "Syncs each extension with its private repository at 02:30, pushed only after a clean secrets scan.",
-    schedule: { every: 86400 }
-  }),
-  "ops-flow": launchd("ops-flow", {
-    description: "Tells the leads when a session holds a run slot over 15 minutes, or a model slot over 120.",
-    schedule: { every: 60 }
-  }),
-  "ops-herdr": launchd("ops-herdr", {
-    description: "Starts each herdr server that is down, on the pinned binary and the repo's config.",
-    schedule: { every: 60 }
-  }),
-  "ops-machine": terminal("ops-machine", `${bunJob("ops-machine")} --data {data}`, {
-    description: "Writes one line a minute of the machine's load, memory and live sessions to machine.jsonl.",
-    schedule: { every: 60 }
-  }),
-  "ops-merge-train": terminal("ops-merge-train", "python3 -I {checkout}/scripts/ops/merge-train/run.py", {
-    description: "Runs the merge train: builds a train of ready PRs and checks each step.",
-    neverPause: true,
-    schedule: { every: 60 }
-  }),
-  "ops-restore": {
-    ...launchd("ops-restore", {
-      description: "Restores a lost main checkout by the playbook's steps once a guard is gone on two looks 5 minutes apart.",
-      schedule: { every: 60 }
-    }),
-    cwd: "{dashboard}",
-    program: [
-      "{bun}",
-      "--no-env-file",
-      "{dashboard}/packages/scripts/src/ops-restore/cli.ts",
-      "--main",
-      "{checkout}"
-    ]
-  },
-  "ops-session-resume": launchd("ops-session-resume", {
-    description: "Queues a carry-on line for each factory session once its usage limit resets.",
-    schedule: { every: 60 }
-  }),
-  "ops-sweep": terminal("ops-sweep", bunJob("ops-sweep"), {
-    description: "The Ops lead's sweep: runners, probes, asks, heartbeats and the forecast.",
-    schedule: { every: 300 }
-  }),
-  "ops-tick": launchd("ops-tick", {
-    description: "The factory's timed beats: the roll gate, the tick, the usage-limit watch and the sweeps.",
-    schedule: { every: 60 }
-  }),
-  "ops-unstick": terminal("ops-unstick", "python3 -I {checkout}/scripts/ops/unstick/run.py", {
-    description: "Reads every live session's screen and clears a factory session stuck on a prompt.",
-    neverPause: true,
-    schedule: { every: 120 }
-  }),
-  "ops-usage": terminal("ops-usage", "python3 -I {checkout}/scripts/ops/usage/run.py", {
-    description: "Reads the account's usage windows into usage.json every 5 minutes.",
-    enabled: true,
-    neverPause: true,
-    schedule: { every: 300 }
-  }),
-  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
-    description: "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
-    schedule: { always: true }
-  }),
-  "ops-zai-usage": launchd("ops-zai-usage", {
-    description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
-    schedule: { every: 300 }
-  })
-};
-var OLD_KEYS = { "ops-dashboard": ["jobs.opsDesk"] };
-var jobSettings = defineSettings(Object.fromEntries(Object.entries(JOBS).map(([name, job]) => [
-  jobKey(name),
-  {
-    aliases: OLD_KEYS[name],
-    default: job,
-    description: `The ${name} ops job: ${job.description}`,
-    merge: true,
-    schema: jobRowSchema,
-    stored: fromStored
-  }
-])));
-var REGISTRY_KEYS = new Set([...Object.keys(JOBS).map(jobKey), ...Object.values(OLD_KEYS).flat()]);
 // packages/settings/src/factory.ts
 var repo = string2().regex(/^(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?$/, "a repository as owner/name, or empty for unset");
 var factorySettings = defineSettings({
@@ -14260,7 +14266,7 @@ var factorySettings = defineSettings({
   },
   "factory.publicRepo": {
     default: "",
-    description: "The public repository, or a list of them: no-public-leak refuses a write to one that holds private text, and the trace ratchet reads past each one's own name.",
+    description: "The public repository, or a list of them, the checkout's origin when unset: no-public-leak refuses a write to one that holds private text, and the trace ratchet reads past each one's own name.",
     schema: union([repo, array(repo)])
   },
   "factory.repo": {
@@ -14346,6 +14352,11 @@ var ownerSettings = defineSettings({
     default: [],
     description: "The owner's first name and handles as chat writes them, lowercase: the inbox gate refuses a manager's stop on a line that addresses one of them and asks for an action, and never reads @<handle> as an agent.",
     schema: array(string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a name or handle, lowercase"))
+  },
+  "owner.voice": {
+    default: "",
+    description: "The voice a draft or a slack decision speaks in as the owner: singular has bun run ask refuse one that says we, us, our, ours or ourselves; empty checks none.",
+    schema: _enum(["", "singular"])
   }
 });
 // packages/settings/src/paths.ts
@@ -14481,16 +14492,33 @@ var whatsappSettings = defineSettings({
     schema: e1642
   }
 });
+// packages/scripts/src/playground/setting.ts
+import { resolve as resolve9 } from "path";
+var CHECKOUT2 = resolve9(__CHECKOUT + "/packages/scripts/src/playground", "../../../..");
+var origins = new Map;
+var originRepo = (checkout = CHECKOUT2) => {
+  if (!origins.has(checkout)) {
+    const run = Bun.spawnSync(["git", "-C", checkout, "remote", "get-url", "origin"], {
+      stderr: "ignore"
+    });
+    const url = run.stdout.toString().trim();
+    const slug = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(url)?.[1] ?? "";
+    origins.set(checkout, slug.toLowerCase());
+  }
+  return origins.get(checkout);
+};
+if (false)
+  ;
+
 // packages/scripts/src/trace-count/kinds.ts
-var TODAY_PUBLIC = ["nrjdalal/playground", "nrjdalal/playground-yard"];
-var reposOf = (settings) => {
+var reposOf = (settings, checkout) => {
   const archive = factorySettings.get(settings, "factory.archiveRepo").toLowerCase();
   const archiveOwner = archive ? [archive.split("/")[0]] : [];
   const set = [factorySettings.get(settings, "factory.publicRepo")].flat().filter(Boolean);
   return {
     archive,
     owner: [...new Set([...ownerSettings.get(settings, "owner.names"), ...archiveOwner])],
-    public: set.length ? set.map((repo) => repo.toLowerCase()) : TODAY_PUBLIC
+    public: set.length ? set.map((repo) => repo.toLowerCase()) : [originRepo(checkout)].filter(Boolean)
   };
 };
 var UNSET_REPOS = reposOf({ schemaVersion: 1, values: {} });
@@ -14629,7 +14657,7 @@ if (false) {}
 
 // scripts/hooks/no-raw-delete.ts
 import { realpathSync as realpathSync5 } from "fs";
-import { basename as basename7, dirname as dirname8, resolve as resolve9, sep as sep4 } from "path";
+import { basename as basename7, dirname as dirname8, resolve as resolve10, sep as sep4 } from "path";
 var INSTEAD4 = "Move it to the 7-day trash with playground rm <path> (a worktree: playground rm --worktree <path>), which takes up to 5,000 files or 2 GB; leave a bigger tree or a scratch folder in place for your lead's cleanup, and let bun install rebuild a node_modules in place. A plain rm of a file inside your own worktree or scratchpad, with no -r, still runs.";
 var WORKTREE = "Remove a worktree with playground rm --worktree <path>, which moves it to the 7-day trash once no live session holds it, it holds no uncommitted change and its work has landed on canary.";
 var refuse11 = (what, why = "a recursive delete is final, and one aimed wrong takes a whole tree", instead = INSTEAD4) => `no-raw-delete hook refuses ${what}: ${why}. ${instead}`;
@@ -14710,7 +14738,7 @@ function real3(path) {
     return realpathSync5(path);
   } catch {
     const parent = dirname8(path);
-    return parent === path ? path : resolve9(real3(parent), basename7(path));
+    return parent === path ? path : resolve10(real3(parent), basename7(path));
   }
 }
 function rootsOf(cwd, session) {
@@ -14926,7 +14954,7 @@ async function check17(raw, environment = process.env) {
 if (false) {}
 
 // scripts/hooks/no-raw-spawn.ts
-import { join as join16, resolve as resolve10, sep as sep5 } from "path";
+import { join as join16, resolve as resolve11, sep as sep5 } from "path";
 var SPAWN = join16(__CHECKOUT + "/scripts/hooks", "..", "spawn.sh");
 var HEADS = new Set([
   "agent",
@@ -15069,7 +15097,7 @@ function scratchWorld(args, local, env) {
     return;
   const tmp = env.process.TMPDIR;
   const path = socket.value;
-  if (!tmp?.startsWith("/") || unreadable(socket) || !path.startsWith("/") || !resolve10(path).startsWith(resolve10(tmp) + sep5))
+  if (!tmp?.startsWith("/") || unreadable(socket) || !path.startsWith("/") || !resolve11(path).startsWith(resolve11(tmp) + sep5))
     return `a scratch herdr call whose HERDR_SOCKET_PATH is not a literal path under your TMPDIR (${tmp ?? "unset"}), where a scratch server's socket goes`;
   const servers = (env.process.PLAYGROUND_HERDR_SESSIONS ?? "").split(",");
   if (unreadable(session) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(session.value) || ["default", "factory", "playground", "playground-probes", "probes", ...servers].includes(session.value))
@@ -15218,7 +15246,7 @@ if (false) {}
 // scripts/hooks/no-raw-wa.ts
 import { realpathSync as realpathSync6 } from "fs";
 import { homedir as homedir4 } from "os";
-import { resolve as resolve11 } from "path";
+import { resolve as resolve12 } from "path";
 var refuse13 = (what) => `no-raw-wa hook refuses ${what}: the data folder's whatsapp/ holds ops-wa's linked device, its auth state, its socket and the owner's messages, which no session reads or writes. To write to the owner on WhatsApp, run playground wa send <absolute file>; to see ops-wa's state, read its row on the System page.`;
 var RECURSIVE = new Set(["ack", "ag", "ditto", "find", "rg", "rsync", "tar"]);
 var RECURSIVE_WITH = {
@@ -15230,14 +15258,14 @@ var RECURSIVE_WITH = {
   zip: /^-[A-Za-z]*r/
 };
 var targetsOf = (environment) => {
-  const typed = resolve11(dataDirOf(environment), "whatsapp");
+  const typed = resolve12(dataDirOf(environment), "whatsapp");
   let real = typed;
   try {
-    real = resolve11(realpathSync6(dataDirOf(environment)), "whatsapp");
+    real = resolve12(realpathSync6(dataDirOf(environment)), "whatsapp");
   } catch {}
   return [...new Set([typed, real].map((p) => p.toLowerCase()))];
 };
-var segments = (path) => resolve11(path).toLowerCase().split("/").filter(Boolean);
+var segments = (path) => resolve12(path).toLowerCase().split("/").filter(Boolean);
 function reach(path, target, glob = false) {
   const p = segments(path);
   const t = segments(target);
@@ -15296,7 +15324,7 @@ async function judgeBash(command, cwd, environment) {
           continue;
         for (const raw of [word.value, word.value.slice(word.value.indexOf("=") + 1)]) {
           const value = /^~(?:\/|$)/.test(raw) ? `${homedir4()}${raw.slice(1)}` : raw;
-          const path = value.startsWith("/") ? value : place.cwd && resolve11(place.cwd, value);
+          const path = value.startsWith("/") ? value : place.cwd && resolve12(place.cwd, value);
           if (!path)
             continue;
           const stands = worst(path, targets, !!word.glob);
@@ -15335,7 +15363,7 @@ async function inspect15(raw, environment) {
     if (at === "inside" || tool === "Grep" && at === "above")
       return refuse13(`a ${tool} through ${path}, which reads whatsapp/ in the data folder`);
     const pattern = input?.pattern;
-    if (tool === "Glob" && typeof pattern === "string" && worst(resolve11(path, pattern), targets, true) === "inside")
+    if (tool === "Glob" && typeof pattern === "string" && worst(resolve12(path, pattern), targets, true) === "inside")
       return refuse13(`a Glob of ${pattern}, which reaches whatsapp/ in the data folder`);
   }
 }
@@ -15612,7 +15640,7 @@ if (false) {}
 // scripts/hooks/no-unslotted-run.ts
 import { existsSync as existsSync9, mkdtempSync, rmdirSync as rmdirSync2, rmSync as rmSync2 } from "fs";
 import { tmpdir } from "os";
-import { join as join18, resolve as resolve12, sep as sep6 } from "path";
+import { join as join18, resolve as resolve13, sep as sep6 } from "path";
 var refuse15 = (what, cd, command) => `no-unslotted-run hook refuses ${what} in a worktree outside run-slot: every heavy run goes through it (playbook's **slots**), so the machine runs a few at a time. Run it as ${cd}~/.playground/ops/run-slot.sh <your name> -- ${command}`;
 var refuseDocker = (what, cd, command, fix) => fix ? `no-unslotted-run hook refuses ${what} from any folder, which run-slot refuses too: ${fix}` : `no-unslotted-run hook refuses ${what} outside run-slot, from any folder: a build fills the Docker VM the live dashboard's Postgres shares (6 Nov: a parallel compose build got it killed), so run-slot runs one docker build at a time, a compose build one service at a time. Run it as ${cd}~/.playground/ops/run-slot.sh <your name> -- ${command}`;
 var COMMIT_TAKES3 = new Set([
@@ -15906,7 +15934,7 @@ function inspect17(raw, environment, main) {
     join18(main, ".claude", "worktrees"),
     real(join18(main, ".claude", "worktrees"))
   ].map((w) => w + sep6);
-  const inWorktree = (dir) => dir !== undefined && [resolve12(dir), real(resolve12(dir))].some((d) => worktrees.some((w) => d.startsWith(w)));
+  const inWorktree = (dir) => dir !== undefined && [resolve13(dir), real(resolve13(dir))].some((d) => worktrees.some((w) => d.startsWith(w)));
   const directory = typeof cwd === "string" ? cwd : undefined;
   let line = [];
   let wrote = false;
@@ -15957,7 +15985,7 @@ function inspect17(raw, environment, main) {
       const line = words();
       if (line === undefined)
         return;
-      const moved = here.cwd !== undefined && (directory === undefined || resolve12(here.cwd) !== resolve12(directory));
+      const moved = here.cwd !== undefined && (directory === undefined || resolve13(here.cwd) !== resolve13(directory));
       const cd = moved ? `cd ${quotedDir(here.cwd)} && ` : "";
       return found.anywhere ? refuseDocker(found.what, cd, line, found.fix) : refuse15(found.what, cd, line);
     }
@@ -15974,7 +16002,7 @@ function inspect17(raw, environment, main) {
   line = lexed.commands;
   return run(lexed, env, visit);
 }
-async function check21(raw, environment = process.env, main = mainCheckout2(resolve12(__CHECKOUT + "/scripts/hooks", "..", ".."))) {
+async function check21(raw, environment = process.env, main = mainCheckout2(resolve13(__CHECKOUT + "/scripts/hooks", "..", ".."))) {
   try {
     return await inspect17(raw, environment, main);
   } catch {

@@ -21,7 +21,9 @@ On a first run, **Start a local container** on the Database row of **Let's check
 - **Docker is not running** on the Database row: start Docker or OrbStack, then click **Start a local container** again, or click **Start without Docker**, which keeps the database as PGlite with no container ([Install](/docs/install#the-dashboards-database)).
 - **PGlite in `<folder>` did not start** on the Database row or from `bun run dev`: the line after it is the server's own words, and the folder's `server.log` holds the rest.
   A port another program took since its last start reads as `EADDRINUSE`: stop that program, or delete `server.json` in the folder, empty `POSTGRES_URL` in `.env` and, with Docker stopped, click **Start without Docker** again, which takes a new port and writes its address.
+  `already served (server.lock)` means another PGlite server holds that folder: stop it, or delete `server.lock` if no server runs.
   `bun run dev:stop` leaves the PGlite server running; to stop it, run `kill <pid>` with the `pid` from `server.json` in its folder.
+- **PGlite databases `<a>` and `<b>` both record port `<n>`** from `bun run dev`: one of the two is a stale record from another checkout; delete the folder of the one `POSTGRES_URL` does not use.
 - **`<.env path>` already names a database (POSTGRES_URL)** on the Database row: `.env` already holds a database address, which setup never overwrites.
   Restart `bun run dev` to use it, or empty that line to have setup make a new one.
 - **pglaunch printed no database address** on the Database row: pglaunch could not start the container, and the row shows what it printed.

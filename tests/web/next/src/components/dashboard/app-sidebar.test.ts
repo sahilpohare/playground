@@ -369,7 +369,7 @@ describe("SessionRow", () => {
           createElement(OpsJobRow, {
             now: NOW,
             row: {
-              does: null,
+              does: "",
               job: "ops-dashboard",
               lastBeatAt: "2026-10-06T11:59:50.000Z",
               name: "Dashboard updates",
@@ -1230,7 +1230,7 @@ describe("OpsJobRow", () => {
       "Dashboard updates (ops-dashboard) · Keeps the Dashboard on the newest canary · Running · beat just now · Its schedule says every 5 min, its heartbeat every 60s",
     )
     expect(html).toContain('aria-description="Dashboard updates (ops-dashboard)')
-    expect(render(job({ does: null, schedule: null }))).not.toContain("null")
+    expect(render(job({ does: "", schedule: null }))).not.toContain("null")
   })
 
   test("Failing and Down read red, with the reason on hover", () => {

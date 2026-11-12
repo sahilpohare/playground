@@ -27,6 +27,8 @@ import {
   jobSchema,
   KINDS,
   orgJobKey,
+  ownerSettings,
+  readPolicyOrDefaults,
   readSetting,
   resetSetting,
   SCOPE_NAME,
@@ -78,7 +80,7 @@ const MENTION_TOKEN =
 const MENTION_MESSAGE =
   "A raw Slack mention token (<@U...>, <!subteam^...>, <!here>, <#C...>) is refused: write mentions as readable names (@name, @team-name); the poster resolves IDs when posting"
 
-// A draft, or a slack decision, speaks in the owner's own voice, and the owner's rule is first person singular: I, never we, us, our, ours or ourselves. The all-caps US is the country, not the pronoun, so it alone passes.
+// A draft, or a slack decision, speaks in the owner's own voice, and under owner.voice's singular that is first person singular: I, never we, us, our, ours or ourselves. The all-caps US is the country, not the pronoun, so it alone passes.
 const OWNER_VOICE = /\b(?:ourselves|ours|our|we|us)\b/gi
 const OWNER_VOICE_MESSAGE =
   "A draft, or a slack decision, speaks in the owner's voice, and the owner's rule is first person singular: I, never we, us, our, ours or ourselves (code, quoted words, US the country and hyphenated names like us-east-1 aside)"
@@ -625,21 +627,6 @@ export const inboxInputSchema = z
       ),
     "An ask holds either a single question's options, approve or deny, or a questions list, not both",
   )
-  .superRefine((input, ctx) => {
-    const text =
-      input.kind === "draft"
-        ? input.preview.text
-        : input.kind === "decision" && input.preview.type === "slack"
-          ? input.preview.text
-          : null
-    const word = text === null ? null : ownerVoiceWord(text)
-    if (word) {
-      ctx.addIssue({
-        code: "custom",
-        message: `${OWNER_VOICE_MESSAGE}. Found "${word}"; rewrite it in the first person singular and post again`,
-      })
-    }
-  })
 
 // Pure: whether an item's preview names a place it lands, so it carries a link or a noLink.
 function namesPlace(input: { kind: string; preview: object }): boolean {
@@ -1431,8 +1418,8 @@ export async function postItem(
   if (!parsed.success) {
     return { code: "VALIDATION_ERROR", message: zodMessage(parsed.error), ok: false }
   }
-  const unowned = ownRefused(parsed.data, settingsData)
-  if (unowned) return unowned
+  const refused = ownRefused(parsed.data, settingsData) ?? voiceRefused(parsed.data, settingsData)
+  if (refused) return refused
   if (threadId !== undefined) {
     const [found] = await db.select({ id: thread.id }).from(thread).where(eq(thread.id, threadId))
     if (!found) return { code: "NOT_FOUND", message: `no thread ${threadId}`, ok: false }
@@ -1448,6 +1435,38 @@ export async function postItem(
     })
     .returning()
   return { item: toItem(row as Row), ok: true }
+}
+
+// Pure: under owner.voice's singular, the refusal for a draft's or a slack decision's first we, us, our, ours or ourselves outside someone else's words; none under any other voice.
+export const voiceRefusal = (
+  input: z.infer<typeof inboxInputSchema>,
+  voice: string,
+): string | undefined => {
+  if (voice !== "singular") return
+  const text =
+    input.kind === "draft"
+      ? input.preview.text
+      : input.kind === "decision" && input.preview.type === "slack"
+        ? input.preview.text
+        : null
+  const word = text === null ? null : ownerVoiceWord(text)
+  return word
+    ? `${OWNER_VOICE_MESSAGE}. Found "${word}"; rewrite it in the first person singular and post again`
+    : undefined
+}
+
+// owner.voice as the data folder's store sets it, so a draft is checked only where a voice is set: none with no folder or a store that does not read.
+const voiceRefused = (
+  input: z.infer<typeof inboxInputSchema>,
+  data?: string,
+): Refused | undefined => {
+  if (!data) return
+  const read = readPolicyOrDefaults(data)
+  const message = voiceRefusal(
+    input,
+    read.refusal === undefined ? ownerSettings.get(read.settings, "owner.voice") : "",
+  )
+  return message ? { code: "VALIDATION_ERROR", message, ok: false } : undefined
 }
 
 // An own card refused as it is posted or edited, so the card never offers an Approve that cannot write: no data folder to read, or no Claude row of usage.accounts at its scope with its email (a GLM row's label is never one).
@@ -1486,8 +1505,8 @@ export async function editItem(
   if (!parsed.success) {
     return { code: "VALIDATION_ERROR", message: zodMessage(parsed.error), ok: false }
   }
-  const unowned = ownRefused(parsed.data, settingsData)
-  if (unowned) return unowned
+  const refused = ownRefused(parsed.data, settingsData) ?? voiceRefused(parsed.data, settingsData)
+  if (refused) return refused
   const item = await getItem(db, key)
   if (!item) return NOT_FOUND
   if (parsed.data.from !== item.from) {

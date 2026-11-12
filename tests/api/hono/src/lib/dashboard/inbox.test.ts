@@ -38,6 +38,7 @@ import {
   type SecretSink,
   sinkArgv,
   slackPlace,
+  voiceRefusal,
 } from "../../../../../../api/hono/src/lib/dashboard/inbox"
 import { uploadSpec } from "../../../../../../api/hono/src/lib/dashboard/slack-upload"
 import { KEYCHAIN_ITEM_NAMES } from "../../../../../../api/hono/src/lib/keychain-items"
@@ -60,6 +61,7 @@ import {
   settingRows,
 } from "../../../../../../packages/settings/src/settings-folder"
 import { testContainerName } from "../../../../../container"
+import { storeWith } from "../../../../../scripts/hooks/render-set"
 
 const CHANNEL = "https://app.slack.com/client/T0000000000/C0MADEUP01"
 const SLACK = {
@@ -421,10 +423,12 @@ describe("what bun run ask takes", () => {
     }
   })
 
-  test("a draft, or a slack decision, speaks in the owner's voice: I, never we, and code or a quote is someone else's words (#674)", () => {
+  test("under owner.voice's singular, a draft or a slack decision speaks in the owner's voice: I, never we, and code or a quote is someone else's words (#674)", () => {
     // the owner speaks as I, me, my; never we, us, our, our side or the team
+    // the refusal under the singular voice for an item, which parses first
+    const voiced = (input: unknown) => voiceRefusal(inboxInputSchema.parse(input), "singular")
     const draft = (text: string) =>
-      inboxInputSchema.safeParse({
+      voiced({
         from: "dispatcher",
         kind: "draft",
         preview: { link: CHANNEL, text, to: "@Merritt" },
@@ -441,21 +445,19 @@ describe("what bun run ask takes", () => {
       ["It is OURS", "OURS"],
       ["by OURSELVES alone", "OURSELVES"],
     ] as const) {
-      const parsed = draft(`${text}.`)
-      expect(parsed.success, text).toBe(false)
-      expect(parsed.error?.issues.at(-1)?.message, text).toContain(`Found "${word}"`)
+      expect(draft(`${text}.`), text).toContain(`Found "${word}"`)
     }
     // the all-caps US is the country, not the pronoun, so it passes; the other words refuse in every case
     for (const fine of ["the US team grows", "US-east is up", "the US and the EU signed"]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // a match a hyphen follows reads as a compound's half, a region name, not the pronoun (us-east-1)
     for (const fine of ["the region is us-east-1", "us-east-1 is up", "our-side is ready"]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // a word inside a longer word is not the owner's voice
     for (const fine of ["trust the build", "two hours in", "as usual", "user asked"]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // a link is an address, not a voice: bare, or Slack's <url|label>
     for (const fine of [
@@ -463,43 +465,58 @@ describe("what bun run ask takes", () => {
       "the deck lives at https://acme.com/us/en/ now",
       "<https://acme.com|our roadmap> has it",
     ]) {
-      expect(draft(`${fine}.`).success, fine).toBe(true)
+      expect(draft(`${fine}.`), fine).toBeUndefined()
     }
     // code and quoted words are someone else's words
-    expect(draft("run `we` twice.").success).toBe(true)
-    expect(draft("```\nwe are the setup\n```").success).toBe(true)
-    expect(draft('he said "we will look into it".').success).toBe(true)
-    expect(draft("> we said so\nI will check.").success).toBe(true)
+    expect(draft("run `we` twice.")).toBeUndefined()
+    expect(draft("```\nwe are the setup\n```")).toBeUndefined()
+    expect(draft('he said "we will look into it".')).toBeUndefined()
+    expect(draft("> we said so\nI will check.")).toBeUndefined()
     // a slack decision's words are checked the same way
-    expect(
-      inboxInputSchema.safeParse(decision({ ...SLACK, text: "hi Merritt, we fixed it." })).success,
-    ).toBe(false)
+    expect(voiced(decision({ ...SLACK, text: "hi Merritt, we fixed it." }))).toContain('Found "we"')
     // other kinds and previews are unaffected
+    expect(voiced(decision({ ...PREVIEWS.ask, text: "we will port it now." }))).toBeUndefined()
     expect(
-      inboxInputSchema.safeParse(decision({ ...PREVIEWS.ask, text: "we will port it now." }))
-        .success,
-    ).toBe(true)
+      voiced(decision({ ...PREVIEWS.delete, what: "our stale worktrees", why: "they hold 30 GB" })),
+    ).toBeUndefined()
     expect(
-      inboxInputSchema.safeParse(
-        decision({ ...PREVIEWS.delete, what: "our stale worktrees", why: "they hold 30 GB" }),
-      ).success,
-    ).toBe(true)
-    expect(
-      inboxInputSchema.safeParse({
+      voiced({
         from: "builder",
         kind: "update",
         preview: { outcome: "alert" },
         title: "the Mac is on battery",
-      }).success,
-    ).toBe(true)
+      }),
+    ).toBeUndefined()
     // only the words are the owner's voice: a clean draft passes, its recipient's short name unchecked
     expect(
-      inboxInputSchema.safeParse({
+      voiced({
         from: "dispatcher",
         kind: "draft",
         preview: { link: CHANNEL, text: "I will send it shortly.", to: "our thread" },
         title: "Ask Merritt",
+      }),
+    ).toBeUndefined()
+    // any other voice checks none
+    expect(
+      voiceRefusal(
+        inboxInputSchema.parse(decision({ ...SLACK, text: "hi Merritt, we fixed it." })),
+        "",
+      ),
+    ).toBeUndefined()
+  })
+
+  // issue 1454: the voice is the owner.voice setting's, none by default, so the item's own shape passes a plural draft
+  test("a draft or a slack decision speaking as we parses, since no voice is set by default", () => {
+    expect(
+      inboxInputSchema.safeParse({
+        from: "dispatcher",
+        kind: "draft",
+        preview: { link: CHANNEL, text: "we will ship it.", to: "@Merritt" },
+        title: "Ask Merritt",
       }).success,
+    ).toBe(true)
+    expect(
+      inboxInputSchema.safeParse(decision({ ...SLACK, text: "hi Merritt, we fixed it." })).success,
     ).toBe(true)
   })
 
@@ -5723,6 +5740,29 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
         ok: false,
       })
       expect((await store.getItem(db, posted.id))?.status).toBe("open")
+    })
+  })
+  // issue 1454: postItem and editItem read owner.voice from the data folder, so the voice check runs only where one is set
+  describe("the owner.voice setting on a post and an edit", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "inbox-voice-"))
+    afterAll(() => rmSync(scratch, { force: true, recursive: true }))
+    const plural = decision({ ...SLACK, text: "hi Merritt, we fixed it." })
+
+    test("a singular voice refuses a plural slack decision on a post and an edit", async () => {
+      const data = storeWith(join(scratch, "singular"), {}, { "owner.voice": "singular" })
+      const posted = await store.postItem(db, plural, undefined, undefined, data)
+      expect(posted).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(!posted.ok && posted.message).toContain('Found "we"')
+      const clean = await store.postItem(db, decision(SLACK), undefined, undefined, data)
+      if (!clean.ok) throw new Error(clean.message)
+      const edited = await store.editItem(db, clean.item.id, plural, undefined, data)
+      expect(!edited.ok && edited.message).toContain('Found "we"')
+    })
+
+    test("no voice set, or no data folder, posts it", async () => {
+      const data = storeWith(join(scratch, "none"), {})
+      expect((await store.postItem(db, plural, undefined, undefined, data)).ok).toBe(true)
+      expect((await store.postItem(db, plural)).ok).toBe(true)
     })
   })
   describe("an own decision's post and Approve (PG-1162)", () => {

@@ -17,6 +17,8 @@ Settings > Jobs on the Dashboard lists every job, an org's own beside Playground
 Its switch saves the job's `enabled` field alone at the job's scope, your login's for Playground's job and its org's for an org's own, with a reason, over any other field your scope's value holds.
 
 A session cannot write a job's setting (the `no-extensions-write` hook refuses `playground settings set` and `reset` of every `jobs.<name>`, and `settings import-jobs` but its `--dry-run`), so it asks you with an Inbox guard decision whose value is `{"enabled": true}` or `{"enabled": false}` alone, or a new `{"config": {...}}` alone, or for an org's own job its whole row ([below](#an-orgs-own-job)); your Approve writes it the same way, an `enabled` or a `config` over the row its scope holds ([Inbox](/docs/inbox)).
+The one exception is how often a job runs: the Ops lead may set a job's row whose only change from the row your scope stores is `schedule.every`, its interval, where the job already runs on one and no other scope stores a row for it.
+It does so with the `playground settings set` call alone on its line, since a variable set beside it could move the write to another scope.
 
 From your own terminal, set your scope's value, which replaces any value it held, with a reason:
 
