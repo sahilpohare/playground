@@ -79,6 +79,9 @@ On its first start the Dashboard's **Start a local container**, on the Database 
 That database listens on every interface with pglaunch's own credentials (user, password and database `postgres`), so anyone who can reach this Mac on that port can read and change it.
 Keep the Mac on a network you trust, or block the port in its firewall.
 
+Docker is optional: while it is not running, the Database row offers **Start without Docker** instead, which keeps the database as [PGlite](https://pglite.dev), Postgres running inside Playground with no container, in `~/.playground/pglite/<name>/`.
+It listens on this Mac alone (127.0.0.1), and `bun run dev` starts it again after a restart.
+
 ## Run it again
 
 Every step checks before it acts, so running the command again changes nothing on a working install, and puts back a link that went missing.

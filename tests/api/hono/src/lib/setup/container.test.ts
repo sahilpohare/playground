@@ -3,8 +3,16 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const { containerName, DOCKER_DOWN, parseLaunch, PGLAUNCH, setupName, startLocal, withDatabase } =
-  await import("../../../../../../api/hono/src/lib/setup/container")
+const {
+  containerName,
+  DOCKER_DOWN,
+  parseLaunch,
+  PGLAUNCH,
+  setupName,
+  startLocal,
+  startPgliteDatabase,
+  withDatabase,
+} = await import("../../../../../../api/hono/src/lib/setup/container")
 const { livePair } = await import("../../../../../../api/hono/src/lib/dev/live-dashboard")
 const { othersLiveDashboard } = await import("../../../../../../api/hono/src/lib/dev/launch")
 const { locate } = await import("../../../../../../api/hono/src/lib/sessions/guard")
@@ -331,6 +339,46 @@ describe("startLocal", () => {
     expect(url).toBe(URL)
     expect(bunx.calls).toEqual([["--bun", PGLAUNCH, "-k", "-n", LIVE.database]])
     expect(migrated).toEqual([URL])
+  })
+})
+
+describe("startPgliteDatabase", () => {
+  const LITE = "postgres://postgres@127.0.0.1:54200/postgres?prepare=false"
+
+  test("starts the checkout's PGlite, proves it, migrates it and saves its URL, with no Docker", async () => {
+    const file = envFile("pglite.env")
+    const steps: string[] = []
+    const order: string[] = []
+    const url = await startPgliteDatabase({
+      envFile: file,
+      migrate: async (u) => void order.push(`migrate ${u}`),
+      name: "playground-a-db",
+      onStep: (step) => steps.push(step),
+      prove: async (u) => (order.push(`prove ${u}`), "proved"),
+      start: async (name) => (order.push(`start ${name}`), LITE),
+    })
+    expect(url).toBe(LITE)
+    expect(order).toEqual(["start playground-a-db", `prove ${LITE}`, `migrate ${LITE}`])
+    expect(steps).toEqual([
+      "Starting PGlite",
+      "Checking the database is on this Mac",
+      "Creating the tables",
+      "Saving the database address",
+    ])
+    expect(readFileSync(file, "utf8")).toBe(`BETTER_AUTH_SECRET=x\nPOSTGRES_URL=${LITE}\n`)
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+
+  test("refuses a .env that already names a database, starting nothing", async () => {
+    const started: string[] = []
+    const run = startPgliteDatabase({
+      envFile: envFile("pglite-set.env", `POSTGRES_URL=${LITE}\n`),
+      name: "playground-a-db",
+      onStep: () => {},
+      start: async (name) => (started.push(name), LITE),
+    })
+    await expect(run).rejects.toThrow("already names a database")
+    expect(started).toEqual([])
   })
 })
 

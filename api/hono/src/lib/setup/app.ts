@@ -8,10 +8,17 @@ import { cors } from "hono/cors"
 import { currentSource } from "@/lib/dashboard/fixture"
 import { ApiError, errorHandler, jsonError } from "@/lib/error"
 import { firstRunChecks } from "@/lib/onboard/checks"
-import { busy, type Fixes, fixes as shared, readFix, startFix } from "@/lib/onboard/fix"
+import {
+  busy,
+  type DatabaseFix,
+  type Fixes,
+  fixes as shared,
+  readFix,
+  startFix,
+} from "@/lib/onboard/fix"
 import { requireLoopback, requireThisMachine, requireTrustedOrigin } from "@/middlewares/dashboard"
 
-// The API with no database, which src/main.ts serves while POSTGRES_URL is unset: GET /api/health answers up with `setup: true` and no database, so playground's wait, ops-tick's watch and verify count the stack as up, GET /api/setup reads where setup stands, POST /api/setup/container starts a local container, GET /api/v1/onboard/checks answers the first run's checks with the database as setup stands and done false, since the done mark lives in the database, GET and POST /api/v1/onboard/fix/:id read and start the first run's fixes, the database's being Start a local container, and every other route is 404. It imports no database, auth or session code, since better-auth lives in the database setup makes, so its writes are guarded by origin and loopback alone, refused when forwarded from off this machine (a tailnet or a LAN proxy), limited to 5 a minute together and run one at a time with every fix.
+// The API with no database, which src/main.ts serves while POSTGRES_URL is unset: GET /api/health answers up with `setup: true` and no database, so playground's wait, ops-tick's watch and verify count the stack as up, GET /api/setup reads where setup stands, POST /api/setup/container starts a local container, GET /api/v1/onboard/checks answers the first run's checks with the database as setup stands and done false, since the done mark lives in the database, GET and POST /api/v1/onboard/fix/:id read and start the first run's fixes, the database's being Start a local container or Start without Docker (PGlite), and every other route is 404. It imports no database, auth or session code, since better-auth lives in the database setup makes, so its writes are guarded by origin and loopback alone, refused when forwarded from off this machine (a tailnet or a LAN proxy), limited to 5 a minute together and run one at a time with every fix.
 
 export type SetupState =
   | { status: "failed"; reason: string }
@@ -20,19 +27,18 @@ export type SetupState =
 
 export type Fetch = (request: Request, env: unknown) => Response | Promise<Response>
 
-// start resolves once the database is ready and the API has moved on to the normal app, or throws with words for the page.
-export const setupApp = (
-  start: (onStep: (step: string) => void) => Promise<void>,
-  runner: Fixes = shared,
-) => {
+export type StartSetup = (onStep: (step: string) => void, engine: DatabaseFix) => Promise<void>
+
+// start resolves once the database the engine names (a container, or PGlite with no Docker) is ready and the API has moved on to the normal app, or throws with words for the page.
+export const setupApp = (start: StartSetup, runner: Fixes = shared) => {
   let state: SetupState = { status: "idle" }
-  const database = async (line: (text: string) => void) => {
+  const database = async (line: (text: string) => void, engine: DatabaseFix) => {
     state = { status: "starting", step: "Starting" }
     try {
       await start((step) => {
         state = { status: "starting", step }
         line(step)
-      })
+      }, engine)
     } catch (error) {
       state = { reason: error instanceof Error ? error.message : String(error), status: "failed" }
       throw error
@@ -82,12 +88,9 @@ export const setupApp = (
 }
 
 // Serves setupApp until start resolves, then loads the normal app and serves it from then on, so setup's routes answer 404 with no restart.
-export const firstRun = (
-  start: (onStep: (step: string) => void) => Promise<void>,
-  load: () => Promise<Fetch>,
-): Fetch => {
-  let serve: Fetch = setupApp(async (onStep) => {
-    await start(onStep)
+export const firstRun = (start: StartSetup, load: () => Promise<Fetch>): Fetch => {
+  let serve: Fetch = setupApp(async (onStep, engine) => {
+    await start(onStep, engine)
     onStep(`Opening ${site.name}`)
     serve = await load()
   }).fetch

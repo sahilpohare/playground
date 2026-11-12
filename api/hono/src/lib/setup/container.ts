@@ -1,4 +1,4 @@
-import { chmodSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { site } from "@packages/config/site"
@@ -15,6 +15,7 @@ import {
   livePair,
   unreusedLiveDatabase,
 } from "@/lib/dev/live-dashboard"
+import { startPglite } from "@/lib/pglite"
 import { provenLocal } from "@/lib/sessions/guard"
 
 // First run's Start a local container: Postgres started by pglaunch as it is (the owner's choice for this one step: its own postgres/postgres login, published on every interface), proved local as bun run ingest proves it, migrated, and named in .env. Every call is a fixed argv: pglaunch is pinned exactly and given the checkout's container name, and nothing comes from a request.
@@ -114,13 +115,7 @@ export async function startLocal({
       `${name} holds the ${site.name} you run every day; start this checkout's own`,
     )
   }
-  const saved = Bun.file(envFile)
-  const before = (await saved.exists()) ? await saved.text() : ""
-  if (/^POSTGRES_URL=[ \t]*\S/m.test(before)) {
-    throw new SetupError(
-      `${envFile} already names a database (POSTGRES_URL), so ${site.name} uses it on its next start`,
-    )
-  }
+  const before = await unsetEnv(envFile)
   onStep("Checking Docker")
   if ((await docker(["info"])).code !== 0) throw new SetupError(DOCKER_DOWN)
   if (branch === live.branch) {
@@ -170,7 +165,48 @@ export async function startLocal({
   onStep("Creating the tables")
   await migrateTo(launched.url)
   onStep("Saving the database address")
-  if (await saved.exists()) chmodSync(envFile, 0o600)
-  writeFileSync(envFile, withDatabase(before, launched.url), { mode: 0o600 })
+  saveEnv(envFile, before, launched.url)
   return launched.url
+}
+
+export type StartPglite = Pick<Start, "envFile" | "migrate" | "name" | "onStep" | "prove"> & {
+  start?: (name: string) => Promise<string>
+}
+
+// First run's Start without Docker: the checkout's own PGlite (lib/pglite.ts), proved local, migrated and named in .env as startLocal's container is; a failure throws and leaves the server running so Try again reuses it.
+export async function startPgliteDatabase({
+  envFile,
+  migrate: migrateTo = migrate,
+  name,
+  onStep,
+  prove = provenLocal,
+  start = startPglite,
+}: StartPglite): Promise<string> {
+  const before = await unsetEnv(envFile)
+  onStep("Starting PGlite")
+  const url = await start(name)
+  onStep("Checking the database is on this Mac")
+  await prove(url)
+  onStep("Creating the tables")
+  await migrateTo(url)
+  onStep("Saving the database address")
+  saveEnv(envFile, before, url)
+  return url
+}
+
+// envFile's text, refused when it already names a database, which the next start uses.
+const unsetEnv = async (envFile: string): Promise<string> => {
+  const saved = Bun.file(envFile)
+  const before = (await saved.exists()) ? await saved.text() : ""
+  if (/^POSTGRES_URL=[ \t]*\S/m.test(before)) {
+    throw new SetupError(
+      `${envFile} already names a database (POSTGRES_URL), so ${site.name} uses it on its next start`,
+    )
+  }
+  return before
+}
+
+const saveEnv = (envFile: string, before: string, url: string) => {
+  if (existsSync(envFile)) chmodSync(envFile, 0o600)
+  writeFileSync(envFile, withDatabase(before, url), { mode: 0o600 })
 }

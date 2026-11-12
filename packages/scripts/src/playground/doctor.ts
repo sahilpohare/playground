@@ -35,7 +35,7 @@ const TOOLS: [string, boolean, string, string][] = [
     "curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash",
     "routes Claude Code to a Codex (ChatGPT) subscription too",
   ],
-  ["docker", true, "install Docker Desktop", "the Dashboard's database"],
+  ["docker", false, "install Docker Desktop", "a database in a container; PGlite needs none"],
   ["gh", true, "brew install gh", "clones, PRs and ext sync"],
   ["git", true, "brew install git", "the checkout"],
   ["node", true, `brew install node (${NODE_MIN.join(".")} or newer)`, "the Dashboard's next dev"],
