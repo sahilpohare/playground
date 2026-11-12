@@ -73,20 +73,31 @@ test("no two checks in a run share a browser session", async () => {
   expect(source).not.toMatch(/browse\(\s*at,\s*async/)
 })
 
-// A fake agent-browser first on PATH, logging each call: its sign-in wait hangs, or fails with "fail", and every other call answers success.
+// A fake agent-browser first on PATH, logging each call: its sign-in wait hangs, writing its own pid to hung, until verify, its parent, has gone (30 s at most), or fails with "fail", and every other call answers success.
 const fakeBrowser = (wait: "hang" | "fail") => {
   const dir = mkdtempSync(join(tmpdir(), "verify-close-"))
   const log = join(dir, "calls.log")
+  const hung = join(dir, "hung.pid")
   const answer =
     wait === "hang"
-      ? `sleep 30; echo '{"success":true,"data":{}}'`
+      ? `echo $$ > "${hung}"; i=0; while [ $i -lt 300 ] && kill -0 $PPID 2>/dev/null; do sleep 0.1; i=$((i+1)); done; echo '{"success":true,"data":{}}'`
       : `echo '{"success":false,"error":"boom"}'`
   writeFileSync(
     join(dir, "agent-browser"),
     `#!/bin/sh\necho "$*" >> "${log}"\ncase "$*" in *"wait --url"*) ${answer};; *) echo '{"success":true,"data":{"result":true}}';; esac\n`,
   )
   chmodSync(join(dir, "agent-browser"), 0o755)
-  return { dir, log, env: { ...process.env, PATH: `${dir}:${process.env.PATH}` } }
+  return { dir, env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, hung, log }
+}
+
+// Whether the process with this pid still runs: signal 0 sends nothing and only asks.
+const running = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 const ROWS = ["bun", CLI, "rows", "--web", "http://127.0.0.1:9", "--api", "http://127.0.0.1:9"]
 const closesItsOwn = (calls: string) => {
@@ -95,22 +106,24 @@ const closesItsOwn = (calls: string) => {
   expect(calls).toMatch(new RegExp(`--session ${session} --json close`))
 }
 
-// An interrupt runs every open cleanup before it exits, so no browser session outlives the run.
+// An interrupt runs every open cleanup before it exits, so no browser session outlives the run, and the hung browser call ends with it (#1742), read by its own pid.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   test(`verify closes its browser session on ${signal}`, async () => {
-    const { dir, env, log } = fakeBrowser("hang")
+    const { dir, env, hung, log } = fakeBrowser("hang")
+    let pid = 0
     try {
       const run = Bun.spawn(ROWS, { env, stderr: "ignore", stdin: "ignore", stdout: "ignore" })
-      for (
-        let i = 0;
-        i < 200 && !(existsSync(log) && readFileSync(log, "utf8").includes("wait --url"));
-        i++
-      )
+      for (let i = 0; i < 200 && !(existsSync(hung) && readFileSync(hung, "utf8").trim()); i++)
         await Bun.sleep(50)
+      pid = Number(readFileSync(hung, "utf8").trim())
+      expect(running(pid)).toBe(true)
       run.kill(signal)
       expect(await run.exited).toBe(130)
       closesItsOwn(readFileSync(log, "utf8"))
+      for (let i = 0; i < 40 && running(pid); i++) await Bun.sleep(50)
+      expect(running(pid)).toBe(false)
     } finally {
+      if (pid && running(pid)) process.kill(pid, "SIGTERM")
       rmSync(dir, { force: true, recursive: true })
     }
   }, 20_000)

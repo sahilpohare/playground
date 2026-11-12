@@ -1,28 +1,20 @@
-import { mkdir, readdir } from "node:fs/promises"
+import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 
-import { seatOf } from "../../../../../packages/config/src/kinds"
-import {
-  parseSessionState,
-  type SessionState,
-  type SessionStateName,
-  sessionStateDir,
-  stateNow,
-} from "../../../../../packages/config/src/session-state"
 import { configDirOf, dataDirOf } from "../../../../../packages/env/src/data-dir"
-import { sendAs } from "../../../../../packages/scripts/src/ops-job/job"
 import {
-  liveSessions,
-  newestTurnAt,
-  transcriptTail,
-} from "../../../../../packages/scripts/src/ops-session-resume/resume"
+  assistantOf,
+  busyOf,
+  handOn,
+  type Stuck,
+  stuckOf,
+} from "../../../../../packages/scripts/src/ops-job/dispatcher"
+import { sendAs } from "../../../../../packages/scripts/src/ops-job/job"
 import { writeAtomic } from "../../../../../packages/scripts/src/write-atomic"
 import { readPolicy, slackSettings } from "../../../../../packages/settings/src"
 import { history, ownerMessages, PLAYGROUND, readSent, type Slack, slackOf, tokenOf } from "./slack"
 
 const STATE = "dm-watch.json"
-// How long an owner message waits for our reply, and a dispatcher's stuck or failed record stands, before the assistant hears it too.
-export const WAIT_S = 180
 // How far back each pass reads; a first pass hands on only the last 2 minutes, so a new install replays no history.
 const WINDOW_S = 3600
 const FIRST_S = 120
@@ -30,7 +22,6 @@ const FIRST_S = 120
 // bravo marks a message past its hand-on, sent to the assistant seat or logged as kept with the dispatcher, so neither happens twice; the name is kept from when the second dispatcher was the backup, so a file written before reads the same.
 type Handed = { at: number; bravo?: true; text: string; ts: string }
 type State = { handed: Handed[]; stuckTold?: string }
-export type Stuck = { at: string; state: string } | null
 type Io = {
   assistant: () => Promise<string | undefined>
   busy: () => Promise<boolean>
@@ -70,7 +61,7 @@ export async function watch(io: Io) {
     read.some((m) => sent.has(m.ts) && m.text !== PLAYGROUND && Number(m.ts) > Number(ts))
   const waiting = state.handed.filter((h) => !h.bravo && !replied(h.ts))
   const working = !blocked && waiting.length > 0 && (await busy())
-  const due = waiting.filter((h) => blocked || (now - h.at >= WAIT_S && !working))
+  const { due, why } = handOn(waiting, (h) => now - h.at, blocked, working)
   const to = due.length > 0 ? await assistant() : undefined
   for (const h of due) {
     h.bravo = true
@@ -80,9 +71,6 @@ export async function watch(io: Io) {
       )
       continue
     }
-    const why = blocked
-      ? `the dispatcher has read ${blocked.state} since ${blocked.at}`
-      : `no reply has landed in ${WAIT_S / 60} minutes`
     await send(to, `The owner's DM at ${h.ts}, handed on since ${why}: ${h.text}\n${reply}`)
   }
   if (blocked && due.length > 0 && state.stuckTold !== blocked.at) {
@@ -96,57 +84,6 @@ export async function watch(io: Io) {
   }
   state.handed = state.handed.filter((h) => Number(h.ts) >= now - WINDOW_S)
   await writeAtomic(path, JSON.stringify(state))
-}
-
-// The session in the assistant seat, by the roster as roster.ts who assistant reads it; undefined while none holds it or the roster does not read.
-export async function assistantOf(data: string): Promise<string | undefined> {
-  const roster = await Bun.file(join(data, "roster.json"))
-    .json()
-    .catch(() => null)
-  return seatOf(roster?.agents, "assistant")
-}
-
-// The session-state record of each live session under the name, with the state stateNow() reads it as, as ops-session-resume reads it, so a newer turn ends a stuck one.
-async function recordsOf(name: string, data: string, configDir: string) {
-  const live = await liveSessions(configDir)
-  const dir = sessionStateDir(data)
-  const files = new Set(await readdir(dir).catch(() => [] as string[]))
-  const found: { record: SessionState; state: SessionStateName | null }[] = []
-  for (const [id, session] of live) {
-    if (session.name !== name || !files.has(`${id}.json`)) continue
-    const record = parseSessionState(await Bun.file(join(dir, `${id}.json`)).text())
-    if (record)
-      found.push({
-        record,
-        state: stateNow(record, newestTurnAt(await transcriptTail(configDir, id))),
-      })
-  }
-  return found
-}
-
-// The dispatcher's record when it has read stuck or failed for over 3 minutes.
-export async function stuckOf(
-  name: string,
-  data: string,
-  configDir: string,
-  now: number,
-): Promise<Stuck> {
-  for (const { record, state } of await recordsOf(name, data, configDir))
-    if ((state === "stuck" || state === "failed") && now - Date.parse(record.at) / 1000 > WAIT_S)
-      return { at: record.at, state: record.state }
-  return null
-}
-
-// Whether the dispatcher is mid-turn: a working record written in the last 3 minutes, since each tool call rewrites it.
-export async function busyOf(
-  name: string,
-  data: string,
-  configDir: string,
-  now: number,
-): Promise<boolean> {
-  return (await recordsOf(name, data, configDir)).some(
-    ({ record, state }) => state === "working" && now - Date.parse(record.at) / 1000 <= WAIT_S,
-  )
 }
 
 // one pass, no retry: its errors as one plain line, which the beat's failure alert reads

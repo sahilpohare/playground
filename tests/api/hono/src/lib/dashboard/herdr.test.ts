@@ -14,6 +14,7 @@ import { join } from "node:path"
 import {
   answerKeys,
   bringsBack,
+  codexLaunches,
   FIXTURE_SOCKET,
   HerdrDown,
   herdrEvents,
@@ -325,6 +326,72 @@ describe("readServer and herdrRecords", () => {
       session_id: SESSION,
     })
     expect(herdrRecords([read], null, "t")[0]).toMatchObject({ session_id: SESSION })
+  })
+
+  test("a Codex pane holds the session its launch record names, live with no Claude registry file (#1794)", () => {
+    const THREAD = "0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+    const pane = (label: string, argv: string[]): ServerRead => ({
+      panes: [
+        {
+          ...paneSchema.parse({ ...PANE, agent: null, agent_session: null, label }),
+          processes: [{ argv, cwd: "/tmp/leads", pid: 5151 }],
+        },
+      ],
+      server: "playground",
+      workspaces: [],
+    })
+    const codex = new Map([["dispatcher", THREAD]])
+    const running = pane("dispatcher", ["/opt/codex/bin/codex", "--dangerously-bypass-hook-trust"])
+    const [record, ...rest] = herdrRecords([running], registered([]), "t", codex)
+    expect(rest).toEqual([])
+    expect(record).toMatchObject({
+      agent: "codex",
+      pid: 5151,
+      session_id: THREAD,
+      surface_id: "herdr:playground:w1:p1",
+      transcript_path: "",
+    })
+    expect(liveRecords({ sessions: [record] }, null).sessions).toHaveLength(1)
+    // the pane's codex has exited to its shell, or the label has no Codex launch record
+    expect(herdrRecords([pane("dispatcher", ["/bin/zsh"])], registered([]), "t", codex)).toEqual([])
+    expect(herdrRecords([running], registered([]), "t")).toEqual([])
+    expect(herdrRecords([pane("builder", ["codex"])], registered([]), "t", codex)).toEqual([])
+    // npm's launcher runs under node; a word naming codex elsewhere in the argv, a shell's argument, holds nothing
+    const launcher = pane("dispatcher", ["node", "/x/node_modules/.bin/codex", "resume"])
+    expect(herdrRecords([launcher], registered([]), "t", codex)).toHaveLength(1)
+    const shell = pane("dispatcher", ["/bin/zsh", "-c", "/opt/codex/bin/codex"])
+    expect(herdrRecords([shell], registered([]), "t", codex)).toEqual([])
+    expect(
+      herdrRecords([pane("dispatcher", ["less", "codex"])], registered([]), "t", codex),
+    ).toEqual([])
+  })
+
+  test("the Codex launch records are the sessions whose pin names codex, with their resume record's thread", () => {
+    const data = mkdtempSync(join(tmpdir(), "codex-launch-"))
+    cleanups.push(() => rmSync(data, { force: true, recursive: true }))
+    mkdirSync(join(data, "backends"))
+    mkdirSync(join(data, "resume"))
+    const THREAD = "0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+    const record = (name: string, pin: string, thread = THREAD, folder = "/x/leads") => {
+      writeFileSync(join(data, "backends", name), `${pin}\n`)
+      writeFileSync(
+        join(data, "resume", `${name}.sh`),
+        `#!/bin/bash\n# server: playground\nexec /x/scripts/spawn.sh resume ${name} ${folder} ${thread}\n`,
+      )
+    }
+    record("dispatcher", "codex openai")
+    // spawn.sh writes the exec line with %q, so a folder holding a space reads as one word with its space escaped
+    record("dispatcher-b", "codex openai", THREAD, "/x/my\\ leads")
+    record("builder", "claude-code claude")
+    record("planner", "codex openai", "not-a-thread")
+    writeFileSync(join(data, "backends", "ops"), "codex openai\n")
+    expect(codexLaunches(data)).toEqual(
+      new Map([
+        ["dispatcher", THREAD],
+        ["dispatcher-b", THREAD],
+      ]),
+    )
+    expect(codexLaunches(join(data, "none"))).toEqual(new Map())
   })
 
   test("a board that reads no herdr server, or not every one, keeps the others' change times", () => {
@@ -1118,7 +1185,7 @@ const repoFiles = async (keep: (path: string) => boolean): Promise<Record<string
   return files
 }
 
-// Text typed into a pane lands as a user turn and reads as the owner's, and nothing may speak for the owner, so only herdr.ts's writes type, for the owner's own clicks and the idle compact's `/compact` the owner approved (ADR 0020); sessions talk through SendMessage. A cmux command that types is held here while cmux can still be installed, and a script's key into a herdr pane further below, to run.py's Escape and `playground picker`.
+// Text typed into a pane lands as a user turn and reads as the owner's, and nothing may speak for the owner, so only herdr.ts's writes type, for the owner's own acts and the idle compact's `/compact` the owner approved (ADR 0020); sessions talk through SendMessage. A cmux command that types is held here while cmux can still be installed, and a script's key into a herdr pane further below, to run.py's Escape and `playground picker`.
 const PANE_TYPING = [
   /(?:^|[^\w-])[$"'{]*[\w./~-]*cmux\b[}"']?(?:\s+--?[\w-]+(?:=\S+)?)*\s+send(?:-key)?\s+(?!(?:or|and)\b)[^\s`]/i,
   /["']cmux["']\s*,\s*["']send(?:-key)?["']/i,

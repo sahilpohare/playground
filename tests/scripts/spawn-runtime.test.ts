@@ -176,7 +176,7 @@ describe("with no --runtime, a start opens in herdr whatever its spawner's termi
     expect(readFileSync(lw(r.home, "runtimes", "worker-brave-otter"), "utf8")).toBe("herdr\n")
   })
 
-  // spawn.sh opens every session in herdr: --runtime cmux is refused in every mode as any runtime but herdr or hc is, before any cmux or herdr call and any pin.
+  // spawn.sh opens every session in herdr: --runtime cmux is refused in every mode as any runtime but herdr is, before any cmux or herdr call and any pin.
   test.each([
     ["a worker", ["worker", "worker-brave-otter", "b.md"]],
     ["a column", ["column", "reviewer", "reviewer-x", "worker-x", "w1:p2", "r.md", "--pr", "1"]],
@@ -184,7 +184,7 @@ describe("with no --runtime, a start opens in herdr whatever its spawner's termi
     ["a manager", ["manager", "optimizer", "b.md"]],
     ["a resume", ["resume", "worker-x", root, "0b6e3c1a-4d2f-4e8a-9c7b-1f2e3d4c5b6a"]],
     ["a --check", ["worker", "worker-brave-otter", "b.md", "--check"]],
-  ])("--runtime cmux on %s is refused as any runtime but herdr or hc is", async (_, args) => {
+  ])("--runtime cmux on %s is refused as any runtime but herdr is", async (_, args) => {
     const r = await spawn(
       [...args, "--runtime", "cmux"],
       [],
@@ -193,7 +193,7 @@ describe("with no --runtime, a start opens in herdr whatever its spawner's termi
       { name: String(args[0] === "column" ? args[2] : args[1]), backend: "claude" },
     )
     expect(r.code).toBe(2)
-    expect(r.err).toContain('--runtime takes herdr or hc, not "cmux"')
+    expect(r.err).toContain('--runtime takes herdr alone, not "cmux"')
     expect(r.cmux).toBeUndefined()
     expect(herdrCalls(r)).toEqual([])
     expect(existsSync(lw(r.home, "runtimes"))).toBe(false)
@@ -217,7 +217,7 @@ describe("with no --runtime, a start opens in herdr whatever its spawner's termi
       backend: "claude",
     })
     expect(r.code).toBe(2)
-    expect(r.err).toContain('--runtime takes herdr or hc, not "tmux"')
+    expect(r.err).toContain('--runtime takes herdr alone, not "tmux"')
     expect(herdrCalls(r)).toEqual([])
     expect(existsSync(lw(r.home, "runtimes"))).toBe(false)
   })

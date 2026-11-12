@@ -46,6 +46,7 @@ describe("toolChecks", () => {
       "node",
       "python3",
       "uv",
+      "whisper-cli",
       "gh login",
     ])
     expect(missing(checks)).toBe(false)
@@ -62,15 +63,17 @@ describe("toolChecks", () => {
     expect(missing(checks)).toBe(true)
   })
 
-  test("docker, uv, claude-codex and the gh login are optional, since PGlite needs no Docker", () => {
+  test("docker, uv, whisper-cli, claude-codex and the gh login are optional, since PGlite needs no Docker", () => {
     const checks = toolChecks(
-      (cmd) => cmd !== "uv" && cmd !== "docker" && cmd !== "claude-codex",
+      (cmd) => cmd !== "uv" && cmd !== "docker" && cmd !== "whisper-cli" && cmd !== "claude-codex",
       () => false,
     )
     expect(checks.find((c) => c.name === "docker")!.detail).toContain("PGlite needs none")
     expect(checks.find((c) => c.name === "docker")!.status).toBe("optional")
     expect(checks.find((c) => c.name === "uv")!.status).toBe("optional")
     expect(checks.find((c) => c.name === "claude-codex")!.status).toBe("optional")
+    expect(checks.find((c) => c.name === "whisper-cli")!.status).toBe("optional")
+    expect(missing(checks)).toBe(false)
     expect(checks.find((c) => c.name === "gh login")).toEqual({
       detail: "sync is off; fix: gh auth login, then playground ext init",
       name: "gh login",
@@ -296,6 +299,7 @@ describe("doctor.ts --tools", () => {
       "claude",
       "claude-codex",
       "uv",
+      "whisper-cli",
       "gh login",
     ])
   })

@@ -227,6 +227,124 @@ describe("sweep: ops-tick ends what the detector flags", () => {
     expect(closed).toEqual(["r2kq9m-reviewer"])
     expect(lines.map((l) => l.to)).toEqual(["ops"])
   })
+
+  // #1762: a lead closed the worker's PR unmerged and had it rebuild from canary; the older merged PR on its row must not end it, and its lead must hear.
+  test("a worker whose PR that closed last closed unmerged is kept, and its lead is asked to reassign or end it", async () => {
+    const { closed, deps, reported } = fakes()
+    const older: PrState = { ...MERGED, mergedAt: "2026-11-01T00:10:00Z" }
+    const unmerged: PrState = {
+      closedAt: "2026-11-01T03:00:00Z",
+      head: "cl0sed11",
+      ref: "pg-2111-z",
+      state: "closed",
+      verdicts: [],
+    }
+    const lines = await sweep(
+      input({
+        prState: async (url) => (url === URL ? older : url === NEXT ? unmerged : null),
+        roster: { "v4tql8-worker": { kind: "worker", name: "v4tql8-worker", pr: NEXT } },
+        sessions: { "v4tql8-worker": live("v4tql8-worker") },
+        workerPrs: async (name) => (name === "v4tql8-worker" ? [URL, NEXT] : []),
+      }),
+      deps,
+    )
+    expect([closed, reported]).toEqual([[], []])
+    expect(lines).toEqual([
+      {
+        text: "Kept v4tql8-worker: worker-pr-closed (closed #2111); reassign it or end it",
+        to: "builder",
+      },
+    ])
+  })
+
+  test("a worker whose PR that closed last merged is ended, and the line names it, reading merged", async () => {
+    const { deps, reported } = fakes()
+    const older: PrState = {
+      closedAt: "2026-11-01T00:10:00Z",
+      head: "cl0sed11",
+      ref: "pg-2110-z",
+      state: "closed",
+      verdicts: [],
+    }
+    const newer: PrState = { ...MERGED, mergedAt: "2026-11-01T03:00:00Z" }
+    const lines = await sweep(
+      input({
+        prState: async (url) => (url === URL ? older : url === NEXT ? newer : null),
+        roster: { "s9bkr5-worker": { kind: "worker", name: "s9bkr5-worker", pr: NEXT } },
+        sessions: { "s9bkr5-worker": live("s9bkr5-worker") },
+        workerPrs: async (name) => (name === "s9bkr5-worker" ? [URL, NEXT] : []),
+      }),
+      deps,
+    )
+    expect(reported).toEqual([
+      ["s9bkr5-worker", "ended automatically: worker-prs-done (merged), #2111 merged as daaac8e"],
+    ])
+    expect(lines).toEqual([
+      {
+        text: "Ended s9bkr5-worker: worker-prs-done (merged), #2111 merged as daaac8e",
+        to: "builder",
+      },
+    ])
+  })
+
+  // #1748 runs live after the next ship: the sweep holds the checker too, not only the detector's list
+  test("a checker whose own worker is gone stays while an open PR on its list has a live worker", async () => {
+    const { closed, deps } = fakes()
+    const lines = await sweep(
+      input({
+        prState: async (url) =>
+          url === NEXT ? { head: "0pen0001", state: "open", verdicts: [] } : null,
+        roster: {
+          "j4wnc7-reviewer": {
+            kind: "reviewer",
+            name: "j4wnc7-reviewer",
+            prs: [NEXT],
+            worker: "g0new0rk-worker",
+          },
+          "c6xhn2-worker": { kind: "worker", name: "c6xhn2-worker" },
+        },
+        sessions: {
+          "c6xhn2-worker": live("c6xhn2-worker"),
+          "j4wnc7-reviewer": live("j4wnc7-reviewer"),
+        },
+        workerPrs: async (name) => (name === "c6xhn2-worker" ? [NEXT] : []),
+      }),
+      deps,
+    )
+    expect([closed, lines]).toEqual([[], []])
+  })
+
+  // GitHub closes a PR's issue a beat after its merge, so the issue never counts as the last close
+  test("a merged PR beside the issue it closes, closed a beat later, still ends the worker as merged", async () => {
+    const { closed, deps, reported } = fakes()
+    const ISSUE = "https://github.com/o/r/issues/2112"
+    const lines = await sweep(
+      input({
+        prState: async (url) =>
+          url === NEXT
+            ? { ...MERGED, mergedAt: "2026-11-01T03:00:00Z" }
+            : url === ISSUE
+              ? { closedAt: "2026-11-01T03:00:01Z", head: "", state: "closed", verdicts: [] }
+              : null,
+        roster: {
+          "n8vtrw-worker": { kind: "worker", name: "n8vtrw-worker", pr: NEXT, prs: [NEXT, ISSUE] },
+        },
+        sessions: { "n8vtrw-worker": live("n8vtrw-worker") },
+        workerPrs: async (name) => (name === "n8vtrw-worker" ? [NEXT] : []),
+      }),
+      deps,
+    )
+    expect(closed).toEqual(["n8vtrw-worker"])
+    expect(reported).toEqual([
+      ["n8vtrw-worker", "ended automatically: worker-prs-done (merged), #2111 merged as daaac8e"],
+    ])
+    expect(lines).toEqual([
+      {
+        text: "Ended n8vtrw-worker: worker-prs-done (merged), #2111 merged as daaac8e",
+        to: "builder",
+      },
+    ])
+  })
 })
 
 describe("guards", () => {

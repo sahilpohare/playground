@@ -1,11 +1,13 @@
-// PreToolUse hook, acting for a factory session alone (role.ts): refuses a Bash test run that reads green while no test ran or a test failed: bun with an option given its value as the next word (--cwd <dir>, --env-file <file>) before its run or test subcommand, which then prints bun's usage and exits 0 (run) or runs package.json's test script with the paths appended in place of the tests (test), and a test run (bun's, or a pytest, ty or ruff run) piped into another command in a script that sets no pipefail and reads no pipe status of its own shell, whose exit status is then the last command's.
+// PreToolUse hook, acting for a factory session alone (role.ts): refuses a Bash test run that reads green while no test ran or a test failed: bun with an option given its value as the next word (--cwd <dir>, --env-file <file>) before its run or test subcommand, which then prints bun's usage and exits 0 (run) or runs package.json's test script with the paths appended in place of the tests (test), and a test run (bun's, or a pytest, ty or ruff run) or a git push piped into another command in a script that sets no pipefail and reads no pipe status of its own shell, whose exit status is then the last command's.
 
 import { fromFactory } from "./role"
 import {
   type Command,
+  GIT_TAKES,
   lex,
   parse,
   parseFlags,
+  type Parsed,
   program,
   pythonModule,
   SHELLS,
@@ -46,17 +48,36 @@ const positionals = (args: Word[]): string[] => {
   return out
 }
 
-function runsTests(cmd: Command): boolean {
-  const parsed = parse(cmd)
+// The commands a wrapper or a shell runs for it (its command, its script's words or its -c script's commands), or undefined for any other command.
+function inner(cmd: Command, parsed: Parsed): Command[] | undefined {
   const { args, name } = parsed
   const slot = slotWords(parsed)
-  if (slot) return slot.length === 0 ? false : runsTests({ ...cmd, scope: 0, words: slot })
-  if (SHELLS.has(name)) {
-    const script = shellSlot(args, name)
-    if (script) return runsTests({ ...cmd, scope: 0, words: script })
-    const { inline, operand } = shellOperand(args, name)
-    return inline && operand !== undefined && lex(operand.value).commands.some(runsTests)
-  }
+  if (slot) return slot.length === 0 ? [] : [{ ...cmd, scope: 0, words: slot }]
+  if (!SHELLS.has(name)) return
+  const script = shellSlot(args, name)
+  if (script) return [{ ...cmd, scope: 0, words: script }]
+  const { inline, operand } = shellOperand(args, name)
+  return inline && operand !== undefined ? lex(operand.value).commands : []
+}
+
+// Whether the command is a git push, past git's global options (-C <dir>, -c <key=value> and the rest of GIT_TAKES).
+function pushes(cmd: Command): boolean {
+  const parsed = parse(cmd)
+  const commands = inner(cmd, parsed)
+  if (commands) return commands.some(pushes)
+  const { args, name } = parsed
+  if (name !== "git") return false
+  let k = 0
+  for (; k < args.length && args[k].value.startsWith("-"); k++)
+    if (GIT_TAKES.has(args[k].value)) k++
+  return args[k]?.value === "push"
+}
+
+function runsTests(cmd: Command): boolean {
+  const parsed = parse(cmd)
+  const commands = inner(cmd, parsed)
+  if (commands) return commands.some(runsTests)
+  const { args, name } = parsed
   // uvx names a tool at a version as ruff@latest
   if (TEST_BINS.has(name) || PY_TOOLS.has(name.replace(/@.*$/, ""))) return true
   const python = pythonModule(name, args)
@@ -141,6 +162,8 @@ function judgeCommand(cmd: Command, guarded: boolean): string | undefined {
     return `no-false-green hook refuses bun ${flag}: bun then misreads the subcommand (run prints its usage and exits 0, test runs package.json's test script with the paths appended in place of the tests), so its exit says nothing about the tests. Join the value with = (--opt=value) or put the option after the subcommand: bun --cwd=<dir> run test:file <files>, or bun run --cwd <dir> <script>.`
   if (!guarded && cmd.stdin && runsTests(cmd.stdin))
     return `no-false-green hook refuses a test run piped into ${name || "a command group"} with no pipefail: a pipeline's exit status is its last command's, so a failing run reads 0. Drop the pipe (the Bash tool keeps long output), or set pipefail inside the script that holds the pipe (set -o pipefail; first, inside the quotes of a bash -c script) so the test's own exit status comes through.`
+  if (!guarded && cmd.stdin && pushes(cmd.stdin))
+    return `no-false-green hook refuses a git push piped into ${name || "a command group"} with no pipefail: a pipeline's exit status is its last command's, so a failed push reads 0. Push bare (the Bash tool keeps its output), then check it with git ls-remote origin refs/heads/<branch>, which prints the local head's sha once the push has landed.`
 }
 
 async function inspect(raw: string, shell: string) {
@@ -150,7 +173,7 @@ async function inspect(raw: string, shell: string) {
   }
   if (tool !== "Bash" || typeof toolInput?.command !== "string") return
   const { command } = toolInput
-  const words = /\b(?:bun|bunx|jest|npm|npx|pnpm|pnpx|pytest|ruff|ty|vitest|yarn)\b/
+  const words = /\b(?:bun|bunx|git|jest|npm|npx|pnpm|pnpx|pytest|ruff|ty|vitest|yarn)\b/
   if (!words.test(command.replace(/["'\\]/g, ""))) return
   return judge(command, dialect(shell))
 }

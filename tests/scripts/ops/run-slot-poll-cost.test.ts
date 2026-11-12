@@ -1,163 +1,11 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { SCRIPT, WAITING, runSlot, stop, machine } from "./run-slot-fake"
+import { machine, shim, stop, waiter, lookedSince, type Waiter } from "./run-slot-fake"
 
-// ten waiters' first looks under xtrace and the shims, about 700 process starts each at a queue of 10, took 45 to 110 s at load5 19 to 25 before the window opened, and with quiet rounds of a whole poll the ten-queue-waiter row took 142 to 246 s at load5 12 to 24 (issue 1612, measured), so the slowest row has about 1.5 times its time
+// the slowest row here, the head's, took 72 s beside the rate files at load5 15 to 34 (issue 1671, measured), so each row has about 5 times its time
 setDefaultTimeout(360_000)
-
-// every external command run-slot.sh calls by name; a shim for each counts its start, so a start the shims miss is a fork that runs bash alone, which the trace's subshell levels count
-const COMMANDS =
-  "awk basename bun cat cut date diff dirname docker env find getconf git grep head id iostat ls mkdir mktemp mv nice ps python3 readlink realpath rm rmdir sed seq setsid sleep sort ssh stat sysctl tail timeout top touch tr uname uptime vm_stat wc xargs".split(
-    " ",
-  )
-
-type Machine = ReturnType<typeof machine>
-// shims ahead of the machine's PATH, each a perl script, which the waiters' xtrace leaves untraced, that writes its name to the count file and runs the command the machine's PATH finds
-const shim = (m: Machine) => {
-  const dir = join(m.root, "shims")
-  const count = join(m.root, "starts")
-  mkdirSync(dir)
-  writeFileSync(count, "")
-  const rest = m.env().PATH
-  for (const name of COMMANDS) {
-    writeFileSync(
-      join(dir, name),
-      `#!/usr/bin/perl\nopen(my $f, ">>", "${count}"); print $f "${name}\\n"; close $f;\n$ENV{PATH} = "${rest}";\nexec { "${name}" } "${name}", @ARGV or exit 127;\n`,
-    )
-    chmodSync(join(dir, name), 0o755)
-  }
-  return { count, path: `${dir}:${rest}` }
-}
-// starts a waiter under xtrace, its PS4 the subshell level, and keeps its stderr
-const waiter = (
-  m: Machine,
-  path: string,
-  who: string,
-  command: string[],
-  extra: Record<string, string>,
-) => {
-  const marker = join(m.root, `ran-${who}`)
-  const p = runSlot(["bash", SCRIPT, who, "--", ...command, marker], {
-    cwd: m.root,
-    env: m.env({ ...extra, PATH: path, PS4: "+$BASH_SUBSHELL ", SHELLOPTS: "xtrace" }),
-    stderr: "pipe",
-    ops: m.ops,
-  })
-  const w = { err: "", marker, p }
-  void (async () => {
-    const text = new TextDecoder()
-    for await (const chunk of p.stderr) w.err += text.decode(chunk, { stream: true })
-  })()
-  return w
-}
-type Waiter = ReturnType<typeof waiter>
-// whether the waiter has ended a look since `at` in its trace: a look_mark, then a sleep after it
-const lookedSince = (w: Waiter, at: number) =>
-  /^\++\d+ look_mark$[\s\S]*^\+0 sleep \S+$/m.test(w.err.slice(at))
-// the subshells a trace shows entered: each line at a deeper level than the line before it
-const subshells = (trace: string) => {
-  let n = 0
-  let last = 0
-  for (const line of trace.split("\n")) {
-    const level = line.match(/^\++(\d+) /)?.[1]
-    if (level === undefined) continue
-    if (Number(level) > last) n++
-    last = Number(level)
-  }
-  return n
-}
-// whether a waiter has ended its last look: a sleep follows its last look_mark, or it has none (the clone loop never calls look_mark)
-const settled = (trace: string) => {
-  const at = trace.lastIndexOf(" look_mark\n")
-  return at < 0 || /^\+0 sleep \S+$/m.test(trace.slice(at))
-}
-// whether a whole poll ran in this part of a trace: a sleep, the wake after it, and the next sleep
-const polled = (trace: string) =>
-  /^\+0 sleep \S+$[\s\S]*?^\+0 (?!sleep )[\s\S]*?^\+0 sleep \S+$/m.test(trace)
-// the processes the waiters started together each second over `window` seconds, once each has printed its first wait line and then a round has passed that began with no look under way, in which each waiter ran a whole poll and none began a look, since a waiter whose first look ran before the others had joined looks once more at them; a round of a fixed poll's length ended before a loaded Mac woke the waiters, so their look at the oldest's first run-slot.next landed in the window (issue 1612, measured)
-const starts = async (
-  count: string,
-  waiters: Waiter[],
-  waits: RegExp,
-  window: number,
-  during: () => Promise<unknown> = async () => {},
-) => {
-  for (const w of waiters) while (!waits.test(w.err)) await Bun.sleep(50)
-  for (let quiet = false; !quiet;) {
-    const at = waiters.map((w) => w.err.length)
-    const idle = waiters.every((w) => settled(w.err))
-    while (!waiters.every((w, i) => polled(w.err.slice(at[i])))) await Bun.sleep(50)
-    quiet = idle && waiters.every((w, i) => !/^\++\d+ look_mark$/m.test(w.err.slice(at[i])))
-  }
-  const from = waiters.map((w) => w.err.length)
-  const before = readFileSync(count, "utf8").split("\n").length
-  await Promise.all([Bun.sleep(window * 1000), during()])
-  const execs = readFileSync(count, "utf8").split("\n").length - before
-  const forks = waiters.reduce((n, w, i) => n + subshells(w.err.slice(from[i])), 0)
-  const rate = (execs + forks) / window
-  if (rate >= 5)
-    console.error(
-      "looks in the window:",
-      waiters
-        .map((w, i) => (w.err.slice(from[i]).match(/^\++\d+ look_mark$/gm) ?? []).length)
-        .join(","),
-    )
-  await Promise.all(waiters.map((w) => stop(w.p)))
-  expect(waiters.every((w) => !existsSync(w.marker))).toBe(true)
-  return rate
-}
-
-// issue 1338, 7 Nov: sixteen waiters started about 60 processes a second between them, which held load5 between 30 and 42 on 15 cores with the CPU half idle, so the slots they waited for stayed shut
-describe("waiters cost close to nothing while they wait", () => {
-  test("ten queue waiters behind held slots start fewer than 5 processes a second together", async () => {
-    const m = machine({ off: ["run-slot.3-off", "run-slot.4-off"] })
-    m.hold("run-slot", 3, "big")
-    m.hold("run-slot-2", 3, "big")
-    const { count, path } = shim(m)
-    const waiters = Array.from({ length: 10 }, (_, i) =>
-      waiter(m, path, `worker-${i}`, ["touch"], { RUN_SLOT_POLL: "15" }),
-    )
-    expect(await starts(count, waiters, new RegExp(WAITING.source, "m"), 30)).toBeLessThan(5)
-  })
-
-  // a count of polls to look again on (an older copy's 20) sets each waiter looking within the window, about 900 to 2,200 processes a look with ten tickets
-  // round 4 of the review: every waiter's mark shared one path, which a read subcommand's exit removed, so each run's end set every waiter looking
-  test("and across 25 polls, with nothing changed but a read of the slots, fewer than 20 a poll", async () => {
-    const m = machine({ off: ["run-slot.3-off", "run-slot.4-off"] })
-    m.hold("run-slot", 3, "big")
-    m.hold("run-slot-2", 3, "big")
-    const { count, path } = shim(m)
-    const waiters = Array.from({ length: 10 }, (_, i) =>
-      waiter(m, path, `worker-${i}`, ["touch"], { RUN_SLOT_POLL: "1" }),
-    )
-    // a read subcommand, run outside the shims, so only the waiters' own starts count
-    const slots = async () => {
-      await Bun.sleep(5_000)
-      await runSlot(["bash", SCRIPT, "slots"], {
-        cwd: m.root,
-        env: m.env(),
-        stdout: "ignore",
-        stderr: "ignore",
-        ops: m.ops,
-      }).exited
-    }
-    expect(await starts(count, waiters, new RegExp(WAITING.source, "m"), 25, slots)).toBeLessThan(
-      20,
-    )
-  })
-
-  test("and so do ten clone waiters behind the load brake", async () => {
-    const m = machine({ cores: 8, load1: 2, load5: 20 })
-    mkdirSync(join(m.root, "node_modules"))
-    const { count, path } = shim(m)
-    const waiters = Array.from({ length: 10 }, (_, i) =>
-      waiter(m, path, `worker-${i}`, ["cp", "-R", "node_modules"], { RUN_SLOT_POLL: "5" }),
-    )
-    expect(await starts(count, waiters, /^run-slot\.sh: this clone waits /m, 10)).toBeLessThan(5)
-  })
-})
 
 // round 1 of the review of issue 1338's fix: a head whose idle poll watched the files and the load alone missed the CPU opening slots 2 to 4, and waited 20 polls
 describe("a waiter at the head reads the gate that held its last look", () => {
@@ -204,7 +52,7 @@ describe("a waiter behind the head", () => {
     const freed = next.err.length
     m.release("run-slot-2")
     const sleeps = (from: number) => next.err.slice(from).match(/^\+0 sleep 1$/gm)?.length ?? 0
-    // the pick's look writes run-slot.next partway through, which a loaded Mac can take seconds to reach, so worker-y's polls count from the first sign it could act, that write or the look's end, read before its take, and from the release when its take or 10 sleeps come first (issue 1612)
+    // the pick's look writes run-slot.next partway through, which a loaded Mac can take seconds to reach, so worker-y's polls count from the first sign it could act, that write or the look's end, read before its take, and from the release when its take or 10 sleeps come first (issue 1612: that look took 5.4 to 5.8 s at load5 22, and a count from the release read 4 polls against 3, measured)
     let signed = false
     while (
       !(signed = named() !== was || lookedSince(pick, seen)) &&

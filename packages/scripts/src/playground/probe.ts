@@ -9,13 +9,14 @@ import {
   accountSettings,
   accountsOf,
   liveSettings,
+  type Backend,
   modelSettings,
+  readPin,
   readPolicyOrDefaults,
 } from "@packages/settings"
 
 import { portlessCa } from "../portless-ca"
 import {
-  type Backend,
   dashboardBeatOf,
   staleBeat,
   type DashboardBeat,
@@ -165,8 +166,7 @@ export const liveSessions = (keep: (name: string) => boolean): Dispatcher[] => {
 
 const backendOf = (name: string): Backend | null => {
   try {
-    const pin = readFileSync(join(homeDataDir(), "backends", name), "utf8").trim()
-    return pin === "glm" || pin === "claude" ? pin : null
+    return readPin(readFileSync(join(homeDataDir(), "backends", name), "utf8"))?.backend ?? null
   } catch {
     return null
   }

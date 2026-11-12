@@ -1,10 +1,11 @@
 // PreToolUse hook: refuses a build, a test run, lefthook, turbo (but for the packages build a pull needs, run with env validation off), a git command that moves HEAD, the index or the files (but for the release skill's step 5 fast-forward and the keep reset off a stray local commit; a worker's hard reset there ran another branch's code under every hook for 3.5 minutes) or a file write (a Bash command's, or a Write, Edit, MultiEdit or NotebookEdit), run-slot.sh's command read as typed bare, in the main checkout, which every installed skill follows and so stays clean (a reviewer's `lefthook run pre-commit` from the Bash tool's default cwd rebuilt packages' dist and wrote .turbo/runs there). It also refuses a git write in the live Dashboard's checkout to every factory session but its runner and the ops lead, since that checkout serves the owner's Dashboard.
-import { readdirSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path"
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
 import { liveSettings } from "../../packages/settings/src/live"
 import { readPolicySync } from "../../packages/settings/src/rendered"
+import { eachInput } from "./codex"
 import { fromFactory, registryName, rosterKind, sessionOf, sessionRole } from "./role"
 import {
   codeFed,
@@ -12,6 +13,8 @@ import {
   type Env,
   examine,
   GIT_TAKES,
+  isFolder,
+  kernelPath,
   knownVariables,
   lex,
   marked,
@@ -24,6 +27,7 @@ import {
   stdinOf,
   stdinShell,
   type Text,
+  unreadWord,
   type Visit,
   type Word,
 } from "./shell"
@@ -72,6 +76,13 @@ export function liveCheckout(
       // a worktree whose files went with it
     }
   }
+}
+
+// Whether a path under the worktrees folder sits in one worktree: inside a folder there that holds a .git, or one not there yet, which the line may make into a new worktree (`git worktree add <path> && cd <path>`), or a file there, which nothing walks up from; the worktrees folder itself and a plain folder in it hold no checkout of their own, so git, turbo and bun walk up from there to the main checkout.
+function inWorktree(path: string, worktrees: string): boolean {
+  if (!path.startsWith(worktrees)) return false
+  const tree = join(worktrees, path.slice(worktrees.length).split(sep)[0])
+  return existsSync(join(tree, ".git")) || !isFolder(tree)
 }
 
 // A path with its nearest existing folder's links followed, so a write through a link into the checkout (link-skills' ~/.claude/skills) is judged where it lands.
@@ -136,7 +147,7 @@ const fixFor = (sure: boolean, own = INSTEAD) => (sure ? own : UNKNOWN_FIX)
 const BUN_SCRIPTS = new Set(["build", "check-types", "test", "test:file"])
 const RUNNERS = new Set(["npx"])
 // bunx is bun x, read as one
-const X: Word = { quoted: false, value: "x" }
+export const X: Word = { quoted: false, value: "x" }
 const TOOLS = new Set(["lefthook", "turbo"])
 const DUPLICATE = /^(?:\d+|-)$/
 // The one turbo call the main checkout runs, after a pull that changes packages/ (the release skill's step 5): its CLI imports their dist
@@ -209,6 +220,16 @@ export function bunCall(
     // bun x's options that take a value (-p, --registry), so the word after one is the tool
     else if (words[0] === "x" && RUNNER_TAKES.has(v)) k++
     else if (!v.startsWith("-")) {
+      // when bun reads an option's value as its subcommand, it drops the next word naming that subcommand, so the tool is the word after it
+      if (
+        v === "x" &&
+        words.length === 1 &&
+        words[0] === "x" &&
+        args[sub - 1]?.value.startsWith("-")
+      ) {
+        sub = k
+        continue
+      }
       if (words.push(v) === 1) sub = k
       if (v !== "run" && v !== "x") break
     }
@@ -216,11 +237,24 @@ export function bunCall(
   return { at: k, chained, cwd, filtered, sub, words, xCwd }
 }
 
-// git's subcommand and its words, and the tree it acts on: the checkout a --git-dir of `<checkout>/.git` names, whose HEAD and index move, else its --work-tree, else the folder its -C options name (each relative to the one before); each counts only before the subcommand.
+// Where git lands on a path, read as the kernel reads it: a link is followed before a `..` after it, so `<link>/..` is the folder above the link's target; a path that is not there yet is read by real().
+const landing = (word: Word | undefined, env: Env, from: string | undefined) => {
+  if (!word || pathOf(word, { ...env, cwd: from }) === undefined) return undefined
+  return kernelPath(word, from, real(resolve(from ?? "", word.value)))
+}
+
+// git's subcommand and its words, and the tree it acts on: the checkout a --git-dir of `<checkout>/.git` names, whose HEAD and index move, else its --work-tree, else the folder its -C options name (each from where the one before lands, by landing()); each counts only before the subcommand.
+// `also` holds the trees GIT_DIR and GIT_WORK_TREE name, read the same way from where the -C options land, from the call's own assignments and env wrapper (`local`) or the line's earlier ones; a value the hook cannot read is undefined there, since it may name any tree.
 export function gitCall(
   args: Word[],
   env: Env,
-): { cwd: string | undefined; rest: string[]; sub: string | undefined } {
+  local?: Map<string, Text>,
+): {
+  also: (string | undefined)[]
+  cwd: string | undefined
+  rest: string[]
+  sub: string | undefined
+} {
   let cwd = env.cwd
   let gitDir: string | undefined
   let workTree: string | undefined
@@ -231,20 +265,35 @@ export function gitCall(
   let k = 0
   for (; k < args.length && args[k].value.startsWith("-"); k++) {
     const v = args[k].value
-    if (v === "-C") cwd = args[k + 1] && pathOf(args[++k], { ...env, cwd })
+    if (v === "-C") cwd = args[k + 1] && landing(args[++k], env, cwd)
     else if (v === "--git-dir" || v.startsWith("--git-dir=")) {
       const word = value(k, "--git-dir")
       if (v === "--git-dir") k++
-      gitDir = word && pathOf(word, { ...env, cwd })
+      gitDir = landing(word, env, cwd)
     } else if (v === "--work-tree" || v.startsWith("--work-tree=")) {
       const word = value(k, "--work-tree")
       if (v === "--work-tree") k++
-      workTree = word && pathOf(word, { ...env, cwd })
+      workTree = landing(word, env, cwd)
     } else if (GIT_TAKES.has(v)) k++
   }
-  const repo = gitDir?.replace(/\/+$/, "")
-  const tree = repo?.endsWith(`${sep}.git`) ? dirname(repo) : (workTree ?? cwd)
-  return { cwd: tree, rest: args.slice(k + 1).map((a) => a.value), sub: args[k]?.value }
+  const checkout = (dir: string | undefined) => {
+    const repo = dir?.replace(/\/+$/, "")
+    return repo?.endsWith(`${sep}.git`) ? dirname(repo) : undefined
+  }
+  const also: (string | undefined)[] = []
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const set = local?.get(key) ?? env.vars.get(key)
+    if (!set || set.value === "") continue
+    const word = { ...set, quoted: true }
+    const at = unreadWord(word) ? undefined : landing(word, env, cwd)
+    also.push(key === "GIT_DIR" ? (checkout(at) ?? at) : at)
+  }
+  return {
+    also,
+    cwd: checkout(gitDir) ?? workTree ?? cwd,
+    rest: args.slice(k + 1).map((a) => a.value),
+    sub: args[k]?.value,
+  }
 }
 
 // these subcommands move HEAD, the index or the files, whatever their words
@@ -273,10 +322,14 @@ const LIVE_FIX =
   "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each canary head, and a change it needs goes through a PR into canary."
 
 // A git call that writes the live Dashboard's checkout: a commit, or any move gitMoves reads, every merge and reset included, since step 5 and the keep reset are the main checkout's own.
-function liveWrite(args: Word[], env: Env): { cwd: string | undefined; what: string } | undefined {
-  const { cwd, rest, sub } = gitCall(args, env)
+function liveWrite(
+  args: Word[],
+  env: Env,
+  local: Map<string, Text>,
+): { also: (string | undefined)[]; cwd: string | undefined; what: string } | undefined {
+  const { also, cwd, rest, sub } = gitCall(args, env, local)
   if (sub && (sub === "commit" || sub === "merge" || gitMoves(sub, rest)))
-    return { cwd, what: `git ${sub}` }
+    return { also, cwd, what: `git ${sub}` }
 }
 
 // Whether a session writes the live Dashboard's checkout by its role: the runner holding it, or the ops lead, whose name in Claude Code's registry has the roster's ops kind; a read that throws (no registry folder) names no writer, so check()'s fail-open never lets the call through.
@@ -390,7 +443,8 @@ function runnerTarget(args: Word[]): number {
 }
 
 // A tool by name or path, or as a package at a version (turbo@latest)
-const toolName = (word: string | undefined) => program((word ?? "").replace(/(?<=.)@[^/]*$/, ""))
+export const toolName = (word: string | undefined) =>
+  program((word ?? "").replace(/(?<=.)@[^/]*$/, ""))
 const isTurbo = (word: string | undefined) => toolName(word) === "turbo"
 
 // Whether the build's settings reach turbo: from its own assignments or env wrapper, an export before it, or the session's environment.
@@ -399,6 +453,12 @@ function validationOff(local: Map<string, Text>, env: Env): boolean {
     local.get(key)?.value ?? env.vars.get(key)?.value ?? env.process[key]
   return !!read("NODE_ENV") && read("SKIP_ENV_VALIDATION") === "true"
 }
+
+// The folders beside a program bun x runs: its own, and an unread one when the hook cannot read the folder bun's --cwd options chain to
+export const withChained = (
+  also: (string | undefined)[] | undefined,
+  chained: string | undefined,
+) => [...(also ?? []), ...(chained === undefined ? [undefined] : [])]
 
 // Every folder a hit runs in: its own, and those runnerFolders adds beside it.
 export const ranIn = (dir: string | undefined, also?: (string | undefined)[]) => [
@@ -437,13 +497,13 @@ function runs(
     if (tool) return { cwd: cwdFlag(args, env), what: `${name} ${tool}` }
   }
   if (name === "git") {
-    const { cwd, rest, sub } = gitCall(args, env)
-    if (sub === "commit") return { cwd, what: "git commit, which runs lefthook's pre-commit" }
+    const { also, cwd, rest, sub } = gitCall(args, env, local)
+    if (sub === "commit") return { also, cwd, what: "git commit, which runs lefthook's pre-commit" }
     if (keepReset(sub, rest, cwd)) return
-    return sub && gitMoves(sub, rest) ? { cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined
+    return sub && gitMoves(sub, rest) ? { also, cwd, fix: GIT_FIX, what: `git ${sub}` } : undefined
   }
   if (name !== "bun") return
-  const { at, cwd, filtered, sub, words } = bunCall(args, env)
+  const { at, chained, cwd, filtered, sub, words } = bunCall(args, env)
   const target = words[0] === "run" || words[0] === "x" ? words[1] : words[0]
   const packaged = words[0] === "x" ? packagedTools(args.slice(sub + 1)) : []
   const tool = [toolName(target), ...packaged].find((t) => TOOLS.has(t))
@@ -462,6 +522,17 @@ function runs(
   // bare, a script name runs the script, but build is bun's own bundler unless a --filter names the packages whose script it runs
   if (target && BUN_SCRIPTS.has(target) && (words[0] === "run" || filtered || target !== "build"))
     return { cwd, what: `bun ${words.join(" ")}` }
+  // bun x runs any program in the folder its --cwd options chain to, so that program is read as the shell would read it there
+  if (words[0] === "x" && target && args[at]?.value === target) {
+    const ran = runs(toolName(target), args.slice(at + 1), local, { ...env, cwd: chained })
+    return (
+      ran && {
+        ...ran,
+        also: withChained(ran.also, chained),
+        what: `bun x ${ran.what}`,
+      }
+    )
+  }
 }
 
 // How sed and perl read each flag letter that is more than a switch: edit (in place, -i and BSD sed's -I), script (carries the script) and value, each holding the rest of its word, else the next word; rest, holding the rest of its word alone; digits, holding the octal or x-hex digits after it, then reading on
@@ -548,6 +619,21 @@ function writes(name: string, args: Word[]): Word[] {
   return out
 }
 
+// agent-browser's subcommands that save the page at the path they are given
+const BROWSER_SAVES = new Set(["pdf", "screenshot"])
+const BROWSER_FIX =
+  "agent-browser saves a relative path in the folder its browser started in, which can be the main checkout, where playground rm cannot clean it. Name an absolute path under your scratchpad or your worktree: agent-browser screenshot <your scratchpad>/<name>.png."
+
+// The subcommand of an agent-browser screenshot or pdf that names no absolute path, else undefined: the subcommand is the first word past its options and their values, and the path any later word that reads as an absolute one, so a selector, --full and --session stand anywhere.
+function browserPathless(args: Word[], env: Env): string | undefined {
+  for (let k = 0; k < args.length; k++) {
+    const v = args[k].value
+    if (BROWSER_SAVES.has(v))
+      return args.slice(k + 1).some((w) => pathOf(w, { ...env, cwd: undefined })) ? undefined : v
+    if (!v.startsWith("-") && !args[k - 1]?.value.startsWith("-")) return
+  }
+}
+
 // The files a command writes, by a redirect or by name, each one the hook can place.
 export function writeTargets(cmd: Command, name: string, args: Word[]): Word[] {
   const targets = [
@@ -611,7 +697,7 @@ async function inspect(raw: string, environment: Record<string, string | undefin
     return (
       path !== undefined &&
       (path === checkout || path.startsWith(checkout + sep)) &&
-      !(path + sep).startsWith(worktrees)
+      !inWorktree(path, worktrees)
     )
   }
   // the live checkout is read only for a Bash call, so a file tool's write pays nothing for it
@@ -623,15 +709,17 @@ async function inspect(raw: string, environment: Record<string, string | undefin
     )
   }
   let writer: Promise<boolean> | undefined
-  // a git write whose tree lands in the live checkout, by the caller's test of its tree, refused unless the session writes it
+  // a git write whose tree lands in the live checkout, by the caller's test of its trees, or that a GIT_DIR or GIT_WORK_TREE the hook cannot read may land anywhere, refused unless the session writes it
   const liveRefusal = async (
     args: Word[],
+    local: Map<string, Text>,
     env: Env,
     lands: (cwd: string | undefined) => boolean,
     fix: string,
   ) => {
-    const move = liveWrite(args, env)
-    if (!move || !lands(move.cwd) || (await (writer ??= liveWriter(raw, environment)))) return
+    const move = liveWrite(args, env, local)
+    if (!move || !(ranIn(move.cwd, move.also).some(lands) || unreadFolder(move.also))) return
+    if (await (writer ??= liveWriter(raw, environment))) return
     return refuse(`${move.what} in the live Dashboard's checkout`, fix)
   }
   const file = typeof tool === "string" ? input[FILE_TOOLS[tool]] : undefined
@@ -650,7 +738,14 @@ async function inspect(raw: string, environment: Record<string, string | undefin
   const lexed = lex(command, known)
   // the shell each pipeline feeds, by the command whose output it reads, since the walk judges that command in the folder the pipeline runs in and never visits a shell of its own
   const fed = codeFed(lexed.commands)
+  // the call's own commands, when each opens with the bare word agent-browser, as no-raw-delete reads an eval
+  const browserOnly = new Set(
+    lexed.commands.every((c) => c.words[0]?.source === "agent-browser") ? lexed.commands : [],
+  )
   const visit: Visit = async (cmd, parsed, env) => {
+    const pathless = browserOnly.has(cmd) ? browserPathless(parsed.args, env) : undefined
+    if (pathless)
+      return refuse(`agent-browser ${pathless} with a relative path or none`, BROWSER_FIX)
     // a builtin run() hands over (a bare `sudo -s`, which it hands every hook once a redirect feeds it, a bare copy of a followed shell, an export) is read only for the script a here-string, a heredoc or a pipeline feeds it; one that feeds a shell (a loop's `done`) is judged in full, as the reader hands it to every hook
     if ((parsed.name === "" && !cmd.feedsShell) || EXPORTS.has(parsed.name)) {
       for (const here of places(env, directory)) {
@@ -678,7 +773,13 @@ async function inspect(raw: string, environment: Record<string, string | undefin
       if (blindWrite) return refuse(`a write to ${blindWrite.value}`, ANYWHERE_FIX)
       const blindLive =
         name === "git"
-          ? await liveRefusal(args, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX)
+          ? await liveRefusal(
+              args,
+              local,
+              blind,
+              (cwd) => cwd === undefined || inLive(cwd),
+              ANYWHERE_FIX,
+            )
           : undefined
       if (blindLive) return blindLive
     }
@@ -703,7 +804,9 @@ async function inspect(raw: string, environment: Record<string, string | undefin
       if (ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)))
         return refuse(ran.what, fixFor(sure, ran.fix))
       const moved =
-        name === "git" ? await liveRefusal(args, here, inLive, fixFor(sure, LIVE_FIX)) : undefined
+        name === "git"
+          ? await liveRefusal(args, local, here, inLive, fixFor(sure, LIVE_FIX))
+          : undefined
       if (moved) return moved
       const wrote = writeTargets(cmd, name, args).find((t) => inMain(pathOf(t, here)))
       if (wrote) return refuse(`a write to ${pathOf(wrote, here)}`, fixFor(sure))
@@ -733,7 +836,7 @@ export async function check(
   main: string = mainCheckout(resolve(import.meta.dir, "..", "..")),
 ): Promise<string | undefined> {
   try {
-    return await inspect(raw, environment, main)
+    return await eachInput(raw, "no-main-checkout", (one) => inspect(one, environment, main))
   } catch {
     return
   }

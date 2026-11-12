@@ -18,7 +18,10 @@ line=$(printf '%s' "$2" | tr '\r\n' '  ')
 # NOTIFY_WHOLE=1: the line goes whole, as the channel watch's posts do (a runner's SendMessage carried them uncut); every other line stops at 400.
 [ "$NOTIFY_WHOLE" = 1 ] || line=$(printf '%s' "$line" | cut -c1-400)
 mkdir -p "$OPS/outbox"
-echo "$(date -u +%FT%TZ) [ops-$1 → $to] $line" >> "$OPS/alerts.log"
+# NOTIFY_PRIVATE=1: alerts.log names the line's length alone, as ops-wa sets for the owner's WhatsApp words, which stay out of every log.
+logged=$line
+[ "$NOTIFY_PRIVATE" != 1 ] || logged="(a private line of ${#line} characters)"
+echo "$(date -u +%FT%TZ) [ops-$1 → $to] $logged" >> "$OPS/alerts.log"
 # NOTIFY_MAC=1: the line also shows as a macOS banner, for what must reach the owner away from the Dashboard.
 [ "$NOTIFY_MAC" != 1 ] || osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Playground"' -e 'end run' "$line" > /dev/null 2>&1
 OUTBOX="$OPS/outbox" NOTIFY_JOB="$1" NOTIFY_TO_NAME="$to" NOTIFY_LINE="$line" python3 -I -c 'import json, os, time

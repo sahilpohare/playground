@@ -32,3 +32,37 @@ export const machine: Reader = {
     return settled ? { code: settled[1], stdout: settled[0] } : { code: 1, stdout: "" }
   },
 }
+
+// One JSON-RPC answer from a fixed argv that speaks it over stdio, as Codex's app-server does: the lines written in order, then the first stdout line whose id is id, read within 5 seconds; null for none. The child is ended by its own handle once it answers.
+export const askOnce = async (argv: string[], lines: string[], id: number): Promise<unknown> => {
+  const child = Bun.spawn(argv, {
+    stderr: "ignore",
+    stdin: "pipe",
+    stdout: "pipe",
+    timeout: TIMEOUT_MS,
+  })
+  for (const line of lines) child.stdin.write(`${line}\n`)
+  await child.stdin.flush()
+  const answer = async () => {
+    const decoder = new TextDecoder()
+    let text = ""
+    for await (const chunk of child.stdout) {
+      const parts = (text + decoder.decode(chunk, { stream: true })).split("\n")
+      text = parts.pop() ?? ""
+      for (const line of parts) {
+        const read = (() => {
+          try {
+            return JSON.parse(line) as { id?: unknown }
+          } catch {
+            return null
+          }
+        })()
+        if (read?.id === id) return read
+      }
+    }
+    return null
+  }
+  const read = await settledWithin(answer(), TIMEOUT_MS + 1000)
+  child.kill()
+  return read ?? null
+}

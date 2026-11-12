@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
 import { UPSTREAM_SKILLS } from "../../packages/scripts/src/vendor-upstream/stage"
+import { guardInputs } from "./codex"
 import { writeTargets } from "./no-main-checkout"
 import { fromFactory } from "./role"
 import {
@@ -33,6 +34,7 @@ type Input = {
   source?: unknown
   tool_input?: { command?: unknown; file_path?: unknown; skill?: unknown } | null
   tool_name?: unknown
+  turn_id?: unknown
 }
 
 const WRITES = new Set(["Edit", "MultiEdit", "Write"])
@@ -40,6 +42,10 @@ const ID = /^[\w-]+$/
 // the bare name, or a plugin's or a folder's scoped copy (`ws-home:writing-for-agents`)
 const LOADS = new RegExp(`^(?:[\\w./-]+:)?${SKILL}$`)
 const TYPED = new RegExp(`^\\s*/(?:[\\w./-]+:)?${SKILL}(?:\\s|$)`)
+// Codex has no Skill tool, so a Codex session loads the skill by reading its SKILL.md in the shell
+const READS = new RegExp(
+  `(?:^|[\\n;&|(])\\s*(?:bat|cat|head|less|more|nl|sed|tail)\\s[^\\n;&|]*${SKILL}/SKILL\\.md(?![\\w.])`,
+)
 // a checkout is the factory's when it holds the factory's own skill, in core or in either folder an older worktree's branch may have, so a worktree matches and another org's repository does not
 const FACTORY_MARKERS = [
   join("extensions", "core", "skills", "playbook", "SKILL.md"),
@@ -379,17 +385,35 @@ export async function check(
       if (input.source === "compact") clear(input, env)
       return
     }
-    if (event === "PreToolUse" && WRITES.has(String(input.tool_name)))
-      return await judge(input, env)
-    if (event === "PreToolUse" && input.tool_name === "Bash") {
-      const file = markOf(input, env)
-      if (!file || existsSync(file)) return
-      // past the walk's deadline the call runs, inside the hook's 15s timeout
-      const target = await withDeadline(8_000, () => bashTarget(input, env))
-      return target === undefined ? undefined : await refusal(input, env, target)
+    if (event !== "PreToolUse") return
+    const command = input.tool_input?.command
+    if (
+      typeof input.turn_id === "string" &&
+      input.tool_name === "Bash" &&
+      typeof command === "string" &&
+      READS.test(command)
+    ) {
+      await mark(input, env)
+      return
+    }
+    // a Codex edit reads as one Write per file its patch names; one it cannot read runs, since the hook nudges
+    for (const one of guardInputs(raw) ?? []) {
+      const reason = await toolCheck(JSON.parse(one) as Input, env)
+      if (reason) return reason
     }
   } catch {
     return
+  }
+}
+
+async function toolCheck(input: Input, env: Environment): Promise<string | undefined> {
+  if (WRITES.has(String(input.tool_name))) return await judge(input, env)
+  if (input.tool_name === "Bash") {
+    const file = markOf(input, env)
+    if (!file || existsSync(file)) return
+    // past the walk's deadline the call runs, inside the hook's 15s timeout
+    const target = await withDeadline(8_000, () => bashTarget(input, env))
+    return target === undefined ? undefined : await refusal(input, env, target)
   }
 }
 

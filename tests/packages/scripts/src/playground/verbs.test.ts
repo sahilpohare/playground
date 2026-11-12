@@ -18,7 +18,7 @@ const scratch = mkdtempSync(join(tmpdir(), "playground-verbs-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
 test("the verbs are package scripts' plain names, A to Z", () => {
-  expect(VERBS).toEqual(["ask", "changelog", "dm", "ingest", "queues", "thread"])
+  expect(VERBS).toEqual(["ask", "changelog", "dm", "ingest", "queues", "thread", "wa"])
 })
 
 // the old desk: names are gone with the rename's code half, so no job or session names one

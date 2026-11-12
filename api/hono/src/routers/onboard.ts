@@ -3,6 +3,7 @@ import { site } from "@packages/config/site"
 import { db, recordActivity, roleChangeSummary, user as userTable } from "@packages/db"
 import { isLocal } from "@packages/env"
 import { env } from "@packages/env/api-hono"
+import { HARNESS_IDS } from "@packages/settings"
 import { and, eq, ne } from "drizzle-orm"
 import { type Context, Hono } from "hono"
 import { describeRoute, resolver } from "hono-openapi"
@@ -19,6 +20,7 @@ import { type DoneMark, firstRunChecks } from "@/lib/onboard/checks"
 import { doneMark } from "@/lib/onboard/done-mark"
 import { type Fixes, fixes as shared, readFix, startFix } from "@/lib/onboard/fix"
 import { FIX_IDS } from "@/lib/onboard/fix-ids"
+import { harnessCards } from "@/lib/onboard/harness"
 import { org } from "@/lib/org"
 import { signInAs } from "@/lib/sign-in"
 import { requireConsoleRole } from "@/middlewares/console"
@@ -85,8 +87,16 @@ const checkSchema = z.object({
 
 const owner = requireConsoleRole("owner")
 
+const harnessCard = z.object({
+  checks: z.array(checkSchema),
+  id: z.enum(HARNESS_IDS),
+  label: z.string(),
+  ready: z.boolean(),
+  refusal: z.string().nullable(),
+})
+
 const fixRead = z.object({
-  device: z.object({ code: z.string(), url: z.string() }).nullable(),
+  device: z.object({ code: z.string().nullable(), url: z.string() }).nullable(),
   id: z.string(),
   lines: z.array(z.string()),
   reason: z.string().nullable(),
@@ -177,6 +187,28 @@ export const onboardRoutes = (deps: OnboardDeps) => {
         await deps.signIn(c, theOwner(await deps.owners()))
         return c.json({ data: { signedIn: true as const } })
       },
+    )
+    .get(
+      "/harnesses",
+      describeRoute({
+        tags: ["Onboarding"],
+        description:
+          "Each harness Alpha can start on, as a card: Installed at the version tested, Signed in and its Plan, each a row in the checks' shape with the fix a failed row offers, whether it is ready to start, and a refusal in plain words while its start would be refused (Codex on the live data folder).",
+        responses: {
+          200: {
+            content: {
+              "application/json": {
+                schema: resolver(z.object({ data: z.object({ harnesses: z.array(harnessCard) }) })),
+              },
+            },
+            description: "OK",
+          },
+          ...forbiddenErrorResponses,
+        },
+      }),
+      requireThisMachine,
+      ownerOnceMade,
+      async (c) => c.json({ data: { harnesses: await harnessCards() } }),
     )
     .get(
       "/fix/:id",

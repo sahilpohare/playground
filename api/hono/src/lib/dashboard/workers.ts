@@ -15,6 +15,7 @@ import { dataDir } from "@packages/env/data-dir"
 import { readSessionNames } from "@packages/settings"
 
 import {
+  codexLaunches,
   herdrRecords,
   type HerdrWait,
   herdrWorkspaces,
@@ -59,7 +60,7 @@ import { projectsDir } from "@/lib/sessions/paths"
 import { readUsage, type Usage } from "@/lib/usage/window"
 
 // A light is the board's one-glance state: needs-you (a picker or prompt waits on the owner), working, or idle.
-export type Light = "idle" | "needs-you" | "working"
+export type Light = "idle" | "needs-you" | "unknown" | "working"
 
 export type Question = { multiSelect: boolean; options: string[]; prompt: string }
 
@@ -406,13 +407,17 @@ export function herdrFeed(calls: OpenCall[], wait: HerdrWait | null): FeedItem[]
   return item ? [item] : []
 }
 
-const LIGHT_ORDER: Record<Light, number> = { "needs-you": 0, working: 1, idle: 2 }
+const LIGHT_ORDER: Record<Light, number> = { "needs-you": 0, working: 1, idle: 2, unknown: 2 }
 
 // A pending card of any kind (a picker, a permission, a plan) waits on the owner as surely as a question does.
 export const lightOf = (lifecycle: string, questions: Question[], feed: FeedItem[] = []): Light => {
   if (questions.length > 0 || feed.length > 0 || lifecycle === "needsInput") return "needs-you"
   return lifecycle === "running" ? "working" : "idle"
 }
+
+// Pure: a Codex session's light: it writes no state record (its hooks.json leaves session-state out), so a light that would read idle is unknown, never idle.
+export const codexLight = (agent: unknown, light: Light): Light =>
+  agent === "codex" && light === "idle" ? "unknown" : light
 
 // Pure: whether an answer landed after a prompt stamped at `at` went up. A stamp in whole seconds covers all of its second, so a prompt stamped 12:00:05Z went up before 12:00:06.
 const answeredAfter = (answeredAt: string | null, at: string): boolean => {
@@ -480,10 +485,13 @@ export const rosterFacts = (
 // What proves a session record live (herdr's, as herdrRecords() shapes it), read once per refresh: Claude's registry, when each registered pid's process started (null when ps could not be run), and the transcripts folder of the Claude config that registry belongs to.
 export type LiveProof = { projects: string; registry: Registry; starts: Map<number, string> | null }
 
-// Pure: whether a session record is a Claude session running now. A record outlives its session's end at the pid it stored, which macOS hands to the next process that starts (a record whose session ended yesterday read live as another program's pid, a needsInput row with a red light). Claude writes a registry file at its pid while it runs, naming its session and when its process started; a clean exit removes the file, a crash leaves it. So the record is live only when the file at its pid names its session and that pid's process started when the file says, which a reused pid's never did. A file mid-rewrite, a registry or ps that cannot be read (proof null with neither), or a session under another Claude config, whose registry this one cannot see, leaves the record's word standing.
+// Pure: whether a session record is a Claude or Codex session running now. A record outlives its session's end at the pid it stored, which macOS hands to the next process that starts (a record whose session ended yesterday read live as another program's pid, a needsInput row with a red light). Claude writes a registry file at its pid while it runs, naming its session and when its process started; a clean exit removes the file, a crash leaves it. So the record is live only when the file at its pid names its session and that pid's process started when the file says, which a reused pid's never did. A file mid-rewrite, a registry or ps that cannot be read (proof null with neither), or a session under another Claude config, whose registry this one cannot see, leaves the record's word standing.
 export function isLiveRecord(record: Json, proof: LiveProof | null): boolean {
   const sessionId = str(record.session_id)
-  if (!sessionId || record.stored_pid_exists !== true || record.agent !== "claude") return false
+  if (!sessionId || record.stored_pid_exists !== true) return false
+  // A Codex record's harness comes from its launch record (codexLaunches), and its proof is the codex process herdr found in its pane's foreground this read.
+  if (record.agent === "codex") return true
+  if (record.agent !== "claude") return false
   if (!proof || proof.registry === null) return true
   const transcript = str(record.transcript_path)
   if (transcript && !transcript.startsWith(`${proof.projects}/`)) return true
@@ -498,7 +506,7 @@ export function isLiveRecord(record: Json, proof: LiveProof | null): boolean {
 
 declare const LIVE: unique symbol
 
-// The session records with every one that is not a live Claude session left out. Only liveRecords() makes one, so a read that takes it (composeWorkers, tasksFor, sessionsRead) cannot be handed a raw list.
+// The session records with every one that is not a live Claude or Codex session left out. Only liveRecords() makes one, so a read that takes it (composeWorkers, tasksFor, sessionsRead) cannot be handed a raw list.
 export type LiveRecords = { readonly [LIVE]: true; sessions: Json[] }
 
 // Pure: a session list as LiveRecords. A null proof takes each record's word, as with no registry to read.
@@ -509,7 +517,7 @@ export const liveRecords = (sessions: unknown, proof: LiveProof | null): LiveRec
     ),
   }) as LiveRecords
 
-// Pure: the session records and workspace list in, one row per live Claude session out, the ones that need the owner first.
+// Pure: the session records and workspace list in, one row per live session out, the ones that need the owner first.
 export function composeWorkers(
   sessions: LiveRecords,
   workspaces: unknown,
@@ -587,10 +595,12 @@ export function composeWorkers(
       lifecycle,
       ...(read.loginExpired && { loginExpired: true as const }),
       // a probe's prompts are its spawner's, so it never reads as waiting on the owner
-      light:
+      light: codexLight(
+        record.agent,
         role === "other" && isProbe(name)
           ? lightOf(lifecycle === "needsInput" ? "idle" : lifecycle, [])
           : lightOf(lifecycle, [], feed),
+      ),
       model: read.model,
       name,
       questions: [],
@@ -734,7 +744,9 @@ export const unstickProblem = (now = Date.now()): string | null =>
 export async function listLive(): Promise<Live> {
   const [files, servers] = await Promise.all([readRegistry(), readHerdr()])
   const registry = registryOf(files)
-  const records = { sessions: herdrRecords(servers, registry, new Date().toISOString()) }
+  const records = {
+    sessions: herdrRecords(servers, registry, new Date().toISOString(), codexLaunches()),
+  }
   const workspaces = { workspaces: herdrWorkspaces(servers) }
   const starts = await processStarts(
     [...(registry ?? [])].flatMap(([pid, entry]) => (entry?.procStart ? [pid] : [])),

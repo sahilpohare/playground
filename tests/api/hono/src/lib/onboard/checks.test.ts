@@ -11,7 +11,6 @@ type Check = import("../../../../../../api/hono/src/lib/onboard/checks").Check
 
 const ORDER = [
   "bun",
-  "claude",
   "claude-codex",
   "docker",
   "Database",
@@ -52,7 +51,6 @@ const machine = (
 const TOOLS = [
   "brew",
   "bun",
-  "claude",
   "claude-codex",
   "docker",
   "gh",
@@ -65,7 +63,6 @@ const TOOLS = [
 
 const ANSWERS = {
   "bun --version": { stdout: "1.3.2\n" },
-  "claude --version": { stdout: "2.1.4 (Claude Code)\n" },
   "claude-codex --version": { stdout: "claude-codex 0.3.0\n" },
   "docker info --format {{.ServerVersion}}": { stdout: "28.3.1\n" },
   "gh --version": { stdout: "gh version 2.80.0 (2026-09-01)\n" },
@@ -134,6 +131,14 @@ describe("onboardChecks on a machine it reads", () => {
     expect(ran.some((argv) => argv[0] === "cmux")).toBe(false)
   })
 
+  test("shows no claude row, since the harness cards take its place, and never runs claude (#1835)", async () => {
+    const { ran, reader } = machine([...TOOLS, "claude"], ANSWERS, [CA])
+    expect(
+      byName(await onboardChecks({ ...signedUp, database: "ok", reader })).claude,
+    ).toBeUndefined()
+    expect(ran.some((argv) => argv[0] === "claude")).toBe(false)
+  })
+
   test("each missing tool names the fix id that installs it, and one with no fix carries a note alone", async () => {
     const { reader } = machine([], {}, [CA])
     const rows = byName(await onboardChecks({ ...signedUp, database: "ok", reader }))
@@ -142,7 +147,6 @@ describe("onboardChecks on a machine it reads", () => {
     )
     expect(actions).toEqual({
       bun: null,
-      claude: "claude",
       "claude-codex": null,
       Database: null,
       docker: "docker",

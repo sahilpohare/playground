@@ -38,7 +38,7 @@ jobs:
 
       # test:skills' steps run zsh, which the hosted image may not carry
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        uses: ./.github/actions/install-zsh
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts

@@ -124,7 +124,11 @@ test("remove takes an extension out of the order, links and repos and leaves its
 
 test("a bundled extension is off until its switch turns it on in ext.bundled at the login's scope, and back off (#849)", () => {
   const data = fresh()
-  expect(listBundled(data)).toEqual([{ name: "slack", on: false }])
+  const off: ReturnType<typeof listBundled> = [
+    { name: "slack", on: false },
+    { name: "whatsapp", on: false },
+  ]
+  expect(listBundled(data)).toEqual(off)
   expect(value(data, "ext.bundled")).toEqual([])
   expect(setBundled(data, "slack", true, WHO)).toEqual({
     key: "ext.bundled",
@@ -132,10 +136,18 @@ test("a bundled extension is off until its switch turns it on in ext.bundled at 
     scope: ME,
     value: ["slack"],
   })
-  expect(listBundled(data)).toEqual([{ name: "slack", on: true }])
+  expect(listBundled(data)).toEqual([
+    { name: "slack", on: true },
+    { name: "whatsapp", on: false },
+  ])
   expect(setBundled(data, "slack", true, WHO)).toMatchObject({ ok: false, status: 409 })
-  expect(setBundled(data, "slack", false, WHO)).toMatchObject({ ok: true, value: [] })
-  expect(listBundled(data)).toEqual([{ name: "slack", on: false }])
+  expect(setBundled(data, "whatsapp", true, WHO)).toMatchObject({
+    ok: true,
+    value: ["slack", "whatsapp"],
+  })
+  expect(setBundled(data, "slack", false, WHO)).toMatchObject({ ok: true, value: ["whatsapp"] })
+  expect(setBundled(data, "whatsapp", false, WHO)).toMatchObject({ ok: true, value: [] })
+  expect(listBundled(data)).toEqual(off)
 })
 
 test("a name Playground does not ship is refused, and ext.bundled refuses one twice or one unknown", () => {

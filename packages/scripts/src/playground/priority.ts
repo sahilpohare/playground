@@ -13,7 +13,7 @@ export type PriorityDeps = { by: () => Promise<string>; data: string; now: () =>
 
 const SESSION = /^[a-z0-9]+(-[a-z0-9]+)*$/
 const FILE = /^priority-(.+)\.json$/
-// priority-start.json is a job's own start file, which passes no focus, so this command never writes, lifts or lapses it
+// priority-start.json is a job's own start file, kept by that job, so this command never writes, lifts or lapses it
 const JOB = "start"
 
 export const windowPath = (data: string, session: string) => join(data, `priority-${session}.json`)
@@ -66,7 +66,7 @@ const parse = (verb: string, args: string[]): { reason: string; session: string 
     if (positionals.length !== 1 || !SESSION.test(session))
       return `priority ${verb} takes one session's name`
     if (session === JOB)
-      return `priority-${JOB}.json is a job's own start file, which passes no focus: that job writes and lifts it`
+      return `priority-${JOB}.json is a job's own start file: that job writes and lifts it`
     if (!reason) return `priority ${verb} takes --reason "<why>"`
     return { reason, session }
   } catch (error) {

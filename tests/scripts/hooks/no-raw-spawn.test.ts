@@ -639,7 +639,7 @@ describe("herdr's reads run", () => {
   })
 })
 
-// The herdr-core (hc) trial world spawn.sh's probe start builds: its wrapper at <data folder>/hc-trial/hc, which sets the world's own HC_SESSION, XDG folders and SSH_CONNECTION and drops every HERDR_* and HC_* variable.
+// herdr-core (hc): the factory stays on herdr, so every hc call is refused but its help and version, the old trial world's wrapper at <data folder>/hc-trial/hc included.
 const HC = "/Users/x/.playground/hc-trial/hc"
 const hc = (command: string, environment: Record<string, string | undefined> = {}) =>
   check(
@@ -652,7 +652,7 @@ const hc = (command: string, environment: Record<string, string | undefined> = {
     { HOME: "/Users/x", TMPDIR: TMP, ...environment },
   )
 
-describe("an hc call outside the trial world is refused, naming the world's wrapper", () => {
+describe("an hc call is refused", () => {
   test.each([
     ["exec", "hc exec ls"],
     ["exec on another machine", "hc exec --on vps ls"],
@@ -687,17 +687,6 @@ describe("an hc call outside the trial world is refused, naming the world's wrap
       "curl on the trial world's socket",
       `curl --unix-socket ${TMP}pghc.Ab12/herdr-core/pgtrial.sock http://x/`,
     ],
-  ])("%s", async (_name, command) => {
-    expect(await hc(command)).toMatch(/^no-raw-spawn hook refuses /)
-  })
-
-  test("the refusal names the trial world's wrapper", async () => {
-    expect(await hc("hc exec ls")).toContain(HC)
-  })
-})
-
-describe("an hc call through the trial world's wrapper runs, but a start, an update or another machine", () => {
-  test.each([
     ["a list", `${HC} ls`],
     ["a terminal's state", `${HC} get t1`],
     ["a screen read", `${HC} read t1`],
@@ -707,21 +696,9 @@ describe("an hc call through the trial world's wrapper runs, but a start, an upd
     ["an interrupt", `${HC} interrupt t1`],
     ["the probe ended", `${HC} kill t1`],
     ["the server restarted", `${HC} server restart`],
-    ["the server stopped, the issue's undo", `${HC} server stop`],
+    ["the server stopped by the old wrapper", `${HC} server stop`],
     ["events followed", `${HC} events`],
-    ["the wrapper by its path under HOME", '"$HOME/.playground/hc-trial/hc" get t1'],
-  ])("%s", async (_name, command) => {
-    expect(await hc(command)).toBeUndefined()
-  })
-
-  test("the wrapper under PLAYGROUND_DATA_DIR runs, and the one under HOME is then outside", async () => {
-    expect(await hc("/d/hc-trial/hc ls", { PLAYGROUND_DATA_DIR: "/d" })).toBeUndefined()
-    expect(await hc(`${HC} ls`, { PLAYGROUND_DATA_DIR: "/d" })).toMatch(
-      /^no-raw-spawn hook refuses /,
-    )
-  })
-
-  test.each([
+    ["the old wrapper by its path under HOME", '"$HOME/.playground/hc-trial/hc" get t1'],
     ["a run, which only spawn.sh starts", `${HC} run --bg claude`],
     ["a run of a shell", `${HC} run bash`],
     ["an update, which swaps the checked binary", `${HC} update`],
@@ -739,8 +716,13 @@ describe("an hc call through the trial world's wrapper runs, but a start, an upd
     ["the wrapper sourced", `source ${HC} run`],
     ["the wrapper dotted", `. ${HC} run`],
     ["a copy of herdr-core run by a shell", `bash /tmp/herdr-core send t1 hi`],
-  ])("%s is refused", async (_name, command) => {
-    expect(await hc(command)).toMatch(/^no-raw-spawn hook refuses /)
+    ["the old wrapper under PLAYGROUND_DATA_DIR", "/d/hc-trial/hc ls"],
+  ])("%s", async (_name, command) => {
+    expect(await hc(command, { PLAYGROUND_DATA_DIR: "/d" })).toMatch(/^no-raw-spawn hook refuses /)
+  })
+
+  test("the refusal says only hc's --help and --version run", async () => {
+    expect(await hc("hc exec ls")).toContain("runs only hc's --help and --version")
   })
 })
 
@@ -782,12 +764,12 @@ describe("it fails open", () => {
   })
 })
 
-test("the factory settings register it for Bash", async () => {
+test("the factory settings run it on Bash through guards", async () => {
   const settings = (await Bun.file(join(root, "scripts", "factory-settings.json")).json()) as {
     hooks: { PreToolUse: { hooks: { command: string }[]; matcher: string }[] }
   }
   const entry = settings.hooks.PreToolUse.find((e) =>
-    e.hooks.some((h) => h.command.includes("scripts/hooks/bundled/no-raw-spawn.js")),
+    e.hooks.some((h) => h.command.includes("scripts/hooks/bundled/guards.js")),
   )
   expect(entry?.matcher).toBe("^Bash$")
 })

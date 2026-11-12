@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { join } from "node:path"
 
 import {
-  boardSignature,
-  daySignature,
   finalText,
   majority,
   triageMajority,
@@ -11,80 +8,11 @@ import {
   verdict,
 } from "../../../../../../packages/scripts/src/parity/replay/compare"
 
-// A made-up board report in the layout the board scan writes, frozen in the tree since the scan's skill lives in an extension.
-const sample = () =>
-  Bun.file(
-    join(import.meta.dir, "../../../../../api/hono/src/lib/apps/fixtures/board-report.md"),
-  ).text()
-
 const event = (value: object) => JSON.stringify(value)
 const use = (id: string, name: string, input: object = {}) =>
   event({ message: { content: [{ id, input, name, type: "tool_use" }] }, type: "assistant" })
 const result = (text: string, denials: object[] = []) =>
   event({ permission_denials: denials, result: text, type: "result" })
-
-describe("boardSignature", () => {
-  test("reads a made-up report, row by row with its count line", async () => {
-    const signature = JSON.parse(boardSignature(await sample()))
-    expect(signature.count).toBe("💻 1 mine · ✅ 1 free · 🔍 2 to check · ⏭️ 2 skipped")
-    expect(signature.rows).toHaveLength(6)
-    expect(signature.rows.find((row: string[]) => row[0] === "ACME-9102")).toEqual([
-      "ACME-9102",
-      "Check",
-      "T2",
-      "Urgent",
-      null,
-      "Merritt",
-    ])
-  })
-
-  test("free text and the header's time do not count; a tier, a status or a row does", async () => {
-    const text = await sample()
-    const base = boardSignature(text)
-    expect(boardSignature(text.replace("Mon 5 Oct, 1:12 pm", "Tue 6 Oct, 9:00 am"))).toBe(base)
-    expect(boardSignature(text.replace("Reschedule sends", "Rescheduling sends"))).toBe(base)
-    expect(boardSignature(text.replace("then /triage ACME-9103", "then look"))).toBe(base)
-    expect(boardSignature(text.replace("| 🟡 T2 |", "| 🟠 T3 |"))).not.toBe(base)
-    expect(boardSignature(text.replace("| Assigned |", "| Owner: Anne |"))).toBe(base)
-    expect(boardSignature(text.replace("Ask Alex, Kim", "Ask Kim"))).not.toBe(base)
-  })
-
-  test("a report the dashboard cannot read is its own signature, so it never matches a board", () => {
-    expect(boardSignature("no board here")).toBe("unreadable")
-  })
-})
-
-describe("daySignature", () => {
-  const day = [
-    "## 🌙 End of day · Thu 8 Oct",
-    "",
-    "• #31, #32: enquiry notes in the drawer (ACME-144, live on prod)",
-    "• #33: names the home it asked about (on dev) [no ticket]",
-    "• released to prod: ACME-119, ACME-122",
-    "• Port of the listing feed: triaged and split with Merritt",
-    "",
-    "1 line has no ticket: #33.",
-  ].join("\n")
-
-  test("each line's ids, as sets, and its no-ticket flag", () => {
-    expect(JSON.parse(daySignature(day))).toEqual([
-      { flagged: false, ids: ["#31", "#32", "ACME-144"] },
-      { flagged: false, ids: ["ACME-119", "ACME-122"] },
-      { flagged: false, ids: [] },
-      { flagged: true, ids: ["#33"] },
-    ])
-  })
-
-  test("order and wording do not count; an id or a flag does", () => {
-    const base = daySignature(day)
-    const lines = day.split("\n")
-    const swapped = [...lines.slice(0, 2), lines[3], lines[2], ...lines.slice(4)].join("\n")
-    expect(daySignature(swapped)).toBe(base)
-    expect(daySignature(day.replace("enquiry notes in the drawer", "notes"))).toBe(base)
-    expect(daySignature(day.replace("#32", "#34"))).not.toBe(base)
-    expect(daySignature(day.replace(" [no ticket]", ""))).not.toBe(base)
-  })
-})
 
 describe("triageSignature", () => {
   const run = [

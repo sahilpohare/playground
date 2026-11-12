@@ -17,6 +17,12 @@ test("every job of the two pull request checks stops at 20 minutes", async () =>
   }
 })
 
+// zsh-cache's one step takes about 7.5 minutes at its longest: 2 apt tries capped at 150 s, a 15 s wait and a Homebrew install capped at 130 s
+test("zsh-cache's job stops at 10 minutes", async () => {
+  const { jobs } = await read("zsh-cache.yml")
+  expect(Object.values(jobs).map((job) => job["timeout-minutes"])).toEqual([10])
+})
+
 test("each shard's suite deadline, which names the file it hangs in, is set 10 minutes inside the job's timeout", async () => {
   const { jobs } = await read("auto-check-build.yml")
   for (const job of Object.values(jobs)) {

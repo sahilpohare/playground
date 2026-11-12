@@ -2,7 +2,7 @@
 const __CHECKOUT = import.meta.dir.slice(0, import.meta.dir.lastIndexOf("/scripts/hooks/bundled"));
 
 // scripts/hooks/no-glm-heavy-path.ts
-import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, readlinkSync, realpathSync } from "fs";
+import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, readlinkSync, realpathSync as realpathSync2 } from "fs";
 import { loadavg } from "os";
 import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join as join5, resolve as resolve3 } from "path";
 
@@ -5112,7 +5112,7 @@ var extOrderSchema = array(extScopeSchema).refine((names) => new Set(names).size
 var extLinksSchema = record(extScopeSchema, array(extLinkSchema));
 
 // packages/settings/src/ext.ts
-var BUNDLED_EXTENSIONS = ["slack"];
+var BUNDLED_EXTENSIONS = ["slack", "whatsapp"];
 var extSettings = defineSettings({
   "ext.bundled": {
     default: [],
@@ -5140,6 +5140,21 @@ var guardedOrgs = (values) => {
   return [...new Set(Object.values(links).flat())].filter((link) => link !== "*").sort();
 };
 
+// packages/settings/src/harnesses.ts
+var HARNESSES = [
+  { backends: ["claude", "glm"], id: "claude-code" },
+  { backends: ["openai"], id: "codex" }
+];
+var readPin = (text) => {
+  const words = text.trim().split(/\s+/);
+  const [harnessId, backend] = words.length === 1 ? ["claude-code", words[0]] : words;
+  if (words.length > 2)
+    return null;
+  const harness = HARNESSES.find((h) => h.id === harnessId);
+  const found = harness?.backends.find((b) => b === backend);
+  return harness && found ? { backend: found, harness: harness.id } : null;
+};
+
 // packages/settings/src/rules.ts
 var percent = number2().int().min(1).max(100);
 var ruleSettings = defineSettings({
@@ -5163,7 +5178,7 @@ var ruleSettings = defineSettings({
       } catch {
         return false;
       }
-    }, "an IANA time zone, such as UTC or Asia/Kolkata")
+    }, "an IANA time zone, such as UTC or America/New_York")
   },
   "context.window": {
     default: 400000,
@@ -5334,6 +5349,23 @@ async function registryName(sessionId, environment = process.env) {
     } catch {}
   }
 }
+async function codexName(sessionId, environment = process.env) {
+  if (!environment.CODEX_HOME)
+    return;
+  let name;
+  try {
+    const index = await Bun.file(join3(environment.CODEX_HOME, "session_index.jsonl")).text();
+    for (const line of index.split(`
+`)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.id === sessionId && typeof entry.thread_name === "string")
+          name = entry.thread_name;
+      } catch {}
+    }
+  } catch {}
+  return name;
+}
 async function rosterKind(name, environment = process.env) {
   const path = join3(dataDirOf(environment), "roster.json");
   try {
@@ -5354,7 +5386,7 @@ async function sessionRole(environment, sessionId) {
   if (typeof sessionId !== "string")
     return "";
   try {
-    const name = await registryName(sessionId, environment) ?? "";
+    const name = await registryName(sessionId, environment) ?? await codexName(sessionId, environment) ?? "";
     const role = name && await rosterRole(name, environment);
     if (role)
       return role;
@@ -5377,6 +5409,7 @@ function sessionOf(raw) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
+import { realpathSync, statSync } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename, dirname, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 var UNKNOWN = "\x00";
@@ -6136,6 +6169,8 @@ function walk(lx, scope, nested, inherit) {
       if (after === "&&")
         done.chained = true;
       done.chain = lx.token;
+      if (lx.orRun)
+        done.orRun = true;
       const last = lx.commands[lx.commands.length - 1]?.words;
       const compound = !!done.group && last?.length === 1 && OPENS.has(reserved[0] ?? "") && !HELD.has(reserved[0] ?? "");
       if (reserved.some((w) => HELD.has(w)) || compound)
@@ -6168,8 +6203,10 @@ function walk(lx, scope, nested, inherit) {
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
-      if (depth === 0 && FREES.has(op))
+      if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
+        lx.orRun = op === "||";
+      }
       after = op;
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
@@ -6703,6 +6740,7 @@ async function runAll(lexed, env, visit, builtins) {
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
 async function examine(cmd, env, visit, builtins) {
   tick();
+  orElse(cmd, env);
   unchain(cmd, env);
   if (cmd.opaque) {
     env.cwdAnywhere = true;
@@ -6861,11 +6899,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
+  const lineOr = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
+  env.cwdOr = undefined;
   try {
     return await body();
   } finally {
+    const scriptOr = env.cwdOr;
+    env.cwdOr = scriptOr && scriptOr.orChain === undefined ? { ...scriptOr, cdChain: cmd.chain, scope: cmd.scope } : lineOr;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -6899,7 +6941,8 @@ async function cdTarget(name, args, env) {
   const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
   if (!dir)
     return homedir3();
-  const typed = dir.value === "-" ? undefined : await folder(pathOf(dir, env));
+  const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
+  const typed = await folder(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
   const base = sign && (sign === "-" ? env.old?.dir : env.cwd);
   return base ? await folder(base + dir.value.slice(2)) : typed;
@@ -6907,7 +6950,7 @@ async function cdTarget(name, args, env) {
 async function folder(path) {
   if (!path)
     return;
-  return await isFolder(path) ? path : undefined;
+  return isFolder(path) ? path : undefined;
 }
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -6919,6 +6962,7 @@ function cdTargets(name, cmd, parsed, env, from) {
     return { back: true, paths: [], unread: true };
   const paths = new Set;
   const many = manyTimes(cmd, parsed);
+  const physical = physicalCd(parsed.args);
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
@@ -6931,14 +6975,23 @@ function cdTargets(name, cmd, parsed, env, from) {
         unread = true;
         continue;
       }
-      paths.add(path);
+      const landed = physical ? kernelPath(word, base, path) : path;
+      paths.add(landed);
       if (many && word.value.split("/").includes("..")) {
-        for (const up of ancestors(path))
+        for (const up of ancestors(landed))
           paths.add(up);
       }
     }
   }
   return { back: dirs.length > 1, paths: [...paths], unread };
+}
+var physicalCd = (args) => args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"));
+function kernelPath(word, base, lexical) {
+  try {
+    return realpathSync.native(isAbsolute2(word.value) ? word.value : `${base}/${word.value}`);
+  } catch {
+    return lexical;
+  }
 }
 function tildeMove(move, name, parsed, env, from, back) {
   const dir = parsed.args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -6977,10 +7030,11 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   const chained = cmd.chained && !negated(cmd);
-  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || await isFolder(paths[0]))) {
+  if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
+    env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
       env.oldFrom = bases;
     if (chained) {
@@ -6990,11 +7044,44 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   env.cwdSure = undefined;
-  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
+  env.cwdOr = undefined;
+  const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || paths.every(isFolder));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
 var negated = (cmd) => markers(cmd.words).filter((word) => word === "!").length % 2 === 1;
+var EXITS = new Set(["exit"]);
+function orElse(cmd, env) {
+  const or = env.cwdOr;
+  if (!or)
+    return;
+  if (cmd.chain === or.orChain) {
+    if (or.exits && cmd.detached)
+      env.cwdOr = { ...or, exits: false };
+    return;
+  }
+  if (cmd.chain === or.cdChain) {
+    if (!or.joined)
+      env.cwdOr = { ...or, joined: true };
+    return;
+  }
+  if (or.orChain === undefined && cmd.orRun) {
+    env.cwdOr = {
+      ...or,
+      exits: EXITS.has(parse3(cmd).name) && !cmd.detached && cmd.scope === or.scope,
+      landed: { maybe: env.cwdMaybe ?? [], sure: env.cwdSure },
+      orChain: cmd.chain
+    };
+    env.cwdMaybe = keep([...new Set([...startFolders(env), ...or.before])], env);
+    env.cwdSure = undefined;
+    return;
+  }
+  if ((or.joined || or.exits) && or.landed) {
+    env.cwdMaybe = or.landed.maybe;
+    env.cwdSure = or.landed.sure;
+  }
+  env.cwdOr = undefined;
+}
 function unchain(cmd, env) {
   if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
     return;
@@ -7014,9 +7101,9 @@ function keep(folders, env) {
   env.cwdUnread = true;
   return folders.slice(0, MAX_FOLDERS);
 }
-async function isFolder(path) {
+function isFolder(path) {
   try {
-    return (await Bun.file(path).stat()).isDirectory();
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -7400,7 +7487,7 @@ async function onGlm(raw, environment = process.env) {
     if (!name || name.includes("/"))
       return false;
     const pin = join5(dataDir(environment), "backends", name);
-    return (await Bun.file(pin).text()).trim() === "glm";
+    return readPin(await Bun.file(pin).text())?.backend === "glm";
   } catch {
     return false;
   }
@@ -7451,6 +7538,26 @@ var plain = (w) => !unreadable(w);
 function changedBy(dir, ours, theirs) {
   const base = names2(dir, ["merge-base", ours, theirs])?.[0];
   return base ? pathsOf(dir, ["diff", "--name-only", "--no-renames", base, theirs]) : null;
+}
+function mergedTree(dir, ours, theirs) {
+  const proc = Bun.spawnSync(["git", "-C", dir, "merge-tree", "--write-tree", ours, theirs], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stderr: "ignore"
+  });
+  if (proc.exitCode !== 0 && proc.exitCode !== 1)
+    return null;
+  return proc.stdout.toString().split(`
+`)[0] || null;
+}
+function beyondMerge(files, ours, theirs, read, dir) {
+  const tree = mergedTree(dir, ours, theirs);
+  const lists = tree ? read(tree) : [null];
+  if (lists.some((l) => l === null))
+    return;
+  const own = new Set(lists.flat());
+  for (const file of files)
+    if (!own.has(file))
+      files.delete(file);
 }
 async function mergeHeads(dir) {
   const path = names2(dir, ["rev-parse", "--git-path", "MERGE_HEAD"])?.[0];
@@ -7522,6 +7629,8 @@ async function commit(rest, dir, chained, forced) {
       if (differ[i].has(file))
         files.add(file);
   });
+  if (heads.length === 1)
+    beyondMerge(files, "HEAD", heads[0], against, dir);
   const heavyFiles = [...files].filter(heavy).sort();
   if (heavyFiles.length === 0)
     return;
@@ -7529,6 +7638,25 @@ async function commit(rest, dir, chained, forced) {
   if (chained && !all && paths.length === 0 && heavyFiles.every((f) => !staged.has(f)))
     return `no-glm-heavy-path hook refuses this git commit: ${heavyFiles.join(", ")} is on disk and not staged, and the hook cannot tell before the call runs whether the git add before it stages it, while this session runs on GLM and that is Opus work. Run git commit as its own call.`;
   return refuse("git commit", heavyFiles);
+}
+function rebased(dir, named, source, dest, not) {
+  const branch = dest === "HEAD" ? names2(dir, ["symbolic-ref", "-q", "--short", "HEAD"])?.[0] : dest.replace(/^refs\/heads\//, "");
+  if (!branch)
+    return;
+  const config = (key) => names2(dir, ["config", "--get", key])?.[0];
+  const remote = named ?? config(`branch.${branch}.pushRemote`) ?? config("remote.pushDefault") ?? config(`branch.${branch}.remote`) ?? "origin";
+  const old = names2(dir, ["rev-parse", "-q", "--verify", `refs/remotes/${remote}/${branch}`])?.[0];
+  if (!old)
+    return;
+  const ancestor = Bun.spawnSync(["git", "-C", dir, "merge-base", "--is-ancestor", old, source], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stderr: "ignore"
+  });
+  if (ancestor.exitCode !== 1)
+    return;
+  const oldest = names2(dir, ["rev-list", "--reverse", "--topo-order", source, "--not", not])?.[0];
+  const base = oldest && names2(dir, ["rev-parse", "-q", "--verify", `${oldest}^`])?.[0];
+  return base ? [old, base] : undefined;
 }
 function push(rest, dir, branchReads) {
   const { flags, positionals } = parseFlags(rest, PUSH_TAKES);
@@ -7543,14 +7671,19 @@ function push(rest, dir, branchReads) {
   if (given.has("--tags") || given.has("--follow-tags") || given.has("--mirror"))
     sources.push("--tags");
   const deleting = given.has("--delete") || given.has("-d");
+  const dests = [];
   for (const spec of refspecs) {
-    const [source] = spec.value.replace(/^\+/, "").split(":");
-    if (source !== "" && !deleting)
+    const [source, dest = source] = spec.value.replace(/^\+/, "").split(":");
+    if (source !== "" && !deleting) {
       sources.push(source);
+      dests.push(dest);
+    }
   }
   const replaced = ["--all", "--branches", "--mirror", "--tags"].some((f) => given.has(f));
-  if (refspecs.length === 0 && !replaced)
+  if (refspecs.length === 0 && !replaced) {
     sources.push("HEAD");
+    dests.push("HEAD");
+  }
   if (deleting && sources.length === 0)
     return;
   const name = remote && !/[:/]/.test(remote.value) ? remote.value : undefined;
@@ -7560,7 +7693,7 @@ function push(rest, dir, branchReads) {
     "log",
     "--name-only",
     "--no-renames",
-    "--diff-merges=dense-combined",
+    "--diff-merges=off",
     "--format=",
     ...sources,
     "--not",
@@ -7574,6 +7707,17 @@ function push(rest, dir, branchReads) {
     const [first, ...others] = names2(dir, ["rev-parse", `${merge}^@`]) ?? [];
     if (!first)
       return unread("git push", "the parents of a merge it pushes");
+    const own = pathsOf(dir, [
+      "show",
+      "--name-only",
+      "--no-renames",
+      "--diff-merges=dense-combined",
+      "--format=",
+      merge
+    ]);
+    if (own === null)
+      return unread("git push", "the files of the commits it pushes");
+    const made = new Set(own);
     for (const other of others) {
       const changed = changedBy(dir, first, other);
       const differs = pathsOf(dir, ["diff", "--name-only", "--no-renames", other, merge]);
@@ -7581,9 +7725,16 @@ function push(rest, dir, branchReads) {
         return unread("git push", "the files of the commits it pushes");
       for (const file of changed)
         if (differs.includes(file))
-          files.add(file);
+          made.add(file);
     }
+    if (others.length === 1)
+      beyondMerge(made, first, others[0], (tree) => [pathsOf(dir, ["diff", "--name-only", "--no-renames", tree, merge])], dir);
+    for (const file of made)
+      files.add(file);
   }
+  const bases = sources.length === 1 && dests.length === 1 && (!remote || name) ? rebased(dir, name, sources[0], dests[0], not) : undefined;
+  if (bases)
+    beyondMerge(files, bases[0], bases[1], (tree) => [pathsOf(dir, ["diff", "--name-only", "--no-renames", tree, sources[0]])], dir);
   const heavyFiles = [...files].filter(heavy).sort();
   return heavyFiles.length > 0 ? refuse("git push", heavyFiles) : undefined;
 }
@@ -7823,7 +7974,7 @@ function gitOrg(parsed, env, dir, sub, orgs) {
 }
 var realOf = (path, depth = 0) => {
   try {
-    return realpathSync(path);
+    return realpathSync2(path);
   } catch {}
   if (depth > 40)
     return path;

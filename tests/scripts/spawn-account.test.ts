@@ -13,6 +13,7 @@ import {
   spawn,
   TOKEN,
   unplugged,
+  usage,
 } from "./spawn-fake"
 
 // Every case runs spawn.sh, which starts fake processes and waits on them; one took 19.9s on the loaded runner box, so each gets twice that.
@@ -89,21 +90,32 @@ describe("--account logs the session in as another Claude account", () => {
     expect(existsSync(join(r.home, "claude.args"))).toBe(false)
   })
 
-  // A session on the machine's own login shares its usage, which --account's skipped usage check would then never read.
+  // A session on the machine's own login starts on its config with no token, as a bare start does, its usage judged as that login's (#1756).
   const own = (email: string) => JSON.stringify({ oauthAccount: { emailAddress: email } })
-  test.each([
-    ["a worker", ["worker", "worker-brave-otter", "b.md", "--account", email], {}],
-    [
-      `${OLD.dispatcher}-2`,
+  // usage.json reading the own login, so a start on it is judged by that file
+  const ownUsage = JSON.stringify(usage({ account: email }))
+  test("a worker on this machine's own login starts on it with no token, and the Keychain is not asked", async () => {
+    const r = await spawn(["worker", "worker-brave-otter", "b.md", "--account", email], [], {
+      CLAUDE_JSON: own(email.toUpperCase()),
+      USAGE_JSON: ownUsage,
+    })
+    expect(r.code).toBe(0)
+    expect(command(r)).toStartWith("(env PLAYGROUND_ROLE=worker claude ")
+    expect(r.security).toBeUndefined()
+  })
+
+  test("the second dispatcher on this machine's own login is refused before herdr runs, since it would run out with the first", async () => {
+    const r = await spawn(
       ["manager", `${OLD.dispatcher}-2`, `brief-${OLD.dispatcher}-2.md`, "--account", email],
-      { CLAUDE_JSON: own(email.toUpperCase()) },
-    ],
-  ])("%s on this machine's own login is refused before herdr runs", async (_, args, env) => {
-    const r = await spawn(args as string[], [], { CLAUDE_JSON: own(email), ...env })
+      [],
+      { CLAUDE_JSON: own(email) },
+    )
     expect(r.code).toBe(1)
     expect(placing(r)).toEqual([])
     expect(r.roster).toBeUndefined()
-    expect(r.err).toContain(`--account ${email} is this machine's own Claude login`)
+    expect(r.err).toContain(
+      "the second dispatcher, runs on --backend glm, or on Claude with --account <email>, a second account",
+    )
   })
 
   test("the own login is read from the config folder's .claude.json when CLAUDE_CONFIG_DIR is set", async () => {
@@ -111,10 +123,10 @@ describe("--account logs the session in as another Claude account", () => {
       CLAUDE_JSON: own("quilla@example.org"),
       CONFIG_DIR_CLAUDE_JSON: own(email),
       CLAUDE_CONFIG_DIR: join(scratch, `home-${homes + 1}`, ".claude"),
+      USAGE_JSON: ownUsage,
     })
-    expect(r.code).toBe(1)
-    expect(placing(r)).toEqual([])
-    expect(r.err).toContain("is this machine's own Claude login")
+    expect(r.code).toBe(0)
+    expect(r.security).toBeUndefined()
   })
 
   test("under inscope, whose folder the launch drops, the own login is read from ~/.claude.json", async () => {
@@ -123,9 +135,10 @@ describe("--account logs the session in as another Claude account", () => {
       CONFIG_DIR_CLAUDE_JSON: own("quilla@example.org"),
       CLAUDE_CONFIG_DIR: join(scratch, `home-${homes + 1}`, ".claude"),
       INSCOPE_CCD: "/work/.claude",
+      USAGE_JSON: ownUsage,
     })
-    expect(r.code).toBe(1)
-    expect(r.err).toContain("is this machine's own Claude login")
+    expect(r.code).toBe(0)
+    expect(r.security).toBeUndefined()
   })
 
   test.each([

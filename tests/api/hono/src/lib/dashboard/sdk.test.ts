@@ -847,7 +847,7 @@ describe("the hosted session on the board", () => {
   })
 })
 
-// The hosted session takes a message or an answer only from the owner's own clicks, as deliver() does: the composer's and the card's routes.
+// The hosted session takes a message or an answer only from the owner's own clicks, the acts deliver() types for: the composer's and the card's routes.
 describe("who reaches the hosted session", () => {
   test("only the dashboard router sends to it or answers it", async () => {
     const root = join(import.meta.dir, "../../../../../..")

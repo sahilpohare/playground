@@ -1168,10 +1168,9 @@ describe("as Claude Code runs it", () => {
     return found
   }
 
-  test("the factory settings' matcher takes Bash and the Linear, Slack and GitHub tools", async () => {
+  test("the factory settings' matcher takes the Linear, Slack and GitHub tools, Bash reaching it through guards", async () => {
     const matcher = new RegExp((await entry()).matcher)
     for (const tool of [
-      "Bash",
       "mcp__linear-shared__save_issue",
       "mcp__claude_ai_Linear__save_comment",
       "mcp__slack-shared__chat_post_message",
@@ -1181,7 +1180,7 @@ describe("as Claude Code runs it", () => {
     ]) {
       expect(matcher.test(tool)).toBe(true)
     }
-    for (const tool of ["Read", "Write", "Edit", "mcp__notes__save_note"]) {
+    for (const tool of ["Bash", "Read", "Write", "Edit", "mcp__notes__save_note"]) {
       expect(matcher.test(tool)).toBe(false)
     }
   })

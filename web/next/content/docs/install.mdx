@@ -61,6 +61,20 @@ A GitHub login (`gh auth login`) is optional for the install, and syncing your e
 9. Prints **Left for you**, or `Playground is ready.` when nothing is left.
 10. Starts `playground` once every required tool is there and the local address is set up. Its first start cuts the Dashboard's own checkout in `.claude/worktrees/desk`, installs it, starts the Dashboard and opens it, whose chat starts with **Let's check this Mac** ([Where to start](/docs#where-to-start)).
 
+## Pick what Alpha runs on
+
+After the database and settings steps, first run shows one card for each harness Alpha can start on: **Claude Code** and **Codex**.
+Each card checks three things, and a failed check has its own button:
+
+- **Installed**, at the version Playground tested: **Install** when it is missing, **Update** when it is older. A newer version reads "newer than tested" and still starts.
+- **Signed in**: Claude Code reads `claude auth status`, Codex reads `codex login status`. **Sign in** runs the sign-in for you and shows its link, and Codex's one-time code, to open in your browser.
+- **Plan**: Codex's plan once it is signed in. Claude Code's reads "not read yet".
+
+Pick a card, and **Start** turns on once it reads Installed and Signed in; your pick is saved as the `harness.alpha` setting.
+Codex keeps its sign-in in its own folder, `~/.playground/codex`, and Playground copies it nowhere.
+For now Codex starts Alpha only on a test copy of Playground (`$PLAYGROUND_DATA_DIR` naming another folder), so on your own sessions its card says so and **Start** stays off.
+Settings > Harness shows the same cards with **Switch Alpha**: Alpha writes its handoff and stops, then starts again on the other harness from it.
+
 ## Where it writes
 
 Outside its own folder it writes in these places, besides the tools' own installers:

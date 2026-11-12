@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
+import { check as dispatch, GUARDS as DISPATCHED } from "../../../scripts/hooks/guards"
 import { check as desktopOwnerApp } from "../../../scripts/hooks/no-desktop-owner-app"
 import { check as envDump } from "../../../scripts/hooks/no-env-dump"
 import { check as extensionRepoWrite } from "../../../scripts/hooks/no-extension-repo-write"
@@ -67,6 +68,7 @@ const PATHS: Paths = {
   MAIN: join(SCRATCH, "main"),
   ROOT,
   SCOPE,
+  TREE_LINK: join(SCRATCH, "main", ".claude", "worktrees", "a", "into-main"),
   WORDS: join(HOME, "words"),
   WORK: join(HOME, "work"),
 }
@@ -86,6 +88,10 @@ writeFileSync(join(ROOT, "policy.json"), "{}\n")
 writeFileSync(join(SCOPE, "lists", "release-owners.json"), "[]\n")
 writeFileSync(PATHS.WORDS, "y ".repeat(400_000))
 symlinkSync(ROOT, PATHS.LINK)
+// the main checkout's worktree a, by its .git file, holding a link into the main checkout, and a plain folder beside it that no worktree holds, for #1663's rows
+writeFileSync(join(PATHS.MAIN, ".claude", "worktrees", "a", ".git"), "gitdir: x\n")
+symlinkSync(join(PATHS.MAIN, ".claude"), PATHS.TREE_LINK)
+mkdirSync(join(PATHS.MAIN, ".claude", "worktrees", "plain"))
 symlinkSync(ROOT, join(DATA, "store"))
 symlinkSync(DATA, join(HOME, "pg"))
 symlinkSync(join(PATHS.CLI_DIR, "cli.ts"), join(HOME, "pc"))
@@ -233,24 +239,52 @@ const GUARD_OF: Record<(typeof CHECK_NAMES)[number], Guard> = {
 }
 
 // Each guard's bundle, copied into a scratch checkout with no node_modules above it, as a damaged install leaves one; the folders the bundles read beside them (extensions' lists, the settings reader role.ts runs in its own process) link to this checkout's.
-const BUNDLED_ROOT = join(SCRATCH, "bundled-checkout")
-const BUNDLED_DIR = join(BUNDLED_ROOT, "scripts", "hooks", "bundled")
-mkdirSync(BUNDLED_DIR, { recursive: true })
-for (const file of readdirSync(join(CHECKOUT, "scripts", "hooks", "bundled")))
-  copyFileSync(join(CHECKOUT, "scripts", "hooks", "bundled", file), join(BUNDLED_DIR, file))
-for (const path of [
-  "extensions",
-  "packages",
-  join("scripts", "roster-statuses.json"),
-  join("scripts", "spawn.sh"),
-])
-  symlinkSync(join(CHECKOUT, path), join(BUNDLED_ROOT, path))
+const bundledCheckout = (root: string) => {
+  const dir = join(root, "scripts", "hooks", "bundled")
+  mkdirSync(dir, { recursive: true })
+  for (const file of readdirSync(join(CHECKOUT, "scripts", "hooks", "bundled")))
+    copyFileSync(join(CHECKOUT, "scripts", "hooks", "bundled", file), join(dir, file))
+  for (const path of [
+    "extensions",
+    "packages",
+    join("scripts", "roster-statuses.json"),
+    join("scripts", "spawn.sh"),
+  ])
+    symlinkSync(join(CHECKOUT, path), join(root, path))
+  return dir
+}
+const BUNDLED_DIR = bundledCheckout(join(SCRATCH, "bundled-checkout"))
+// A guard registered on Bash alone has no bundle of its own: guards.js runs it, so its bundled check is guards.js's entry for it.
+type GuardsBundle = {
+  GUARDS: {
+    name: string
+    run: (raw: string, env: NodeJS.ProcessEnv) => Promise<string | undefined>
+  }[]
+}
+const GUARDS_BUNDLE = (await import(join(BUNDLED_DIR, "guards.js"))) as GuardsBundle
+// guards.js passes no main checkout, so no-unslotted-run reads its bundle's own: this copy sits in a worktree of PATHS.MAIN by its .git file, as its source is handed PATHS.MAIN
+const WORKTREE_BUNDLED = join(SCRATCH, "bundled-worktree")
+const WORKTREE_GUARDS_BUNDLE = (await import(
+  join(bundledCheckout(WORKTREE_BUNDLED), "guards.js")
+)) as GuardsBundle
+writeFileSync(
+  join(WORKTREE_BUNDLED, ".git"),
+  `gitdir: ${join(PATHS.MAIN, ".git", "worktrees", "bundled")}\n`,
+)
+const TAKES_MAIN = new Set(["no-unslotted-run"])
+const inGuardsBundle = (guard: string) =>
+  (TAKES_MAIN.has(guard) ? WORKTREE_GUARDS_BUNDLE : GUARDS_BUNDLE).GUARDS.find(
+    ({ name }) => name === guard,
+  )
 const BUNDLED: Checks = Object.fromEntries(
   await Promise.all(
-    CHECK_NAMES.map(async (name) => [
-      name,
-      (await import(join(BUNDLED_DIR, `${GUARD_OF[name]}.js`))).check,
-    ]),
+    CHECK_NAMES.map(async (name) => {
+      const own = join(BUNDLED_DIR, `${GUARD_OF[name]}.js`)
+      if (existsSync(own)) return [name, (await import(own)).check]
+      const entry = inGuardsBundle(GUARD_OF[name])
+      if (!entry) throw new Error(`${GUARD_OF[name]} has no bundle and guards.js runs none of it`)
+      return [name, (raw: string, env?: NodeJS.ProcessEnv) => entry.run(raw, env ?? process.env)]
+    }),
   ),
 ) as Checks
 
@@ -510,13 +544,23 @@ describe("each no-extensions-write refusal of a #1428 row names the call as one 
   })
 })
 
+// A Bash row of a guard guards.ts runs reaches it through guards.ts's check(), gated as a factory session's call, with the guard set up as its own test sets it up.
+const dispatched = (guard: Guard) => DISPATCHED.find((g) => g.name === guard)
+const verdict = (c: (typeof CASES)[number], cwd: string, home: string) => {
+  const entry = dispatched(c.guard)
+  if (typeof c.call !== "string" || !entry) return GUARDS[c.guard].run(input(c.call, cwd), home)
+  return dispatch(input(c.call, cwd), { PLAYGROUND_ROLE: "worker" }, [
+    { ...entry, run: (raw) => GUARDS[c.guard].run(raw, home) },
+  ])
+}
+
 describe("every refused form stays refused unless the allow list names it", () => {
   test.each(CASES.map((c) => [c.key, c] as const))(
     "%s",
     async (_, c) => {
       const at = GUARDS[c.guard].folders[c.folder]
       if (!at) throw new Error(`${c.guard} has no ${c.folder} folder`)
-      const reason = await GUARDS[c.guard].run(input(c.call, at[0]), at[1])
+      const reason = await verdict(c, at[0], at[1])
       if (allowed(c)) expect(reason).toBeUndefined()
       else expect(reason).toContain(`${c.guard} hook `)
     },
@@ -602,6 +646,82 @@ describe("every refused form stays refused unless the allow list names it", () =
   })
 })
 
+// A Codex session's hook input (codex-cli 0.167.1): its own fields beside Claude Code's, a shell call as Bash with its command, an MCP call by its mcp__ name and arguments, and an edit in two shapes, an apply_patch call whose command is the patch, or an apply_patch command run in the shell.
+const THREAD = "0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+const CODEX_FIELDS = {
+  model: "gpt-made-up",
+  permission_mode: "bypassPermissions",
+  session_id: THREAD,
+  tool_use_id: "call-made-up",
+  transcript_path: null,
+  turn_id: "turn-made-up",
+}
+const EDITS = new Set(["Edit", "MultiEdit", "NotebookEdit", "Write"])
+const added = (text: string) =>
+  text
+    .split("\n")
+    .map((line) => `+${line}`)
+    .join("\n")
+// The patch Codex sends for an edit row: a Write adds its file, every other edit updates it.
+const patchOf = ({ input }: { input: Record<string, unknown> }) => {
+  const path = String(input.file_path ?? input.notebook_path)
+  const body =
+    typeof input.content === "string"
+      ? `*** Add File: ${path}\n${added(input.content)}`
+      : `*** Update File: ${path}\n@@\n-${String(input.old_string ?? "x")}\n${added(String(input.new_string ?? "y"))}`
+  return `*** Begin Patch\n${body}\n*** End Patch`
+}
+type Shape = { input: Record<string, unknown>; shape: string; tool: string }
+// Each Codex shape of a row; a read by Read, Glob or Grep has none, since Codex reads through the shell.
+const codexShapes = (call: Call): Shape[] => {
+  if (typeof call === "string") return [{ input: { command: call }, shape: "shell", tool: "Bash" }]
+  if (call.tool.startsWith("mcp__")) return [{ input: call.input, shape: "mcp", tool: call.tool }]
+  if (!EDITS.has(call.tool)) return []
+  const patch = patchOf(call)
+  return [
+    { input: { command: patch }, shape: "apply_patch call", tool: "apply_patch" },
+    {
+      input: { command: `apply_patch <<'EOF'\n${patch}\nEOF` },
+      shape: "apply_patch in the shell",
+      tool: "Bash",
+    },
+  ]
+}
+const codexInput = ({ input, tool }: Shape, cwd: string) =>
+  JSON.stringify({
+    ...CODEX_FIELDS,
+    cwd,
+    hook_event_name: "PreToolUse",
+    tool_input: input,
+    tool_name: tool,
+  })
+const CODEX_CASES = CASES.flatMap((c) =>
+  codexShapes(c.call).map((shape) => ({ ...c, codex: shape, key: `${c.key} | ${shape.shape}` })),
+)
+
+describe("every refused form stays refused in its Codex shape", () => {
+  test.each(CODEX_CASES.map((c) => [c.key, c] as const))(
+    "%s",
+    async (_, c) => {
+      const at = GUARDS[c.guard].folders[c.folder] as [string, string]
+      const reason = await GUARDS[c.guard].run(codexInput(c.codex, at[0]), at[1])
+      if (allowed(c)) expect(reason).toBeUndefined()
+      else expect(reason).toContain(`${c.guard} hook `)
+    },
+    60_000,
+  )
+
+  test("every edit row has both Codex edit shapes", () => {
+    const edits = CASES.filter((c) => typeof c.call !== "string" && EDITS.has(c.call.tool))
+    expect(edits.length).toBeGreaterThan(0)
+    for (const c of edits)
+      expect(codexShapes(c.call).map((s) => s.shape)).toEqual([
+        "apply_patch call",
+        "apply_patch in the shell",
+      ])
+  })
+})
+
 // Each path flag a row names, listed once, with the joins its program reads between the flag and its folder: "=" joined, " " spaced, "" attached; git reads -C spaced alone.
 const PATH_FLAGS = [
   { flag: "--cwd", joins: ["=", " "], program: "bun" },
@@ -628,9 +748,11 @@ const flagIn = ({ flag, joins, program }: PathFlag) =>
 const LINKS = join(SCRATCH, "spelling-links")
 mkdirSync(LINKS)
 let links = 0
-const realOf = (path: string) => {
+const realOf = (path: string, physical = false) => {
   try {
-    return statSync(path).isDirectory() ? realpathSync(path) : undefined
+    return statSync(path).isDirectory()
+      ? (physical ? realpathSync.native : realpathSync)(path)
+      : undefined
   } catch {
     return undefined
   }
@@ -649,9 +771,12 @@ function spellingsOf(call: Call, cwd: string, id: string): { spelling: string; t
       const [all, before = "", glue = "", folder = ""] = m
       const at = resolve(cwd, folder)
       const real = moves ? undefined : realOf(at)
-      if (!real) {
+      // a `..` after a link names the folder above the link's target, which resolve() reads as the folder above the link, so no spelling built from `at` names the folder the row's does
+      const kernel = realOf(isAbsolute(folder) ? folder : `${cwd}/${folder}`, true)
+      const climbs = !!real && kernel !== undefined && kernel !== real
+      if (!real || climbs) {
         UNSPELT.add(
-          `${id} | ${pathFlag.program} ${pathFlag.flag}, ${moves ? "it moves folders" : "no folder"}`,
+          `${id} | ${pathFlag.program} ${pathFlag.flag}, ${moves ? "it moves folders" : climbs ? "it climbs out of a link" : "no folder"}`,
         )
         continue
       }
@@ -714,9 +839,16 @@ describe("every spelling of a row's path flag keeps the row's verdict", () => {
 
   test("the rows whose path flag keeps its single spelling are the ones pinned here", () => {
     expect([...UNSPELT].sort()).toEqual([
+      // a `..` after a link, which the kernel reads from the link's target
+      "#1663 a commit by one -C that climbs out of a link | git -C, it climbs out of a link",
+      // the row's cd moves the shell, so its --cwd is read from a folder no spelling knows
+      "#1663 turbo by bunx --cwd that runs only when the cd before its || failed | bunx --cwd, it moves folders",
       // bunx's spelling takes the row's last --cwd, which bun reads from the --cwd=/ before it, so the row's own folder holds none
       "#1732 a runner --cwd read from the one before it | bunx --cwd, no folder",
       "#1732 turbo's relative --cwd read from the runner's | bunx --cwd, no folder",
+      "#1747 bunx running a commit in a --cwd read from the one before | bunx --cwd, no folder",
+      "#1747 bunx running bun's build in a --cwd in a worktree read from the one before | bunx --cwd, no folder",
+      "#1747 bunx running bun's build in a --cwd read from the one before | bunx --cwd, no folder",
       "#466 git --work-tree with a subcommand for its value | git --work-tree, no folder",
       "#466 git -C with a subcommand for its value | git -C, no folder",
     ])
@@ -746,9 +878,24 @@ describe("every spelling of a row's path flag keeps the row's verdict", () => {
       "#1173 GNU mv to the shell's folder attached to its target option in a cluster after a cd to a variable | -ft",
       "#1173 GNU mv to the shell's folder by its long target option after a cd to a variable | --target-directory",
       "#1173 GNU mv to the shell's folder by its shortened long target option after a cd to a variable | --target",
+      // cd's -P, alone or among its other options, which take no value: the folder after it is the cd's own operand
+      "#1663 a commit after a cd whose -P comes before -L | -PL",
+      "#1663 a commit after a physical cd into a link, then a climb | -P",
+      "#1663 a commit after a physical cd that climbs out of a link | -P",
+      "#1663 a commit after a quiet physical pushd that climbs out of a link | -qP",
+      "#1663 a commit after zsh's quiet physical cd that climbs out of a link | -qP",
+      // git's second -C, read from where the first lands through a link, so a spelling of it alone from the row's folder names another folder
+      "#1663 a commit by a -C read from a link into the main checkout | -C",
+      "#1663 a commit by a -C read from a link named by its absolute path | -C",
+      // turbo's own --cwd, which no path flag spells
+      "#1663 turbo by its --cwd in a plain folder of the worktrees folder | --cwd",
+      "#1663 turbo by its --cwd in the worktrees folder | --cwd",
       // the --cwd=/ that bunx's spelling passes over for the row's last --cwd, read from it
       "#1732 a runner --cwd read from the one before it | --cwd",
       "#1732 turbo's relative --cwd read from the runner's | --cwd",
+      "#1747 bunx running a commit in a --cwd read from the one before | --cwd",
+      "#1747 bunx running bun's build in a --cwd in a worktree read from the one before | --cwd",
+      "#1747 bunx running bun's build in a --cwd read from the one before | --cwd",
       // an option that takes no value, followed by an operand
       "#356 a link to the data folder made in the same call | -s",
       "#356 a write after a word with an unbalanced quote | -rf",
@@ -842,10 +989,13 @@ describe("each bundled guard gives its source's verdict with no node_modules rea
     expect(() => Bun.resolveSync("zod", BUNDLED_DIR)).toThrow()
   })
 
-  // A guard with a bundle goes through its bundle's check(), so registering one with no entry in GUARD_OF fails here rather than comparing its source with itself.
+  // A guard with a bundle, its own or guards.js running it, goes through that bundle, so registering one with no entry in GUARD_OF fails here rather than comparing its source with itself.
   test("every guard here has a bundle exactly when GUARD_OF names its check", () => {
     for (const guard of Object.keys(GUARDS))
-      expect({ bundled: existsSync(join(BUNDLED_DIR, `${guard}.js`)), guard }).toEqual({
+      expect({
+        bundled: existsSync(join(BUNDLED_DIR, `${guard}.js`)) || !!inGuardsBundle(guard),
+        guard,
+      }).toEqual({
         bundled: BUNDLED_PASS.has(guard as Guard),
         guard,
       })

@@ -30,7 +30,7 @@
   (the second dispatcher then takes the primary's name plus `-2`, `probe-<what>-2`, so the real second dispatcher stays out of its reach; a test of the second dispatcher's chat spawns that second probe, or names another in `PLAYGROUND_DISPATCHER_SECONDARY`), and `PLAYGROUND_ATTACHMENTS_DIR` and
   `PLAYGROUND_DEBUG_PASTE_DIR` (each honoured on a live-reads stack alone) to scratch folders so its uploads and paste reports stay out of the live dashboard's.
   Such a stack seats no assistant (`assistantOf`), so the real one stays out of its reach too.
-  Answering an inbox item types into the session its `from` names, so a test stack posts its test items `from` the probe, into the worktree's own database, which never holds a real one.
+  Answering an inbox item types into the session its `from` names, so a test stack posts its test items `from` the probe, into the worktree's own database, which never holds a real one, and each answer's `close` names that checkout's own `bun run --cwd <checkout> ask`, never the live Inbox's.
   Close the probe the moment its test is done.
 - ALWAYS: Verify dashboard work with `bun run verify` (`--help` lists its checks) rather than a script of your own: a worker before it opens or updates a PR, the reviewer before it scores one, a runner after it restarts a stack.
   With no check it runs `all`.

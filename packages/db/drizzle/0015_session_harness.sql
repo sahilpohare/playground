@@ -1,0 +1,1 @@
+ALTER TABLE "claude_session" ADD COLUMN "harness" text DEFAULT 'claude-code' NOT NULL;

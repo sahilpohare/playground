@@ -13,7 +13,6 @@ import {
   depsOf,
 } from "../../../../../packages/scripts/src/playground/migrate"
 import { OLD_TREE_PATHS } from "../../../../../packages/scripts/src/rename/rules"
-import { TODAY_PUBLIC } from "../../../../../packages/scripts/src/trace-count/kinds"
 import { mustGit } from "../../../../../packages/settings/src/folder"
 import { putItem, showItem } from "../../../../../packages/settings/src/items"
 import { scopeDir } from "../../../../../packages/settings/src/rendered"
@@ -178,7 +177,7 @@ const SETTINGS: [string, unknown, string][] = [
   ["ext.links", { [LOGIN]: ["*"], [ORG]: ["*", ORG] }, "--org"],
   ["ext.order", [LOGIN, ORG], "--org"],
   ["factory.archiveRepo", "acme/old-factory", "the archive's origin"],
-  ["factory.publicRepo", ["acme/new-factory", ...TODAY_PUBLIC], "this checkout's origin"],
+  ["factory.publicRepo", "acme/new-factory", "this checkout's origin"],
   ["factory.repo", "acme/new-factory", "this checkout's origin"],
   ["live.branch", "live/old", "api/hono/src/lib/dev/live-desk.ts at canary"],
   ["live.container", "acme-old-db", "api/hono/src/lib/dev/live-desk.ts at canary"],

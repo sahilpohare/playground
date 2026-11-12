@@ -134,7 +134,7 @@ describe("--model picks the Claude model a session runs on", () => {
     expect(start.code).toBe(0)
     const pins = join(start.home, ".playground", "backends")
     expect(readdirSync(pins)).toEqual(["worker-brave-otter"])
-    expect(readFileSync(join(pins, "worker-brave-otter"), "utf8")).toBe("claude\n")
+    expect(readFileSync(join(pins, "worker-brave-otter"), "utf8")).toBe("claude-code claude\n")
   })
 
   test.each([

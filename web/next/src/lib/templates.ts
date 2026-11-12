@@ -17,6 +17,9 @@ export type TemplateRow = InferResponseType<
 
 export const TEMPLATES_QUERY_KEY = ["session-templates"] as const
 
+// The model a GLM template names, packages/settings' GLM_MODEL, which the web reads no package for; a test keeps the two equal.
+export const GLM_MODEL = "glm"
+
 export async function readTemplates(): Promise<TemplateRow[]> {
   const { data, error } = await unwrap(apiClient.v1.sessions.templates.$get())
   if (error) throw new Error(error.message)
@@ -38,7 +41,7 @@ export const templateRowView = (
   secondRunning: boolean,
 ): { detail: string; label: string; reason: string | null } => ({
   detail: [
-    row.backend === "glm" ? "GLM" : (row.model ?? "Claude"),
+    row.model === GLM_MODEL ? "GLM" : (row.model ?? "Claude"),
     row.effort && isEffort(row.effort) ? EFFORT_LABELS[row.effort] : null,
   ]
     .filter(Boolean)
@@ -56,19 +59,19 @@ export const TEMPLATE_SETTING_QUERY_KEY = ["setting", TEMPLATES_KEY] as const
 // The manager kinds a template starts, as the settings schema lists them: the roster's managers.
 export const TEMPLATE_KINDS = ROSTER_KINDS.filter((kind) => ROSTER_ROLE_OF_KIND[kind] === "manager")
 
-// One template as sessions.templates stores it; the API's schema checks every field on save.
+// One template as sessions.templates stores it, its model a Claude id or glm; the API's schema checks every field on save.
 export type Template = {
   account?: string
-  backend: "claude" | "glm"
   brief: string
   effort?: SessionEffort
+  harness: TemplateRow["harness"]
   id: string
   kind: RosterKind
   label: string
   model?: string
 }
 
-// The editor's fields, each a string, empty for none.
+// The editor's fields, each a string, empty for none: backend is claude or glm, a GLM template's model.
 export type TemplateForm = {
   account: string
   backend: string
@@ -152,23 +155,24 @@ export const newTemplateId = (label: string, rows: Template[]): string => {
 // Pure: the editor's fields for a template, or for a new one.
 export const templateForm = (template?: Template): TemplateForm => ({
   account: template?.account ?? "",
-  backend: template?.backend ?? "claude",
+  backend: template?.model === GLM_MODEL ? "glm" : "claude",
   brief: template?.brief ?? "",
   effort: template?.effort ?? "",
   kind: template?.kind ?? "orchestrator",
   label: template?.label ?? "",
-  model: template?.model ?? "",
+  model: template?.model === GLM_MODEL ? "" : (template?.model ?? ""),
 })
 
-// Pure: the template the editor's fields save, an empty field left out and a GLM template without the Claude-only account, effort and model.
+// Pure: the template the editor's fields save, on Claude Code, an empty field left out and a GLM template glm as its model, without the Claude-only account, effort and model.
 export const templateOf = (form: TemplateForm, id: string): Template => {
   const claude = form.backend !== "glm"
   const effort = isEffort(form.effort) ? form.effort : undefined
   const optional = { account: form.account, effort, model: form.model.trim() }
   return {
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => claude && value)),
-    backend: claude ? "claude" : "glm",
+    ...(claude ? {} : { model: GLM_MODEL }),
     brief: form.brief.trim(),
+    harness: "claude-code",
     id,
     kind: TEMPLATE_KINDS.find((kind) => kind === form.kind) ?? "orchestrator",
     label: form.label.trim(),
@@ -234,7 +238,7 @@ export const kindWord = (kind: string) => kind.charAt(0).toUpperCase() + kind.sl
 export const templateWords = (template: Template): string =>
   [
     kindWord(template.kind),
-    template.backend === "glm"
+    template.model === GLM_MODEL
       ? "GLM"
       : isModel(template.model)
         ? MODEL_LABELS[template.model]

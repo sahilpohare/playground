@@ -11,8 +11,12 @@ import { prebuildTests } from "./verify/prebuild"
 
 const TIMINGS = "tests/timings.json"
 
-// Files that run one at a time after the parallel pass: dev.test.ts and launch.test.ts move packages/env/dist/gaps.mjs aside, and dev.test.ts's launcher rebuilds @packages/env, whose dist the other workers import; this pass runs its files in one process, which loads a shared helper once, so no spawn*.test.ts or ops/run-slot*.test.ts file joins it, since each needs its fake afresh
-const SERIAL = ["tests/api/hono/src/bin/dev.test.ts", "tests/api/hono/src/lib/dev/launch.test.ts"]
+// Files that run one at a time after the parallel pass: dev.test.ts and launch.test.ts move packages/env/dist/gaps.mjs aside, and dev.test.ts's launcher rebuilds @packages/env, whose dist the other workers import; check-types-env.test.ts runs the root check-types script in the checkout, whose env values hash build keys other workers' dist was not built under, so a worker beside it would read a dist rebuilt mid-pass; this pass runs its files in one process, which loads a shared helper once, so no spawn*.test.ts or ops/run-slot*.test.ts file joins it, since each needs its fake afresh
+const SERIAL = [
+  "tests/api/hono/src/bin/dev.test.ts",
+  "tests/api/hono/src/lib/dev/launch.test.ts",
+  "tests/check-types-env.test.ts",
+]
 
 const { env, scratch } = sandbox()
 // a git hook (pre-commit runs tests) exports GIT_DIR and GIT_INDEX_FILE, which turn a test's scratch git init or commit onto the real repository: one set its core.bare (3 Nov); a test that needs a GIT_ variable sets it on its own git call

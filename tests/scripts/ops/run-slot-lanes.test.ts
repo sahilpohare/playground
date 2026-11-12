@@ -147,24 +147,36 @@ describe("memory shuts slots 2 to 4 as mem_ok reads it", () => {
 })
 
 describe("the gauges", () => {
-  test("an unread top shuts slots 2 to 4 and says so once a run", () => {
+  test("an unread top keeps slots 2 to 4 open and says so once a run", () => {
     const m = machine()
     writeFileSync(join(m.bin, "top"), "#!/bin/bash\nexit 1\n")
     chmodSync(join(m.bin, "top"), 0o755)
     const { err, slots } = look(m)
-    expect(slots).toBe("1\n")
-    expect(err.match(/^run-slot\.sh: cannot read the CPU's idle share /gm)).toHaveLength(1)
+    expect(slots).toBe("4\n")
+    expect(
+      err.match(
+        /^run-slot\.sh: cannot read the CPU's idle share \(top -l 2 -n 0\), so the lanes go by the load and memory alone$/gm,
+      ),
+    ).toHaveLength(1)
   })
 
-  // top's first sample reads since boot, so a top that prints it alone gives no idle share, rather than its 98%
-  test("a top that prints its first sample alone shuts them", () => {
+  // an idle share that reads - is a dark sensor, not a busy CPU (issue 1818)
+  test("a top that prints no CPU usage line keeps them open", () => {
+    const m = machine()
+    writeFileSync(join(m.bin, "top"), "#!/bin/bash\necho no cpu usage reading\n")
+    chmodSync(join(m.bin, "top"), 0o755)
+    expect(look(m).slots).toBe("4\n")
+  })
+
+  // top's first sample reads since boot, so a top that prints it alone gives no idle share, rather than its 98%, which no longer counts as busy (issue 1818)
+  test("a top that prints its first sample alone keeps them open", () => {
     const m = machine()
     writeFileSync(
       join(m.bin, "top"),
       '#!/bin/bash\necho "CPU usage: 1.00% user, 1.00% sys, 98.00% idle "\n',
     )
     chmodSync(join(m.bin, "top"), 0o755)
-    expect(look(m).slots).toBe("1\n")
+    expect(look(m).slots).toBe("4\n")
   })
 
   test("a run that said an unread top once leaves no marker behind", async () => {
@@ -279,11 +291,11 @@ describe("the gauges", () => {
     },
   )
 
-  test("an unread top shuts them with why=cpu", async () => {
+  test("an unread top keeps them open, its lanes line naming the dark idle", async () => {
     const m = machine({ idle: 80, load1: 18 })
     writeFileSync(join(m.bin, "top"), "#!/bin/bash\nexit 1\n")
     expect(await m.runs("worker-x")).toBe(true)
-    expect(lanes(m)).toEqual([expect.stringMatching(/ shut why=cpu idle=-% load1=18\.00 /)])
+    expect(lanes(m)).toEqual([expect.stringMatching(/ open idle=-% load1=18\.00 /)])
   })
 
   test("a read subcommand records no lanes line", () => {

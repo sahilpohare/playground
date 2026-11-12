@@ -16,6 +16,7 @@ import { MARKER } from "../../../../../packages/safe-delete/src"
 import {
   runSpawn,
   SPAWN_LOCK,
+  dispatcherOptions,
   startDispatcher,
   takeLock,
 } from "../../../../../packages/scripts/src/playground/spawn"
@@ -175,6 +176,40 @@ describe("startDispatcher", () => {
     expect(readFileSync(join(data, "brief-dispatcher.md"), "utf8")).toBe("The owner's own edit.\n")
   })
 
+  test("--harness codex reaches spawn.sh manager with --harness codex (#1835)", async () => {
+    const { data, home, spawn, template } = setup()
+    const started = await startDispatcher({
+      data,
+      harness: "codex",
+      live: [],
+      name: "dispatcher",
+      spawn,
+      template,
+    })
+    expect(started.code).toBe(0)
+    expect(readFileSync(join(home, "argv"), "utf8")).toBe(
+      "manager dispatcher brief-dispatcher.md --harness codex\n",
+    )
+  })
+
+  test("--brief starts it from Switch's handoff, writing no brief from the template", async () => {
+    const { data, home, spawn, template } = setup()
+    const brief = "handoffs/dispatcher-switch.md"
+    await startDispatcher({
+      brief,
+      data,
+      harness: "codex",
+      live: [],
+      name: "dispatcher",
+      spawn,
+      template,
+    })
+    expect(readFileSync(join(home, "argv"), "utf8")).toBe(
+      `manager dispatcher ${brief} --harness codex\n`,
+    )
+    expect(existsSync(join(data, "brief-dispatcher.md"))).toBe(false)
+  })
+
   test("exits 3 and runs nothing while a session holds the name", async () => {
     const { data, home, spawn, template } = setup()
     expect(
@@ -191,5 +226,26 @@ describe("startDispatcher", () => {
       code: 1,
       message: "spawn.sh refuses dispatcher: a made-up gate",
     })
+  })
+})
+
+describe("dispatcherOptions", () => {
+  test("takes --harness and --brief, claude-code adding nothing", () => {
+    expect(dispatcherOptions([])).toEqual({})
+    expect(dispatcherOptions(["--harness", "claude-code"])).toEqual({})
+    expect(dispatcherOptions(["--harness", "codex", "--brief", "handoffs/d-switch.md"])).toEqual({
+      brief: "handoffs/d-switch.md",
+      harness: "codex",
+    })
+  })
+
+  test.each([
+    [["--harness", "glm"]],
+    [["--harness"]],
+    [["--brief", "/etc/passwd"]],
+    [["--brief", "../x.md"]],
+    [["--model", "x"]],
+  ])("refuses %p with its usage", (words) => {
+    expect(dispatcherOptions(words)).toStartWith("usage: playground dispatcher")
   })
 })

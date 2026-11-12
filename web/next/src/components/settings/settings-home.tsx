@@ -5,6 +5,7 @@ import { OwnerOnly } from "@/components/dashboard/owner-only"
 import { ReadOnlyLine } from "@/components/dashboard/read-only-line"
 import { Accounts } from "@/components/settings/accounts"
 import { Extensions } from "@/components/settings/extensions"
+import { Harness } from "@/components/settings/harness"
 import { Jobs } from "@/components/settings/jobs"
 import { MacChecks } from "@/components/settings/mac-checks"
 import { Privacy } from "@/components/settings/privacy"
@@ -20,7 +21,7 @@ export function SettingsHome() {
     <>
       <PageHeader
         title="Settings"
-        description="Accounts, templates, extensions, privacy, jobs and how the Dashboard runs."
+        description="Accounts, the harness Alpha runs on, templates, extensions, privacy, jobs and how the Dashboard runs."
       />
       {allowed && config.hosted ? (
         <div className="flex flex-col gap-6">
@@ -31,6 +32,7 @@ export function SettingsHome() {
         <div className="flex flex-col gap-6">
           <MacChecks />
           <Accounts />
+          <Harness />
           <Templates />
           <Extensions />
           <Privacy />

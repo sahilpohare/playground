@@ -11,7 +11,7 @@ import { pausedOps, useOps, whenWords } from "@/lib/ops"
 import { relativeTime } from "@/lib/time"
 
 const pausedConfig: Record<string, ColumnConfig> = {
-  // room for the longest script's name, Code consultant starts
+  // room for the longest script's name, Claude usage readings
   name: { extra: 24 },
   does: { extra: 36, flex: true, wrap: true },
   runs: { extra: 12 },
@@ -25,7 +25,7 @@ export const lastBeat = (row: OpsRow, now: number): string =>
 // Every cell muted: these jobs are paused on purpose, so none of them reads as a problem.
 export const pausedColumns = (now: number) => [
   textColumn<OpsRow>("name", "Script", (row) => row.name, true),
-  textColumn<OpsRow>("does", "Does", (row) => row.does ?? "", true),
+  textColumn<OpsRow>("does", "Does", (row) => row.does, true),
   textColumn<OpsRow>("runs", "Runs", (row) => whenWords(row.schedule) ?? "", true),
   textColumn<OpsRow>("beat", "Last beat", (row) => lastBeat(row, now), true),
 ]

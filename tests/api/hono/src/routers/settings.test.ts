@@ -144,3 +144,66 @@ describe("Settings > Jobs' writes through PUT /api/v1/settings/:key (#1336)", ()
     expect(readSetting(data, KEY)!.rows).toEqual([{ key: KEY, scope: ME, value: body.value }])
   })
 })
+
+// #1797: Settings > Extensions > WhatsApp saves its two numbers through this PUT, and the page reads each back by its last 4 digits alone, so no answer of this router carries a whole number.
+describe("WhatsApp's numbers through /api/v1/settings (#1797)", () => {
+  const NUMBER = "+15550100001"
+  const MASKED = "••••0001"
+  const write = (key: string, value: string) =>
+    app.request(
+      `http://127.0.0.1/${key}`,
+      {
+        body: JSON.stringify({
+          by: "Settings",
+          reason: `Set ${key} in Settings > Extensions`,
+          scope: ME,
+          value,
+        }),
+        headers: { "content-type": "application/json", origin: trusted() },
+        method: "PUT",
+      },
+      peer("127.0.0.1"),
+    )
+  const read = (path: string) => app.request(`http://127.0.0.1${path}`)
+
+  test("a bad number is refused with a plain message and nothing is saved", async () => {
+    const data = setUp()
+    spies.push(signedIn("owner"))
+    const response = await write("wa.owner", "5550100001")
+    expect(response.status).toBe(400)
+    expect(await response.text()).toContain("a phone number is + and 8 to 15 digits")
+    expect(readSetting(data, "wa.owner")!.rows).toEqual([])
+  })
+
+  test.each(["wa.device", "wa.owner"])(
+    "%s saves whole, and every read gives back its last 4 digits alone",
+    async (key) => {
+      const data = setUp()
+      spies.push(signedIn("owner"))
+      const response = await write(key, NUMBER)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ data: { key, scope: ME, value: MASKED } })
+      expect(readSetting(data, key)!.rows).toEqual([{ key, scope: ME, value: NUMBER }])
+
+      const one = await read(`/${key}`)
+      const oneBody = await one.text()
+      expect(oneBody).not.toContain(NUMBER)
+      expect(JSON.parse(oneBody).data).toMatchObject({
+        rows: [{ key, scope: ME, value: MASKED }],
+        value: MASKED,
+      })
+
+      const all = await read("/")
+      const allBody = await all.text()
+      expect(allBody).not.toContain(NUMBER)
+      const listed = JSON.parse(allBody).data
+      expect(listed.values[key]).toBe(MASKED)
+      expect(listed.rows).toContainEqual({ key, scope: ME, value: MASKED })
+
+      const why = await read(`/${key}/why`)
+      const whyBody = await why.text()
+      expect(whyBody).not.toContain(NUMBER)
+      expect(JSON.parse(whyBody).data[0]).toMatchObject({ newValue: MASKED, oldValue: null })
+    },
+  )
+})

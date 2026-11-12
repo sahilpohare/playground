@@ -3,7 +3,7 @@ import { z } from "zod"
 import { defineSettings, extLinksSchema, extOrderSchema, extScopeSchema } from "./settings"
 
 // The extensions this checkout ships under extensions/, beside core, each off until the owner turns it on in ext.bundled.
-export const BUNDLED_EXTENSIONS = ["slack"] as const
+export const BUNDLED_EXTENSIONS = ["slack", "whatsapp"] as const
 
 // The extensions: the bundled ones turned on, the repository each one's clone syncs with, the order a name is taken from them, and the orgs whose repos read each; extChain in settings.ts reads the last two.
 export const extSettings = defineSettings({

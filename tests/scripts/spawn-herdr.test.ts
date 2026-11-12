@@ -183,7 +183,9 @@ describe("--runtime herdr opens the session in herdr (#909)", () => {
       `playground ${dir}/playground.sock ${dir}/config.toml`,
     )
     expect(readFileSync(lw(r.home, "runtimes", "worker-brave-otter"), "utf8")).toBe("herdr\n")
-    expect(readFileSync(lw(r.home, "backends", "worker-brave-otter"), "utf8")).toBe("claude\n")
+    expect(readFileSync(lw(r.home, "backends", "worker-brave-otter"), "utf8")).toBe(
+      "claude-code claude\n",
+    )
     expect(execLine(r, "worker-brave-otter")).toBe(
       `exec spawn.sh resume worker-brave-otter ${root} ${sid}`,
     )

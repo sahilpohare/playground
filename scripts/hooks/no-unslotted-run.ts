@@ -13,8 +13,11 @@ import {
   RUNNER_TAKES,
   ranIn,
   runnerFolders,
+  toolName,
   turboWords,
   unreadFolder,
+  withChained,
+  X,
 } from "./no-main-checkout"
 import { fromFactory } from "./role"
 import {
@@ -251,6 +254,12 @@ const lineWords = (values: string[]) =>
 const nextBuild = (values: string[]) =>
   lineWords(values).some((v, k, all) => program(v) === "next" && all[k + 1] === "build")
 
+// The folder next build builds, its first word that is no option, read from the folder it runs in
+const nextDir = (args: Word[], env: Env) => {
+  const dir = args.find((a) => !a.value.startsWith("-"))
+  return dir ? [pathOf(dir, env)] : []
+}
+
 // The heavy task a turbo call runs, as `turbo run <task>` or turbo's own `turbo <task>`, or undefined.
 function turboTask(words: Word[]): string | undefined {
   const values = words.map((w) => w.value)
@@ -305,7 +314,9 @@ function heavy(
     return
   }
   if (name === "next")
-    return args[0]?.value === "build" ? { dir: env.cwd, what: "next build" } : undefined
+    return args[0]?.value === "build"
+      ? { also: nextDir(args.slice(1), env), dir: env.cwd, what: "next build" }
+      : undefined
   // turbo by name, path or versioned package, through bunx, npx or bun x past their options, read as no-main-checkout reads it
   const turbo = turboWords(name, args, env)
   if (turbo) {
@@ -323,25 +334,52 @@ function heavy(
       (a, k) => !a.value.startsWith("-") && !RUNNER_TAKES.has(args[k - 1]?.value ?? ""),
     )
     const values = words.map((w) => w.value)
-    return (program(values[0] ?? "") === "next" && values[1] === "build") ||
-      (packagedTools(args).includes("next") && nextBuild(values))
-      ? { also: runnerFolders(name, args, env, []), dir: env.cwd, what: `${name} next build` }
-      : undefined
+    const base = name === "bunx" ? bunCall([X, ...args], env).chained : env.cwd
+    if (program(values[0] ?? "") === "next" && values[1] === "build")
+      return {
+        also: [
+          ...(runnerFolders(name, args, env, []) ?? []),
+          ...nextDir(words.slice(2), { ...env, cwd: base }),
+        ],
+        dir: env.cwd,
+        what: `${name} next build`,
+      }
+    if (packagedTools(args).includes("next") && nextBuild(values))
+      return { also: runnerFolders(name, args, env, []), dir: env.cwd, what: `${name} next build` }
+    return name === "bunx" ? heavy("bun", [X, ...args], env) : undefined
   }
   if (name !== "bun") return
-  const { at, cwd, filtered, sub, words } = bunCall(args, env)
+  const { at, chained, cwd, filtered, sub, words } = bunCall(args, env)
   const rest = args.slice(at + 1)
   if (words[0] === "install" || words[0] === "i") {
     if (rest.some((a) => ["--dry-run", "--help", "-h"].includes(a.value))) return
     return { dir: cwdFlag(rest, { ...env, cwd }), what: "bun install" }
   }
+  if (words[0] === "x" && program(words[1] ?? "") === "next" && rest[0]?.value === "build")
+    return {
+      also: [
+        ...(runnerFolders(name, args, env, []) ?? []),
+        ...nextDir(rest.slice(1), { ...env, cwd: chained }),
+      ],
+      dir: cwd,
+      what: "bun x next build",
+    }
   if (
     words[0] === "x" &&
-    ((program(words[1] ?? "") === "next" && rest[0]?.value === "build") ||
-      (packagedTools(args.slice(sub + 1)).includes("next") &&
-        nextBuild([words[1] ?? "", ...rest.map((a) => a.value)])))
+    packagedTools(args.slice(sub + 1)).includes("next") &&
+    nextBuild([words[1] ?? "", ...rest.map((a) => a.value)])
   )
     return { also: runnerFolders(name, args, env, []), dir: cwd, what: "bun x next build" }
+  // bun x runs any program in the folder its --cwd options chain to, so that program is read as the shell would read it there
+  if (words[0] === "x" && words[1] && args[at]?.value === words[1]) {
+    const ran = heavy(toolName(words[1]), rest, {
+      ...env,
+      cwd: chained,
+    })
+    if (ran) {
+      return { ...ran, also: withChained(ran.also, chained), what: `bun x ${ran.what}` }
+    }
+  }
   // bun run test:file passes its words to bun test, and with no file runs the whole suite as bun test does
   const testFile = words[0] === "run" && words[1] === "test:file"
   if (words[0] === "test" || testFile) {

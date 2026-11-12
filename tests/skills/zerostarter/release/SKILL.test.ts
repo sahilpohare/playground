@@ -21,11 +21,11 @@ describe("the ship's merge step is ship:merge, which reads its gates at the head
     )
   })
 
-  test("a pin with held runs under the bot's draft opens the ship PR again from step 2", async () => {
+  test("a pin with held runs under the bot's draft approves them with ship:approve-held", async () => {
     const text = await step3()
     expect(text).toContain("`action_required`")
-    expect(text).toContain("`gh pr close <n>`")
-    expect(text).toContain("step 2's `gh pr create`")
+    expect(text).toContain("`bun run ship:approve-held <n>`")
+    expect(text).not.toContain("`gh pr close <n>`")
   })
 
   test("a red reruns once, a cancelled run whole, and a second red or a FAIL gate line holds the ship by step 1", async () => {

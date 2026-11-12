@@ -21,6 +21,10 @@ export const BUNDLED_WORDS: Record<string, { description: string; title: string 
     description: "Your Slack DM with the factory: sessions post replies there and read yours back.",
     title: "Slack",
   },
+  whatsapp: {
+    description: "WhatsApp mode: text the factory from your phone and get its replies there.",
+    title: "WhatsApp",
+  },
 }
 
 export const EXTENSION_NAME = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$/

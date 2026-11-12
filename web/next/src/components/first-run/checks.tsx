@@ -21,6 +21,7 @@ import {
   type ChecksRead,
   checksOf,
   checksPath,
+  deviceLabel,
   type FixJob,
   fixJobOf,
   linesOf,
@@ -63,7 +64,7 @@ const fixCall = async (id: string, method: "GET" | "POST", signedIn: boolean) =>
   return fixJobOf(body) ?? "The fix did not read as one"
 }
 
-// A row's fix: its button, then while it runs its last lines and gh's one-time code with Open GitHub, read again every second; once it settles the checks are read again, and a failure says why.
+// A row's fix: its button, then while it runs its last lines and a sign-in's link with its one-time code where it has one (gh's with Open GitHub, Codex's), read again every second; once it settles the checks are read again, and a failure says why.
 function FixButton({
   action,
   onSettled,
@@ -105,14 +106,18 @@ function FixButton({
       </Button>
       {running && job.device && (
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-muted-foreground">Your one-time code</span>
-          <span className="font-mono">{job.device.code}</span>
+          {job.device.code && (
+            <>
+              <span className="text-muted-foreground">Your one-time code</span>
+              <span className="font-mono">{job.device.code}</span>
+            </>
+          )}
           <Button
             size="sm"
             variant="outline"
             render={<a href={job.device.url} rel="noreferrer" target="_blank" />}
           >
-            Open GitHub
+            {deviceLabel(action.id)}
           </Button>
         </div>
       )}

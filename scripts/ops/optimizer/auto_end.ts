@@ -86,16 +86,29 @@ export async function endOne(target: Target, why: string, deps: EndDeps): Promis
     : [{ text, to }]
 }
 
-// ops-tick's sweep: every session idle_sessions.ts flags with a flag that ends it.
+// ops-tick's sweep: every session idle_sessions.ts flags with a flag that ends it; a worker whose PR closed last unmerged is kept instead, one line asking its lead to reassign or end it.
 export async function sweep(input: CollectInput, deps: EndDeps): Promise<Line[]> {
   const out: Line[] = []
   for (const row of await collect(input)) {
+    const kept = row.why.find((w) => w.startsWith("worker-pr-closed"))
+    if (kept) {
+      out.push({
+        text: `Kept ${row.name}: ${kept}; reassign it or end it`,
+        to: leadOf(row.lead, row.worker),
+      })
+      continue
+    }
     const why = endsOn(row)
     if (!why) continue
-    const sha = row.sha
-      ? `, ${row.mergedPr ? `#${row.mergedPr} ` : ""}merged as ${row.sha.slice(0, 7)}`
+    // A pr-done end names the PR that decided it: a merge with its sha, a close by number alone.
+    const mark = /^(?:checker-pr-done|worker-prs-done)\b/.test(why)
+      ? row.sha
+        ? `, #${row.donePr} merged as ${row.sha.slice(0, 7)}`
+        : why.endsWith("(closed)") && row.donePr
+          ? `, #${row.donePr} closed`
+          : ""
       : ""
-    out.push(...(await endOne(row, `${why}${sha}`, deps)))
+    out.push(...(await endOne(row, `${why}${mark}`, deps)))
   }
   return out
 }

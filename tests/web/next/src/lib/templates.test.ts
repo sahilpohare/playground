@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
+import { GLM_MODEL as SETTINGS_GLM_MODEL } from "../../../../../packages/settings/src/harnesses"
 import {
+  GLM_MODEL,
   newDefaults,
   newTemplateId,
   resetTemplate,
@@ -20,8 +22,8 @@ import {
 } from "../../../../../web/next/src/lib/templates"
 
 const row = (over: Partial<TemplateRow>): TemplateRow => ({
-  backend: "claude",
   effort: null,
+  harness: "claude-code",
   id: "orchestrator",
   kind: "orchestrator",
   label: "Orchestrator",
@@ -46,14 +48,14 @@ describe("a template picker row", () => {
   })
 
   test("a dispatcher template is disabled while the second dispatcher runs; an orchestrator is not", () => {
-    const glm = row({ backend: "glm", id: "second-dispatcher-glm", kind: "dispatcher" })
+    const glm = row({ id: "second-dispatcher-glm", kind: "dispatcher", model: "glm" })
     expect(templateRowView(glm, true).reason).toBe("The second dispatcher is running")
     expect(templateRowView(glm, false).reason).toBeNull()
     expect(templateRowView(row({}), true).reason).toBeNull()
   })
 
   test("its detail is its backend or model, then its effort", () => {
-    expect(templateRowView(row({ backend: "glm" }), false).detail).toBe("GLM")
+    expect(templateRowView(row({ model: "glm" }), false).detail).toBe("GLM")
     expect(templateRowView(row({ effort: "high", model: "opus" }), false).detail).toBe(
       "opus · High",
     )
@@ -63,32 +65,33 @@ describe("a template picker row", () => {
 // The defaults as packages/settings/src/sessions.ts holds them.
 const DEFAULTS: Template[] = [
   {
-    backend: "claude",
     brief: "assistant.md",
+    harness: "claude-code",
     id: "assistant",
     kind: "assistant",
     label: "Assistant",
   },
   {
-    backend: "claude",
     brief: "orchestrator.md",
+    harness: "claude-code",
     id: "orchestrator",
     kind: "orchestrator",
     label: "Orchestrator",
   },
   {
-    backend: "claude",
     brief: "dispatcher-2.md",
+    harness: "claude-code",
     id: "second-dispatcher-claude",
     kind: "dispatcher",
     label: "Second dispatcher on Claude",
   },
   {
-    backend: "glm",
     brief: "dispatcher-2.md",
+    harness: "claude-code",
     id: "second-dispatcher-glm",
     kind: "dispatcher",
     label: "Second dispatcher on GLM",
+    model: "glm",
   },
 ]
 const orchestrator = DEFAULTS[1]!
@@ -137,8 +140,8 @@ describe("the template editor", () => {
     const form = { ...templateForm(), brief: "night.md", label: "Night shift" }
     const added = templateOf(form, newTemplateId(form.label, DEFAULTS))
     expect(added).toEqual({
-      backend: "claude",
       brief: "night.md",
+      harness: "claude-code",
       id: "night-shift",
       kind: "orchestrator",
       label: "Night shift",
@@ -158,12 +161,18 @@ describe("the template editor", () => {
     expect(withoutTemplate(rows, "orchestrator", DEFAULTS)).toEqual(rows)
   })
 
-  test("a GLM template saves without Claude's account, effort and model", () => {
-    const form = { ...templateForm(orchestrator), account: "pat@example.com", effort: "high" }
+  test("a GLM template saves glm as its model, without Claude's account, effort and model", () => {
+    const form = {
+      ...templateForm(orchestrator),
+      account: "pat@example.com",
+      effort: "high",
+      model: "opus",
+    }
     expect(templateOf({ ...form, backend: "glm" }, "orchestrator")).toEqual({
       ...orchestrator,
-      backend: "glm",
+      model: "glm",
     })
+    expect(templateForm(DEFAULTS[3])).toMatchObject({ backend: "glm", model: "" })
   })
 
   // Each refusal is the settings write's own words, which tests/packages/settings/src/sessions.test.ts holds the same.
@@ -236,4 +245,8 @@ describe("a default added after a save", () => {
     }
     expect(newDefaults(withTemplate(DEFAULTS, night), DEFAULTS)).toEqual([])
   })
+})
+
+test("the web's GLM model is the settings package's", () => {
+  expect(GLM_MODEL).toBe(SETTINGS_GLM_MODEL)
 })

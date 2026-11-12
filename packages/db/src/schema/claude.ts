@@ -16,7 +16,7 @@ import {
 import { jsonb } from "@/columns"
 import { thread } from "@/schema/thread"
 
-// Every Claude Code session on this machine, read from its transcript under ~/.claude/projects, so the dashboard can list past sessions and show full logs after Claude Code's 30-day cleanup deletes the files. These rows hold secrets and customer data: they belong only in the dashboard's local Postgres, never a shared database. Named claude_* because Better Auth already owns `session`.
+// Every Claude Code session on this machine, read from its transcript under ~/.claude/projects, and every Codex session, read from its rollout under ~/.codex/sessions, so the dashboard can list past sessions and show full logs after Claude Code's 30-day cleanup deletes the files. These rows hold secrets and customer data: they belong only in the dashboard's local Postgres, never a shared database. Named claude_* because Better Auth already owns `session`.
 
 const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" })
 
@@ -36,6 +36,8 @@ export const claudeSession = pgTable(
     description: text("description"),
     entryCount: integer("entry_count").default(0).notNull(),
     gitBranch: text("git_branch"),
+    // The harness that ran the session, a HarnessId of HARNESSES in packages/settings/src/harnesses.ts; every session stored before Codex's rollouts were read is Claude Code's.
+    harness: text("harness").default("claude-code").notNull(),
     id: text("id").primaryKey(),
     inputTokens: bigint("input_tokens", { mode: "number" }).default(0).notNull(),
     // interactive, headless, subagent or fork; null for a session known only as another's parent, whose transcript was never read.

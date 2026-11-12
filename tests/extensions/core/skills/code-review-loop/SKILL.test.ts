@@ -81,7 +81,12 @@ describe("code-review-loop keeps its reviewer for the merge (#1067)", () => {
 
   test("step 8 names the one waiter on the head's checks, which a re-run at the same head ends (#1410)", async () => {
     const step8 = (await skill()).split("8. **Report and wait.**")[1]?.split("\n")[0] ?? ""
-    expect(step8).toContain("`${CLAUDE_SKILL_DIR}/scripts/state.ts checks <repo> <n> <head>`")
+    expect(step8).toContain(
+      "`cd /private/tmp && ${CLAUDE_SKILL_DIR}/scripts/state.ts checks <repo> <n> <head>`",
+    )
+    expect(step8).toContain(
+      "`cd /private/tmp && ${CLAUDE_SKILL_DIR}/scripts/state.ts wait <repo> <n> <head>`",
+    )
     expect(step8).toContain(
       "start `checks` again at once, which waits past a red that concluded before it started",
     )

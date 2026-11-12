@@ -1,6 +1,6 @@
 import type { Group } from "./_shared"
 
-// The hc calls no-raw-spawn refuses: outside the trial world, and the world's own wrapper past its verb check; rows are data, as refused-forms.ts says.
+// The hc calls no-raw-spawn refuses, the old trial world's wrapper included; rows are data, as refused-forms.ts says.
 export const groups: Group[] = [
   {
     folders: ["checkout"],

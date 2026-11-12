@@ -69,18 +69,20 @@ A document or script that moved to another folder is still found by the end of i
 
 `bun run parity` compares what your sessions are given.
 `bun run parity replay` checks what a headless skill does with it, for each replay an extension carries: a scope keeps its replays beside its skills, in `replays/` (`replays.json`, `map.json` and `fixtures/<replay>/`), and core carries none.
+The scope also keeps each replay's layouts, as its script `parity-replay` (`scripts/parity-replay/`): `schemas/<server>.json`, the tool list each stub serves under that server's name, and `compare.ts`, whose `comparators` export names the comparators its replays take beyond core's own.
+A replay whose scope holds no layout for one of its servers, or no comparator by the name its `compare` gives, names what is missing and runs no model.
 Each replay runs its skill's `SKILL.md` before a change (the scope's `skills` at `--base` in the scope's own git, `HEAD` by default) and after it (the scope's working tree), on made-up fixtures, and compares the two by its comparator:
 
-- **Board scan**: the same rows, each with its status, tier, priority, assignee and the person its next step asks, and the same count line.
-- **End-of-day scan**: the same ticket and pull request numbers on each line, whatever the wording.
-- **Triage**: the same systems read, in any order, and the same writes refused, each with what it aimed at, counting each read or refusal that more than half a side's runs make, so a read the model adds in some runs leaves the result alone.
+- **Triage**, core's own: the same systems read, in any order, and the same writes refused, each with what it aimed at, counting each read or refusal that more than half a side's runs make, so a read the model adds in some runs leaves the result alone.
+- **A scope's own**: each signs a run's last message, and the two sides match when the signature most runs share is the same.
 
 ```bash
 bun run parity replay --runs 0                  # check every replay's setup, with no model run
 bun run parity replay --only <replay>           # replay one skill
-bun run parity replay --snapshot                # refresh each server's tool list from the real server
+bun run parity replay --snapshot                # copy each scope's layouts with fresh tool lists, to put back
 ```
 
+- `--snapshot` reads each server's tool list from the real server named in `~/.mcp.json`, writes it into a scratch copy of the scope's `scripts/parity-replay/`, and prints the `playground ext put` command that puts the copy back as the item's next revision.
 - `--runs <n>` sets each side's run count; a replay passes when the after side's majority matches the before side's, and fails as changed only when both sides have a majority and the two differ.
   A side with no majority fails as noisy, after a before side reruns at 5, since a skill the model runs two ways says nothing about the change; its fixture or its prompt fixes it.
 - Nothing real is read or written. Every MCP server is a stub under the same name that answers from the replay's `fixtures/` folder in its scope, and `gh` is a shim that does the same.

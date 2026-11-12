@@ -361,15 +361,17 @@ describe("screenshot", () => {
     constructor(
       private marker: "late" | "never",
       private data: "late" | "never" = "late",
-      private afterShot: "settled" | "busy" = "settled",
+      private afterShot: "busy" | "fails" | "settled" = "settled",
     ) {
       super()
     }
     override async run(...args: string[]): Promise<Record<string, unknown>> {
       this.calls.push(args)
-      // the data check after a shot reads busy after the first shot alone, when afterShot is busy
+      // the data check after a shot reads busy after the first shot alone, when afterShot is busy, and fails there when it fails
       if (args[0] === "eval" && args[1] === DATA_READY[1]) {
         const shots = this.calls.filter((call) => call[0] === "screenshot").length
+        if (this.afterShot === "fails" && shots === 1)
+          throw new Error(`agent-browser ${args.join(" ")}: Execution context was destroyed`)
         return { result: !(this.afterShot === "busy" && shots === 1) }
       }
       const waitsOn =
@@ -515,6 +517,20 @@ describe("screenshot", () => {
     const settled = new FakeBrowser("late")
     await shoot(settled)
     expect(settled.calls.filter((args) => args[0] === "screenshot")).toHaveLength(1)
+  })
+
+  // #1742: the eval after a shot ran outside the wait's try, so one that failed failed the shot's check
+  test("an eval after the shot that fails reads as the page not ready: its data is waited for and it is shot again", async () => {
+    const failing = new FakeBrowser("late", "late", "fails")
+    const result = await shoot(failing)
+    expect(result.ok).toBe(true)
+    const shots = failing.calls.flatMap((args, i) => (args[0] === "screenshot" ? [i] : []))
+    expect(shots).toHaveLength(2)
+    const again = failing.calls.findIndex(
+      (args, i) => i > shots[0]! && args[0] === "wait" && args[2] === DATA_READY[1],
+    )
+    expect(again).toBeGreaterThan(shots[0]!)
+    expect(shots[1]).toBeGreaterThan(again)
   })
 
   test("a route READY does not name is shot once its data is in", async () => {

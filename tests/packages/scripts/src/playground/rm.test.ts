@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test"
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -8,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -98,6 +100,11 @@ const git = (cwd: string, ...args: string[]) => {
   return run.stdout.toString().trim()
 }
 
+const file = (path: string, text = "x"): void => {
+  mkdirSync(join(path, ".."), { recursive: true })
+  writeFileSync(path, text)
+}
+
 // A mkdtemp machine: HOME with its main checkout and data folder, and deps that record each notify line.
 const machine = () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rm-")))
@@ -139,6 +146,82 @@ test("runRm moves a path, lists it and restores it, telling no one", async () =>
   expect(told).toEqual([])
 })
 
+test("rm of a tree leaves its node_modules and web/next/.next out of the trash, keeps every other file, and the move and restore lines name the install", async () => {
+  const { deps, home } = machine()
+  const tree = join(home, "review-clone")
+  file(join(tree, "node_modules", "left-pad", "index.js"))
+  file(join(tree, "packages", "web", "node_modules", "react", "index.js"))
+  file(join(tree, "web", "next", ".next", "build-manifest.json"))
+  file(join(tree, "web", "next", ".next-cache", "y.js"))
+  file(join(tree, "src", "index.ts"))
+  const log = console.log
+  const said: string[] = []
+  console.log = (line: string) => void said.push(line)
+  const code = await runRm([tree, "--reason", "scratch"], deps)
+  expect(code).toBe(0)
+  const trash = join(deps.data, "trash")
+  const [batch] = readdirSync(trash)
+  const item = join(trash, batch, "1", "review-clone")
+  expect(existsSync(join(item, "node_modules"))).toBe(false)
+  expect(existsSync(join(item, "packages", "web", "node_modules"))).toBe(false)
+  expect(existsSync(join(item, "web", "next", ".next"))).toBe(false)
+  expect(existsSync(join(item, "web", "next", ".next-cache", "y.js"))).toBe(true)
+  expect(existsSync(join(item, "src", "index.ts"))).toBe(true)
+  expect(said.join("\n")).toContain("bun install")
+  expect(await runRm(["--restore", `${batch}/1`], deps)).toBe(0)
+  console.log = log
+  expect(existsSync(join(tree, "src", "index.ts"))).toBe(true)
+  expect(existsSync(join(tree, "node_modules"))).toBe(false)
+  expect(said.join("\n")).toContain("bun install")
+})
+
+test("a strip that stops partway still moves the tree, and the move line names it", async () => {
+  const { deps, home } = machine()
+  const tree = join(home, "review-clone")
+  file(join(tree, "node_modules", "locked", "child.js"))
+  file(join(tree, "node_modules", "ok", "child.js"))
+  file(join(tree, "src", "index.ts"))
+  chmodSync(join(tree, "node_modules", "locked"), 0o555)
+  const log = console.log
+  const said: string[] = []
+  console.log = (line: string) => void said.push(line)
+  expect(await runRm([tree, "--reason", "scratch"], deps)).toBe(0)
+  console.log = log
+  expect(said.join("\n")).toContain("the strip stopped")
+  const trash = join(deps.data, "trash")
+  const [batch] = readdirSync(trash)
+  expect(existsSync(join(trash, batch, "1", "review-clone", "src", "index.ts"))).toBe(true)
+  chmodSync(join(trash, batch, "1", "review-clone", "node_modules", "locked"), 0o755)
+})
+
+test("the restore of a batch the strip took rebuildables from names the install", async () => {
+  const { deps, home } = machine()
+  const trash = join(deps.data, "trash")
+  const batch = "20261101T120000Z-xssrgq"
+  file(join(trash, batch, "1", "review-clone", "node_modules", "left-pad", "index.js"))
+  file(join(trash, batch, "1", "review-clone", "src", "index.ts"))
+  writeFileSync(
+    join(trash, batch, "manifest.jsonl"),
+    `${JSON.stringify({
+      at: "2026-11-01T12:00:00.000Z",
+      files: 2,
+      id: `${batch}/1`,
+      path: join(home, "review-clone"),
+      reason: "playground rm",
+      session: "xssrgq",
+      size: 20,
+      stripped: 1,
+    })}\n`,
+  )
+  const log = console.log
+  const said: string[] = []
+  console.log = (line: string) => void said.push(line)
+  expect(await runRm(["--restore", `${batch}/1`], deps)).toBe(0)
+  console.log = log
+  expect(existsSync(join(home, "review-clone", "src", "index.ts"))).toBe(true)
+  expect(said.join("\n")).toContain("bun install")
+})
+
 test("runRm tells the dispatcher once when a session hits the per-minute cap, however many tries it refuses", async () => {
   const { deps, home, told } = machine()
   const paths = Array.from({ length: 14 }, (_, i) => {
@@ -152,6 +235,42 @@ test("runRm tells the dispatcher once when a session hits the per-minute cap, ho
   expect(told).toEqual([
     "j6rjgy-worker: j6rjgy-worker quarantined 3 paths in the last minute, the most one session may",
   ])
+})
+
+test("runRm clears the caller's own scratch folder", async () => {
+  const { deps, home } = machine()
+  const scratch = join(home, ".playground", "scratch", "j6rjgy-worker")
+  mkdirSync(join(scratch, "tmp"), { recursive: true })
+  writeFileSync(join(scratch, "tmp", "work.txt"), "x")
+  expect(await runRm([scratch], deps)).toBe(0)
+  expect(existsSync(scratch)).toBe(false)
+})
+
+test("runRm refuses another session's scratch folder", async () => {
+  const { deps, home } = machine()
+  const other = join(home, ".playground", "scratch", "a4b5c6-worker")
+  mkdirSync(other, { recursive: true })
+  expect(await runRm([other], deps)).toBe(1)
+  expect(existsSync(other)).toBe(true)
+})
+
+test("runRm refuses a .. escape out of the caller's own scratch folder", async () => {
+  const { deps, home } = machine()
+  const scratch = join(home, ".playground", "scratch", "j6rjgy-worker")
+  const other = join(home, ".playground", "scratch", "a4b5c6-worker")
+  mkdirSync(other, { recursive: true })
+  expect(await runRm([`${scratch}/../a4b5c6-worker`], deps)).toBe(1)
+  expect(existsSync(other)).toBe(true)
+})
+
+test("runRm refuses a symlink inside the caller's own scratch folder that points out of it", async () => {
+  const { deps, home } = machine()
+  const scratch = join(home, ".playground", "scratch", "j6rjgy-worker")
+  mkdirSync(join(home, ".ssh"), { recursive: true })
+  mkdirSync(scratch, { recursive: true })
+  symlinkSync(join(home, ".ssh"), join(scratch, "keys"))
+  expect(await runRm([join(scratch, "keys")], deps)).toBe(1)
+  expect(existsSync(join(scratch, "keys"))).toBe(true)
 })
 
 test("runRm tells the dispatcher of a protected path, and not of a missing one", async () => {

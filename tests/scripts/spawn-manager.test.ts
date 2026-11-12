@@ -67,7 +67,7 @@ describe("a manager starts in a workspace of its own, in the leads worktree", ()
     )
     expect(command).toContain(`~/.playground/brief-${OLD.dispatcher}-2.md`)
     expect(command).not.toContain("Report to")
-    expect(pinOf(r, `${OLD.dispatcher}-2`)).toBe("glm")
+    expect(pinOf(r, `${OLD.dispatcher}-2`)).toBe("claude-code glm")
     expect(r.roster).toEqual([
       "set",
       `${OLD.dispatcher}-2`,
@@ -105,7 +105,7 @@ describe("a manager starts in a workspace of its own, in the leads worktree", ()
       `CLAUDE_CODE_OAUTH_TOKEN="$tk" env PLAYGROUND_ROLE=dispatcher claude -n ${OLD.dispatcher}-2 --model claude-opus-5-5 `,
     )
     expect(command).not.toContain("api.z.ai")
-    expect(pinOf(r, `${OLD.dispatcher}-2`)).toBe("claude")
+    expect(pinOf(r, `${OLD.dispatcher}-2`)).toBe("claude-code claude")
   })
 
   test.each([
@@ -515,7 +515,7 @@ describe("a manager starts in a workspace of its own, in the leads worktree", ()
     )
     expect(command).toContain("~/.playground/brief-optimizer.md")
     expect(command).toContain("(to: dispatcher)")
-    expect(pinOf(r, "optimizer")).toBe("claude")
+    expect(pinOf(r, "optimizer")).toBe("claude-code claude")
     expect(r.roster).toEqual([
       "set",
       "optimizer",

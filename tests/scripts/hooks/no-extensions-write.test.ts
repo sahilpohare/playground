@@ -592,6 +592,39 @@ describe("a quoted argument is read as a command line only where a program runs 
     expect(await bash(command)).toBeUndefined()
   })
 
+  // #1799: a quiet commit's message names the home by ~/ as text, under run-slot and with its own log redirect too; the real home, since the shell reads ~ as the process's home
+  const atHome = (command: string) =>
+    check(JSON.stringify({ cwd: tmpdir(), tool_input: { command }, tool_name: "Bash" }), {
+      HOME: homedir(),
+    })
+  const log = join(tmpdir(), "commit.log")
+  test.each([
+    [
+      "under run-slot, with its log redirect",
+      `~/.playground/ops/run-slot.sh w -- git commit -q -m "fix(x): reads each checkout in ~/<org>" > ${log} 2>&1`,
+    ],
+    [
+      "under run-slot",
+      `~/.playground/ops/run-slot.sh w -- git commit -q -m "fix(x): files in ~/ stay"`,
+    ],
+    ["with its log redirect", `git commit -q -m "fix(x): files in ~/ stay" > ${log} 2>&1`],
+  ])("a quiet commit whose message names ~/ runs %s", async (_, command) => {
+    expect(await atHome(command)).toBeUndefined()
+  })
+
+  test.each([
+    [
+      "a substitution in its message writes into the root",
+      `~/.playground/ops/run-slot.sh w -- git commit -q -m "fix(x): $(touch ~/.playground/extensions/f)" > ${log} 2>&1`,
+    ],
+    [
+      "its redirect writes into the root",
+      `git commit -q -m "fix(x): y" > ~/.playground/extensions/f`,
+    ],
+  ])("a quiet commit stays refused when %s", async (_, command) => {
+    expect(await atHome(command)).toContain("no-extensions-write hook refuses")
+  })
+
   test("a gated call after a quiet commit stays refused", async () => {
     expect(await bash("git commit -m 'fix: x' && playground migrate")).toContain(
       "playground migrate",
@@ -767,8 +800,26 @@ describe("a quoted argument is read as a command line only where a program runs 
     ["gh api with a Go template", `gh api x --template '{{range .}}{{.a}} {{end}}'`],
     ["gh api with a Go template by -t", `gh api x -t '{{range .}}{{.a}} {{end}}'`],
     ["gh pr view with a Go template", `gh pr view 1 --json a --template '{{.a}} x'`],
+    [
+      "gh issue create with a title naming the data folder",
+      `gh issue create --title "a note about ~/.playground" --body x`,
+    ],
+    ["gh pr comment with a body naming the data folder", `gh pr comment 1 -b "see ~/.playground"`],
+    [
+      "a cd to a folder, then a sed range from a bracket regex",
+      "cd /tmp && sed -n '/[Ff]ollow/,$p' f",
+    ],
+    [
+      "a cd to the checkout, then gh's jq body through a sed range and head",
+      `cd ${CHECKOUT} && gh api repos/o/r/issues/comments/1 --jq .body | sed -n '/[Ff]ollow/,$p' | head -40`,
+    ],
   ])("%s runs from the home and the data folder", async (_, command) => {
     for (const cwd of homes) expect(await at(command, cwd)).toBeUndefined()
+  })
+
+  test("a gh post that opens an editor keeps canary's reading of its title", async () => {
+    const command = `gh issue create --editor --title "a note about ~/.playground"`
+    for (const cwd of homes) expect(await at(command, cwd)).toContain("no-extensions-write hook ")
   })
 
   test.each([
@@ -1641,8 +1692,8 @@ describe("a quoted argument is read as a command line only where a program runs 
       `git commit -m "fix(x): y"; sh -c 'true'`,
     ],
     [
-      "a redirect that writes a file, dropping its redirect guard runs it",
-      `git commit -m "fix(x): y" > f`,
+      "a redirect that writes a file from another call on the line, dropping its redirect guard runs it",
+      `git commit -m "fix(x): y"; echo x > f`,
     ],
     [
       "a message holding the root's path as text, dropping its text guard runs it",
@@ -2169,7 +2220,7 @@ describe("a factory session's ext accept is refused, since accepting a proposal 
     ],
   ])("%s", async (_, command) => {
     expect(await bash(command)).toContain(
-      "refuses playground ext accept, the owner's own call: post it as an accept decision with bun run ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role",
+      "refuses playground ext accept, the owner's own call: post it as an accept decision with playground ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role",
     )
   })
 })
@@ -2363,7 +2414,7 @@ describe("a job's setting is the owner's alone (PG-1196)", () => {
   ])("a session's own %s is refused, naming the guard decision", async (command) => {
     const refusal = await bash(command)
     expect(refusal).toContain("no-extensions-write hook refuses")
-    expect(refusal).toContain("post a guard decision with bun run ask new")
+    expect(refusal).toContain("post a guard decision with playground ask new")
   })
 })
 
@@ -2510,5 +2561,216 @@ describe("an eval of literal text runs", () => {
     ["an eval of an escaped glob operator", "eval echo \\^x"],
   ])("%s runs from the checkout and the home", async (_, command) => {
     for (const cwd of [CHECKOUT, HOME]) expect(await bash(command, cwd)).toBeUndefined()
+  })
+})
+
+// The Ops lead sets a guard setting that only tunes a number: glm.readOnlyLoad5 to a positive limit, and a job's row changed in its schedule's interval alone, read against the row the login's scope stores, since a set replaces that row and the render reads every field it leaves out from the registry; every other change, and every other session, stays with the owner
+describe("the Ops lead's tuning of a guard setting", () => {
+  const home = mkdtempSync(join(tmpdir(), "no-extensions-write-tuning-"))
+  const data = join(home, ".playground")
+  const config = join(home, "config")
+  // a call runs from a worktree, since from the home, which holds the data folder, a glob character in a word reads as a path into the extensions
+  const work = join(home, "work")
+  mkdirSync(work)
+  mkdirSync(join(data, "extensions", "hooks"), { recursive: true })
+  mkdirSync(join(config, "sessions"), { recursive: true })
+  // each job as policy.json renders it, its stored row over the registry's entry
+  const job = (fields: object) => ({
+    callsModel: false,
+    command: "bun run x",
+    cwd: "{checkout}",
+    description: "a job",
+    enabled: false,
+    runtime: "launchd",
+    ...fields,
+  })
+  writeFileSync(
+    join(data, "extensions", "policy.json"),
+    JSON.stringify({
+      values: {
+        "jobs.opsAlways": job({ enabled: true, schedule: { always: true } }),
+        "jobs.opsAwake": job({ enabled: true, schedule: { every: 300 } }),
+        "jobs.opsOrg": job({ enabled: true, schedule: { every: 60 } }),
+      },
+    }),
+  )
+  // the rows each scope stores: the login's, one under jobs.opsDashboard's old name, and an org's that holds a row for a job; no scope stores jobs.opsUsage, so policy.json lacks it and the registry's entry is its row
+  writeFileSync(join(data, "extensions", "login"), "me\n")
+  for (const [scope, values] of [
+    [
+      "me",
+      {
+        "jobs.opsAlways": { enabled: true },
+        "jobs.opsAwake": { enabled: true },
+        "jobs.opsDesk": { enabled: true },
+      },
+    ],
+    ["acme", { "jobs.opsOrg": { enabled: true } }],
+  ] as const) {
+    mkdirSync(join(data, "extensions", scope, ".git"), { recursive: true })
+    writeFileSync(join(data, "extensions", scope, "settings.json"), JSON.stringify(values))
+  }
+  writeFileSync(
+    join(data, "roster.json"),
+    JSON.stringify({
+      agents: [
+        { kind: "ops", name: "ops", status: "working" },
+        { kind: "builder", name: "builder", status: "working" },
+        { kind: "worker", name: "abc-worker", status: "working" },
+      ],
+    }),
+  )
+  for (const [session, name] of [
+    ["s-ops", "ops"],
+    ["s-builder", "builder"],
+    ["s-worker", "abc-worker"],
+  ])
+    writeFileSync(
+      join(config, "sessions", `${session}.json`),
+      JSON.stringify({ name, sessionId: session }),
+    )
+  afterAll(() => rmSync(home, { force: true, recursive: true }))
+
+  const as = (session: string, role: string, command: string) =>
+    check(
+      JSON.stringify({
+        cwd: work,
+        hook_event_name: "PreToolUse",
+        session_id: session,
+        tool_input: { command },
+        tool_name: "Bash",
+      }),
+      { CLAUDE_CONFIG_DIR: config, HOME: home, PLAYGROUND_ROLE: role },
+    )
+  const ops = (command: string) => as("s-ops", "lead", command)
+
+  const TUNES = [
+    ["glm.readOnlyLoad5 to a new limit", "playground settings set glm.readOnlyLoad5 20 --reason r"],
+    [
+      "a job's interval, its stored row otherwise as it stands",
+      `playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "the interval of a registry job no scope stores a row for",
+      `playground settings set jobs.opsUsage '{"schedule":{"every":600}}' --reason r`,
+    ],
+  ]
+
+  test.each(TUNES)("the Ops lead sets %s", async (_, command) => {
+    expect(await ops(command)).toBeUndefined()
+  })
+
+  test.each(TUNES)("the Builder lead and a worker are refused %s", async (_, command) => {
+    for (const [session, role] of [
+      ["s-builder", "lead"],
+      ["s-worker", "worker"],
+      ["s-unnamed", "lead"],
+    ])
+      expect(await as(session, role, command)).toContain(
+        "no-extensions-write hook refuses playground settings",
+      )
+  })
+
+  test.each([
+    ["glm.readOnlyLoad5 to 0", "playground settings set glm.readOnlyLoad5 0 --reason r"],
+    ["glm.readOnlyLoad5 to a word", "playground settings set glm.readOnlyLoad5 high --reason r"],
+    [
+      "glm.readOnlyLoad5 to a value it cannot read",
+      'playground settings set glm.readOnlyLoad5 "$N" --reason r',
+    ],
+    [
+      "glm.readOnlyLoad5 at a scope",
+      "playground settings set glm.readOnlyLoad5 20 --scope acme --reason r",
+    ],
+    ["a reset of glm.readOnlyLoad5", "playground settings reset glm.readOnlyLoad5 --reason r"],
+    [
+      "a job turned off with its interval",
+      `playground settings set jobs.opsAwake '{"enabled":false,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's row that drops a field",
+      `playground settings set jobs.opsAwake '{"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's row that adds a command",
+      `playground settings set jobs.opsAwake '{"command":"x","enabled":true,"schedule":{"every":300}}' --reason r`,
+    ],
+    [
+      "a number in a job's config",
+      `playground settings set jobs.opsAwake '{"config":{"timeout":5},"enabled":true,"schedule":{"every":300}}' --reason r`,
+    ],
+    [
+      "a job's interval that is no positive integer",
+      `playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":1.5}}' --reason r`,
+    ],
+    [
+      "a job's whole rendered row with a new interval, which would pin the registry's fields",
+      `playground settings set jobs.opsAwake '{"callsModel":false,"command":"bun run x","cwd":"{checkout}","description":"a job","enabled":true,"runtime":"launchd","schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job whose rendered schedule is no interval, moved to one",
+      `playground settings set jobs.opsAlways '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job its login stores under an old name",
+      `playground settings set jobs.opsDashboard '{"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job an org's scope stores a row for",
+      `playground settings set jobs.opsOrg '{"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job policy.json holds no row for",
+      `playground settings set jobs.opsNone '{"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's row at a scope",
+      `playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --scope acme --reason r`,
+    ],
+    ["a reset of a job", "playground settings reset jobs.opsAwake --reason r"],
+    ["import-jobs", "playground settings import-jobs /tmp/jobs.json --reason r"],
+    [
+      "live.branch, a key naming what a guard allows",
+      "playground settings set live.branch x --reason r",
+    ],
+    ["owner.names", "playground settings set owner.names '[]' --reason r"],
+    [
+      "a tuning set chained with a refused one",
+      "playground settings set glm.readOnlyLoad5 20 --reason r && playground settings set live.branch x --reason r",
+    ],
+    [
+      "a job's interval with PLAYGROUND_LOGIN set before it, which moves the set to another scope",
+      `PLAYGROUND_LOGIN=acme playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's interval after an export of PLAYGROUND_LOGIN",
+      `export PLAYGROUND_LOGIN=acme; playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's interval under env with PLAYGROUND_LOGIN",
+      `env PLAYGROUND_LOGIN=acme playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's interval with another data folder",
+      `PLAYGROUND_DATA_DIR=/tmp/other playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's interval with another home",
+      `HOME=/tmp/other playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's interval after a sourced file, which may export the login",
+      `. ./login.sh; playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+    ],
+    [
+      "a job's interval in a subshell",
+      `(playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r)`,
+    ],
+    [
+      "glm.readOnlyLoad5 with PLAYGROUND_LOGIN set before it",
+      `PLAYGROUND_LOGIN=acme playground settings set glm.readOnlyLoad5 20 --reason r`,
+    ],
+  ])("the Ops lead is refused %s", async (_, command) => {
+    expect(await ops(command)).toContain("no-extensions-write hook refuses playground settings")
   })
 })

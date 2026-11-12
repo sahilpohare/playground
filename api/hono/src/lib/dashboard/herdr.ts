@@ -11,6 +11,7 @@ import {
   type SessionState,
 } from "@packages/config/session-state"
 import { dataDirOf } from "@packages/env/data-dir"
+import { readPin } from "@packages/settings"
 import { z } from "zod"
 
 import {
@@ -302,6 +303,7 @@ const STATUSES = ["idle", "working", "blocked", "done", "unknown"] as const
 export const paneSchema = z.object({
   agent_session: z.object({ kind: z.string(), value: z.string() }).nullish(),
   agent_status: z.enum(STATUSES).catch("unknown"),
+  label: z.string().nullish(),
   pane_id: z.string().regex(new RegExp(`^${PANE_ID}$`)),
   scroll: z.object({ offset_from_bottom: z.number() }).nullish(),
   terminal_id: z.string(),
@@ -433,20 +435,44 @@ const FILED: Record<SessionState["state"], string> = {
   working: "running",
 }
 
+// Pure: the program an argv runs is codex, run directly or as npm's launcher under node.
+const runsCodex = (argv: string[]) => {
+  const program = /(^|\/)node$/.test(argv[0] ?? "") ? argv[1] : argv[0]
+  return /(^|\/)codex$/.test(program ?? "")
+}
+
+// The session a pane holds, its agent and the process that runs it, or null. A Codex session writes no Claude registry file, so its pane holds it when the pane's label has a Codex launch record (codexLaunches) and a codex process runs in its foreground.
+function paneSession(
+  pane: Pane,
+  registry: Registry,
+  codex: CodexLaunches,
+): { agent: "claude" | "codex"; proc: Pane["processes"][number]; sessionId: string } | null {
+  const thread = pane.label ? codex.get(pane.label) : undefined
+  const codexProc = thread ? pane.processes.find((p) => runsCodex(p.argv ?? [])) : undefined
+  if (thread && codexProc) return { agent: "codex", proc: codexProc, sessionId: thread }
+  const registered = pane.processes.find((p) => registry?.get(p.pid))
+  const registeredId = registered && registry?.get(registered.pid)?.sessionId
+  if (registered)
+    return registeredId ? { agent: "claude", proc: registered, sessionId: registeredId } : null
+  const unread = pane.processes.find((p) => registry === null || registry.get(p.pid) === null)
+  return unread && pane.agent_session?.kind === "id" && pane.agent_session.value
+    ? { agent: "claude", proc: unread, sessionId: pane.agent_session.value }
+    : null
+}
+
 // Pure but for the change times (state.changed: when each session's herdr state last changed, as this process saw it, by its terminal and session, which a move does not change; herdr keeps no such time, and answeredSince() compares a picker's answer with it): every server's panes as the session records liveRecords() and composeWorkers() read. A pane holds a session when a process in its foreground has a registry file naming one, so a pane whose Claude has exited, or one never registered, is no session (St3); a file mid-rewrite leaves herdr's own agent_session, when it has one.
-export function herdrRecords(reads: ServerRead[], registry: Registry, now: string): Json[] {
+export function herdrRecords(
+  reads: ServerRead[],
+  registry: Registry,
+  now: string,
+  codex: CodexLaunches = new Map(),
+): Json[] {
   const changes = new Map<string, Change>()
   const records = reads.flatMap((read) =>
     read.panes.flatMap((pane) => {
-      const registered = pane.processes.find((p) => registry?.get(p.pid))
-      const unread = pane.processes.find((p) => registry === null || registry.get(p.pid) === null)
-      const proc = registered ?? unread
-      const sessionId = registered
-        ? (registry?.get(registered.pid)?.sessionId ?? "")
-        : unread && pane.agent_session?.kind === "id"
-          ? pane.agent_session.value
-          : ""
-      if (!proc || !sessionId) return []
+      const held = paneSession(pane, registry, codex)
+      if (!held) return []
+      const { agent, proc, sessionId } = held
       const key = `${read.server}:${pane.terminal_id}:${sessionId}`
       const known = state.changed.get(key)
       // a read more than SEEN_SLACK_MS after the last can hide a change and back (a picker answered, then a permission raised), so its state began at some time unknown, as on a fresh process
@@ -459,7 +485,7 @@ export function herdrRecords(reads: ServerRead[], registry: Registry, now: strin
       const cwd = proc.cwd ?? ""
       return [
         {
-          agent: "claude",
+          agent,
           agent_lifecycle: LIFECYCLE[pane.agent_status],
           cwd,
           herdr_seen_at: seen ? at : null,
@@ -471,7 +497,8 @@ export function herdrRecords(reads: ServerRead[], registry: Registry, now: strin
           started_at: null,
           stored_pid_exists: true,
           surface_id: herdrSurface(read.server, pane.pane_id),
-          transcript_path: cwd ? transcriptPath(claudeDir(), cwd, sessionId) : "",
+          transcript_path:
+            agent === "claude" && cwd ? transcriptPath(claudeDir(), cwd, sessionId) : "",
           updated_at: at,
           workspace_id: herdrSurface(read.server, pane.workspace_id),
         },
@@ -484,6 +511,31 @@ export function herdrRecords(reads: ServerRead[], registry: Registry, now: strin
     if (!whole.has(change.server) && !changes.has(key)) changes.set(key, change)
   state.changed = changes
   return records
+}
+
+// The sessions spawn.sh started in Codex, by name: each one whose backend pin names the codex harness, with the thread its resume record's exec line names (spawn.sh resume <name> <folder> <thread>).
+export type CodexLaunches = Map<string, string>
+
+export function codexLaunches(data = dataDir()): CodexLaunches {
+  const out: CodexLaunches = new Map()
+  let names: string[] = []
+  try {
+    names = readdirSync(join(data, "backends"))
+  } catch {
+    return out
+  }
+  for (const name of names) {
+    try {
+      if (readPin(readFileSync(join(data, "backends", name), "utf8"))?.harness !== "codex") continue
+      const exec = readFileSync(join(data, "resume", `${name}.sh`), "utf8")
+        .split("\n")
+        .find((line) => line.startsWith("exec "))
+      // spawn.sh writes the line with %q, so a folder may hold an escaped space: the name follows resume, and the thread ends the line
+      const words = exec?.match(/ resume (\S+) .* ([0-9a-f-]{36})$/)
+      if (words?.[1] === name && words[2]) out.set(name, words[2])
+    } catch {}
+  }
+  return out
 }
 
 // Pure: every server's workspaces in the board's workspace list, each id its ref too.

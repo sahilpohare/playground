@@ -47,7 +47,7 @@ export const ROOT_READS: Record<string, string> = {
   "packages/settings/src/rendered.ts":
     "its own tree: coreDir() is extensions/core, whose lists ship with each version",
   "scripts/hooks/no-chat-question.ts":
-    "unreached: a Stop hook reads last_assistant_message, which no Bash call the differential passes carries",
+    "unreached: its dashboard read runs on a Stop input's last_assistant_message, which no Bash call the differential passes carries, and its PreToolUse path judges AskUserQuestion alone",
   "scripts/hooks/no-extensions-write.ts":
     "its own tree: the worker module it loads is its own code",
   "scripts/hooks/no-main-checkout.ts":

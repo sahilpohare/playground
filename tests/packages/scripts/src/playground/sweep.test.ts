@@ -12,6 +12,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  LIFT_GAP,
+  LIFT_HOLD,
+  LOAD_CAP,
   runSweep,
   SWITCH_HOURS,
   SWITCHES,
@@ -118,10 +121,55 @@ describe("playground sweep", () => {
       "alert: pr-stalled acme/archive#9: no activity for 50m",
       "queue: #9 ready, #10",
       "load5 28.0, at or above 15",
-      "single slot: on",
+      "single slot: on, held by load until load5 holds under 22 for 5 min (load5 28.0)",
     ])
     expect(await sweep(dir, NOW, 20)).toEqual(["quiet"])
     expect(await sweep(dir, NOW, 9)).toEqual(["load5 9.0, back under 15"])
+  })
+
+  // issue 1737: single stood by timer at load5 5.6, so the line says whether the load holds it or it has lifted under the cap
+  test("the single-slot line says whether load holds it or it has lifted under the cap", async () => {
+    const dir = folder()
+    writeFileSync(join(dir, "ops", "run-slot.single"), "")
+    writeFileSync(join(dir, "ops", "run-slot.load5-cap"), "14\n")
+    const under = (seconds: number) =>
+      writeFileSync(
+        join(dir, "ops", "run-slot.under"),
+        `${NOW.getTime() / 1000 - seconds} ${NOW.getTime() / 1000 - 10}\n`,
+      )
+    under(60)
+    expect(await sweep(dir, NOW, 5.6)).toEqual([
+      "single slot: on, held by load until load5 holds under 14 for 5 min (load5 5.6)",
+    ])
+    under(301)
+    expect(await sweep(dir, NOW, 5.6)).toEqual([
+      "single slot: on, lifted under the cap: load5 5.6 has held under 14 for 5 min",
+    ])
+    expect(await sweep(dir, NOW, 14.2)).toEqual([
+      "single slot: on, held by load until load5 holds under 14 for 5 min (load5 14.2)",
+    ])
+  })
+
+  // a reviewer: a mark whose last reading is old may hide a crossing no run read, so it holds as run-slot.sh's lifted does
+  test("a mark whose last reading under the cap is over 90 s old reads held", async () => {
+    const dir = folder()
+    writeFileSync(join(dir, "ops", "run-slot.single"), "")
+    const at = NOW.getTime() / 1000
+    writeFileSync(join(dir, "ops", "run-slot.under"), `${at - 3600} ${at - 91}\n`)
+    expect(await sweep(dir, NOW, 5.6)).toEqual([
+      "single slot: on, held by load until load5 holds under 22 for 5 min (load5 5.6)",
+    ])
+  })
+
+  test("its hold, gap and cap are run-slot.sh's", async () => {
+    const script = await Bun.file(
+      join(import.meta.dir, "../../../../../scripts/ops/run-slot.sh"),
+    ).text()
+    expect(script).toContain(`\nLIFT_HOLD=${LIFT_HOLD}\n`)
+    expect(script).toContain(`\nLIFT_GAP=${LIFT_GAP}\n`)
+    expect(script).toContain(
+      `[ -n "$cap" ] || cap=${LOAD_CAP}; [ "$cap" -le ${LOAD_CAP} ] || cap=${LOAD_CAP}`,
+    )
   })
 
   test("an alert whose since moves every cycle prints once, and again only after it clears", async () => {

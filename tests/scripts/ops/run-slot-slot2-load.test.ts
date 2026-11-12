@@ -10,7 +10,7 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 
-import { SCRIPT, WAITING, machine, stop } from "./run-slot-fake"
+import { SCRIPT, WAITING, machine, stop, within } from "./run-slot-fake"
 
 // a check waits on its run's exit or a line it prints, so the timeout only catches a hang
 setDefaultTimeout(60_000)
@@ -52,10 +52,9 @@ describe("slots 2 to 4 with single-slot mode off", () => {
     const run = m.start("worker-m", { ...MEDIUM, RUN_SLOT_LOAD_WAIT: "600" })
     expect(await run.saw(WAITING)).toBe(true)
     writeFileSync(join(m.ops, "run-slot.load5-cap"), "raised for the shards\n20\n")
-    const done = run.ran()
-    const took = await Promise.race([done.then(() => true), Bun.sleep(8_000).then(() => false)])
-    await stop(run.p)
-    expect(took).toBe(true)
+    // the check binds the run's own line, not wall time; within is the give-up if the line never comes (issue 1725: an 8 s wall-time race lost once in a 145-file batch, the look that reads the moved cap stretching under a batch's load)
+    await within(() => run.stderr().includes("holds run-slot-2"), "the held waiter took slot 2", m)
+    expect(await run.ran()).toBe(true)
   })
 
   // review round 1: the hold shut run-slot-2 alone, so a second heavy run took run-slot-3 or run-slot-4 at the cap while the lanes were open

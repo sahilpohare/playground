@@ -39,26 +39,17 @@ describe("a session cmux restored in a dispatcher checkout keeps the factory's h
       expect(project).toContainEqual(hook)
   })
 
+  // guards runs every Bash guard (tests/scripts/hooks/guards.test.ts), and the rest keep their own entry for the tools other than Bash they guard
   test.each([
+    "guards",
     "no-bare-slack-link",
-    "no-desktop-owner-app",
-    "no-env-dump",
     "no-extension-repo-write",
     "no-extensions-write",
-    "no-false-green",
     "no-glm-heavy-path",
-    "no-headless-login",
-    "no-kill-by-name",
     "no-linear-ticket",
     "no-main-checkout",
-    "no-ours-merge",
     "no-playground-leak",
-    "no-prompt-stop",
-    "no-raw-delete",
-    "no-raw-spawn",
     "no-release-comment",
-    "no-stash",
-    "no-unslotted-run",
   ])("%s is a factory hook", async (name) => {
     const commands = (await preToolUse(join("scripts", "factory-settings.json"))).flatMap((h) =>
       h.hooks.map((x) => x.command),
@@ -78,10 +69,10 @@ describe("a session cmux restored in a dispatcher checkout keeps the factory's h
     },
   )
 
-  // a Write into the main checkout passed while no-main-checkout heard only Bash
+  // a Write into the main checkout passed while no-main-checkout heard only Bash, which now reaches both through guards
   test.each(
     ["no-extensions-write", "no-main-checkout"].flatMap((name) =>
-      ["Bash", "Edit", "MultiEdit", "NotebookEdit", "Write"].map((tool) => [name, tool]),
+      ["Edit", "MultiEdit", "NotebookEdit", "Write"].map((tool) => [name, tool]),
     ),
   )("%s hears %s", async (name, tool) => {
     const hook = (await preToolUse(join("scripts", "factory-settings.json"))).find((h) =>

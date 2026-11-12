@@ -27,3 +27,14 @@ export const secretIn = (value: unknown): string | undefined => {
       if (found) return found
     }
 }
+
+// A private key's whole block, to its end line or the text's end, since its header alone marks one.
+const PRIVATE_BLOCK =
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g
+
+// Pure: the text with every secret shape in it, a private key's whole block included, replaced by hidden.
+export const hideSecrets = (text: string, hidden = "[hidden]"): string =>
+  SECRET_SHAPES.reduce(
+    (said, [, shape]) => said.replace(new RegExp(shape.source, `${shape.flags}g`), hidden),
+    text.replace(PRIVATE_BLOCK, hidden),
+  )

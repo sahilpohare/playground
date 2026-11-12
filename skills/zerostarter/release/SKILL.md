@@ -28,13 +28,13 @@ CANARY=$(gh api repos/{owner}/{repo}/branches/canary --jq .commit.sha)
 A ship still short of step 4 as the freeze nears its lapse ([pr-merge's Holds and rulings](../../../packages/scripts/src/pr-merge/README.md#holds-and-rulings)) runs `bun run ship:freeze vX.Y.Z` again, which restarts it.
 A ship that stops before its tag ends the freeze with `bun run ship:freeze --end`, so the held PRs merge again.
 
-Run the new-user gate on it, `bun run gate:new-user "$CANARY"` (`.agents/testing.md`, End-to-end tests). Its last line, `New-user gate at <sha>: PASS` or `New-user gate at <sha>: FAIL`, goes into the ship PR's body on a line of its own, for step 3's `ship:merge` to read, with each FAIL and INCONCLUSIVE line it printed named below it.
+Run the new-user gate on it through run-slot as `ops-ship`, `~/.playground/ops/run-slot.sh ops-ship -- bun run gate:new-user "$CANARY"` (`.agents/testing.md`, End-to-end tests), so it runs at class 0, beside the runs that gate a merge, and a ship needs no focus. Its last line, `New-user gate at <sha>: PASS` or `New-user gate at <sha>: FAIL`, goes into the ship PR's body on a line of its own, for step 3's `ship:merge` to read, with each FAIL and INCONCLUSIVE line it printed named below it.
 
 Done when `bun run ship:freeze status` prints the `"*"` line naming `vX.Y.Z` (step 3's `ship:merge` refuses a line Ops wrote by hand, so ask Ops to lift one), `CANARY` holds the SHA you mean to ship and the gate's last line for it is in hand. When `canary` moves before step 3, read it again.
 
 ## Rehearse an invitee's update
 
-When the candidate changes the update path anything in the ship's step 5 runs (`update.ts` itself, `link-skills.sh`, an ops job, the Dashboard roll), rehearse the update an invitee runs, from the last tag to the candidate, before the ship's step 3: a machine whose own checkout cannot take the update yet still gets the proof. The whole rehearsal lives in one scratch folder, and nothing outside it changes. A `--to` run stops before the Dashboard roll, which `playground update` reaches only without a tag, and with no `jobs.json` in the throwaway data folder its ops-restart step restarts nothing, so the rehearsal proves the checkout-side path: the fetch, the tag checkout, `link-skills.sh`, the install and the build. The roll proves itself on a dashboard stack of its own; an ops job's restart proves itself in the ship's step 5, on the machine that holds the jobs.
+When the candidate changes the update path anything in the ship's step 5 runs (`update.ts` itself, `link-skills.sh`, an ops job, the Dashboard roll), rehearse the update an invitee runs, from the last tag to the candidate, before the ship's step 3: a machine whose own checkout cannot take the update yet still gets the proof. The whole rehearsal lives in one scratch folder, and nothing outside it changes but the real data folder's `ops/run-slot*` files, which its own run-slot calls write. A `--to` run stops before the Dashboard roll, which `playground update` reaches only without a tag, and with no `jobs.json` in the throwaway data folder its ops-restart step restarts nothing, so the rehearsal proves the checkout-side path: the fetch, the tag checkout, `link-skills.sh`, the install and the build. The roll proves itself on a dashboard stack of its own; an ops job's restart proves itself in the ship's step 5, on the machine that holds the jobs. The rehearsal's install, build and `playground update` each run through run-slot as `ops-ship`, by run-slot's real absolute path (`<real home>/.playground/ops/run-slot.sh ops-ship -- <command>`), since the throwaway `HOME` holds no ops folder; the containment of step b, written `env -i ...` in the blocks below, stays on the command after `--`.
 
 a. **Mirror.** Give the rehearsal an origin of its own: clone the repository bare into the scratch folder, then clone that mirror and, in the clone, fetch the pinned `$CANARY` from the repository, merge it into `main` with `--no-ff` (the merge commit a ship makes), and tag the merge with the tag this ship will cut.
    Clone the mirror with `-b main`, since the mirror's HEAD is `canary`, where the merge is a no-op (`Already up to date.`) and the tag lands on the candidate itself (the v0.0.29 rehearsal).
@@ -52,27 +52,36 @@ a. **Mirror.** Give the rehearsal an origin of its own: clone the repository bar
 
    Done when the mirror's `main` holds the merge commit, the tag names it, and the repository holds neither.
 
-b. **Contain.** Run every later command under `env -i`, so the run inherits nothing from the real environment, `PLAYGROUND_REPO` included, with `HOME` at a throwaway folder inside the scratch folder.
+b. **Contain.** Run every later command under `env -i`, so the run inherits nothing from the real environment, `PLAYGROUND_REPO` included, with `HOME` at the throwaway `<scratch>/home`.
    Put `PATH` together for the run: the stub folder first, then the throwaway `HOME`'s `.bun/bin`, then a folder holding the real `bun`, `bunx` and `node` alone, the runtimes the install, the build and the `playground` command run on (`bunx` since `bun install` runs the checkout's `prepare` script), then the system basics; the real `HOME`'s own bin stays off `PATH`, since its `playground` link points at the real checkout.
+   Seed the throwaway `HOME`'s bun cache by an APFS clone, `mkdir -p <scratch>/home/.bun/install` and then `cp -c -R ~/.bun/install/cache <scratch>/home/.bun/install/cache` with that `cache` itself absent, since a `cache` already there takes the copy in as `cache/cache`, so the install reads packages it already has; the clone writes only the copy, so the before-state check still holds.
+   The realism it trades: the clone can hold packages an invitee's cache lacks, so the rehearsal no longer shows a package missing from a fresh cache.
    Put a stub on `PATH` for each side-effecting tool the update can call, one that logs each call and refuses; read `update.ts`, `ops-restart/cli.ts` and what they call for the list.
    Write each stub's link with its literal target path, one `ln -s` a line (`ln -s _stub <scratch>/stubs/gh`), since no-extensions-write refuses a link whose target holds a loop variable, and the whole call with it ([scripts/hooks/README.md](../../../scripts/hooks/README.md#no-extensions-write)).
    Leave `claude` off `PATH` altogether: `link-skills`' `orgs home` step waits for an absent `claude` and fails a stub that refuses.
-   Record the before-state (listings and checksums) of everything outside the scratch folder the update could reach, the home folder's bins and links among them, before any install runs, leaving out the main checkout's `.git/config`, which other sessions rewrite as they add branches and worktrees (two v0.0.27 rehearsals in a row read it changed).
-   Done when every tool on the list is stubbed or absent, and the before-state is saved.
+   Record the before-state (listings and checksums) of everything outside the scratch folder the update could reach, the home folder's bins and links among them, before any install runs,
+   leaving out the main checkout's `.git/config`, which other sessions rewrite as they add branches and worktrees (two v0.0.27 rehearsals in a row read it changed), and the real data folder's `ops/run-slot*` files, which the rehearsal's own run-slot calls write.
+   Done when `<scratch>/home/.bun/install/cache` holds the cloned packages at its top level, every tool on the list is stubbed or absent, and the before-state is saved.
 
 c. **Invitee.** Clone from the mirror, check out the last tag on `main`, and install and build inside the containment, running the install and build steps of an invitee's install from the clone, since `install.sh` itself stops without `claude`:
 
    ```bash
-   bun install --frozen-lockfile
-   env NODE_ENV=production SKIP_ENV_VALIDATION=true node_modules/.bin/turbo run build --filter='./packages/*'
-   bash scripts/link-skills.sh   # links this clone's playground command into the throwaway HOME's bin, already on PATH
+   <real home>/.playground/ops/run-slot.sh ops-ship -- env -i ... bun install --frozen-lockfile
+   <real home>/.playground/ops/run-slot.sh ops-ship -- env -i ... env NODE_ENV=production SKIP_ENV_VALIDATION=true node_modules/.bin/turbo run build --filter='./packages/*'
+   env -i ... bash scripts/link-skills.sh   # links this clone's playground command into the throwaway HOME's bin, already on PATH
    ```
 
    Done when `playground doctor` from the clone, still contained, reads `held at <last tag>, N commits behind origin/main`.
 
-d. **Update.** Run `playground update --to <tag>`, then `playground doctor`, still contained.
+d. **Update.** Run the update, then `playground doctor`, still contained:
+
+   ```bash
+   <real home>/.playground/ops/run-slot.sh ops-ship -- env -i ... playground update --to <tag>
+   env -i ... playground doctor
+   ```
+
    This run proves the last tag's `update.ts` taking the invitee to the candidate, since the clone runs the code it holds.
-   When the candidate changes `update.ts` itself, run `playground update --to <tag>` a second time from the updated clone, then `playground doctor`, still contained, so the candidate's own `update.ts` runs.
+   When the candidate changes `update.ts` itself, run that block a second time from the updated clone, so the candidate's own `update.ts` runs.
    The first run leaves the tag's own commit in the throwaway data folder's `ops/update-head`, so a second run reads an empty change set and skips the install, the build and the skills line: first move that file aside when the change is on the no-record path, or write the last tag's commit into it when the change reads the change set, so the second run reads what the first did (the v0.0.26 rehearsal on 1 Nov: the first run ran v0.0.25's `update.ts`, and only the second, with the file moved aside, printed the candidate's new no-record line).
    Done when each update exits 0, doctor's version line reads `at <tag>` after each, and the MISSING lines are only the containment's own and the machine's own gaps: `claude` off `PATH`, `docker` and `gh` left off it and the pinned `herdr` the throwaway `HOME` lacks, while every need the update itself runs on reads ok (`bun`, `git` and `node`, with `python3` from the system basics); the after-state, taken the same way, reads unchanged against the before-state, and each stub's log names the calls the real machine would have taken, and a second run's output shows the step the candidate's change is on, with the line that change adds when it adds one. A step that fails names its caller: when a stub took that call, the update needs it, so contain that call another way (a flag, an env) and run the rehearsal again.
 
@@ -101,9 +110,9 @@ MERGE=$(gh pr view <n> --json mergeCommit --jq .mergeCommit.oid)
 Fix each reason it names, then run it again, at most every 5 minutes while a check still runs (the **github** rule):
 
 - A refusal naming a head other than `$CANARY` means `canary` moved: go back to step 1.
-- No `Audit, Lint, and Build` or `test` check at the head, with the pin's `auto-check-build` and `auto-test` runs reading `action_required` (`gh run list --commit "$CANARY" --event pull_request`), means the bot opened the draft there, so its runs are held runs ([GITHUB-BULK-READS.md, Reading canary's own checks](../../../extensions/core/skills/playbook/GITHUB-BULK-READS.md#reading-canarys-own-checks)). Close the draft (`gh pr close <n>`) and open the ship PR again with step 2's `gh pr create`, whose `opened` event from your account starts both.
+- No `Audit, Lint, and Build` or `test` check at the head, with the pin's `auto-check-build` and `auto-test` runs reading `action_required` (`gh run list --commit "$CANARY" --event pull_request`), means the bot opened the draft there, so its runs are held runs ([GITHUB-BULK-READS.md, Reading canary's own checks](../../../extensions/core/skills/playbook/GITHUB-BULK-READS.md#reading-canarys-own-checks)). Run `bun run ship:approve-held <n>`, which approves the ship PR's held runs at its head alone and prints each run it approved, or `none held`.
 - A red check: rerun its run once, `gh run rerun <run id> --failed`, or a cancelled run whole with `gh run rerun <run id>`, its id from `gh run list --commit "$CANARY" --event pull_request --json databaseId,workflowName,conclusion`.
-- A second red, or a FAIL gate line, holds the ship: name the failing test (`gh run view <run id> --log-failed`) or step in the ship PR and up the chain, and end the freeze by step 1's line for a ship that stops.
+- A second red, or a FAIL gate line, holds the ship: name the failing test (`gh run view <run id> --log-failed`; `gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<job id>/logs` reads a job's whole log, where `--log-failed` cuts it) or step in the ship PR and up the chain, and end the freeze by step 1's line for a ship that stops.
 
 Done when `ship:merge` printed `merged #<n> at <sha>` and `MERGE` holds that commit.
 
@@ -128,7 +137,7 @@ Done when `gh release list -L 1` shows `vX.Y.Z` marked Latest, its page opens wi
 Run `playground update` (`packages/scripts/src/playground/update.ts`) in a run slot; the command is the main checkout's own, linked into `~/.bun/bin`:
 
 ```bash
-~/.playground/ops/run-slot.sh <your name> -- playground update
+~/.playground/ops/run-slot.sh ops-ship -- playground update
 ```
 
 It runs each step below and stops at the first that fails, naming it.

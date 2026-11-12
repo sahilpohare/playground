@@ -43,4 +43,6 @@ export const allowed: string[] = [
   "a quiet commit whose --message= holds a parenthesised scope",
   // #1455: a quiet message is text git never runs, so one naming a gated call runs
   "a quiet message that names a gated call",
+  // #1799: a quiet commit's own redirect takes only what git prints, judged by where it writes, so it keeps the line call by call
+  "a redirect writing a file after a quiet commit",
 ]

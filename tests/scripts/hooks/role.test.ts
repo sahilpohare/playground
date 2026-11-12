@@ -156,6 +156,32 @@ describe("a session's factory role", () => {
     ).toBe("")
   })
 
+  // A Codex session writes no Claude registry file: its name is its thread's, the last line for its id in CODEX_HOME's session_index.jsonl, as codex app-server's thread/name/set writes it (measured on codex-cli 0.167.1).
+  test("a Codex session resumed with no PLAYGROUND_ROLE reads its role from its thread's name", async () => {
+    const codex = join(config, "codex")
+    const thread = "0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+    await Bun.write(
+      join(codex, "session_index.jsonl"),
+      [
+        { id: thread, thread_name: "notes", updated_at: "2026-11-11T09:00:00Z" },
+        { id: "01a1c9e5-2922-7d80-938b-4d9553bcd7fe", thread_name: "builder", updated_at: "x" },
+        { id: thread, thread_name: "dispatcher", updated_at: "2026-11-11T09:01:00Z" },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n") + "\n",
+    )
+    const environment = {
+      CLAUDE_CONFIG_DIR: config,
+      CODEX_HOME: codex,
+      PLAYGROUND_DATA_DIR: join(config, "playground"),
+    }
+    expect(await sessionRole(environment, thread)).toBe("dispatcher")
+    expect(await sessionRole(environment, "0f9a1c2e-0000-4e5f-8a6b-7c8d9e0f1a2b")).toBe("")
+    expect(await sessionRole({ ...environment, CODEX_HOME: join(codex, "none") }, thread)).toBe("")
+    // a Claude session's registry name still comes first
+    expect(await sessionRole(environment, "s-restored")).toBe("lead")
+  })
+
   test("a name with no role reads its roster kind; a kind off the list reads as none", async () => {
     expect(
       await sessionRole(

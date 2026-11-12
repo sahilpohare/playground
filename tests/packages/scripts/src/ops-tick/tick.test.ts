@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test"
 import {
   appendFileSync,
   chmodSync,
@@ -23,9 +23,9 @@ import {
   cycle,
   idleCompact,
   leadOf,
-  loadCapOf,
   nextDue,
   resultOf,
+  runSlotHold,
   runner,
   switchAccount,
   trashPurge,
@@ -196,6 +196,128 @@ describe("roll gate", () => {
     await beat("roll-gate").run(ctx)
     expect(await Bun.file(join(ops, "dashboard", "roll-now")).exists()).toBe(false)
     expect(sent).toEqual([])
+  })
+})
+
+// #1779: a run-slot hold past 30 minutes while a waiter queues is told to ops once per hold.
+describe("run-slot hold", () => {
+  const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z")
+  // A pid known dead: a child spawned and awaited is gone by the time it returns
+  const deadPid = async (): Promise<number> => {
+    const child = Bun.spawn(["true"])
+    await child.exited
+    return child.pid
+  }
+  const hold = (
+    ops: string,
+    slot: string,
+    who: string,
+    pid: number,
+    sinceMs: number,
+    waiters: string[],
+  ) => {
+    writeFileSync(join(ops, `${slot}.holder`), `${who} ${pid} ${iso(sinceMs)} 4 3\n`)
+    mkdirSync(join(ops, "run-slot.waiters"), { recursive: true })
+    for (const ticket of waiters) writeFileSync(join(ops, "run-slot.waiters", ticket), "")
+    appendFileSync(
+      join(ops, "run-slot.runs.log"),
+      `2026-10-19T12:00:00Z ask ${who} ${pid} bun run test:file tests/scripts/long.test.ts\n`,
+    )
+  }
+  // Counts the Bun.file calls that name run-slot.runs.log during run()
+  const runsLogReads = async (run: () => Promise<void>): Promise<number> => {
+    const spy = spyOn(Bun, "file")
+    try {
+      await run()
+      return spy.mock.calls.filter((c) => String(c[0]).endsWith("run-slot.runs.log")).length
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
+  test("a hold past 30 minutes with a waiter queued tells ops once, naming the holder, its command and its run time", async () => {
+    const ops = scratch()
+    const now = at(13, 10)
+    const since = now.getTime() - 40 * 60_000
+    hold(ops, "run-slot", "g7wkr2-worker", process.pid, since, [
+      `1760000000-${process.pid}-y8wqk2-worker`,
+    ])
+    hold(ops, "run-slot-2", "k3v9q2-worker", process.pid, now.getTime() - 10 * 60_000, [])
+    const { ctx, sent } = fake(ops, now)
+    await runSlotHold(ctx)
+    expect(sent).toEqual([
+      {
+        text: `run-slot: g7wkr2-worker's run has held run-slot for 40 min while 1 waiter queues: bun run test:file tests/scripts/long.test.ts (pid ${process.pid}, since ${iso(since)})`,
+        to: "ops",
+      },
+    ])
+  })
+
+  test("a hold past 30 minutes with no live waiter queued tells ops nothing", async () => {
+    const ops = scratch()
+    const now = at(13, 10)
+    const dead = await deadPid()
+    hold(ops, "run-slot", "g7wkr2-worker", process.pid, now.getTime() - 40 * 60_000, [
+      `1760000000-${dead}-y8wqk2-worker`,
+    ])
+    const { ctx, sent } = fake(ops, now)
+    await runSlotHold(ctx)
+    expect(sent).toEqual([])
+  })
+
+  test("a due hold with no waiter at all reads no runs.log and sends nothing", async () => {
+    const ops = scratch()
+    const now = at(13, 10)
+    hold(ops, "run-slot", "g7wkr2-worker", process.pid, now.getTime() - 40 * 60_000, [])
+    const { ctx, sent } = fake(ops, now)
+    const reads = await runsLogReads(() => runSlotHold(ctx))
+    expect(sent).toEqual([])
+    expect(reads).toBe(0)
+  })
+
+  test("a second pass on the same hold tells nothing more", async () => {
+    const ops = scratch()
+    const now = at(13, 10)
+    hold(ops, "run-slot", "g7wkr2-worker", process.pid, now.getTime() - 40 * 60_000, [
+      `1760000000-${process.pid}-y8wqk2-worker`,
+    ])
+    const first = fake(ops, now)
+    await runSlotHold(first.ctx)
+    expect(first.sent).toHaveLength(1)
+    const second = fake(ops, at(13, 15))
+    const reads = await runsLogReads(() => runSlotHold(second.ctx))
+    expect(second.sent).toEqual([])
+    expect(reads).toBe(0)
+  })
+
+  test("a pass with no hold due reads no runs.log, and sends nothing", async () => {
+    const ops = scratch()
+    const now = at(13, 10)
+    hold(ops, "run-slot", "g7wkr2-worker", process.pid, now.getTime() - 10 * 60_000, [
+      `1760000000-${process.pid}-y8wqk2-worker`,
+    ])
+    const { ctx, sent } = fake(ops, now)
+    const reads = await runsLogReads(() => runSlotHold(ctx))
+    expect(sent).toEqual([])
+    expect(reads).toBe(0)
+  })
+
+  test("a due hold still alerts once, reading runs.log once", async () => {
+    const ops = scratch()
+    const now = at(13, 10)
+    const since = now.getTime() - 40 * 60_000
+    hold(ops, "run-slot", "g7wkr2-worker", process.pid, since, [
+      `1760000000-${process.pid}-y8wqk2-worker`,
+    ])
+    const { ctx, sent } = fake(ops, now)
+    const reads = await runsLogReads(() => runSlotHold(ctx))
+    expect(sent).toEqual([
+      {
+        text: `run-slot: g7wkr2-worker's run has held run-slot for 40 min while 1 waiter queues: bun run test:file tests/scripts/long.test.ts (pid ${process.pid}, since ${iso(since)})`,
+        to: "ops",
+      },
+    ])
+    expect(reads).toBe(1)
   })
 })
 
@@ -852,7 +974,7 @@ describe("the beats that send no line", () => {
     )
   })
 
-  test("the trash purge waits at the load cap and names the batches it left", async () => {
+  test("the trash purge removes its batch at any load", async () => {
     const ops = scratch()
     const trash = join(ops, "..", "trash")
     const now = new Date("2026-11-02T12:17:00Z")
@@ -861,35 +983,58 @@ describe("the beats that send no line", () => {
     const { ctx, runs, sent } = fake(ops, now)
     await trashPurge(
       undefined,
-      () => 20e9,
-      () => 22,
+      () => 100e9,
+      async () => {},
     )(ctx)
-    expect(existsSync(join(trash, "20261020T000000Z-s"))).toBe(true)
+    expect(existsSync(join(trash, "20261020T000000Z-s"))).toBe(false)
     expect(existsSync(join(trash, "20261101T000000Z-s"))).toBe(true)
     expect(runs).toEqual([])
     expect(sent).toEqual([])
-    expect(await Bun.file(join(ops, "log", "trash-purge.log")).text()).toContain(
-      "removed 0, left for load (20261020T000000Z-s, 20261101T000000Z-s)",
-    )
+    const log = await Bun.file(join(ops, "log", "trash-purge.log")).text()
+    expect(log).toContain("removed 1 (20261020T000000Z-s)")
+    expect(log).not.toContain("left for load")
   })
 
-  test("loadCapOf reads the switch's last line as run-slot.sh does, while it stands, and defaults to 22", () => {
+  test("the trash purge strips rebuildables from the batches it keeps", async () => {
     const ops = scratch()
-    const now = new Date("2026-11-08T12:00:00Z")
-    const cap = join(ops, "run-slot.load5-cap")
-    expect(loadCapOf(ops, now)).toBe(22)
-    writeFileSync(cap, "builder 2026-11-08T00:00:00Z 2026-11-09T00:00:00Z a low cap\n15\n")
-    expect(loadCapOf(ops, now)).toBe(15)
-    writeFileSync(cap, "builder 2026-11-08T00:00:00Z 2026-11-09T00:00:00Z over the line\n30\n")
-    expect(loadCapOf(ops, now)).toBe(22)
-    writeFileSync(cap, "builder 2026-11-08T00:00:00Z 2026-11-08T04:00:00Z expired\n15\n")
-    expect(loadCapOf(ops, now)).toBe(22)
-    writeFileSync(cap, "builder 2026-11-08T00:00:00Z 2026-11-09T00:00:00Z no whole number\n15.5\n")
-    expect(loadCapOf(ops, now)).toBe(22)
-    writeFileSync(cap, "12\n")
-    utimesSync(cap, now, now)
-    expect(loadCapOf(ops, now)).toBe(12)
-    expect(loadCapOf(ops, new Date("2026-11-08T16:00:01Z"))).toBe(22)
+    const trash = join(ops, "..", "trash")
+    const now = new Date("2026-11-02T12:17:00Z")
+    mkdirSync(join(trash, "20261020T000000Z-s", "1"), { recursive: true })
+    mkdirSync(join(trash, "20261101T000000Z-s", "1", "review-clone", "node_modules", "react"), {
+      recursive: true,
+    })
+    writeFileSync(
+      join(trash, "20261101T000000Z-s", "1", "review-clone", "node_modules", "react", "index.js"),
+      "x",
+    )
+    writeFileSync(
+      join(trash, "20261101T000000Z-s", "manifest.jsonl"),
+      `${JSON.stringify({
+        at: "2026-11-01T00:00:00.000Z",
+        files: 1,
+        id: "20261101T000000Z-s/1",
+        path: "/desk/wt",
+        reason: "playground rm",
+        session: "s",
+        size: 10,
+      })}\n`,
+    )
+    const { ctx, runs, sent } = fake(ops, now)
+    await trashPurge(
+      undefined,
+      () => 100e9,
+      async () => {},
+    )(ctx)
+    expect(existsSync(join(trash, "20261020T000000Z-s"))).toBe(false)
+    expect(existsSync(join(trash, "20261101T000000Z-s"))).toBe(true)
+    expect(existsSync(join(trash, "20261101T000000Z-s", "1", "review-clone", "node_modules"))).toBe(
+      false,
+    )
+    expect(runs).toEqual([])
+    expect(sent).toEqual([])
+    expect(await Bun.file(join(ops, "log", "trash-purge.log")).text()).toContain(
+      "removed 1 (20261020T000000Z-s), stripped 1 folders (20261101T000000Z-s)",
+    )
   })
 
   test("the idle compact runs the Dashboard checkout's idle-compact bin straight every 5 minutes and logs each line it prints", async () => {
