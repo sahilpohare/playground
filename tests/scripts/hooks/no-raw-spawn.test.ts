@@ -764,12 +764,12 @@ describe("it fails open", () => {
   })
 })
 
-test("the factory settings register it for Bash", async () => {
+test("the factory settings run it on Bash through guards", async () => {
   const settings = (await Bun.file(join(root, "scripts", "factory-settings.json")).json()) as {
     hooks: { PreToolUse: { hooks: { command: string }[]; matcher: string }[] }
   }
   const entry = settings.hooks.PreToolUse.find((e) =>
-    e.hooks.some((h) => h.command.includes("scripts/hooks/bundled/no-raw-spawn.js")),
+    e.hooks.some((h) => h.command.includes("scripts/hooks/bundled/guards.js")),
   )
   expect(entry?.matcher).toBe("^Bash$")
 })

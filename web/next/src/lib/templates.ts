@@ -17,8 +17,8 @@ export type TemplateRow = InferResponseType<
 
 export const TEMPLATES_QUERY_KEY = ["session-templates"] as const
 
-// The model a GLM template names, packages/settings' GLM_MODEL, which the web reads no package for.
-const GLM_MODEL = "glm"
+// The model a GLM template names, packages/settings' GLM_MODEL, which the web reads no package for; a test keeps the two equal.
+export const GLM_MODEL = "glm"
 
 export async function readTemplates(): Promise<TemplateRow[]> {
   const { data, error } = await unwrap(apiClient.v1.sessions.templates.$get())

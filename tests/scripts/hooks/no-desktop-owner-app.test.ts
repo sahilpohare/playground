@@ -92,7 +92,7 @@ describe("an app on the list", () => {
     expect(reason).toContain("! prefix")
     expect(reason).toContain("take Slack off")
     expect(reason).toContain(
-      "to take Slack off the list in the owner's login extension, tell your lead, who posts an apps decision with bun run ask new (.agents/dashboard/asks.md), whose Approve takes it off",
+      "to take Slack off the list in the owner's login extension, tell your lead, who posts an apps decision with playground ask new (.agents/dashboard/asks.md), whose Approve takes it off",
     )
   })
 

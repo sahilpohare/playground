@@ -66,13 +66,13 @@ set -euo pipefail
 #   --account <email>  with any mode but restore or close, anywhere among its words: the session logs in as that Claude account, its token read from the Keychain (the service usage.keychainService names) by the new pane's own shell, which stops on an empty one before claude runs; this machine's own login starts on its config with no token, past the account split, its usage judged as a bare start's; with --backend glm it takes a GLM row's label instead
 #   --backend glm      with any mode but restore, close or a reviewer's or a tester's, outside a checkout of an org ext.links guards and on a brief naming no word of the glm-refused-sources list, anywhere among its words: the session runs on Z.ai's GLM (models.glm, glm-5.3-flash by default) through Claude Code, its key read from the Keychain (the service models.glmKeychainService names, the account its usage.accounts row's label names: --account's, else the first GLM row's) by the new pane's own shell, which stops on an empty one before claude runs
 #   --backend claude   the same places: the session runs on Claude (the default; named to set its pin on a fresh start)
-#   --harness codex    with the first dispatcher's manager start or its resume alone, on a scratch data folder (PLAYGROUND_DATA_DIR naming one) until phase 3 wires the factory's guards into Codex's hooks, and no --backend, --account, --model or --effort: the session runs in Codex (the codex on PATH), its CODEX_HOME the data folder's codex/, whose config.toml, hooks.json and app-server-daemon/settings.json each launch writes; its hooks always run trusted (--dangerously-bypass-hook-trust), and it fails closed: a session whose SessionStart hook writes no beat within 60 seconds has its pane closed and the start refused, with no pin, record or roster row. The beat names its thread, which takes the session's name through codex app-server's thread/name/set.
+#   --harness codex    with the first dispatcher's manager start or its resume alone, on a scratch data folder (PLAYGROUND_DATA_DIR naming one) until phase 3 lifts that, and no --backend, --account, --model or --effort: the session runs in Codex (the codex on PATH), its CODEX_HOME the data folder's codex/, whose config.toml, hooks.json (the factory's guards and the beat) and app-server-daemon/settings.json each launch writes; its hooks always run trusted (--dangerously-bypass-hook-trust), and it fails closed: a session whose SessionStart hook writes no beat within 60 seconds has its pane closed and the start refused, with no new pin, record or roster row (a resume keeps its earlier ones), and a pane herdr will not close is named for you to close; a Codex start also stops when PowerShell is installed (a pwsh or powershell on PATH, or /usr/local/bin/pwsh), which the beat names. The beat names its thread, which takes the session's name through codex app-server's thread/name/set.
 #   --harness claude-code  the default: the session runs in Claude Code.
 #     The harness and backend are recorded at the start in ~/.playground/backends/<name> (claude-code glm, codex openai), and carried on its resume, which also reads a pin of the backend alone: a resume takes no --backend or --harness while a pin stands, and refuses with no pin and none given, or with a pin that reads as none of those.
 #   --model <id>       with any mode but restore or close, anywhere among its words: the Claude model, one of models.claude (claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5 and claude-haiku-5-5 by default), else models.default (claude-opus-5-5); never on GLM, which maps every model itself, and a reviewer or a tester runs on models.checker (claude-opus-5-5) alone. Nothing records it: a resume takes it afresh, so a resume with no --model runs on models.default.
 #   --effort <level>   with any mode but restore or close, anywhere among its words: the session's effort, one of low, medium, high, xhigh or max, high by default; the resume record keeps one other than high, so a restore runs at the same effort, and a resume with none runs at high.
 #   --title "<title>"  with worker or a reviewer's or tester's column, anywhere among its words: the plain title the sidebar reads the session by, up to 40 characters; a worker needs one, and a checker with none takes "Review: " or "Test: " before its worker's roster title
-#   --pr <url>[,<url>]  with resume or a reviewer's or tester's column, anywhere among its words: the PRs the checker serves, each by its URL or its number alone, with an issue's URL beside a pull request for a PR not yet opened; a reviewer's or tester's start is refused unless it names a pull request, and its roster row records it before the pane opens; on an ended roster row it replaces the row's prs, and its pr with the first pull request named; on a live row, or none, it joins them and gives a row with no pr the first pull request named
+#   --pr <url>[,<url>]  with resume or a reviewer's or tester's column, anywhere among its words: the PRs the checker serves, each by its URL or its number alone, with an issue's URL beside a pull request for a PR not yet opened, or an extension item it scores as <scope>/<kind>/<key>; a reviewer's or tester's start is refused unless it names a pull request or an extension item, and its roster row records it before the pane opens; on an ended roster row it replaces the row's prs, and its pr with the first pull request named; on a live row, or none, it joins them and gives a row with no pr the first pull request named
 #   --reports-to <session>  with worker alone, anywhere among its words: the session it reports to, named in its first prompt in place of the builder
 #   --in <dir>         with worker alone, anywhere among its words: the folder the worker runs in, in place of this checkout: an existing folder under the code root (paths.codeRoot) or under ~/<org> for an org ext.links guards, any other refused
 #   --memory <dir>     with any mode but restore or close, anywhere among its words: the launch runs with Claude Code's auto-memory on, writing to <dir>, an absolute folder: its built settings file, one of its own (factory-settings-...-memory-<name>.json), sets autoMemoryEnabled and autoMemoryDirectory, while every other launch's file stays as it is, for the auto-memory trial; --memory off launches with memory off on the shared file, whatever arm the role or the row would take
@@ -846,6 +846,8 @@ CLAUDE_MODEL=
 EFFORT=
 RESUME_BRIEF=
 PR_ARG=
+# An extension item a checker scores, <scope>/<kind>/<key>, checked as roster.ts and playground ext check one: the kinds are packages/settings' KINDS.
+ITEM_FORM='[A-Za-z0-9][A-Za-z0-9-]*/(doc|learning|list|rule|script|skill|template)/[a-z0-9][a-z0-9._-]*'
 REPORTS_TO=
 TITLE_ARG=
 IN_DIR=
@@ -884,10 +886,10 @@ while [ $# -gt 0 ]; do
     shift 2
   elif [ "$1" = --pr ]; then
     [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$PR_ARG" ] || usage "--pr takes the PR a checker serves, once"
-    pr_form='^(#?[1-9][0-9]*|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(pull|issues)/[1-9][0-9]*)$'
+    pr_form="^(#?[1-9][0-9]*|https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(pull|issues)/[1-9][0-9]*|$ITEM_FORM)\$"
     IFS=, read -ra prs_named <<<"$2"
     for one in "${prs_named[@]}"; do
-      [[ $one =~ $pr_form ]] || usage "--pr takes a PR's URL or its number alone, comma-separated, or an issue's URL beside one for a PR not yet opened, not \"$2\""
+      [[ $one =~ $pr_form ]] || usage "--pr takes a PR's URL or its number alone, comma-separated, an issue's URL beside one for a PR not yet opened, or an extension item as <scope>/<kind>/<key>, not \"$2\""
     done
     PR_ARG=$2
     shift 2
@@ -1335,9 +1337,9 @@ elif [ "$MODE" = column ] && [[ $ROLE =~ ^(reviewer|tester)$ ]] && [ -z "$TITLE_
   if [ "$ROLE" = reviewer ]; then TITLE_ARG="Review: $of"; else TITLE_ARG="Test: $of"; fi
 fi
 [ -z "$PR_ARG" ] || [[ $ROLE =~ ^(reviewer|tester)$ ]] || usage "--pr is for a reviewer's or tester's start, not a $ROLE's"
-# A checker's row names the pull request it serves, which no-outside-pr-code reads at its first tool call (a row naming none holds it in read mode) and auto-end reads to end it (an ended row's are the PRs it last served), so every reviewer or tester start names one.
-[[ ! $ROLE =~ ^(reviewer|tester)$ ]] || [[ ,$PR_ARG, =~ ,(#?[1-9][0-9]*|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*), ]] ||
-  refuse "a $ROLE starts with --pr <pull url>, the pull request it serves now, by its URL or its number, which its roster row records before its pane opens; an issue's URL alone leaves the row with no pr, so open the PR as a draft first"
+# A checker's row names the pull request or extension item it serves, which no-outside-pr-code reads at its first tool call (a row naming no pull request holds it in read mode) and auto-end reads to end it (an ended row's are the PRs it last served), so every reviewer or tester start names one.
+[[ ! $ROLE =~ ^(reviewer|tester)$ ]] || [[ ,$PR_ARG, =~ ,(#?[1-9][0-9]*|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*|$ITEM_FORM), ]] ||
+  refuse "a $ROLE starts with --pr <pull url>, the pull request it serves now, by its URL or its number, or the extension item it scores as <scope>/<kind>/<key>, which its roster row records before its pane opens; an issue's URL alone leaves the row with no pr, so open the PR as a draft first"
 if [ "$MODE" != resume ] || [ -n "$BRIEF" ]; then
   # The brief's path under ~/.playground names the same file as its bare name.
   BRIEF=${BRIEF#"$DATA/"}
@@ -1357,12 +1359,15 @@ if [ "$MODE" = resume ]; then
   if [ -e "$PINS/$NAME" ]; then
     [ -z "$BACKEND$HARNESS" ] || refuse "the pin decides how $NAME runs; --backend or --harness would change it mid-life. Close it and start it again instead."
     pin=$(cat "$PINS/$NAME") || refuse "it cannot read the backend pin for $NAME"
+    # Its words, one space apart, as readPin() reads them, so a hand edit's spacing changes nothing.
+    read -ra pin_words <<<"$pin" || true
+    pin=${pin_words[*]+"${pin_words[*]}"}
     # A pin names its harness, then its backend (HARNESSES in packages/settings/src/harnesses.ts); one written before the harness split names its backend alone.
     case "$pin" in
       glm | "claude-code glm") BACKEND=glm ;;
       claude | "claude-code claude") ;;
       "codex openai") HARNESS=codex ;;
-      *) refuse "the backend pin for $NAME reads neither glm nor claude: it cannot know how $NAME ran. Fix or remove $SHOWN/backends/$NAME, then resume." ;;
+      *) refuse "the backend pin for $NAME reads none of claude-code claude, claude-code glm, codex openai, glm or claude: it cannot know how $NAME ran. Fix or remove $SHOWN/backends/$NAME, then resume." ;;
     esac
   elif [ -n "$BACKEND$HARNESS" ]; then
     PIN_GIVEN=1
@@ -1377,11 +1382,11 @@ fi
 if [ "$HARNESS" = codex ]; then
   { [ -n "$FIRST" ] && [[ $MODE =~ ^(manager|resume)$ ]]; } || refuse "Codex runs the first dispatcher alone, in a workspace of its own (spawn.sh manager $(dispatcher_of 1) <brief> --harness codex), not $NAME"
   [ -z "$BACKEND$ACCOUNT$CLAUDE_MODEL$EFFORT" ] || refuse "Codex runs on the login and model its CODEX_HOME holds, so it takes no --backend, --account, --model or --effort"
-  # No factory guard reaches a Codex session until phase 3 of the harness layer wires them into its hooks, so it runs only on a scratch data folder; phase 3 lifts this in the change that wires them.
+  # A Codex session runs only on a scratch data folder until phase 3 of the harness layer lifts this, once a live probe has passed.
   # The live data folder is the one dataDir() gives with no PLAYGROUND_DATA_DIR set.
   live=$(cd / && env $UNSET -u PLAYGROUND_DATA_DIR "$BUN" --no-env-file -e "import { dataDir } from '$REPO/packages/env/src/data-dir.ts'; console.log(dataDir())") || refuse "bun could not resolve the live data folder"
   [ "$(cd -P "$DATA" 2>/dev/null && pwd -P)" != "$(cd -P "$live" 2>/dev/null && pwd -P)" ] ||
-    refuse "Codex starts only on a scratch data folder (PLAYGROUND_DATA_DIR naming one) until phase 3 of the harness layer wires the factory's guards into its hooks, and $SHOWN is the live one"
+    refuse "Codex starts only on a scratch data folder (PLAYGROUND_DATA_DIR naming one) until phase 3 of the harness layer (the plan-harness-layer doc) lifts that, once a live probe has passed, and $SHOWN is the live one"
 fi
 # Every start and resume runs in herdr, the one runtime: a resume reads no pin, and the write below rewrites it whatever word it held.
 RUNTIMES="$DATA/runtimes"
@@ -1663,12 +1668,16 @@ SID=${SESSION:-}
 if [ "$RUNTIME" = herdr ] && [ "$MODE" != resume ]; then
   SID=$(uuidgen | tr 'A-F' 'a-f') || refuse "it cannot make a session id (uuidgen)"
 fi
+FRESH=
 if [ "$MODE" = resume ]; then
   COMMAND="$LAUNCH --resume $SESSION -n $NAME $FLAGS"
   PROMPT=
   # A herdr session that never took a message has no transcript, so --resume finds no conversation, while --session-id refuses an id that has one (both measured on claude in herdr): it starts afresh under its own id and name, with the prompt its start recorded.
-  if [ "$RUNTIME" = herdr ] && [ "$HARNESS" != codex ] && [[ $SESSION =~ ^[0-9a-f-]{36}$ ]] &&
-    [ -z "$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -name "$SESSION.jsonl" -print -quit 2>/dev/null)" ]; then
+  # A Codex thread that never wrote its rollout has nothing to resume either, so it starts afresh the same way, under the thread its new beat names.
+  saved=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -name "$SESSION.jsonl" -print -quit 2>/dev/null) || saved=
+  if [ "$HARNESS" = codex ]; then saved=$(find "$DATA/codex/sessions" -name "rollout-*-$SESSION.jsonl" -print -quit 2>/dev/null) || saved=; fi
+  if [ "$RUNTIME" = herdr ] && [[ $SESSION =~ ^[0-9a-f-]{36}$ ]] && [ -z "$saved" ]; then
+    FRESH=1
     COMMAND="$LAUNCH --session-id $SESSION -n $NAME $FLAGS"
     PROMPT=$(cat "$RESUME_DIR/$NAME.prompt" 2>/dev/null) || PROMPT=
     # The prompt goes into the launch inside double quotes, so a quote, $, backquote or backslash would end or run them.
@@ -1703,7 +1712,6 @@ else
   PROMPT="You are $NAME, $WHO. $READ$BINDS$REPORT"
   COMMAND="$LAUNCH --session-id $SID -n $NAME $FLAGS \"$PROMPT\""
 fi
-# The pane's shell runs this text, so the whole launch goes in a subshell: a failed Keychain read's exit ends only that, the message stays on the pane, and tk dies with it.
 # Codex's launch: its CODEX_HOME's files are written fresh each launch, and its hooks always run trusted, since a hook with no recorded trust is silently dropped (measured); the session id comes from the SessionStart beat its hook writes, read after the pane runs.
 BEAT=
 if [ "$HARNESS" = codex ]; then
@@ -1711,9 +1719,11 @@ if [ "$HARNESS" = codex ]; then
   CODEX_HOME="$DATA/codex"
   BEAT="$DATA/launch/$NAME.beat"
   mkdir -p "$CODEX_HOME/app-server-daemon" || refuse "it cannot prepare $CODEX_HOME"
-  python3 -I - "$CODEX_HOME" "$(cd -P "$OWN" && pwd -P)" <<'PY' || refuse "it cannot write $CODEX_HOME's config.toml and hooks.json"
+  # The factory's guards as Codex loads them (packages/scripts/src/codex-hooks.ts), with the beat added below.
+  GUARDS=$(cd / && env $UNSET "$BUN" --no-env-file "$REPO/packages/scripts/src/codex-hooks.ts" "$REPO/scripts/factory-settings.json") || refuse "it cannot render $CODEX_HOME's hooks.json from the factory's settings"
+  python3 -I - "$CODEX_HOME" "$(cd -P "$OWN" && pwd -P)" "$GUARDS" <<'PY' || refuse "it cannot write $CODEX_HOME's config.toml and hooks.json"
 import json, os, sys
-home, folder = sys.argv[1:3]
+home, folder, guards = sys.argv[1:4]
 def write(name, text):
     tmp = os.path.join(home, f"{name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
@@ -1722,18 +1732,21 @@ def write(name, text):
 # The login stays in CODEX_HOME's auth.json, no update check or self-update runs mid-session, and the session's folder is trusted, so no prompt waits on the owner.
 write("config.toml", f'cli_auth_credentials_store = "file"\ncheck_for_update_on_startup = false\n\n[projects.{json.dumps(folder)}]\ntrust_level = "trusted"\n')
 write(os.path.join("app-server-daemon", "settings.json"), json.dumps({"autoUpdateEnabled": False}) + "\n")
-# The beat lands whole: written beside its path, then moved onto it, so the wait never reads half of it.
-beat = {"hooks": [{"command": 'f="$SPAWN_CODEX_BEAT"; cat > "$f.tmp" && mv "$f.tmp" "$f"', "timeout": 10, "type": "command"}], "matcher": ""}
-write("hooks.json", json.dumps({"hooks": {"SessionStart": [beat]}}, indent=2) + "\n")
+# The beat lands whole: written beside its path, then moved onto it, so the wait never reads half of it. A Codex start stops when PowerShell is installed, so the beat names a pwsh or powershell on PATH, or at /usr/local/bin/pwsh, where Codex also looks (shell_detect.rs, codex-cli 0.167.1), in place of the thread.
+beat = {"hooks": [{"command": 'f="$SPAWN_CODEX_BEAT"; p=$(command -v pwsh || command -v powershell || { [ -x /usr/local/bin/pwsh ] && echo /usr/local/bin/pwsh; }); if [ -n "$p" ]; then printf \'{"powershell":"%s"}\\n\' "$p" > "$f.tmp"; else cat > "$f.tmp"; fi && mv "$f.tmp" "$f"', "timeout": 10, "type": "command"}], "matcher": ""}
+hooks = json.loads(guards)
+hooks.setdefault("SessionStart", []).append(beat)
+write("hooks.json", json.dumps({"hooks": hooks}, indent=2) + "\n")
 PY
   LAUNCH="env ${UNSET}${CARRY}PLAYGROUND_ROLE=$ROLE CODEX_HOME=$(printf %q "$CODEX_HOME") SPAWN_CODEX_BEAT=$(printf %q "$BEAT") $(printf %q "$CODEX")"
-  if [ "$MODE" = resume ]; then
+  if [ "$MODE" = resume ] && [ -z "$FRESH" ]; then
     COMMAND="$LAUNCH resume --dangerously-bypass-hook-trust $SESSION"
   else
     COMMAND="$LAUNCH --dangerously-bypass-hook-trust"
   fi
   [ -z "$PROMPT" ] || COMMAND="$COMMAND \"$PROMPT\""
 fi
+# The pane's shell runs this text, so the whole launch goes in a subshell: a failed Keychain read's exit ends only that, the message stays on the pane, and tk dies with it.
 COMMAND="($COMMAND)"
 
 # macOS types at most MAX_CANON 1024 bytes into a pane, and a GLM worker's launch line crosses it (1,025 bytes, measured), so the tail never arrives and the pane waits at >. The same text runs from a file instead: the typed line names the file alone, and the file, read by the pane's own shell, holds the Keychain lookup, never a token. Its first line removes the file, so no past launch outlives its pane to be rerun past this script's refusals.
@@ -2003,19 +2016,31 @@ except (ValueError, KeyError, TypeError):
       [ -s "$BEAT" ] && break
       sleep 0.5
     done
-    SID=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["session_id"])' "$BEAT" 2>/dev/null) || SID=
+    # the beat names the thread, or the PowerShell the start stops on
+    SID=$(python3 -I -c 'import json, sys; b = json.load(open(sys.argv[1])); print("powershell " + b["powershell"] if "powershell" in b else b["session_id"])' "$BEAT" 2>/dev/null) || SID=
     rm -f -- "$BEAT"
     if ! [[ $SID =~ ^[0-9a-f-]{36}$ ]]; then
-      hr pane close "$PANE" >/dev/null 2>&1 || true
       rm -f -- "$LAUNCH_FILE"
-      refuse "Codex's SessionStart hook wrote no beat within 60 seconds, so its guards may not have loaded: $NAME's pane $PANE is closed, and no pin, record or roster row was written"
+      why="Codex's SessionStart hook wrote no beat within 60 seconds, so its guards may not have loaded"
+      [[ $SID != "powershell "* ]] || why="a Codex start stops when PowerShell is installed, and ${SID#powershell } is"
+      hr pane close "$PANE" >/dev/null 2>&1 ||
+        refuse "$why, and herdr would not close $NAME's pane $PANE, so the session may still run: close that pane yourself"
+      # A resume's pin and record stand from its last start, so a later resume tries again.
+      left="no pin, record or roster row was written"
+      [ "$MODE" != resume ] || left="no new pin, record or roster row was written, so its earlier pin and resume record stand"
+      refuse "$why: $NAME's pane $PANE is closed, and $left"
     fi
     # The thread takes the session's name through the app-server's thread/name/set, so Codex's own lists and resume by name find it.
     python3 -I - "$CODEX" "$CODEX_HOME" "$SID" "$NAME" <<'PY' || echo "spawn.sh: $NAME started in Codex, but its thread $SID kept no name" >&2
 import json, os, signal, subprocess, sys
 codex, home, thread, name = sys.argv[1:5]
-signal.alarm(20)
 server = subprocess.Popen([codex, "app-server"], env={**os.environ, "CODEX_HOME": home}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+# An app-server that answers nothing in 20 seconds is ended with the naming, so none outlives the start.
+def give_up(*_):
+    server.kill()
+    sys.exit(1)
+signal.signal(signal.SIGALRM, give_up)
+signal.alarm(20)
 def call(id, method, params):
     server.stdin.write(json.dumps({"id": id, "method": method, "params": params}, separators=(",", ":"), sort_keys=True) + "\n")
     server.stdin.flush()
@@ -2055,7 +2080,7 @@ if [ "$MODE" != resume ] || [ -n "$PIN_GIVEN" ]; then
   pin="claude-code ${BACKEND:-claude}"
   [ "$HARNESS" = codex ] && pin="codex openai"
   if ! { mkdir -p "$PINS" && printf '%s\n' "$pin" > "$PINS/$NAME"; }; then
-    echo "spawn.sh: $NAME started, but its backend pin write failed; its next resume refuses until the pin reads glm or claude" >&2
+    echo "spawn.sh: $NAME started, but its backend pin write failed; its next resume refuses until the pin reads $pin" >&2
   fi
 fi
 if ! { mkdir -p "$RUNTIMES" && printf '%s\n' "$RUNTIME" > "$RUNTIMES/$NAME"; }; then

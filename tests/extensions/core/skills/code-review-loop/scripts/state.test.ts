@@ -183,7 +183,7 @@ test("04h holder tags: held, parked, many plans, lost, outside author, held wins
     true,
   ])
   expect(state.holderTag(roster, plans, "acme/archive", 99, "visitor", "acme-owner")).toEqual([
-    "outside author visitor: the builder triages (a colleague's: the dispatcher decides per CHANNEL.md's Triage; another's app PR: read-only review then the gate; skills/factory: closed)",
+    "outside author visitor: the builder triages (a colleague's: the dispatcher decides per the org's channel triage; another's app PR: read-only review then the gate; skills/factory: closed)",
     false,
   ])
   expect(state.holderTag(roster, plans, "acme/archive", 99, "acme-owner", "acme-owner")[1]).toBe(

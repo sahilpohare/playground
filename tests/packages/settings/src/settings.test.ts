@@ -67,6 +67,7 @@ describe("defineSettings", () => {
       "gates.startsWindow",
       "github.pollMinutes",
       "glm.readOnlyLoad5",
+      "harness.alpha",
       "live.branch",
       "live.container",
       "models.checker",

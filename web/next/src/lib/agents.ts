@@ -125,7 +125,14 @@ export const doingOf = (agent: Agent, dispatcher: boolean): string =>
 // How a status reads at a glance: quiet for what is stopped, parked or merely idle, else the text's own; the state's colour is its icon's, never the words'.
 export type StatusTone = "muted" | "normal"
 
-const QUIET: ReadonlySet<ShownState> = new Set(["down", "ended", "idle", "parked", "usage-limit"])
+const QUIET: ReadonlySet<ShownState> = new Set([
+  "down",
+  "ended",
+  "idle",
+  "parked",
+  "unknown",
+  "usage-limit",
+])
 
 // An open decision or draft a live session posted to Playground's Inbox and depends on: since no factory session blocks on the owner (playbook's ask rule), this is how one shows it waits, linked to the item.
 export type InboxWait = { id: string; ref: number } | null
@@ -170,7 +177,7 @@ export function factsOf(
   // a runner's job runs as a background task while its session idles, so it reads Working (the plan: "Runners use Working while their job runs, Stuck and Down")
   const runs =
     agent.role === "runner" && (live.worker?.tasks ?? []).some((task) => task.state === "running")
-  const light = held === "idle" && runs ? "working" : held
+  const light = (held === "idle" || held === "unknown") && runs ? "working" : held
   // No progress reads the session's own work alone: a quiet runner whose job runs is not hung
   const active = light === held ? (live.worker?.lastActiveAt ?? null) : null
   return {
@@ -528,6 +535,7 @@ export const SHOWN_RANK: Record<ShownState, number> = {
   ready: 7,
   parked: 8,
   "usage-limit": 9,
+  unknown: 9,
   idle: 9,
   done: 10,
   merged: 11,

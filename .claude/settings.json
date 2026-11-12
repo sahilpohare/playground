@@ -65,7 +65,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Bash|mcp__.*[Gg][Ii][Tt][Hh][Uu][Bb].*__(add_comment_to_pending_review|add_issue_comment|add_reply_to_pull_request_comment|pull_request_review_write|update_issue_comment))$",
+        "matcher": "^(mcp__.*[Gg][Ii][Tt][Hh][Uu][Bb].*__(add_comment_to_pending_review|add_issue_comment|add_reply_to_pull_request_comment|pull_request_review_write|update_issue_comment))$",
         "hooks": [
           {
             "type": "command",
@@ -75,7 +75,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|Edit|MultiEdit|NotebookEdit|Write|mcp__.+__((\\w+_)?[Cc]reate_?[Ii]ssues?|[Ii]ssues?_?[Cc]reate|save_issue))$",
+        "matcher": "^(Edit|MultiEdit|NotebookEdit|Write|mcp__.+__((\\w+_)?[Cc]reate_?[Ii]ssues?|[Ii]ssues?_?[Cc]reate|save_issue))$",
         "hooks": [
           {
             "type": "command",
@@ -85,7 +85,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|mcp__.*([Gg][Ii][Tt][Hh][Uu][Bb]|[Ll][Ii][Nn][Ee][Aa][Rr]|[Ss][Ll][Aa][Cc][Kk]).*__.+)$",
+        "matcher": "^(mcp__.*([Gg][Ii][Tt][Hh][Uu][Bb]|[Ll][Ii][Nn][Ee][Aa][Rr]|[Ss][Ll][Aa][Cc][Kk]).*__.+)$",
         "hooks": [
           {
             "type": "command",
@@ -95,7 +95,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|mcp__.*[Gg][Ii][Tt][Hh][Uu][Bb].*__.+)$",
+        "matcher": "^(mcp__.*[Gg][Ii][Tt][Hh][Uu][Bb].*__.+)$",
         "hooks": [
           {
             "type": "command",
@@ -124,23 +124,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-stash.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-stash.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-stash: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-stash: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
+            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/guards.js; [ -f \"$R/$s\" ] || s=scripts/hooks/guards.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"guards: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"guards: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
+            "timeout": 15,
+            "onFailure": "block"
           }
         ]
       },
       {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-ours-merge.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-ours-merge.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-ours-merge: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-ours-merge: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^(Bash|Edit|MultiEdit|NotebookEdit|Write)$",
+        "matcher": "^(Edit|MultiEdit|NotebookEdit|Write)$",
         "hooks": [
           {
             "type": "command",
@@ -150,7 +141,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|Edit|MultiEdit|NotebookEdit|Write)$",
+        "matcher": "^(Edit|MultiEdit|NotebookEdit|Write)$",
         "hooks": [
           {
             "type": "command",
@@ -160,57 +151,7 @@
         ]
       },
       {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-unslotted-run.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-unslotted-run.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-unslotted-run: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-unslotted-run: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-prompt-stop.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-prompt-stop.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-prompt-stop: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-prompt-stop: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-raw-spawn.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-raw-spawn.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-raw-spawn: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-raw-spawn: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-env-dump.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-env-dump.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-env-dump: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-env-dump: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-false-green.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-false-green.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-false-green: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-false-green: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^(Bash|ListMcpResourcesTool|ReadMcpResourceDirTool|ReadMcpResourceTool|mcp__.+)$",
+        "matcher": "^(ListMcpResourcesTool|ReadMcpResourceDirTool|ReadMcpResourceTool|mcp__.+)$",
         "hooks": [
           {
             "type": "command",
@@ -220,47 +161,7 @@
         ]
       },
       {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-desktop-owner-app.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-desktop-owner-app.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-desktop-owner-app: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-desktop-owner-app: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-headless-login.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-headless-login.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-headless-login: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-headless-login: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-kill-by-name.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-kill-by-name.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-kill-by-name: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-kill-by-name: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-raw-delete.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-raw-delete.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-raw-delete: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-raw-delete: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^(Bash|Edit|Glob|Grep|MultiEdit|NotebookEdit|Read|Write)$",
+        "matcher": "^(Edit|Glob|Grep|MultiEdit|NotebookEdit|Read|Write)$",
         "hooks": [
           {
             "type": "command",
@@ -270,17 +171,7 @@
         ]
       },
       {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-mac-web-build.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-mac-web-build.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-mac-web-build: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-mac-web-build: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "^(Bash|mcp__.*[Gg][Ii][Tt][Hh][Uu][Bb].*__label_write)$",
+        "matcher": "^(mcp__.*[Gg][Ii][Tt][Hh][Uu][Bb].*__label_write)$",
         "hooks": [
           {
             "type": "command",

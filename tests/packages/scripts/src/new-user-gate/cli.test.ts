@@ -177,6 +177,23 @@ describe("step 2's database click", () => {
     expect(polls).toBe(3)
   })
 
+  test("a page read as a 404 until its second reopen shows the button then and passes", async () => {
+    const env = join(parent, "reopen.env")
+    let opens = 0
+    const got = await databaseCheck(
+      () => {
+        if (opens < 2) return false
+        writeFileSync(env, "POSTGRES_URL=postgres://gate:gate@127.0.0.1:5432/gate\n")
+        return true
+      },
+      () => existsSync(env) && /^POSTGRES_URL=\S/m.test(readFileSync(env, "utf8")),
+      { buttonMs: 1_000, pollMs: 1, urlMs: 2_000 },
+      () => opens++,
+    )
+    expect(got).toEqual({ detail: "", ok: true })
+    expect(opens).toBe(2)
+  })
+
   test("a fake browser that never shows the button gives up at the button's deadline, before the URL's", async () => {
     const started = Date.now()
     const got = await databaseCheck(

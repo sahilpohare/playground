@@ -18,6 +18,8 @@ import {
 import { dataDir } from "../packages/env/src/data-dir"
 import { factoryRepoOf, loadSessionNames } from "../packages/scripts/src/playground/setting"
 import { writeAtomic } from "../packages/scripts/src/write-atomic"
+import { SCOPE_NAME } from "../packages/settings/src/items"
+import { itemKeySchema, KINDS } from "../packages/settings/src/settings"
 import STATUSES from "./roster-statuses.json"
 
 export const USAGE = `Usage:
@@ -30,7 +32,7 @@ export const USAGE = `Usage:
   roster.ts who <kind>                              (prints the name holding a manager kind's seat; writes nothing)
   roster.ts who dispatcher [1|2]                    (prints the dispatcher in slot 1, Alpha, by default, or 2, Bravo; writes nothing)
   roster.ts who assistant                           (prints the live session the roster gives the assistant kind, else exits 1; writes nothing)
-A checker's prs list holds every PR it serves, so auto-end keeps it while one is open: prs=<pr>,<pr> sets it, prs+=<pr> adds one, prs-=<pr> removes one, and a PR not yet opened goes in as its issue's URL.
+A checker's prs list holds every PR it serves, so auto-end keeps it while one is open: prs=<pr>,<pr> sets it, prs+=<pr> adds one, prs-=<pr> removes one, a PR not yet opened goes in as its issue's URL, and an extension item as <scope>/<kind>/<key>, which assign's pr= adds to prs alone; a checker whose worker is unset or ended takes a new PR through assign with a live worker= alone.
 Times always come from the UTC clock; titles are capped at 40 chars.`
 
 type Agent = Record<string, unknown> & { name: string }
@@ -108,20 +110,41 @@ const prUrl = (raw: string, repo: string): string => {
 
 const ISSUE_URL_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+$/
 
-// A prs entry: a PR as pr takes one, or the issue of a PR not yet opened, by its URL.
+// An extension item a checker scores, as playground ext names one, <scope>/<kind>/<key>; null for a word of another shape.
+const itemRef = (raw: string): string | null => {
+  const parts = raw.split("/")
+  if (parts.length !== 3 || raw.includes(":")) return null
+  const [scope, kind, key] = parts as [string, string, string]
+  if (
+    SCOPE_NAME.test(scope) &&
+    (KINDS as readonly string[]).includes(kind) &&
+    itemKeySchema.safeParse(key).success
+  )
+    return raw
+  throw new Refusal(
+    `roster.ts: an extension item is <scope>/<kind>/<key> as playground ext names it, a login's or org's scope, a kind of ${KINDS.join(", ")} and a key of lowercase letters, digits, dots, dashes and underscores, not ${raw}`,
+    2,
+  )
+}
+
+// A prs entry: a PR as pr takes one, the issue of a PR not yet opened by its URL, or an extension item.
 const prsEntry = (raw: string, repo: string): string => {
   if (ISSUE_URL_RE.test(raw)) return raw
+  if (itemRef(raw)) return raw
   try {
     return prUrl(raw, repo)
   } catch {
     throw new Refusal(
-      `roster.ts: prs takes https://github.com/<owner>/<name>/pull/<n> or its number alone, or a PR not yet opened as https://github.com/<owner>/<name>/issues/<n>, not ${raw}`,
+      `roster.ts: prs takes https://github.com/<owner>/<name>/pull/<n> or its number alone, a PR not yet opened as https://github.com/<owner>/<name>/issues/<n>, or an extension item as <scope>/<kind>/<key>, not ${raw}`,
       2,
     )
   }
 }
 
 const PRS_KEYS = new Set(["prs", "prs+", "prs-"])
+
+const isChecker = (entry: Agent): boolean =>
+  ["reviewer", "tester"].includes(kindOf(entry.name, entry.kind) ?? "")
 
 function apply(entry: Agent, pairs: [string, string][], factoryRepo: string): void {
   const given = pairs.find(([k]) => k === "repo")
@@ -137,6 +160,17 @@ function apply(entry: Agent, pairs: [string, string][], factoryRepo: string): vo
         k === "prs-" ? held.filter((u) => !named.includes(u)) : [...new Set([...held, ...named])]
       if (next.length) entry.prs = next
       else delete entry.prs
+      continue
+    }
+    // an extension item joins a checker's prs and leaves its pr unset, since the dashboard reads pr as a GitHub pull request alone
+    if (k === "pr" && raw !== "" && itemRef(raw)) {
+      if (!isChecker(entry))
+        throw new Refusal(
+          `roster.ts: pr takes an extension item for a reviewer or tester alone, and ${entry.name} is neither`,
+          2,
+        )
+      entry.prs = [...new Set([...((entry.prs as string[] | undefined) ?? []), raw])]
+      delete entry.pr
       continue
     }
     const v = k === "title" ? titled(raw) : k === "pr" && raw !== "" ? prUrl(raw, repo) : raw
@@ -243,8 +277,9 @@ function parkHold(entry: Agent, pairs: [string, string][], moved: boolean): void
     )
 }
 
-// A checker moved by halves keeps its old worker or pr, and the sidebar nests it under that worker's ended row.
+// A checker moved by halves keeps its old worker or pr, and the sidebar nests it under that worker's ended row; one given a new PR beside a worker that is unset or ended is ended by the checker reaper.
 function checkRetask(
+  roster: Roster,
   entry: Agent,
   pairs: [string, string][],
   factoryRepo: string,
@@ -252,7 +287,7 @@ function checkRetask(
 ): void {
   const next: Agent = { ...entry }
   apply(next, pairs, factoryRepo)
-  if (!["reviewer", "tester"].includes(kindOf(next.name, next.kind) ?? "")) return
+  if (!isChecker(next)) return
   const moved = (k: string) => entry[k] !== undefined && next[k] !== entry[k]
   const given = (k: string) => pairs.some(([p]) => p === k)
   // spawn.sh's restart of an ended checker names the PRs it serves now, prs and pr in one set
@@ -264,6 +299,19 @@ function checkRetask(
   )
     throw new Refusal(
       `roster.ts: ${entry.name} is a checker, so it moves to another PR through roster.ts assign ${entry.name} <title> <task> worker=<worker> pr=<url> [repo=<owner>/<name>], which sets its worker, pr, repo and title together`,
+      1,
+    )
+  // the checker reaper ends a checker whose worker has gone (checker-worker-gone), so a new PR on a live row names a live worker
+  const worker = next.worker as string | undefined
+  const gone = !worker || roster.agents.find((a) => a.name === worker)?.status === "ended"
+  const held = (entry.prs as string[] | undefined) ?? []
+  const newPr =
+    pairs.some(([k, v]) => (k === "prs" || k === "prs+") && v.trim()) ||
+    ((next.prs as string[] | undefined) ?? []).some((u) => !held.includes(u)) ||
+    (next.pr !== undefined && next.pr !== entry.pr)
+  if (gone && newPr)
+    throw new Refusal(
+      `roster.ts: ${entry.name} is a checker whose worker ${worker ? `${worker} has ended` : "is not set"}, so the checker reaper would end it: give it the PR with roster.ts assign ${entry.name} <title> <task> worker=<live worker> pr=<n>`,
       1,
     )
 }
@@ -307,7 +355,7 @@ async function main(argv: string[]): Promise<void> {
     const pairs = pairsOf(rest)
     checkPairs(name!, pairs)
     const entry = agent(roster, name!, pairs)
-    checkRetask(entry, pairs, factoryRepo)
+    checkRetask(roster, entry, pairs, factoryRepo)
     // A new task on an agent holding a pr would show the old PR beside it, so it goes through assign; a title alone renames the row.
     if (entry.pr && pairs.some(([k]) => k === "task"))
       throw new Refusal(
@@ -322,7 +370,7 @@ async function main(argv: string[]): Promise<void> {
     const pairs = pairsOf(more)
     checkPairs(name!, pairs)
     const entry = agent(roster, name!, pairs)
-    checkRetask(entry, pairs, factoryRepo)
+    checkRetask(roster, entry, pairs, factoryRepo)
     entry.lastReport = text
     entry.lastReportAt = now()
     apply(entry, pairs, factoryRepo)
@@ -333,9 +381,9 @@ async function main(argv: string[]): Promise<void> {
     const pairs = pairsOf(more)
     checkPairs(name!, pairs)
     const entry = agent(roster, name!, pairs, task)
-    checkRetask(entry, pairs, factoryRepo, true)
+    checkRetask(roster, entry, pairs, factoryRepo, true)
     // A checker keeps every PR it served in its prs list, and its next PR joins it, so auto-end holds it while any is open.
-    const checker = ["reviewer", "tester"].includes(kindOf(entry.name, entry.kind) ?? "")
+    const checker = isChecker(entry)
     const served =
       checker && entry.pr && !pairs.some(([k]) => PRS_KEYS.has(k)) ? [entry.pr as string] : []
     for (const k of [
@@ -352,9 +400,13 @@ async function main(argv: string[]): Promise<void> {
     Object.assign(entry, { status: "working", task })
     apply(entry, [["title", title], ...pairs], factoryRepo)
     parkHold(entry, pairs, true)
-    if (checker && entry.pr)
+    if (checker && (entry.pr || pairs.some(([k, v]) => k === "pr" && v !== "")))
       entry.prs = [
-        ...new Set([...served, ...((entry.prs as string[] | undefined) ?? []), entry.pr as string]),
+        ...new Set([
+          ...served,
+          ...((entry.prs as string[] | undefined) ?? []),
+          ...(entry.pr ? [entry.pr as string] : []),
+        ]),
       ]
   } else if (cmd === "backlog") {
     if (rest.length > 0) throw new Refusal('usage: roster.ts backlog "<text>"', 2)

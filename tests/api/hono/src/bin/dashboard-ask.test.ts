@@ -301,7 +301,7 @@ describe.skipIf(!dockerUp())("the bun run ask CLI", () => {
     expect(posted.code).toBe(0)
     expect(posted.stdout).toMatch(/^\S+\n$/)
     expect(posted.stderr).toContain("ask: this ask is one block of prose")
-    expect(posted.stderr).toContain("bun run ask example code|decision|ui")
+    expect(posted.stderr).toContain("playground ask example code|decision|ui")
     const wide = await cli(
       ["new"],
       JSON.stringify({

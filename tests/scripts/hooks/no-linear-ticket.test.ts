@@ -484,10 +484,10 @@ describe("as Claude Code runs it", () => {
     return found
   }
 
-  test("the matcher takes Bash, the file tools and every tool that can create an issue, and nothing else", async () => {
+  // Bash reaches it through guards (tests/scripts/hooks/guards.test.ts).
+  test("the matcher takes the file tools and every tool that can create an issue, and nothing else", async () => {
     const matcher = new RegExp((await entry()).matcher)
     for (const tool of [
-      "Bash",
       "Edit",
       "MultiEdit",
       "NotebookEdit",
@@ -504,6 +504,7 @@ describe("as Claude Code runs it", () => {
       expect(matcher.test(tool)).toBe(true)
     }
     for (const tool of [
+      "Bash",
       "Read",
       "BashOutput",
       "mcp__linear-shared__get_issue",
@@ -515,11 +516,12 @@ describe("as Claude Code runs it", () => {
     }
   })
 
+  // The skill keeps Bash, which the settings give guards, since a session with the skill alone runs no guards.
   test.each(SKILLS)(
-    "the %s skill registers the same hook for sessions outside dispatcher",
+    "the %s skill registers the same hook for sessions outside dispatcher, Bash included",
     async (skill) => {
       const [found, project] = [await skillEntry(skill), await entry()]
-      expect(found.matcher).toBe(project.matcher)
+      expect(found.matcher).toBe(project.matcher.replace(/^\^\(/, "^(Bash|"))
       expect(found.hooks[0].timeout).toBe(project.hooks[0].timeout)
     },
   )

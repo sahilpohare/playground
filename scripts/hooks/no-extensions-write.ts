@@ -5,6 +5,7 @@ import { dirname, join, resolve, sep } from "node:path"
 
 import { dataDir } from "../../packages/env/src/data-dir"
 import { extensionsDir } from "../../packages/settings/src/rendered"
+import { eachInput } from "./codex"
 import { bunCall, FILE_TOOLS, gitCall, real } from "./no-main-checkout"
 import { fromFactory } from "./role"
 import {
@@ -413,7 +414,7 @@ export const GUARD_KEYS = new Set([
 // An ops job's setting turns it on or moves what it runs, so every jobs.<name> is refused, a name the registry lacks included: only the owner's Approve of a guard decision, or Settings > Jobs, sets one.
 const JOB_PREFIX = "jobs."
 const BY_APPROVE =
-  "a key only the owner sets: post a guard decision with bun run ask new (.agents/dashboard/asks.md), whose Approve writes it"
+  "a key only the owner sets: post a guard decision with playground ask new (.agents/dashboard/asks.md), whose Approve writes it"
 // ext verbs that change a scope's lists or settings, or which scopes the lists and policy.json render from
 const EXT_WRITES = new Set(["add", "import", "init", "link", "order", "remove", "sync", "unlink"])
 // the ext verbs whose --dry-run writes nothing
@@ -485,8 +486,8 @@ function scoreAsOther(words: Word[], cmd: Command, parsed: Parsed, env: Env): bo
 }
 
 const AWKS = new Set(["awk", "gawk", "mawk", "nawk"])
-// what lets an awk program run a command or write a file: system(), getline, a > redirect or an @ directive, and a | pipe outside the literals awkPipe allows
-const AWK_RUNS = /system|getline|[>@]/
+// what lets an awk program run a command or write a file: system(), a > redirect or an @ directive, and a | pipe outside the literals awkPipe allows, the one way a getline runs a command (`"cmd" | getline`), since a plain getline or one from a file only reads
+const AWK_RUNS = /system|[>@]/
 // a regex literal where awk reads only a pattern: at the program's start or after {, }, ;, !, (, ,, ~, &&, || or a newline, holding no quote, no [ and no newline, so a > in it (`/^>>>>>>> /`) is a character it matches, never a redirect
 const AWK_PATTERN = /(^|[{};!(,~\n]|&&|\|\|)(\s*)\/(?:[^\\/"[\n]|\\.)*\//g
 const awkRuns = (program: string) =>
@@ -800,7 +801,7 @@ const FLAGS = /\$\{\([^)]*[eP][^)]*\)[^}]*\}?/g
 const FILE_RUN = /(?:^|[\s;&|(<>])=\(/
 const FILE_RUNS = /=\([^)]*\)?/g
 
-// Whether a call is a closed-list reader whose quoted words are never a command line: awk, cat, cut, echo, git, grep, head, lsof, perl, sed, sort, tail, uniq or wc, or a read-only gh call with a jq filter, as its own program (ownProgram), with no variable set in the call
+// Whether a call is a closed-list reader whose quoted words are never a command line: awk, cat, cut, date, echo, git, grep, head, lsof, perl, sed, sort, tail, uniq or wc, a bash -c of a script of such readers, or a read-only gh call with a jq filter, as its own program (ownProgram), with no variable set in the call
 function narrow(cmd: Command, env: Env): boolean {
   const parsed = parse(cmd)
   const { args, first } = parsed
@@ -825,7 +826,19 @@ function narrow(cmd: Command, env: Env): boolean {
   if (base === "git") return reads(parsed, env) && !args.some(({ value }) => marked(value))
   if (SEDS.has(base)) return sedReads(args)
   if (base === "perl") return perlReads(parsed, env)
-  if (base === "cut" || base === "echo" || base === "lsof") return true
+  // date prints the time and runs nothing, so a read line ending in `; date -u +%FT%TZ` keeps its readers' reading
+  if (base === "cut" || base === "date" || base === "echo" || base === "lsof") return true
+  // bash given one script by -c runs that script alone, which the reader walks call by call, so it is narrow when that script holds reads alone; wholeLine counts it only as its line's one command, and sh and zsh keep canary's reading
+  if (base === "bash") {
+    const [flag, script] = args
+    return (
+      args.length === 2 &&
+      flag.value === "-c" &&
+      script.quoted &&
+      !marked(script.value) &&
+      !wholeLine(lex(script.value, env.known).commands, env, true)
+    )
+  }
   // a read-only gh call is narrow when its jq filter is the only word that holds a space, and a gh post when its title and body are
   if (base === "gh") {
     const filters = ghFilters(parsed)
@@ -880,19 +893,33 @@ function quietCommit(cmd: Command, parsed: Parsed, env: Env): boolean {
 }
 
 // Whether a line is read whole, as canary read it, every spaced text of every program but a reader a command line; a line is read call by call only when every command, its substitutions' included, is narrow or a quiet commit, and no redirect but a quiet commit's own writes a file
-function wholeLine(commands: Command[], env: Env): boolean {
+function wholeLine(commands: Command[], env: Env, readsOnly = false): boolean {
+  // date is a reader only on a line that edits nothing, so one beside an in-place sed or a quiet commit keeps canary's reading; readsOnly, a bash -c's script, spares neither edit
+  const edited = !readsOnly && commands.some((cmd) => edits(cmd, parse(cmd), env))
   return commands.some((cmd) => {
     const words = [...cmd.words, ...cmd.redirects.flatMap((r) => (r.target ? [r.target] : []))]
-    if (words.some((word) => word.procs && wholeLine(word.procs, env))) return true
+    if (words.some((word) => word.procs && wholeLine(word.procs, env, readsOnly))) return true
     const parsed = parse(cmd)
-    // a quiet commit run-slot runs is read as the commit (slotWords), and its own redirect takes what git prints, never its message, judged by where it writes as every redirect is
-    const slot = slotWords(parsed)
-    const commit = slot ? { ...cmd, words: slot } : cmd
-    if (quietCommit(commit, slot ? parse(commit) : parsed, env)) return false
+    const base = parsed.first && program(parsed.first.value)
+    // a bash -c is narrow only as its line's one command, so a shell beside another call keeps canary's reading
+    if (base === "bash" && commands.length > 1) return true
+    if (edited && base === "date") return true
+    if (!readsOnly && quietRun(cmd, parsed, env)) return false
     const writes = cmd.redirects.some((r) => writer(r) && r.target?.value !== "/dev/null")
-    return writes || !(narrow(cmd, env) || sedInPlace(cmd, parsed))
+    return writes || !(narrow(cmd, env) || (!readsOnly && sedInPlace(cmd, parsed)))
   })
 }
+
+// a quiet commit run-slot runs is read as the commit (slotWords), and its own redirect takes what git prints, never its message, judged by where it writes as every redirect is
+function quietRun(cmd: Command, parsed: Parsed, env: Env): boolean {
+  const slot = slotWords(parsed)
+  const commit = slot ? { ...cmd, words: slot } : cmd
+  return quietCommit(commit, slot ? parse(commit) : parsed, env)
+}
+
+// Whether a call edits a file on a line read call by call: a quiet commit or an in-place sed, each judged by what it writes
+const edits = (cmd: Command, parsed: Parsed, env: Env) =>
+  quietRun(cmd, parsed, env) || sedInPlace(cmd, parsed) !== undefined
 
 // Calls whose string argument a shell runs: exec and execSync in a program that names child_process, and execFile, execFileSync, spawn and spawnSync in a program that names `shell` other than as a key whose whole value is a literal `false` (true, a shell's path, a value read at run time or an expression that starts with `false` all run one). A ~ in that string expands to the home as the shell runs it, so the string is judged as its own shell line rather than left relative to the cwd.
 const IMPLICIT_SHELL = new Set(["exec", "execSync"])
@@ -1016,7 +1043,7 @@ function cliWrite(words: Word[]): string | undefined {
         : `playground settings ${verb} of ${key}, a key a guard reads`
   }
   if (verb === "accept")
-    return "playground ext accept, the owner's own call: post it as an accept decision with bun run ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role, since the CLI refuses an accept with PLAYGROUND_ROLE set"
+    return "playground ext accept, the owner's own call: post it as an accept decision with playground ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role, since the CLI refuses an accept with PLAYGROUND_ROLE set"
   if (verb === "put")
     return unread || positional[1] === "list"
       ? "playground ext put of a list, or with a word it cannot read, which may render into a guard's list"
@@ -1472,7 +1499,9 @@ export async function check(
   budget = 10_000,
 ): Promise<string | undefined> {
   try {
-    return await withDeadline(budget, async () => inspect(raw, environment))
+    return await withDeadline(budget, async () =>
+      eachInput(raw, "no-extensions-write", (one) => inspect(one, environment)),
+    )
   } catch (error) {
     if (error instanceof RangeError) return refuse(TOO_LONG)
   }

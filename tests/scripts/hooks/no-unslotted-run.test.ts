@@ -503,3 +503,33 @@ describe("a git commit whose message commitlint passes, or one the hook cannot r
     expect(await commit(command, cwd)).toBeUndefined()
   })
 })
+
+// a conventional header of the given length, as commitlint's header-max-length counts it
+const header = (length: number) => {
+  const head = "fix(scope): "
+  return head + "a".repeat(length - head.length)
+}
+
+describe("a git commit -m whose header runs over commitlint's 100 characters is refused, naming the limit", () => {
+  test.each([
+    ["101 characters", `git commit -m "${header(101)}"`],
+    ["101 characters over a short body", `git commit -m "${header(101)}" -m "body line"`],
+  ])("%s", async (_, command) => {
+    const reason = await commit(command)
+    expect(reason).toContain("no-unslotted-run hook refuses this git commit")
+    expect(reason).toContain("header-max-length")
+    expect(reason).toContain("100")
+  })
+})
+
+describe("a git commit whose header is 100 characters or fewer, or one the hook reads no header of, runs", () => {
+  test.each([
+    ["exactly 100 characters", `git commit -m "${header(100)}"`],
+    ["99 characters", `git commit -m "${header(99)}"`],
+    ["a -F message file", "git commit -F good.txt"],
+    ["an editor commit", "git commit"],
+    ["a multi-line -m whose first line is under the limit", `git commit -m "${GOOD}\n\nbody line"`],
+  ])("%s", async (_, command) => {
+    expect(await commit(command)).toBeUndefined()
+  })
+})

@@ -2,9 +2,9 @@
 const __CHECKOUT = import.meta.dir.slice(0, import.meta.dir.lastIndexOf("/scripts/hooks/bundled"));
 
 // scripts/hooks/no-extensions-write.ts
-import { existsSync, statSync } from "fs";
+import { existsSync as existsSync2, statSync as statSync2 } from "fs";
 import { homedir as homedir4 } from "os";
-import { dirname as dirname3, join as join6, resolve as resolve4, sep as sep2 } from "path";
+import { dirname as dirname3, join as join6, resolve as resolve5, sep as sep2 } from "path";
 
 // packages/env/src/aliases.ts
 var DESK_ENV = new Set([
@@ -66,9 +66,58 @@ import { join as join2 } from "path";
 var CORE = "core";
 var extensionsDir = (data) => join2(data, "extensions");
 
+// scripts/hooks/codex.ts
+import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+var HEADERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
+var SHELL_PATCH = /(?:^|[\n;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*\/)?(?:apply_patch|applypatch)(?=$|[\s;&|)<>'"`])/;
+var patchPaths = (text) => text.split(`
+`).flatMap((line) => {
+  const trimmed = line.trim();
+  const header = HEADERS.find((h) => trimmed.startsWith(h));
+  return header && trimmed.length > header.length ? [trimmed.slice(header.length)] : [];
+});
+var writeOf = (input, path, patch) => {
+  const cwd = typeof input.cwd === "string" ? input.cwd : "/";
+  return JSON.stringify({
+    ...input,
+    tool_input: { content: patch, file_path: isAbsolute2(path) ? path : resolve2(cwd, path) },
+    tool_name: "Write"
+  });
+};
+function guardInputs(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return [raw];
+  }
+  if (typeof input !== "object" || input === null || typeof input.turn_id !== "string")
+    return [raw];
+  const tool = input.tool_name;
+  const command = input.tool_input?.command;
+  const text = typeof command === "string" ? command : "";
+  const shell = tool === "Bash" && SHELL_PATCH.test(text);
+  if (tool !== "apply_patch" && !shell)
+    return [raw];
+  const paths = patchPaths(text);
+  if (paths.length === 0)
+    return null;
+  return [...shell ? [raw] : [], ...paths.map((path) => writeOf(input, path, text))];
+}
+async function eachInput(raw, guard, judge) {
+  const inputs = guardInputs(raw);
+  if (!inputs)
+    return `${guard} hook refuses an apply_patch whose patch names no file it can read: give the patch whole in the call itself, with each file on its own *** Add File, *** Update File or *** Delete File line.`;
+  for (const input of inputs) {
+    const reason = await judge(input);
+    if (reason)
+      return reason;
+  }
+}
+
 // scripts/hooks/no-main-checkout.ts
-import { readdirSync, readFileSync, realpathSync } from "fs";
-import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join as join5, normalize, resolve as resolve3, sep } from "path";
+import { existsSync, readdirSync, readFileSync, realpathSync as realpathSync2, statSync } from "fs";
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute4, join as join5, normalize, resolve as resolve4, sep } from "path";
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js
 function joinValues(array, separator = "|") {
@@ -4763,6 +4812,23 @@ async function registryName(sessionId, environment = process.env) {
     } catch {}
   }
 }
+async function codexName(sessionId, environment = process.env) {
+  if (!environment.CODEX_HOME)
+    return;
+  let name;
+  try {
+    const index = await Bun.file(join3(environment.CODEX_HOME, "session_index.jsonl")).text();
+    for (const line of index.split(`
+`)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.id === sessionId && typeof entry.thread_name === "string")
+          name = entry.thread_name;
+      } catch {}
+    }
+  } catch {}
+  return name;
+}
 async function rosterKind(name, environment = process.env) {
   const path = join3(dataDirOf(environment), "roster.json");
   try {
@@ -4783,7 +4849,7 @@ async function sessionRole(environment, sessionId) {
   if (typeof sessionId !== "string")
     return "";
   try {
-    const name = await registryName(sessionId, environment) ?? "";
+    const name = await registryName(sessionId, environment) ?? await codexName(sessionId, environment) ?? "";
     const role = name && await rosterRole(name, environment);
     if (role)
       return role;
@@ -4806,8 +4872,9 @@ function sessionOf(raw) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
+import { realpathSync } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename, dirname, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+import { basename, dirname, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var UNKNOWN = "\x00";
 var READ = "\x01";
 var MAX_BYTES = 1048576;
@@ -5566,6 +5633,8 @@ function walk(lx, scope, nested, inherit) {
       if (after === "&&")
         done.chained = true;
       done.chain = lx.token;
+      if (lx.orRun)
+        done.orRun = true;
       const last = lx.commands[lx.commands.length - 1]?.words;
       const compound = !!done.group && last?.length === 1 && OPENS.has(reserved[0] ?? "") && !HELD.has(reserved[0] ?? "");
       if (reserved.some((w) => HELD.has(w)) || compound)
@@ -5598,8 +5667,10 @@ function walk(lx, scope, nested, inherit) {
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
-      if (depth === 0 && FREES.has(op))
+      if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
+        lx.orRun = op === "||";
+      }
       after = op;
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
@@ -6133,6 +6204,7 @@ async function runAll(lexed, env, visit, builtins) {
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
 async function examine(cmd, env, visit, builtins) {
   tick();
+  orElse(cmd, env);
   unchain(cmd, env);
   if (cmd.opaque) {
     env.cwdAnywhere = true;
@@ -6291,11 +6363,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
+  const or = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
+  env.cwdOr = undefined;
   try {
     return await body();
   } finally {
+    const own = env.cwdOr;
+    env.cwdOr = own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -6346,7 +6422,8 @@ async function cdTarget(name, args, env) {
   const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
   if (!dir)
     return homedir3();
-  const typed = dir.value === "-" ? undefined : await folder(pathOf(dir, env));
+  const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
+  const typed = await folder(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
   const base = sign && (sign === "-" ? env.old?.dir : env.cwd);
   return base ? await folder(base + dir.value.slice(2)) : typed;
@@ -6366,6 +6443,7 @@ function cdTargets(name, cmd, parsed, env, from) {
     return { back: true, paths: [], unread: true };
   const paths = new Set;
   const many = manyTimes(cmd, parsed);
+  const physical = physicalCd(parsed.args);
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
@@ -6378,14 +6456,23 @@ function cdTargets(name, cmd, parsed, env, from) {
         unread = true;
         continue;
       }
-      paths.add(path);
+      const landed = physical ? kernelPath(word, base, path) : path;
+      paths.add(landed);
       if (many && word.value.split("/").includes("..")) {
-        for (const up of ancestors(path))
+        for (const up of ancestors(landed))
           paths.add(up);
       }
     }
   }
   return { back: dirs.length > 1, paths: [...paths], unread };
+}
+var physicalCd = (args) => args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"));
+function kernelPath(word, base, lexical) {
+  try {
+    return realpathSync.native(isAbsolute3(word.value) ? word.value : `${base}/${word.value}`);
+  } catch {
+    return lexical;
+  }
 }
 function tildeMove(move, name, parsed, env, from, back) {
   const dir = parsed.args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -6428,6 +6515,7 @@ async function chdirTo(name, cmd, parsed, env) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
+    env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
       env.oldFrom = bases;
     if (chained) {
@@ -6437,11 +6525,44 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   env.cwdSure = undefined;
+  env.cwdOr = undefined;
   const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
 var negated = (cmd) => markers(cmd.words).filter((word) => word === "!").length % 2 === 1;
+var EXITS = new Set(["exit"]);
+function orElse(cmd, env) {
+  const or = env.cwdOr;
+  if (!or)
+    return;
+  if (cmd.chain === or.orChain) {
+    if (or.exits && cmd.detached)
+      env.cwdOr = { ...or, exits: false };
+    return;
+  }
+  if (cmd.chain === or.cdChain) {
+    if (!or.joined)
+      env.cwdOr = { ...or, joined: true };
+    return;
+  }
+  if (or.orChain === undefined && cmd.orRun) {
+    env.cwdOr = {
+      ...or,
+      exits: EXITS.has(parse3(cmd).name) && !cmd.detached && cmd.scope === or.scope,
+      landed: { maybe: env.cwdMaybe ?? [], sure: env.cwdSure },
+      orChain: cmd.chain
+    };
+    env.cwdMaybe = keep([...new Set([...startFolders(env), ...or.before])], env);
+    env.cwdSure = undefined;
+    return;
+  }
+  if ((or.joined || or.exits) && or.landed) {
+    env.cwdMaybe = or.landed.maybe;
+    env.cwdSure = or.landed.sure;
+  }
+  env.cwdOr = undefined;
+}
 function unchain(cmd, env) {
   if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
     return;
@@ -6683,9 +6804,9 @@ async function resolveText(text, env) {
 function pathOf(text, env) {
   if (text.unknown || text.reads?.length || text.value === "")
     return;
-  if (isAbsolute2(text.value))
+  if (isAbsolute3(text.value))
     return text.value;
-  return env.cwd ? resolve2(env.cwd, text.value) : undefined;
+  return env.cwd ? resolve3(env.cwd, text.value) : undefined;
 }
 async function readFile(path) {
   const file = Bun.file(path);
@@ -7342,7 +7463,7 @@ var held3 = (word, env, steady) => !marked(word.value) || !!heldWord(word, env, 
 // scripts/hooks/no-main-checkout.ts
 function real(path) {
   const found = resolved(path);
-  if (found !== undefined || !isAbsolute3(path))
+  if (found !== undefined || !isAbsolute4(path))
     return found ?? nearest(path);
   const parts = normalize(path).split(sep).filter(Boolean);
   let low = 0;
@@ -7358,7 +7479,7 @@ function real(path) {
 }
 var resolved = (path) => {
   try {
-    return realpathSync(path);
+    return realpathSync2(path);
   } catch {
     return;
   }
@@ -7421,6 +7542,16 @@ function bunCall(args, env) {
   }
   return { at: k, chained, cwd, filtered, sub, words, xCwd };
 }
+var landing = (word, env, from) => {
+  if (!word || pathOf(word, { ...env, cwd: from }) === undefined)
+    return;
+  const path = isAbsolute4(word.value) ? word.value : `${from}${sep}${word.value}`;
+  try {
+    return realpathSync2.native(path);
+  } catch {
+    return real(resolve4(path));
+  }
+};
 function gitCall(args, env) {
   let cwd = env.cwd;
   let gitDir;
@@ -7430,17 +7561,17 @@ function gitCall(args, env) {
   for (;k < args.length && args[k].value.startsWith("-"); k++) {
     const v = args[k].value;
     if (v === "-C")
-      cwd = args[k + 1] && pathOf(args[++k], { ...env, cwd });
+      cwd = args[k + 1] && landing(args[++k], env, cwd);
     else if (v === "--git-dir" || v.startsWith("--git-dir=")) {
       const word = value(k, "--git-dir");
       if (v === "--git-dir")
         k++;
-      gitDir = word && pathOf(word, { ...env, cwd });
+      gitDir = landing(word, env, cwd);
     } else if (v === "--work-tree" || v.startsWith("--work-tree=")) {
       const word = value(k, "--work-tree");
       if (v === "--work-tree")
         k++;
-      workTree = word && pathOf(word, { ...env, cwd });
+      workTree = landing(word, env, cwd);
     } else if (GIT_TAKES.has(v))
       k++;
   }
@@ -7475,6 +7606,7 @@ var RUNNER_TAKES = new Set([
   "-p"
 ]);
 var SED_VALUES = new Set(["--expression", "--file", "--line-length"]);
+var BROWSER_SAVES = new Set(["pdf", "screenshot"]);
 var EXPORTS2 = new Set(["declare", "export", "local", "readonly", "typeset"]);
 if (false) {}
 
@@ -7763,7 +7895,7 @@ var GUARD_KEYS = new Set([
   "usage.keychainService"
 ]);
 var JOB_PREFIX = "jobs.";
-var BY_APPROVE = "a key only the owner sets: post a guard decision with bun run ask new (.agents/dashboard/asks.md), whose Approve writes it";
+var BY_APPROVE = "a key only the owner sets: post a guard decision with playground ask new (.agents/dashboard/asks.md), whose Approve writes it";
 var EXT_WRITES = new Set(["add", "import", "init", "link", "order", "remove", "sync", "unlink"]);
 var EXT_DRY = new Set(["add", "import", "init"]);
 var SWITCHES = {
@@ -7776,7 +7908,7 @@ function isCli(word, dirs) {
     return false;
   const paths = dirs.map((dir) => pathOf(word, { cwd: dir }));
   if (program(word.value) === "playground")
-    return !word.value.includes("/") || !paths.some((path) => !!path && existsSync(path) && statSync(path).isDirectory());
+    return !word.value.includes("/") || !paths.some((path) => !!path && existsSync2(path) && statSync2(path).isDirectory());
   const cli = (sep2 + CLI).toLowerCase();
   return paths.some((path) => !!path && [path, `${path}.ts`].some((at) => real(at).toLowerCase().endsWith(cli)));
 }
@@ -7807,7 +7939,7 @@ function scoreAsOther(words, cmd, parsed, env) {
   return changes(at === -1 ? cmd.words : cmd.words.slice(0, at));
 }
 var AWKS = new Set(["awk", "gawk", "mawk", "nawk"]);
-var AWK_RUNS = /system|getline|[>@]/;
+var AWK_RUNS = /system|[>@]/;
 var AWK_PATTERN = /(^|[{};!(,~\n]|&&|\|\|)(\s*)\/(?:[^\\/"[\n]|\\.)*\//g;
 var awkRuns = (program) => AWK_RUNS.test(program.replace(AWK_PATTERN, "$1$2RE")) || awkPipe(program);
 var AWK_LEAD = /^\s*\/(?:[^\\/"[\n]|\\.)*\/(?=\s*(?:\{|$))/;
@@ -8108,8 +8240,12 @@ function narrow(cmd, env) {
     return sedReads(args);
   if (base === "perl")
     return perlReads(parsed, env);
-  if (base === "cut" || base === "echo" || base === "lsof")
+  if (base === "cut" || base === "date" || base === "echo" || base === "lsof")
     return true;
+  if (base === "bash") {
+    const [flag, script] = args;
+    return args.length === 2 && flag.value === "-c" && script.quoted && !marked(script.value) && !wholeLine(lex(script.value, env.known).commands, env, true);
+  }
   if (base === "gh") {
     const filters = ghFilters(parsed);
     const texts = filters.size > 0 ? filters : ghTexts(parsed);
@@ -8142,20 +8278,30 @@ function quietCommit(cmd, parsed, env) {
     return false;
   return args.every((word, at) => !/\s/.test(word.value) || word.quoted && !marked(word.value) && (/^(?:-[a-zA-Z]*m|--message)$/.test(args[at - 1]?.value ?? "") || word.value.startsWith("--message=")));
 }
-function wholeLine(commands, env) {
+function wholeLine(commands, env, readsOnly = false) {
+  const edited = !readsOnly && commands.some((cmd) => edits(cmd, parse3(cmd), env));
   return commands.some((cmd) => {
     const words = [...cmd.words, ...cmd.redirects.flatMap((r) => r.target ? [r.target] : [])];
-    if (words.some((word) => word.procs && wholeLine(word.procs, env)))
+    if (words.some((word) => word.procs && wholeLine(word.procs, env, readsOnly)))
       return true;
     const parsed = parse3(cmd);
-    const slot = slotWords(parsed);
-    const commit = slot ? { ...cmd, words: slot } : cmd;
-    if (quietCommit(commit, slot ? parse3(commit) : parsed, env))
+    const base = parsed.first && program(parsed.first.value);
+    if (base === "bash" && commands.length > 1)
+      return true;
+    if (edited && base === "date")
+      return true;
+    if (!readsOnly && quietRun(cmd, parsed, env))
       return false;
     const writes = cmd.redirects.some((r) => writer(r) && r.target?.value !== "/dev/null");
-    return writes || !(narrow(cmd, env) || sedInPlace(cmd, parsed));
+    return writes || !(narrow(cmd, env) || !readsOnly && sedInPlace(cmd, parsed));
   });
 }
+function quietRun(cmd, parsed, env) {
+  const slot = slotWords(parsed);
+  const commit = slot ? { ...cmd, words: slot } : cmd;
+  return quietCommit(commit, slot ? parse3(commit) : parsed, env);
+}
+var edits = (cmd, parsed, env) => quietRun(cmd, parsed, env) || sedInPlace(cmd, parsed) !== undefined;
 var IMPLICIT_SHELL = new Set(["exec", "execSync"]);
 var SHELL_RUNNER = /\b(exec|execFile|execFileSync|execSync|spawn|spawnSync)\s*\(/g;
 var SHELL_WORD = /(["']?)\bshell\b\1(\s*:\s*false\b(?=\s*[,})]))?/g;
@@ -8271,7 +8417,7 @@ function cliWrite(words) {
     return PRIVACY_KEYS.has(key) && !scoped ? `playground settings ${verb} of ${key}, a key a guard reads, ${PRIVACY}` : job ? `playground settings ${verb} of ${key}, ${BY_APPROVE}` : `playground settings ${verb} of ${key}, a key a guard reads`;
   }
   if (verb === "accept")
-    return "playground ext accept, the owner's own call: post it as an accept decision with bun run ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role, since the CLI refuses an accept with PLAYGROUND_ROLE set";
+    return "playground ext accept, the owner's own call: post it as an accept decision with playground ask new (.agents/dashboard/asks.md), whose Approve has the dashboard run it with no role, since the CLI refuses an accept with PLAYGROUND_ROLE set";
   if (verb === "put")
     return unread || positional[1] === "list" ? "playground ext put of a list, or with a word it cannot read, which may render into a guard's list" : undefined;
   if (EXT_WRITES.has(verb) && !(dry && EXT_DRY.has(verb)))
@@ -8309,7 +8455,7 @@ async function inspect(raw, environment, unknown = false) {
   const file = typeof tool === "string" ? input[FILE_TOOLS[tool]] : undefined;
   if (typeof file === "string") {
     const expanded = /^~(?:\/|$)/.test(file) ? join6(home, file.slice(1)) : file;
-    return inRoot(resolve4(directory ?? "", expanded)) ? refuse(`a write to ${file}`) : undefined;
+    return inRoot(resolve5(directory ?? "", expanded)) ? refuse(`a write to ${file}`) : undefined;
   }
   if (tool !== "Bash")
     return;
@@ -8575,7 +8721,7 @@ async function inspect(raw, environment, unknown = false) {
 }
 async function check(raw, environment = process.env, budget = 1e4) {
   try {
-    return await withDeadline(budget, async () => inspect(raw, environment));
+    return await withDeadline(budget, async () => eachInput(raw, "no-extensions-write", (one) => inspect(one, environment)));
   } catch (error) {
     if (error instanceof RangeError)
       return refuse(TOO_LONG);

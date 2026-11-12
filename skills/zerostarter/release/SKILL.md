@@ -112,7 +112,7 @@ Fix each reason it names, then run it again, at most every 5 minutes while a che
 - A refusal naming a head other than `$CANARY` means `canary` moved: go back to step 1.
 - No `Audit, Lint, and Build` or `test` check at the head, with the pin's `auto-check-build` and `auto-test` runs reading `action_required` (`gh run list --commit "$CANARY" --event pull_request`), means the bot opened the draft there, so its runs are held runs ([GITHUB-BULK-READS.md, Reading canary's own checks](../../../extensions/core/skills/playbook/GITHUB-BULK-READS.md#reading-canarys-own-checks)). Run `bun run ship:approve-held <n>`, which approves the ship PR's held runs at its head alone and prints each run it approved, or `none held`.
 - A red check: rerun its run once, `gh run rerun <run id> --failed`, or a cancelled run whole with `gh run rerun <run id>`, its id from `gh run list --commit "$CANARY" --event pull_request --json databaseId,workflowName,conclusion`.
-- A second red, or a FAIL gate line, holds the ship: name the failing test (`gh run view <run id> --log-failed`) or step in the ship PR and up the chain, and end the freeze by step 1's line for a ship that stops.
+- A second red, or a FAIL gate line, holds the ship: name the failing test (`gh run view <run id> --log-failed`; `gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<job id>/logs` reads a job's whole log, where `--log-failed` cuts it) or step in the ship PR and up the chain, and end the freeze by step 1's line for a ship that stops.
 
 Done when `ship:merge` printed `merged #<n> at <sha>` and `MERGE` holds that commit.
 

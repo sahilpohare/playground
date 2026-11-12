@@ -1,0 +1,57 @@
+name: Install zsh
+description: Installs zsh from a cache of its .deb files keyed on the runner image, else from apt, else from the image's Homebrew, since apt's hosts fail for hours at a time.
+
+runs:
+  using: composite
+  steps:
+    # the key is read in the shell, since an expression's env context holds no runner variable
+    - name: Name zsh's packages' cache by the runner image
+      id: zsh-key
+      shell: bash
+      run: echo "key=zsh-debs-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+    # the .deb files alone: apt leaves root's lock and _apt's partial/ beside them, which the runner user's tar cannot read
+    - name: Restore zsh's packages
+      id: zsh-debs
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/zsh-debs/*.deb
+        key: ${{ steps.zsh-key.outputs.key }}
+
+    - name: Install zsh
+      id: zsh
+      shell: bash
+      run: |
+        if command -v zsh >/dev/null; then echo "zsh is present at $(command -v zsh): no apt call"; exit 0; fi
+        debs=~/.cache/zsh-debs
+        if ls "$debs"/*.deb >/dev/null 2>&1; then
+          if sudo dpkg -i "$debs"/*.deb; then echo "zsh from the cache: no apt call"; exit 0; fi
+          echo "the cached packages did not install: fetching them again"
+        fi
+        mkdir -p "$debs/partial"
+        for try in 1 2; do
+          if sudo timeout -k 10 140 sh -c 'apt-get update -q && apt-get install -y -q --download-only -o Dir::Cache::archives="$1" zsh' sh "$debs"; then
+            sudo dpkg -i "$debs"/*.deb
+            echo "fetched=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "apt try $try of 2 failed"
+          if [ "$try" -lt 2 ]; then sleep 15; fi
+        done
+        brew=/home/linuxbrew/.linuxbrew/bin/brew
+        echo "apt is unreachable: zsh from Homebrew's bottles on ghcr.io"
+        if HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 timeout -k 10 120 "$brew" install zsh; then
+          sudo ln -sf "$("$brew" --prefix)/bin/zsh" /usr/bin/zsh
+          echo "$("$brew" --prefix)/bin" >> "$GITHUB_PATH"
+          exit 0
+        fi
+        echo "Homebrew failed too: the fault is wider than apt's hosts"
+        exit 1
+
+    # a cache saved on a PR serves that PR alone, so zsh-cache.yml saves one on canary, which every PR reads as its base's
+    - name: Save zsh's packages
+      if: steps.zsh.outputs.fetched == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/zsh-debs/*.deb
+        key: ${{ steps.zsh-key.outputs.key }}

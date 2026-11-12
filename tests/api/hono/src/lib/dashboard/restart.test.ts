@@ -38,6 +38,11 @@ describe("a restart after a login expires", () => {
     expect(restartPrs(true, {})).toBeNull()
     expect(restartPrs(true, { prs: [ISSUE] })).toBeNull()
     expect(restartPrs(true, { pr: A, prs: [ISSUE, A] })).toEqual([A, ISSUE])
+    expect(restartPrs(true, { prs: ["acme/script/start-up"] })).toBeNull()
+    expect(restartPrs(true, { pr: A, prs: [A, "acme/script/start-up"] })).toEqual([
+      A,
+      "acme/script/start-up",
+    ])
     expect(restartPrs(true, undefined)).toBeUndefined()
     expect(restartPrs(false, { pr: A, prs: [A] })).toBeUndefined()
   })

@@ -1172,6 +1172,209 @@ describe.skipIf(!dockerUp())("ingest", () => {
       holder.release()
     }
   })
+
+  // A made-up Codex rollout, its lines in the shapes Codex writes at rust-v0.167.1 (RolloutLine in codex-rs/history/src/lib.rs, ResponseItem in codex-rs/protocol/src/models.rs).
+  const THREAD = "019a7c00-0000-7000-8000-00000000c0de"
+  const ZST_THREAD = "019a7c00-0000-7000-8000-00000000beef"
+  const rollout = (thread: string) =>
+    [
+      line({
+        timestamp: "2026-11-11T10:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: thread,
+          session_id: thread,
+          timestamp: "2026-11-11T10:00:00.000Z",
+          cwd: "/Users/me/repo",
+          originator: "codex_cli_rs",
+          cli_version: "0.167.1",
+          source: "cli",
+          model_provider: "openai",
+          git: { branch: "main" },
+        },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:00.100Z",
+        type: "turn_context",
+        payload: { cwd: "/Users/me/repo", model: "gpt-5.5-codex" },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:00.200Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "<environment_context>a sandbox</environment_context>" },
+          ],
+        },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Fix the flaky test\nwith details" }],
+        },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Reading the test" }],
+        },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell",
+          arguments: JSON.stringify({ command: ["bun", "test"] }),
+          call_id: "call_1",
+        },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:04.000Z",
+        type: "response_item",
+        payload: { type: "function_call_output", call_id: "call_1", output: "1 pass" },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:05.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Fixed." }],
+        },
+      }),
+      line({
+        timestamp: "2026-11-11T10:00:05.100Z",
+        type: "event_msg",
+        payload: { type: "task_complete" },
+      }),
+    ].join("")
+
+  const rolloutDir = () => join(root, "codex", "sessions", "2026", "11", "11")
+  const rolloutPath = (thread: string, suffix = "") =>
+    join(rolloutDir(), `rollout-2026-11-11T10-00-00-${thread}.jsonl${suffix}`)
+  type RolloutReader = (
+    db: ReturnType<typeof connect>,
+    sessions: string,
+    path: string,
+  ) => Promise<{ entries: number; id: string } | null>
+  // Loaded per test, and typed here, so the Claude Code rows above still run and type-check on a checkout with no rollout reader.
+  const ingestRollout = async (path: string) => {
+    const reader = (await import("../../../../../../api/hono/src/lib/sessions/ingest")) as {
+      ingestRollout?: RolloutReader
+    }
+    if (!reader.ingestRollout) throw new Error("no rollout reader")
+    return reader.ingestRollout(db, join(root, "codex", "sessions"), path)
+  }
+
+  test("a Codex rollout ingests into one codex session keyed on its thread id, its turns kinded as the chat shows them", async () => {
+    mkdirSync(rolloutDir(), { recursive: true })
+    writeFileSync(rolloutPath(THREAD), rollout(THREAD))
+    expect(await ingestRollout(rolloutPath(THREAD))).toEqual({ entries: 9, id: THREAD })
+    expect(await sessionRow(THREAD)).toMatchObject({
+      cwd: "/Users/me/repo",
+      entry_count: 9,
+      git_branch: "main",
+      harness: "codex",
+      kind: "interactive",
+      model: "gpt-5.5-codex",
+      task: "Fix the flaky test",
+      version: "0.167.1",
+    })
+    const turns =
+      await admin`select kind, text, tool from claude_entry where session_id = ${THREAD} and kind <> 'meta' order by seq`
+    expect(
+      turns.map((t: { kind: string; text: string; tool: string | null }) => [
+        t.kind,
+        t.text.split("\n")[0],
+        t.tool,
+      ]),
+    ).toEqual([
+      ["human", "Fix the flaky test", null],
+      ["thinking", "Reading the test", null],
+      ["tool", "bun test", "shell"],
+      ["result", "1 pass", null],
+      ["assistant", "Fixed.", null],
+    ])
+  })
+
+  test("a second run over a rollout adds nothing, and its compressed copy stays the same one session", async () => {
+    expect(await ingestRollout(rolloutPath(THREAD))).toEqual({ entries: 0, id: THREAD })
+    writeFileSync(rolloutPath(THREAD, ".zst"), Bun.zstdCompressSync(rollout(THREAD)))
+    expect(await ingestRollout(rolloutPath(THREAD, ".zst"))).toEqual({ entries: 0, id: THREAD })
+    expect(await entryCount(THREAD)).toBe(9)
+    const sessions = await admin`select count(*)::int as n from claude_session where id = ${THREAD}`
+    expect(sessions[0].n).toBe(1)
+  })
+
+  test("a rollout that is only a .jsonl.zst ingests whole, and once", async () => {
+    writeFileSync(rolloutPath(ZST_THREAD, ".zst"), Bun.zstdCompressSync(rollout(ZST_THREAD)))
+    expect(await ingestRollout(rolloutPath(ZST_THREAD, ".zst"))).toEqual({
+      entries: 9,
+      id: ZST_THREAD,
+    })
+    expect(await ingestRollout(rolloutPath(ZST_THREAD, ".zst"))).toEqual({
+      entries: 0,
+      id: ZST_THREAD,
+    })
+    expect((await sessionRow(ZST_THREAD)).harness).toBe("codex")
+  })
+
+  test("a Claude Code transcript still ingests as a claude-code session", async () => {
+    expect((await sessionRow(SESSION)).harness).toBe("claude-code")
+  })
+
+  test("a compressed rollout whose read is stopped part way ends up whole on the next pass", async () => {
+    const CUT = "019a7c00-0000-7000-8000-00000000c07a"
+    writeFileSync(rolloutPath(CUT, ".zst"), Bun.zstdCompressSync(rollout(CUT)))
+    const { ingestRollout: read } =
+      await import("../../../../../../api/hono/src/lib/sessions/ingest")
+    let checks = 0
+    const stopAfterOne = {
+      get aborted() {
+        checks += 1
+        return checks > 1
+      },
+    }
+    const sessions = join(root, "codex", "sessions")
+    await read(db, sessions, rolloutPath(CUT, ".zst"), { chunkBytes: 512, signal: stopAfterOne })
+    await read(db, sessions, rolloutPath(CUT, ".zst"))
+    expect(await entryCount(CUT)).toBe(9)
+  })
+
+  test("a stack that reads this machine skips a rollout that is not Playground's own, unread", async () => {
+    const FOREIGN = "019a7c00-0000-7000-8000-00000000f00d"
+    writeFileSync(rolloutPath(FOREIGN), rollout(FOREIGN))
+    const keys = [
+      "PLAYGROUND_ALL_SESSIONS",
+      "PLAYGROUND_DATA_DIR",
+      "PLAYGROUND_FIXTURE",
+      "PLAYGROUND_LIVE_READS",
+    ]
+    const saved = keys.map((key) => [key, process.env[key]] as const)
+    Object.assign(process.env, {
+      PLAYGROUND_DATA_DIR: join(root, "own-data"),
+      PLAYGROUND_LIVE_READS: "1",
+    })
+    delete process.env.PLAYGROUND_ALL_SESSIONS
+    delete process.env.PLAYGROUND_FIXTURE
+    try {
+      expect(await ingestRollout(rolloutPath(FOREIGN))).toBeNull()
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+    expect(await sessionRow(FOREIGN)).toBeUndefined()
+  })
 })
 
 describe("mergeSession", () => {

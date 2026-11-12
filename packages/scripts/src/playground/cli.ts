@@ -46,7 +46,7 @@ import {
   probe,
   supervisorRunning,
 } from "./probe"
-import { runSpawn, startDispatcher } from "./spawn"
+import { dispatcherOptions, runSpawn, startDispatcher } from "./spawn"
 import { runStore, terminalIo } from "./store"
 import { startJobs } from "./terminal"
 import { askPurge, uninstall } from "./uninstall"
@@ -71,9 +71,13 @@ const briefExists = (brief: string): boolean => existsSync(join(HOME_DATA, brief
 type ManagerVerb = NamedKind | "optimizer"
 
 // playground dispatcher, planner, builder, ops or optimizer, and the bare start's dispatcher step: 0 started, 3 already running, 1 refused with spawn.sh's reason.
-const manager = async (kind: ManagerVerb): Promise<{ code: number; message: string }> => {
+const manager = async (
+  kind: ManagerVerb,
+  options: { brief?: string; harness?: "codex" } = {},
+): Promise<{ code: number; message: string }> => {
   const name = kind === "optimizer" ? kind : getSessionNames().names[kind]
   const result = await startDispatcher({
+    ...options,
     data: HOME_DATA,
     live: liveSessions((live) => live === name).map((d) => d.name),
     name,
@@ -138,9 +142,11 @@ const setUp = async (): Promise<string | null> => {
 // The managers a playground verb starts: the dispatcher, which starts the Planner, the Builder and Ops the first time it routes work to each, so none sits idle on the user's usage, and the optimizer when the dispatcher itself starts, since ops-tick's beats bring its retros.
 const MANAGERS: ManagerVerb[] = ["builder", "dispatcher", "ops", "optimizer", "planner"]
 
-const managerAlone = async (kind: ManagerVerb): Promise<number> => {
+const managerAlone = async (kind: ManagerVerb, words: string[]): Promise<number> => {
+  const options = kind === "dispatcher" ? dispatcherOptions(words) : {}
+  if (typeof options === "string") return fail(options, 2)
   const unready = await setUp()
-  if (unready === null) return (await manager(kind)).code
+  if (unready === null) return (await manager(kind, options)).code
   console.error(`playground: ${unready}`)
   return 1
 }
@@ -436,7 +442,7 @@ const code =
           : command === "add"
             ? await add(rest)
             : MANAGERS.includes(command as ManagerVerb)
-              ? await managerAlone(command as ManagerVerb)
+              ? await managerAlone(command as ManagerVerb, rest)
               : command === "page"
                 ? page(rest)
                 : command === "view"

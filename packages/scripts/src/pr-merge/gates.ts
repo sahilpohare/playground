@@ -12,6 +12,7 @@ export type { GateName, Verdict } from "@packages/config/verdicts"
 export type Check = {
   conclusion?: string | null
   context?: string
+  detailsUrl?: string
   name?: string
   startedAt?: string
   state?: string
@@ -25,6 +26,12 @@ export type Gate = { detail: string; name: string; ok: boolean }
 
 // GitHub's jobs every head runs (.github/workflows), by their check names: pr:merge needs each one's newest run on the head finished and passed.
 export const REQUIRED_CHECKS = ["Audit, Lint, and Build", "test"]
+
+// The workflow each required check's job runs in, so a run that finished without that job reads apart from one GitHub has yet to start.
+const REQUIRED_WORKFLOWS: Record<string, string> = {
+  "Audit, Lint, and Build": "auto-check-build",
+  test: "auto-test",
+}
 
 export type PrFacts = {
   // How many commits canary has that the head lacks: 0 is up to date, NaN when gh's answer did not read as a count.
@@ -117,6 +124,18 @@ export function newestRuns(checks: Check[]): Check[] {
   return [...newest.values()]
 }
 
+// Pure: the run id of a required check's workflow once every job it ran passed, its check still missing: GitHub ended the run without creating the job, and a rerun brings it; null while a job is unfinished or red, or none ran. The largest id is the newest run's, since a second run on the head with fewer shards leaves the first run's extra shard listed.
+function endedRun(checks: Check[], name: string): string | null {
+  const jobs = checks.filter((check) => check.workflowName === REQUIRED_WORKFLOWS[name])
+  const done = (check: Check) =>
+    check.status?.toUpperCase() === "COMPLETED" && PASSED.has(check.conclusion?.toUpperCase() ?? "")
+  if (!jobs.length || !jobs.every(done)) return null
+  const run = Math.max(
+    ...jobs.map((job) => Number(/\/actions\/runs\/(\d+)\//.exec(job.detailsUrl ?? "")?.[1] ?? 0)),
+  )
+  return run > 0 ? String(run) : null
+}
+
 // Pure: the head's GitHub checks as one gate: every check's newest run finished and passed, each required name among them. gitGuardian refuses a head with no GitGuardian check.
 export function ciGate(
   all: Check[],
@@ -124,6 +143,15 @@ export function ciGate(
 ): Gate {
   const checks = newestRuns(all)
   const missing = required.filter((name) => !checks.some((check) => check.name === name))
+  for (const name of missing) {
+    const run = endedRun(checks, name)
+    if (run)
+      return {
+        detail: `no ${name} check on the head, though every job of its ${REQUIRED_WORKFLOWS[name]} run passed: GitHub ended that run without creating it; rerun it with \`gh run rerun ${run}\``,
+        name: "ci",
+        ok: false,
+      }
+  }
   if (missing.length > 0)
     return {
       detail: `no ${missing.join(" or ")} check on the head yet: GitHub runs it on every push`,

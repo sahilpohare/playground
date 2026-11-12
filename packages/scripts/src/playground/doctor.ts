@@ -35,6 +35,12 @@ const TOOLS: [string, boolean, string, string][] = [
   ["node", true, `brew install node (${NODE_MIN.join(".")} or newer)`, "the Dashboard's next dev"],
   ["python3", true, "brew install python", "the ops jobs"],
   ["uv", false, "brew install uv", "the skills' tests"],
+  [
+    "whisper-cli",
+    false,
+    "brew install whisper-cpp ffmpeg, and a model at <data>/wa/whisper-model.bin",
+    "WhatsApp voice notes as text",
+  ],
 ]
 
 const check = (name: string, required: boolean, ok: boolean, fix: string, why: string): Check =>

@@ -92,19 +92,38 @@ export const runSpawn = async (
   }
 }
 
-// playground dispatcher: starts the first dispatcher through spawn.sh's manager mode, its brief written once from the template so the owner's own edits stay; 3 while a session holds its name, 1 with spawn.sh's refusal.
+// Pure: the options playground dispatcher takes, --harness codex (claude-code, the default, adds nothing) and --brief <file> under the data folder, a handoff Switch wrote; else the refusal's words.
+export const dispatcherOptions = (
+  words: string[],
+): { brief?: string; harness?: "codex" } | string => {
+  const options: { brief?: string; harness?: "codex" } = {}
+  for (let i = 0; i < words.length; i += 2) {
+    const [flag, value] = [words[i], words[i + 1]]
+    if (flag === "--harness" && (value === "codex" || value === "claude-code")) {
+      if (value === "codex") options.harness = value
+    } else if (flag === "--brief" && value && !value.startsWith("/") && !value.includes(".."))
+      options.brief = value
+    else return "usage: playground dispatcher [--harness claude-code|codex] [--brief <file>]"
+  }
+  return options
+}
+
+// playground dispatcher: starts the first dispatcher through spawn.sh's manager mode, its brief written once from the template so the owner's own edits stay, or the handoff --brief names, on the harness --harness names; 3 while a session holds its name, 1 with spawn.sh's refusal.
 export const startDispatcher = async (o: {
+  brief?: string
   data: string
+  harness?: "codex"
   live: string[]
   name: string
   spawn: string
   template: string
 }): Promise<{ code: 0 | 1 | 3; message: string }> => {
   if (o.live.includes(o.name)) return { code: 3, message: `${o.name} is already running` }
-  const brief = `brief-${o.name}.md`
+  const brief = o.brief ?? `brief-${o.name}.md`
   mkdirSync(o.data, { recursive: true })
-  if (!existsSync(join(o.data, brief))) copyFileSync(o.template, join(o.data, brief))
-  const result = await runSpawn(o.spawn, ["manager", o.name, brief], o.data)
+  if (!o.brief && !existsSync(join(o.data, brief))) copyFileSync(o.template, join(o.data, brief))
+  const harness = o.harness ? ["--harness", o.harness] : []
+  const result = await runSpawn(o.spawn, ["manager", o.name, brief, ...harness], o.data)
   return result.code === 0
     ? { code: 0, message: `Started ${o.name}` }
     : { code: 1, message: result.message }

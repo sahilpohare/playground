@@ -140,13 +140,21 @@ var SEATLESS = new Set(["ended", "parked"]);
 
 // packages/safe-delete/src/index.ts
 var LIMITS = { bytes: 2 * 1024 ** 3, files: 5000, perMinute: 3 };
+var PLAYGROUND_AGENT = /^com\.playground\.[\w.-]+\.plist$/;
 var CARVE_OUTS = {
   "dashboard-supervisor": {
     bytes: 256 * 1024 ** 2,
     files: 4000,
     folder: "ops/dashboard/builds"
   },
-  jobs: { bytes: 64 * 1024, files: 1, folder: "ops/launch-agents" }
+  jobs: { bytes: 64 * 1024, files: 1, folder: "ops/launch-agents" },
+  "jobs-installed": {
+    bytes: 64 * 1024,
+    files: 1,
+    folder: "Library/LaunchAgents",
+    home: true,
+    name: PLAYGROUND_AGENT
+  }
 };
 
 // packages/settings/src/rendered.ts
@@ -5806,6 +5814,7 @@ var slackSettings = defineSettings({
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
+import { realpathSync } from "fs";
 import { homedir as homedir2 } from "os";
 import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 var UNKNOWN = "\x00";
@@ -6562,6 +6571,8 @@ function walk(lx, scope, nested, inherit) {
       if (after === "&&")
         done.chained = true;
       done.chain = lx.token;
+      if (lx.orRun)
+        done.orRun = true;
       const last = lx.commands[lx.commands.length - 1]?.words;
       const compound = !!done.group && last?.length === 1 && OPENS.has(reserved[0] ?? "") && !HELD.has(reserved[0] ?? "");
       if (reserved.some((w) => HELD.has(w)) || compound)
@@ -6594,8 +6605,10 @@ function walk(lx, scope, nested, inherit) {
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
-      if (depth === 0 && FREES.has(op))
+      if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
+        lx.orRun = op === "||";
+      }
       after = op;
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
@@ -7123,6 +7136,7 @@ async function runAll(lexed, env, visit, builtins) {
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
 async function examine(cmd, env, visit, builtins) {
   tick();
+  orElse(cmd, env);
   unchain(cmd, env);
   if (cmd.opaque) {
     env.cwdAnywhere = true;
@@ -7281,11 +7295,15 @@ function again(lexed, cmd, parsed) {
 async function nested(cmd, env, body) {
   const chain = env.cwdChain;
   const token = env.cwdChainToken;
+  const or = env.cwdOr;
   env.cwdChain = [];
   env.cwdChainToken = undefined;
+  env.cwdOr = undefined;
   try {
     return await body();
   } finally {
+    const own = env.cwdOr;
+    env.cwdOr = own && own.orChain === undefined ? { ...own, cdChain: cmd.chain, scope: cmd.scope } : or;
     const left = [...new Set([...chain ?? [], ...env.cwdChain ?? []])];
     env.cwdChain = keep(left, env);
     env.cwdChainToken = left.length > 0 ? chain?.length ? token : cmd.chain : undefined;
@@ -7319,7 +7337,8 @@ async function cdTarget(name, args, env) {
   const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
   if (!dir)
     return homedir2();
-  const typed = dir.value === "-" ? undefined : await folder(pathOf(dir, env));
+  const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
+  const typed = await folder(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
   const base = sign && (sign === "-" ? env.old?.dir : env.cwd);
   return base ? await folder(base + dir.value.slice(2)) : typed;
@@ -7339,6 +7358,7 @@ function cdTargets(name, cmd, parsed, env, from) {
     return { back: true, paths: [], unread: true };
   const paths = new Set;
   const many = manyTimes(cmd, parsed);
+  const physical = physicalCd(parsed.args);
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
@@ -7351,14 +7371,23 @@ function cdTargets(name, cmd, parsed, env, from) {
         unread = true;
         continue;
       }
-      paths.add(path);
+      const landed = physical ? kernelPath(word, base, path) : path;
+      paths.add(landed);
       if (many && word.value.split("/").includes("..")) {
-        for (const up of ancestors(path))
+        for (const up of ancestors(landed))
           paths.add(up);
       }
     }
   }
   return { back: dirs.length > 1, paths: [...paths], unread };
+}
+var physicalCd = (args) => args.some((a) => /^-[^-]/.test(a.value) && a.value.includes("P"));
+function kernelPath(word, base, lexical) {
+  try {
+    return realpathSync.native(isAbsolute2(word.value) ? word.value : `${base}/${word.value}`);
+  } catch {
+    return lexical;
+  }
 }
 function tildeMove(move, name, parsed, env, from, back) {
   const dir = parsed.args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
@@ -7401,6 +7430,7 @@ async function chdirTo(name, cmd, parsed, env) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
     env.cwdUnread = false;
+    env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
       env.oldFrom = bases;
     if (chained) {
@@ -7410,11 +7440,44 @@ async function chdirTo(name, cmd, parsed, env) {
     return;
   }
   env.cwdSure = undefined;
+  env.cwdOr = undefined;
   const behind = onceOrMore(cmd, parsed) && !unread && !move.back && paths.length > 0 && (chained || (await Promise.all(paths.map(isFolder))).every(Boolean));
   env.cwdMaybe = keep([...new Set([...move.back ? back : behind ? [] : from, ...paths])], env);
   env.cwdUnread = env.cwdUnread || unread || from.length === 0 && paths.length === 0;
 }
 var negated = (cmd) => markers(cmd.words).filter((word) => word === "!").length % 2 === 1;
+var EXITS = new Set(["exit"]);
+function orElse(cmd, env) {
+  const or = env.cwdOr;
+  if (!or)
+    return;
+  if (cmd.chain === or.orChain) {
+    if (or.exits && cmd.detached)
+      env.cwdOr = { ...or, exits: false };
+    return;
+  }
+  if (cmd.chain === or.cdChain) {
+    if (!or.joined)
+      env.cwdOr = { ...or, joined: true };
+    return;
+  }
+  if (or.orChain === undefined && cmd.orRun) {
+    env.cwdOr = {
+      ...or,
+      exits: EXITS.has(parse3(cmd).name) && !cmd.detached && cmd.scope === or.scope,
+      landed: { maybe: env.cwdMaybe ?? [], sure: env.cwdSure },
+      orChain: cmd.chain
+    };
+    env.cwdMaybe = keep([...new Set([...startFolders(env), ...or.before])], env);
+    env.cwdSure = undefined;
+    return;
+  }
+  if ((or.joined || or.exits) && or.landed) {
+    env.cwdMaybe = or.landed.maybe;
+    env.cwdSure = or.landed.sure;
+  }
+  env.cwdOr = undefined;
+}
 function unchain(cmd, env) {
   if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
     return;
@@ -8006,6 +8069,23 @@ async function registryName(sessionId, environment = process.env) {
     } catch {}
   }
 }
+async function codexName(sessionId, environment = process.env) {
+  if (!environment.CODEX_HOME)
+    return;
+  let name;
+  try {
+    const index = await Bun.file(join5(environment.CODEX_HOME, "session_index.jsonl")).text();
+    for (const line of index.split(`
+`)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.id === sessionId && typeof entry.thread_name === "string")
+          name = entry.thread_name;
+      } catch {}
+    }
+  } catch {}
+  return name;
+}
 async function rosterKind(name, environment = process.env) {
   const path = join5(dataDirOf(environment), "roster.json");
   try {
@@ -8026,7 +8106,7 @@ async function sessionRole(environment, sessionId) {
   if (typeof sessionId !== "string")
     return "";
   try {
-    const name = await registryName(sessionId, environment) ?? "";
+    const name = await registryName(sessionId, environment) ?? await codexName(sessionId, environment) ?? "";
     const role = name && await rosterRole(name, environment);
     if (role)
       return role;

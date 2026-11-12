@@ -15,7 +15,9 @@ export type Step = "dispatcher" | "jobs" | "open" | "wait"
 
 export const NEW_WORKER_BRIEF = "handoffs/new-worker.md"
 // spawn.sh's --backend, Claude Code's backends; Codex takes none.
-const BACKENDS: readonly string[] = HARNESSES[0].backends
+const BACKENDS: readonly string[] = HARNESSES.filter((h) => h.id === "claude-code").flatMap(
+  (h) => h.backends,
+)
 const KINDS = ["worker", "runner"]
 const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/
 
@@ -24,7 +26,8 @@ export const VIEW_SERVER = "playground"
 
 export const HELP = `playground            start herdr's servers that are down and restore their sessions, set the Dashboard's database to start again with Docker and start it when stopped, start the Dashboard's stack and follower in herdr when down, start the dispatcher when it is not running (playground dispatcher), then wait for the Dashboard (a progress line every 10s, stopping early with the reason once ops-dashboard's supervisor stops or its start fails, 15 minutes at most), then open it; a step that failed is named last, with why, under Left for you, and the run exits 1
 playground view       open the ${VIEW_SERVER} herdr server, where the sessions run, in this terminal
-playground dispatcher start the dispatcher in a herdr workspace of its own, its brief written once from scripts/briefs/dispatcher.md into the data folder as brief-<dispatcher>.md: exit 0 started, 3 already running, 1 refused with spawn.sh's reason
+playground dispatcher [--harness claude-code|codex] [--brief <file>]
+                      start the dispatcher in a herdr workspace of its own, on the harness --harness names (spawn.sh --harness, the Dashboard's Start passing harness.alpha), its brief written once from scripts/briefs/dispatcher.md into the data folder as brief-<dispatcher>.md, or the data folder's <file> (a handoff Switch wrote): exit 0 started, 3 already running, 1 refused with spawn.sh's reason
 playground planner | builder | ops | optimizer
                       start that manager as playground dispatcher starts the dispatcher, its brief from scripts/briefs/<manager>.md; the dispatcher runs it the first time it routes work there, and the optimizer at its own start
 playground status     one line each for the Dashboard, the follower, each dispatcher, GLM and each herdr server

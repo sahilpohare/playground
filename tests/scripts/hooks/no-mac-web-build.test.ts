@@ -245,14 +245,14 @@ describe("the dashboard's container decides", () => {
     expect(reason).toContain("no docker on PATH")
   })
 
-  // The hook's timeout in each settings file Claude Code reads, in ms.
+  // The timeout of guards, which runs the hook on Bash, in each settings file Claude Code reads, in ms.
   const registered = ["scripts/factory-settings.json", ".claude/settings.json"].map((settings) => {
     const { hooks } = JSON.parse(readFileSync(join(root, settings), "utf8")) as {
       hooks: { PreToolUse: { hooks: { command: string; timeout: number }[] }[] }
     }
     const timeout =
       hooks.PreToolUse.flatMap((e) => e.hooks).find((h) =>
-        h.command.includes("scripts/hooks/bundled/no-mac-web-build.js"),
+        h.command.includes("scripts/hooks/bundled/guards.js"),
       )?.timeout ?? NaN
     return [settings, timeout * 1000] as const
   })

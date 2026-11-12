@@ -1,18 +1,28 @@
+import { existsSync } from "node:fs"
 import { unlink } from "node:fs/promises"
 import { join } from "node:path"
 
 import { managerOf } from "@packages/config/kinds"
 import { configDirOf } from "@packages/env/data-dir"
-import { extSettings, readPolicy, whatsappSettings } from "@packages/settings"
-import makeWASocket, { Browsers, type SocketConfig, useMultiFileAuthState } from "baileys"
+import { extSettings, readPolicy, readRendered, whatsappSettings } from "@packages/settings"
+import makeWASocket, {
+  Browsers,
+  downloadMediaMessage,
+  type SocketConfig,
+  useMultiFileAuthState,
+  type WAMessage,
+} from "baileys"
 
 import { assistantOf, busyOf, stuckOf } from "../ops-job/dispatcher"
 import { engineData, REPO, run, sendAs } from "../ops-job/job"
 import { beat, CYCLE_SECONDS } from "../ops-tick/tick"
 import { dashboardCheckout } from "../playground/probe"
-import { bridge, type Sock, sender } from "./bridge"
-import { keepAlive, ownFolder, releaseLock, SOCKET, takeLock } from "./habits"
+import { EMPTY_LIST, isPublicList, reposOf } from "../trace-count/kinds"
+import { bridge, type Inbox, type Sock, sender } from "./bridge"
+import { type Card, termsOf } from "./cards"
+import { keepAlive, ownFolder, releaseLock, SOCKET, takeLock, writeOwn } from "./habits"
 import { life, type LinkSock, PAIRING, unguarded } from "./life"
+import { mediaDir, modelPath, transcriber } from "./media"
 import { socketPath, serve } from "./server"
 
 // ops-wa: the WhatsApp link on the spare number, held by ops-wa's life; it beats ok while the linked device is connected, waiting while it connects or waits for its numbers or its pairing code, and, once stopped, why, idle, so up.py does not start it again and its row reads the reason.
@@ -58,6 +68,39 @@ const post = async (title: string, text: string, outcome?: "alert") => {
     .find((l) => /^[0-9a-f-]{36}$/.test(l.trim()))
     ?.trim()
 }
+
+// The Inbox as ops-wa reaches it: the open items through ask open --json, no-public-leak's list as that guard reads it, failing closed, and an answer as a file in its own folder that ask whatsapp reads (ADR 0024).
+const lastLine = (text: string) =>
+  (text.trim().split("\n").at(-1) ?? "").replace(/^ask: /, "") || "ask gave no reason"
+const inboxOf = (): Inbox => ({
+  answer: async (id, answer) => {
+    const answers = join(dir, "answers")
+    await ownFolder(answers)
+    const file = join(answers, `${crypto.randomUUID()}.json`)
+    await writeOwn(file, { ...answer, id })
+    const ran = await ask(["whatsapp", file])
+    return ran.code === 0 ? undefined : lastLine(ran.out)
+  },
+  open: async () => {
+    const ran = await ask(["open", "--json"])
+    if (ran.code !== 0) throw new Error(`ask open: ${lastLine(ran.out)}`)
+    return ran.out
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Card)
+  },
+  terms: async () => {
+    const read = await readPolicy(data)
+    const list = await readRendered(data, "hooks/no-public-leak.json")
+    if (read.refusal !== undefined || list.refusal) return undefined
+    const value: unknown = list.path
+      ? await Bun.file(list.path)
+          .json()
+          .catch(() => null)
+      : EMPTY_LIST
+    return isPublicList(value) ? termsOf(value, reposOf(read.settings)) : undefined
+  },
+})
 
 const main = async () => {
   const policy = await readPolicy(data)
@@ -115,7 +158,18 @@ const main = async () => {
     assistant: () => assistantOf(data),
     busy: () => busyOf("dispatcher", data, config, seconds()),
     dir,
+    inbox: inboxOf(),
     log: (line) => console.log(line),
+    media: {
+      dir: mediaDir(data),
+      download: (m) => downloadMediaMessage(m as WAMessage, "buffer", {}),
+      transcribe: transcriber(
+        modelPath(data),
+        (command) => Bun.which(command) !== null,
+        existsSync,
+        (argv) => run(argv, 300_000),
+      ),
+    },
     now: Date.now,
     // WhatsApp mode is the bundled whatsapp extension's switch, read afresh for each message
     on: async () => {

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
 
-import { Templates } from "../../../../../../web/next/src/components/settings/templates"
+import { HARNESSES } from "../../../../../../packages/settings/src/harnesses"
+import { BACKENDS, Templates } from "../../../../../../web/next/src/components/settings/templates"
 import { ACCOUNTS_QUERY_KEY } from "../../../../../../web/next/src/lib/accounts"
 import {
   type Template,
@@ -125,4 +126,9 @@ describe("how a new default appears, in the dialog and the docs", () => {
     )
     for (const text of [dialog, docs]) expect(text).not.toContain("back to the defaults alone")
   })
+})
+
+test("the form's backends are Claude Code's, as the settings package lists them", () => {
+  const claudeCode = HARNESSES.filter((h) => h.id === "claude-code").flatMap((h) => h.backends)
+  expect(BACKENDS.map((option) => option.value)).toEqual(claudeCode)
 })

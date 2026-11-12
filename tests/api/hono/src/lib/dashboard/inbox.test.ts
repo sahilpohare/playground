@@ -19,7 +19,9 @@ import {
   answerInputSchema,
   answerLine,
   answerPayload,
+  askCli,
   checkAnswer,
+  closedPayload,
   inboxCount,
   inboxInputSchema,
   type Delivery,
@@ -908,8 +910,8 @@ describe("an answer", () => {
       ref: 44,
       title: "Accept",
     })
-    const read = (ref: number) => `bun run ask get #i${ref} --ack`
-    const ack = (ref: number) => `bun run ask ack #i${ref} --link <https url>`
+    const read = (ref: number) => `playground ask get #i${ref} --ack`
+    const ack = (ref: number) => `playground ask ack #i${ref} --link <https url>`
     const ackOrWhy = (ref: number) => `${ack(ref)}, or --no-link "<why>" when it leaves no page`
     const asked = item({
       id: "mno",
@@ -1067,7 +1069,7 @@ describe("an answer", () => {
         { accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" }, at: AT, choice: "approve" },
         {
           accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" },
-          close: 'bun run ask ack #i44 --no-link "<why>"',
+          close: 'playground ask ack #i44 --no-link "<why>"',
           next: "nothing",
           verb: "pick",
         },
@@ -1097,6 +1099,23 @@ describe("an answer", () => {
     expect(payloadOf(noted)?.comment).toBe("one\ntwo")
     // no comment, no key
     expect(answerPayload(decided, { at: AT, choice: "deny" })).not.toHaveProperty("comment")
+    // a live-reads test stack's close names its own checkout's CLI, so a probe never closes the live Inbox's item of that number
+    const own = "bun run --cwd /wt ask"
+    expect(answerPayload(decided, { at: AT, choice: "deny" }, own).close).toBe(
+      `${own} get #i${decided.ref} --ack`,
+    )
+    const denied = { ...decided, answer: { at: AT, choice: "deny" } } as InboxItem
+    expect(closedPayload(denied, "dismiss", AT, own).close).toBe(
+      `${own} get #i${decided.ref} --ack`,
+    )
+  })
+
+  test("a close names playground ask, but a live-reads test stack's own checkout's CLI", () => {
+    expect(askCli({ kind: "live", rule: "live-branch" }, "/live")).toBe("playground ask")
+    expect(askCli({ kind: "live", rule: "own" }, "/mine")).toBe("playground ask")
+    expect(askCli({ file: null, kind: "fixture", rule: "factory" }, "/wt")).toBe("playground ask")
+    expect(askCli({ kind: "live", rule: "live-reads" }, "/wt")).toBe("bun run --cwd /wt ask")
+    expect(askCli({ kind: "live", rule: "live-reads" }, null)).toBe("playground ask")
   })
 
   // Send types the words alone into the poster: a draft's files are shared into Slack by the dashboard itself (PG-649), never handed to the session
@@ -2898,7 +2917,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(told.sent).toHaveLength(1)
       expect(told.sent[0]!.to).toBe(go.from)
       expect(payloadOf(told.sent[0]!.text)).toMatchObject({
-        close: `bun run ask ack #i${go.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${go.ref} --no-link "<why>"`,
         go: false,
         id: go.id,
         kind: "decision",
@@ -2912,7 +2931,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       const deniedTold = typed()
       await store.answerItem(db, denied.id, { action: "dismiss" }, { actor, ...deniedTold })
       expect(payloadOf(deniedTold.sent[0]!.text)).toMatchObject({
-        close: `bun run ask get #i${denied.ref} --ack`,
+        close: `playground ask get #i${denied.ref} --ack`,
         verb: "dismiss",
       })
 
@@ -3393,10 +3412,10 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
     )
     if (!answered.ok) throw new Error(answered.message)
     expect(sent.map((d) => d.to)).toEqual(["worker-eod", "dispatcher"])
-    // the dispatcher gets the poster's line with relay set, and reads the preview with bun run ask get
+    // the dispatcher gets the poster's line with relay set, and reads the preview with playground ask get
     const relay = sent[1]?.text ?? ""
     expect(payloadOf(relay)).toMatchObject({
-      close: `bun run ask ack #i${posted.ref} --link <https url>`,
+      close: `playground ask ack #i${posted.ref} --link <https url>`,
       kind: "draft",
       next: "carry-out",
       ref: `#i${posted.ref}`,
@@ -3678,7 +3697,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
     )
     expect(sent.map((d) => d.to)).toEqual(["worker-eod", "dispatcher"])
     expect(payloadOf(sent[1]?.text ?? "")).toMatchObject({
-      close: `bun run ask get #i${posted.ref} --ack`,
+      close: `playground ask get #i${posted.ref} --ack`,
       go: false,
       next: "close",
       relay: { for: "worker-eod", why: "poster-ended" },
@@ -4930,7 +4949,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(sent).toHaveLength(1)
       expect(payloadOf(sent[0]?.text ?? "")).toMatchObject({
         accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" },
-        close: `bun run ask ack #i${posted.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${posted.ref} --no-link "<why>"`,
         next: "nothing",
       })
     })
@@ -5206,7 +5225,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       const relayed = sent.find((delivery) => delivery.to === "dispatcher")
       const relayedPayload = payloadOf(relayed?.text ?? "")
       expect(relayedPayload).toMatchObject({
-        close: `bun run ask ack #i${posted.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${posted.ref} --no-link "<why>"`,
         next: "nothing",
         relay: { for: "worker-eod", why: "poster-ended" },
       })
@@ -5259,7 +5278,7 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(answered.ok && answered.item.status).toBe("approved")
       // the pane opened, so the poster carries out the recheck asks.md names, then closes it
       expect(payloadOf(sent[0]?.text ?? "")).toMatchObject({
-        close: `bun run ask ack #i${posted.ref} --no-link "<why>"`,
+        close: `playground ask ack #i${posted.ref} --no-link "<why>"`,
         next: "carry-out",
         opened: { exitCode: 0 },
         type: "grant",

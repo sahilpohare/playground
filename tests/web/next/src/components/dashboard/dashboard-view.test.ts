@@ -122,36 +122,76 @@ test("the first load's spinner centres in the chat's own frame, so it never move
   )
 })
 
-// The home's onboarding while no dispatcher runs: GitHub, Settings and the Claude account, each ticked once done, then Start; only the first undone row's button is active.
+// The home's onboarding while no dispatcher runs: GitHub, Settings, the harness pick and, for Claude Code, the Claude account, each ticked once done, then Start; only the first undone row's button is active.
 describe("checklistOf", () => {
   const done = (list: ReturnType<typeof checklistOf>) =>
     list.rows.filter((row) => row.done).map((row) => row.step)
+  const pick = "claude-code" as const
 
   test.each([
-    [{ claude: false, github: false, login: false }, [], "github", false],
-    [{ claude: false, github: true, login: false }, ["github"], "settings", false],
-    [{ claude: false, github: true, login: true }, ["github", "settings"], "account", false],
-    [{ claude: true, github: true, login: true }, ["github", "settings", "account"], "start", true],
-    [{ claude: true, github: false, login: true }, ["settings", "account"], "github", false],
-    [{ claude: true, github: true, login: false }, ["github", "account"], "settings", false],
-    [{ claude: false, github: false, login: true }, ["settings"], "github", false],
-    [{ claude: true, github: false, login: false }, ["account"], "github", false],
+    [{ claude: false, github: false, harness: false, login: false }, [], "github", false],
+    [{ claude: false, github: true, harness: false, login: false }, ["github"], "settings", false],
+    [
+      { claude: false, github: true, harness: false, login: true },
+      ["github", "settings"],
+      "harness",
+      false,
+    ],
+    [
+      { claude: false, github: true, harness: true, login: true },
+      ["github", "settings", "harness"],
+      "account",
+      false,
+    ],
+    [
+      { claude: true, github: true, harness: true, login: true },
+      ["github", "settings", "harness", "account"],
+      "start",
+      true,
+    ],
+    [
+      { claude: true, github: false, harness: true, login: true },
+      ["settings", "harness", "account"],
+      "github",
+      false,
+    ],
+    [
+      { claude: true, github: true, harness: false, login: true },
+      ["github", "settings", "account"],
+      "harness",
+      false,
+    ],
+    [
+      { claude: true, github: true, harness: true, login: false },
+      ["github", "harness", "account"],
+      "settings",
+      false,
+    ],
   ] as const)("%o ticks %o, activates %s, shows Start: %s", (facts, ticked, active, start) => {
-    const list = checklistOf(facts)
-    expect(list.rows.map((row) => row.step)).toEqual(["github", "settings", "account"])
+    const list = checklistOf({ ...facts, pick })
+    expect(list.rows.map((row) => row.step)).toEqual(["github", "settings", "harness", "account"])
     expect(done(list)).toEqual([...ticked])
     expect(list.active).toBe(active)
     expect(list.start).toBe(start)
   })
 
-  test("until all three facts are read it is not known: nothing ticked, no button live, no Start", () => {
+  test("a Codex pick drops the Claude account row, so Start shows once its card is ready (#1835)", () => {
+    const list = checklistOf({ github: true, harness: true, login: true, pick: "codex" })
+    expect(list.rows.map((row) => row.step)).toEqual(["github", "settings", "harness"])
+    expect(list).toMatchObject({ active: "start", known: true, start: true })
+    expect(checklistOf({ github: true, harness: false, login: true, pick: "codex" }).active).toBe(
+      "harness",
+    )
+  })
+
+  test("until every fact is read, the pick included, it is not known: nothing ticked, no button live, no Start", () => {
     for (const facts of [
       {},
       { github: true },
       { github: true, login: false },
-      { claude: true, github: true },
-      { claude: false, login: false },
-      { claude: true, login: true },
+      { claude: true, github: true, harness: true, login: true },
+      { claude: true, github: true, login: true, pick },
+      { claude: false, harness: true, login: false, pick },
     ]) {
       const list = checklistOf(facts)
       expect(list).toMatchObject({ active: null, known: false, start: false })
@@ -159,8 +199,12 @@ describe("checklistOf", () => {
     }
   })
 
-  test("once all three facts are read it is known", () => {
-    expect(checklistOf({ claude: false, github: false, login: false }).known).toBe(true)
-    expect(checklistOf({ claude: true, github: true, login: true }).known).toBe(true)
+  test("once every fact is read it is known", () => {
+    expect(
+      checklistOf({ claude: false, github: false, harness: false, login: false, pick }).known,
+    ).toBe(true)
+    expect(
+      checklistOf({ claude: true, github: true, harness: true, login: true, pick }).known,
+    ).toBe(true)
   })
 })

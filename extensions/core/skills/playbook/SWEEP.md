@@ -83,9 +83,9 @@ Done when every row the recovery scan leaves and every stalled PR is acted on, e
 
 ## 5. Act on your Inbox decisions
 
-Run `bun run --cwd <dashboard checkout> ask get <id> --ack` (the live Dashboard's checkout, which its runner's roster task names; any other has its own database) for each Inbox decision your roster entry still lists ([ROSTER.md](ROSTER.md)),
+Run `playground ask get <id> --ack` (it runs in the live Dashboard's checkout; any other has its own database) for each Inbox decision your roster entry still lists ([ROSTER.md](ROSTER.md)),
 act on each whose `status` is no longer `open` (`approved`, `denied`, `sent`, `drafted`, `discarded`, `cleared` or `provided`, with the owner's note in `answer.note` and a draft's changed words in `answer.editedText`),
-and take its id off the list once it is closed: a go with `bun run ask ack <id> --link <url>` or `--no-link "<why>"` after you carry it out, a deny, a clear, a discard or a provided secret by that read.
+and take its id off the list once it is closed: a go with `playground ask ack <id> --link <url>` or `--no-link "<why>"` after you carry it out, a deny, a clear, a discard or a provided secret by that read.
 Ops also checks the `asks` on the dispatcher's entry and sends the dispatcher any answer it missed.
 ops-sweep chases an answer of the owner's its poster has not acked (`bun run ask stale`; on 9 Oct, 11 answers failed unseen and #i76's Send never went out), reminding each live poster once, then at most every 4 hours, so a lead hears only `stale-poster-down` findings: an answer whose poster is down, which Ops passes to the Builder to carry out or re-dispatch.
 An answer the dashboard relayed to the dispatcher because its poster had ended (its `[inbox-answer]` line carries `relay`, `textsOf` in `inbox.ts`) is the dispatcher's to carry out and ack, so the Builder asks the dispatcher before it carries out any `stale-poster-down` answer, and takes only the ones the dispatcher did not receive.

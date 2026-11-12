@@ -24,6 +24,9 @@ liveReads()
 
 const NOW = Date.parse("2026-10-06T12:00:00.000Z")
 
+// The hover line of a job whose own setting gives no description, in place of one core would name.
+const NO_DESCRIPTION = "No description in this job's settings"
+
 const beat = (fields: Record<string, unknown> = {}) =>
   JSON.stringify({
     cycleSeconds: 60,
@@ -175,13 +178,17 @@ describe("readOps", () => {
     ])
   })
 
-  test("a new job's file shows it with no code change and no description, while report.json and alerts.log beside it are not jobs", async () => {
+  test("a new job's file shows it with no code change and the generic line for its hover, while report.json and alerts.log beside it are not jobs", async () => {
     writeFileSync(join(dir, "ops-report.json"), beat({ job: "ops-report", pid: process.pid }))
     writeFileSync(join(dir, "report.json"), beat({ job: "report", pid: process.pid }))
     writeFileSync(join(dir, "alerts.log"), "an alert\n")
     const rows = await readOps(dir, NOW)
     expect(rows.map((row) => row.job)).toEqual(["ops-dashboard", "ops-linear", "ops-report"])
-    expect(rows.at(-1)).toMatchObject({ job: "ops-report", status: "running" })
+    expect(rows.at(-1)).toMatchObject({
+      does: NO_DESCRIPTION,
+      job: "ops-report",
+      status: "running",
+    })
     expect(rows[0]?.does).toBe("Keeps the Dashboard on its branch's latest head")
   })
 
@@ -219,6 +226,25 @@ describe("readOps", () => {
     rmSync(join(dir, "jobs.json"))
   })
 
+  test("a job outside core's registry shows its own jobs.json description, and one with none the generic line (#1866)", async () => {
+    writeFileSync(
+      join(dir, "jobs.json"),
+      JSON.stringify({
+        jobs: [
+          { description: "Reads the tracker's tickets", name: "ops-linear" },
+          { heartbeat: "ops-report", name: "ops-report" },
+          { description: "Not this job's own line", name: "ops-dashboard" },
+        ],
+      }),
+    )
+    const does = new Map((await readOps(dir, NOW)).map((row) => [row.job, row.does]))
+    expect(does.get("ops-linear")).toBe("Reads the tracker's tickets")
+    expect(does.get("ops-report")).toBe(NO_DESCRIPTION)
+    // a registry job keeps core's own plain line
+    expect(does.get("ops-dashboard")).toBe("Keeps the Dashboard on its branch's latest head")
+    rmSync(join(dir, "jobs.json"))
+  })
+
   test("a folder that is not there holds no jobs", async () => {
     expect(await opsJobs(join(dir, "missing"))).toEqual([])
   })
@@ -236,6 +262,13 @@ describe("job names and schedules", () => {
         expect.any(String),
         expect.any(String),
       ])
+  })
+
+  test("the API's own names and hover lines are for core's registry jobs alone, so it names no org's job (#1866)", async () => {
+    const registry = join(import.meta.dir, "../../../../../../packages/settings/src/jobs.ts")
+    const { JOBS } = (await import(registry)) as { JOBS: Record<string, unknown> }
+    for (const job of [...Object.keys(OPS_DOES), ...Object.keys(RUNNER_NAMES)])
+      expect([job, job in JOBS]).toEqual([job, true])
   })
 
   test("every job the API describes has a plain name, and no shown name holds ops", () => {
@@ -256,15 +289,24 @@ describe("job names and schedules", () => {
     files: Record<string, unknown>
   }
   const fixtureJobs = (
-    fixture.files["playground/ops/jobs.json"] as { jobs: { name: string; schedule?: unknown }[] }
+    fixture.files["playground/ops/jobs.json"] as {
+      jobs: { description?: string; name: string; schedule?: unknown }[]
+    }
   ).jobs
   const fixtureRunners = (
     fixture.files["playground/roster.json"] as { agents: { role: string; title?: string }[] }
   ).agents.filter((agent) => agent.role === "runner")
 
-  test("every job in the shipped fixture has a plain name", () => {
-    for (const { name } of fixtureJobs)
-      expect([name, RUNNER_NAMES[name]]).toEqual([name, expect.any(String)])
+  test("a fixture job outside core's registry is labelled by its own jobs.json row, with one set and one on the generic line (#1866)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dashboard-ops-fixture-"))
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify(fixture.files["playground/ops/jobs.json"]))
+    const rows = await readOps(dir, NOW)
+    rmSync(dir, { force: true, recursive: true })
+    const own = fixtureJobs.filter(({ name }) => !(name in OPS_DOES))
+    const does = own.map(({ name }) => rows.find((row) => row.job === name)?.does ?? null)
+    expect(does).toEqual(own.map((job) => job.description ?? NO_DESCRIPTION))
+    expect(does).toContain(NO_DESCRIPTION)
+    expect(does.some((line) => line !== NO_DESCRIPTION)).toBe(true)
   })
 
   test("no name the shipped fixture shows holds ops", () => {
@@ -356,6 +398,7 @@ describe("jobsListed", () => {
     for (const text of [null, "{not json", "[]", '{"jobs": {}}']) {
       expect(jobsListed(text)).toEqual({
         calls: new Map(),
+        descriptions: new Map(),
         enabled: [],
         paused: new Set(),
         schedules: new Map(),

@@ -741,8 +741,8 @@ export const screenshot = async (
   }
   for (const step of waits) await wait(step)
   await browser.run("screenshot", "--full", path)
-  // A full shot sizes the page to 1x1 and back, which can draw a region anew; a page busy again after it is shot once more when its data is back in.
-  if (!(await browser.eval<boolean>(DATA_READY[1]!))) {
+  // A full shot sizes the page to 1x1 and back, which can draw a region anew; a page busy again after it is shot once more when its data is back in, and an eval that fails there reads as busy, so the wait above takes it.
+  if (!(await browser.eval<boolean>(DATA_READY[1]!).catch(() => false))) {
     await wait(["the page's data after the shot", DATA_READY])
     await browser.run("screenshot", "--full", path)
   }

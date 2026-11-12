@@ -104,6 +104,64 @@ const bash = (id: string, command: string) =>
     tool_name: "Bash",
   })
 
+// A Codex session sends an edit in two shapes, an apply_patch call or an apply_patch command run in the shell, and loads a skill by reading its SKILL.md through the shell, since it has no Skill call (codex-cli 0.167.1).
+const CODEX = {
+  model: "gpt-made-up",
+  tool_use_id: "call-1",
+  transcript_path: null,
+  turn_id: "turn-1",
+}
+const patch = (path: string) =>
+  `*** Begin Patch\n*** Update File: ${path}\n@@\n-a\n+b\n*** End Patch`
+const codexEdit = (id: string, path: string) =>
+  event({
+    ...CODEX,
+    hook_event_name: "PreToolUse",
+    session_id: id,
+    tool_input: { command: patch(path) },
+    tool_name: "apply_patch",
+  })
+const codexShellEdit = (id: string, path: string) =>
+  event({
+    ...CODEX,
+    hook_event_name: "PreToolUse",
+    session_id: id,
+    tool_input: { command: `apply_patch <<'EOF'\n${patch(path)}\nEOF` },
+    tool_name: "Bash",
+  })
+const codexBash = (id: string, command: string) =>
+  event({
+    ...CODEX,
+    hook_event_name: "PreToolUse",
+    session_id: id,
+    tool_input: { command },
+    tool_name: "Bash",
+  })
+
+describe("a Codex session's edit of an agent-facing doc waits for writing-for-agents", () => {
+  test("an apply_patch call and an apply_patch command in the shell are each refused before the load", async () => {
+    const id = session()
+    expect(await codexEdit(id, "AGENTS.md")).toContain("writing-first hook refuses")
+    expect(await codexShellEdit(id, "scripts/hooks/README.md")).toContain(
+      "writing-first hook refuses",
+    )
+    expect(await codexEdit(id, "notes.txt")).toBeUndefined()
+  })
+
+  test("its shell read of writing-for-agents' SKILL.md is the load", async () => {
+    const id = session()
+    expect(await codexBash(id, `cat ${join(CONFIG, "skills", SKILL, "SKILL.md")}`)).toBeUndefined()
+    expect(await codexEdit(id, "AGENTS.md")).toBeUndefined()
+    expect(await codexShellEdit(id, "scripts/hooks/README.md")).toBeUndefined()
+  })
+
+  test("a shell line that only names the skill's file is no load", async () => {
+    const id = session()
+    expect(await codexBash(id, `echo ${SKILL}/SKILL.md`)).toBeUndefined()
+    expect(await codexEdit(id, "AGENTS.md")).toContain("writing-first hook refuses")
+  })
+})
+
 describe("a Bash call's direct write to an agent-facing doc waits for writing-for-agents too", () => {
   test.each([
     ["a redirect", "echo x > AGENTS.md"],

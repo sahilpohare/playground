@@ -2,7 +2,7 @@
 decisions: [i580, i734, i737]
 ---
 
-Decide every two-way door yourself and record it; only a one-way door goes to the owner, as one Inbox decision posted with `bun run ask new` while you carry on, so chat holds no question for the owner, and no steps, plan or list the owner comes back to: those go in one Inbox card whose progress is edited in place.
+Decide every two-way door yourself and record it; only a one-way door goes to the owner, as one Inbox decision posted with `playground ask new` while you carry on, so chat holds no question for the owner, and no steps, plan or list the owner comes back to: those go in one Inbox card whose progress is edited in place.
 A lead with a one-way door sends it to the dispatcher; the dispatcher posts the decision, so one session keeps the owner's Inbox free of duplicates and of what it has already ruled.
 The owner reads the Inbox, not the chat, so a question asked in chat goes unanswered, and a session waiting on one holds up the factory.
 A two-way door is a choice that can be undone (a design, an order, scope inside an approved ask, upkeep of our own tools with a backup first, a recovery a machine can finish): take the recommendation, record it in an ADR when its reason should outlast the work, else on the issue, and tell the owner only when it changes what the owner sees or does.
@@ -14,5 +14,5 @@ One decision is one item and one thread is one card: a sub-choice goes in the ma
 A manager other than the dispatcher sends a card of steps to the dispatcher as a message rather than posting it, and posts no card it has already handed the dispatcher, so each card is posted once.
 Answer every reply a person gives one of our questions within minutes, in one short line where they answered.
 Close each item you carry out with where it landed, and settle one you decided another way, so the owner's open list holds only what still waits.
-Done when `bun run ask get <id>` shows each item you posted or sent up open, or closed with its link, and your roster entry's `asks` lists each one still open.
+Done when `playground ask get <id>` shows each item you posted or sent up open, or closed with its link, and your roster entry's `asks` lists each one still open.
 The item's kinds, its shape, the four checks and every `ask` command are in `.agents/dashboard/asks.md`, the `no-chat-question` hook holds a manager's final reply to this rule (`scripts/hooks/README.md`), and the Skill tool's "to-inbox" writes the item.

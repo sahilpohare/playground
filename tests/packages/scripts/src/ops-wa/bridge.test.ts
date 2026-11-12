@@ -6,6 +6,8 @@ import { join } from "node:path"
 import { type Stuck } from "../../../../../packages/scripts/src/ops-job/dispatcher"
 import {
   bridge,
+  type Inbox,
+  type Media,
   OFF,
   REPLY,
   sender,
@@ -13,7 +15,16 @@ import {
   UPDATE,
   UPDATE_MS,
 } from "../../../../../packages/scripts/src/ops-wa/bridge"
+import {
+  type Card,
+  NO_ID,
+  noRow,
+  notSent,
+  termsOf,
+  waitingLine,
+} from "../../../../../packages/scripts/src/ops-wa/cards"
 import { SEND } from "../../../../../packages/scripts/src/ops-wa/habits"
+import { UNSET_REPOS } from "../../../../../packages/scripts/src/trace-count/kinds"
 import { fakeSocket, groupJid, jid, OWNER, STRANGER } from "./fake-socket"
 
 const dirs: string[] = []
@@ -26,7 +37,7 @@ const START = Date.parse("2026-11-11T03:00:00Z")
 const ASSISTANT = "k3m9px-worker"
 
 // One bridge over a fake socket in a scratch data folder: the relay's lines and who each went to, the waits it asked for and a clock the waits move; WhatsApp mode is on, the dispatcher idle and the assistant seat ASSISTANT's unless the test says otherwise.
-const harness = () => {
+const harness = (inbox?: Inbox, media?: Media) => {
   const dir = join(mkdtempSync(join(tmpdir(), "ops-wa-")), "whatsapp")
   dirs.push(dir)
   const fake = fakeSocket()
@@ -67,6 +78,8 @@ const harness = () => {
     },
     reply: send,
     stuck: async () => mode.stuck,
+    inbox,
+    media,
   })
   watched.attach(fake.sock)
   return {
@@ -411,5 +424,337 @@ describe("toWhatsApp", () => {
       "*Head*\n*bold* and _it_, a (https://x.test)",
     )
     expect(toWhatsApp("```\ncode **kept**\n```")).toBe("```\ncode **kept**\n```")
+  })
+})
+
+// A made-up list for no-public-leak and an Inbox held in memory: its open cards, and each answer the bridge records through it.
+const TERMS = termsOf(
+  { companies: ["Acmeworks"], handles: [], linearKeys: [], names: ["Quillon Barr"], slackIds: [] },
+  UNSET_REPOS,
+)
+const card = (
+  ref: number,
+  over: Partial<Card> = {},
+  preview: Partial<Card["preview"]> = {},
+): Card => ({
+  from: "builder",
+  id: `id-${ref}`,
+  kind: "decision",
+  preview: {
+    approve: "Merge it",
+    deny: "Hold it",
+    scope: "factory",
+    text: "Merge tonight?",
+    type: "ask",
+    ...preview,
+  },
+  ref,
+  status: "open",
+  title: `Card ${ref}`,
+  ...over,
+})
+const inboxOf = (open: Card[], terms: typeof TERMS | null = TERMS) => {
+  const answers: { answer: unknown; id: string }[] = []
+  const inbox: Inbox = {
+    answer: async (id, answer) => {
+      answers.push({ answer, id })
+      const answering = open.find((c) => c.id === id)
+      if (answering?.status !== "open") return "This item is already answered"
+      answering.status = "approved"
+    },
+    open: async () => open.filter((c) => c.status === "open"),
+    terms: async () => terms ?? undefined,
+  }
+  return { answers, inbox, open }
+}
+// the owner writes first, since ops-wa never starts a chat, then one pass sends the cards
+const withCards = async (open: Card[], terms?: typeof TERMS | null) => {
+  const ib = inboxOf(open, terms)
+  const h = harness(ib.inbox)
+  h.fake.upsert([h.fake.message(jid(OWNER), "hello")])
+  await h.settle()
+  await h.pass()
+  const texts = () => h.fake.sent.map((s) => s.content.text)
+  return { ...h, ...ib, texts }
+}
+const say = async (h: Awaited<ReturnType<typeof withCards>>, text: string, from = OWNER) => {
+  const before = h.fake.sent.length
+  h.fake.upsert([h.fake.message(jid(from), text)])
+  await h.settle()
+  return h.fake.sent.slice(before).map((s) => s.content.text)
+}
+
+describe("Inbox cards on WhatsApp", () => {
+  test("an open ask goes out once, numbered, naming its id, and a second pass sends it again never", async () => {
+    const h = await withCards([card(12)])
+    expect(h.texts()).toEqual([
+      "*Card 12*\nMerge tonight?\nReply 1 #i12 to Merge it\nReply 2 #i12 to Hold it",
+    ])
+    await h.pass()
+    expect(h.texts()).toHaveLength(1)
+  })
+
+  test("a card with no scope or an org's scope stays in the Inbox and counts in the waiting line, failing closed", async () => {
+    const h = await withCards([
+      card(12, {}, { scope: undefined }),
+      card(13, {}, { scope: "zyx-org" }),
+    ])
+    expect(h.texts()).toEqual([waitingLine(2)])
+    expect(await say(h, "1 #i13")).toEqual([notSent(13)])
+    expect(h.answers).toEqual([])
+  })
+
+  test("no card goes before the owner has written, since ops-wa never starts a chat", async () => {
+    const ib = inboxOf([card(12)])
+    const h = harness(ib.inbox)
+    await h.pass()
+    expect(h.fake.sent).toEqual([])
+  })
+
+  test("the owner's reply answers the card through the Inbox's route and says what it answered", async () => {
+    const h = await withCards([card(12)])
+    expect(await say(h, "1 #i12")).toEqual(["Answered #i12: Merge it."])
+    expect(h.answers).toEqual([{ answer: { action: "approve" }, id: "id-12" }])
+    expect(await say(h, "#i12 2")).toEqual([
+      "#i12 was not answered: This item is already answered. Answer it in the Inbox.",
+    ])
+    expect(h.relayed.filter((line) => line.includes("#i12"))).toEqual([])
+  })
+
+  test("a lettered ask's pick names its option, and None of these denies", async () => {
+    const open = [
+      card(
+        7,
+        {},
+        {
+          approve: undefined,
+          deny: undefined,
+          options: [{ label: "Tonight" }, { label: "Tomorrow" }],
+        },
+      ),
+    ]
+    const h = await withCards(open)
+    await say(h, "2 #i7")
+    expect(h.answers.at(-1)).toEqual({ answer: { action: "approve", option: 1 }, id: "id-7" })
+  })
+
+  test("a bare number or id, while no card that went out waits on its rows, goes to the dispatcher", async () => {
+    const h = await withCards([card(12, { kind: "update" }, { type: undefined })])
+    expect(await say(h, "2")).toEqual([])
+    expect(await say(h, "#i12")).toEqual([])
+    expect(h.relayed.filter((line) => /reads: (2|#i12)\n/.test(line))).toHaveLength(2)
+    expect(h.answers).toEqual([])
+  })
+
+  test("a bare number after its card is answered goes to the dispatcher", async () => {
+    const h = await withCards([card(12)])
+    await say(h, "1 #i12")
+    expect(await say(h, "2")).toEqual([])
+    expect(h.relayed.filter((line) => line.includes("reads: 2\n"))).toHaveLength(1)
+  })
+
+  test("a reply with no card id answers nothing and says so", async () => {
+    const h = await withCards([card(12)])
+    expect(await say(h, "1")).toEqual([NO_ID])
+    expect(h.answers).toEqual([])
+    expect(h.relayed.filter((line) => line.includes("reads: 1\n"))).toEqual([])
+  })
+
+  test("a reply naming an unknown id answers nothing and says so", async () => {
+    const h = await withCards([card(12)])
+    expect(await say(h, "1 #i99")).toEqual([notSent(99)])
+    expect(h.answers).toEqual([])
+  })
+
+  test("a reply naming a card that never went out answers nothing, whatever its kind", async () => {
+    const kept = [
+      card(20, {}, { type: "delete", what: "/tmp/x", why: "old" } as never),
+      card(21, {}, { key: "FAKE_KEY", type: "secret" } as never),
+      card(22, {}, { amount: "$5", type: "budget", why: "a run" } as never),
+      card(23, {}, { sha: "abcdef1", type: "ship" } as never),
+      card(24, {}, { shape: "a table", type: "schema" } as never),
+      card(25, {}, { key: "wa.owner", type: "guard", value: "15550000000" } as never),
+    ]
+    const h = await withCards(kept)
+    expect(h.texts()).toEqual([waitingLine(6)])
+    expect(h.texts().join("\n")).not.toContain("15550000000")
+    for (const ref of [20, 21, 22, 23, 24, 25])
+      expect(await say(h, `1 #i${ref}`)).toEqual([notSent(ref)])
+    expect(h.answers).toEqual([])
+  })
+
+  test("a number past the card's rows answers nothing and says so", async () => {
+    const h = await withCards([card(12)])
+    expect(await say(h, "3 #i12")).toEqual([noRow(12, 2)])
+    expect(h.answers).toEqual([])
+  })
+
+  test("a stranger's reply answers nothing and gets no line back, dropped as any stranger's message", async () => {
+    const h = await withCards([card(12)])
+    expect(await say(h, "1 #i12", STRANGER)).toEqual([])
+    expect(h.answers).toEqual([])
+    expect(await h.dropped()).toHaveLength(1)
+  })
+
+  test("an update goes out read-only, and a reply to it answers nothing", async () => {
+    const h = await withCards([
+      card(30, { kind: "update", title: "#1828 merged" }, { text: "CI is green", type: undefined }),
+    ])
+    expect(h.texts()).toEqual(["*#1828 merged*\nCI is green\n#i30 is an update: it asks nothing."])
+    expect(await say(h, "1 #i30")).toEqual([noRow(30, 0)])
+    expect(h.answers).toEqual([])
+  })
+
+  test("each kept card counts in one waiting line, sent again only when the cards it counts change", async () => {
+    const open = [
+      card(12),
+      card(40, { from: "acme-sync" }),
+      card(41, {}, { text: "for Acmeworks" }),
+    ]
+    const h = await withCards(open)
+    expect(h.texts()).toEqual([expect.stringContaining("#i12"), waitingLine(2)])
+    await h.pass()
+    expect(h.texts()).toHaveLength(2)
+    open.push(
+      card(42, { kind: "draft" }, { text: "a reply", to: "a thread", type: undefined } as never),
+    )
+    await h.pass()
+    expect(h.texts().at(-1)).toBe(waitingLine(3))
+    expect(h.texts().join("\n")).not.toContain("Acmeworks")
+  })
+
+  test("a card that goes is redacted first", async () => {
+    const h = await withCards([
+      card(12, { title: "Ask Quillon Barr" }, { text: `token ghp_${"a".repeat(36)}` }),
+    ])
+    expect(h.texts()[0]).toStartWith("*Ask [hidden]*\ntoken [hidden]\n")
+  })
+
+  test("while no-public-leak's list cannot be read, no card goes, and the waiting line counts them all", async () => {
+    const h = await withCards([card(12), card(13)], null)
+    expect(h.texts()).toEqual([waitingLine(2)])
+  })
+
+  test("while WhatsApp mode is off, a reply is no answer and gets the off line", async () => {
+    const h = await withCards([card(12)])
+    h.mode.on = false
+    expect(await say(h, "1 #i12")).toEqual([OFF])
+    expect(h.answers).toEqual([])
+  })
+
+  test("a plain message still goes to the dispatcher", async () => {
+    const h = await withCards([card(12)])
+    await say(h, "is #i12 merged?")
+    expect(h.relayed.at(-1)).toContain("is #i12 merged?")
+  })
+})
+
+// A media folder beside the scratch whatsapp/, a download that hands back made-up bytes, and a transcriber that reads them as words unless the test says it cannot.
+const withMedia = (words: string | null = "merge the fix tonight") => {
+  const root = mkdtempSync(join(tmpdir(), "ops-wa-media-"))
+  dirs.push(root)
+  const calls = { download: 0, transcribe: [] as string[] }
+  const media: Media = {
+    dir: join(root, "wa", "media"),
+    download: async () => {
+      calls.download++
+      return new TextEncoder().encode("made-up bytes")
+    },
+    transcribe: async (path) => {
+      calls.transcribe.push(path)
+      return words ?? undefined
+    },
+  }
+  const h = harness(undefined, media)
+  return { ...h, calls, media }
+}
+const photo = (h: ReturnType<typeof harness>, caption?: string, from = OWNER) => ({
+  ...h.fake.message(jid(from), ""),
+  message: { imageMessage: { caption, mimetype: "image/jpeg" } },
+})
+const voice = (h: ReturnType<typeof harness>) => ({
+  ...h.fake.message(jid(OWNER), ""),
+  message: { audioMessage: { mimetype: "audio/ogg; codecs=opus", ptt: true } },
+})
+const keptPath = (line: string) => line.match(/kept at (\S+?)(?:,|\n|$)/)?.[1] ?? ""
+
+describe("photos and voice notes", () => {
+  test("a photo is kept in the media folder, the owner's alone, and the dispatcher's line names its path and caption", async () => {
+    const h = withMedia()
+    h.fake.upsert([photo(h, "the build page")])
+    await h.settle()
+    expect(h.relayed).toHaveLength(1)
+    const path = keptPath(h.relayed[0]!)
+    expect(path.startsWith(h.media.dir)).toBe(true)
+    expect(path.endsWith(".jpg")).toBe(true)
+    expect(h.relayed[0]).toContain("holds a photo, kept at")
+    expect(h.relayed[0]).toContain("with the words: the build page")
+    expect(await Bun.file(path).text()).toBe("made-up bytes")
+    expect(statSync(path).mode & 0o777).toBe(0o600)
+    expect(statSync(h.media.dir).mode & 0o777).toBe(0o700)
+    expect(path.includes("/whatsapp/")).toBe(false)
+  })
+
+  test("a photo with no caption names its path alone", async () => {
+    const h = withMedia()
+    h.fake.upsert([photo(h)])
+    await h.settle()
+    expect(h.relayed[0]).toMatch(/holds a photo, kept at \S+\.jpg\n/)
+    expect(h.calls.transcribe).toEqual([])
+  })
+
+  test("a voice note is read on this Mac, and the dispatcher reads its words", async () => {
+    const h = withMedia()
+    h.fake.upsert([voice(h)])
+    await h.settle()
+    const path = keptPath(h.relayed[0]!)
+    expect(path.endsWith(".ogg")).toBe(true)
+    expect(h.calls.transcribe).toEqual([path])
+    expect(h.relayed[0]).toContain("holds a voice note, kept at")
+    expect(h.relayed[0]).toContain("which says: merge the fix tonight")
+  })
+
+  test("a voice note no tool can read goes on as not transcribed, with its path", async () => {
+    const h = withMedia(null)
+    h.fake.upsert([voice(h)])
+    await h.settle()
+    expect(h.relayed[0]).toMatch(/holds a voice note, not transcribed, kept at \S+\.ogg\n/)
+  })
+
+  test("a download that fails is logged, and the dispatcher hears the kind alone", async () => {
+    const h = withMedia()
+    h.media.download = async () => {
+      throw new Error("media gone")
+    }
+    h.fake.upsert([photo(h, "x")])
+    await h.settle()
+    expect(h.relayed[0]).toContain("holds an image, which ops-wa does not read yet")
+    expect(h.logs.some((l) => l.includes("not kept: media gone"))).toBe(true)
+  })
+
+  test("a stranger's photo is dropped and never downloaded", async () => {
+    const h = withMedia()
+    h.fake.upsert([photo(h, "x", STRANGER)])
+    await h.settle()
+    expect(h.calls.download).toBe(0)
+    expect(h.relayed).toEqual([])
+    expect(await h.dropped()).toHaveLength(1)
+  })
+
+  test("while WhatsApp mode is off, nothing is downloaded", async () => {
+    const h = withMedia()
+    h.mode.on = false
+    h.fake.upsert([photo(h, "x")])
+    await h.settle()
+    expect(h.calls.download).toBe(0)
+    expect(h.relayed).toEqual([])
+  })
+
+  test("any other kind still reaches the dispatcher by its kind alone", async () => {
+    const h = withMedia()
+    h.fake.upsert([{ ...h.fake.message(jid(OWNER), ""), message: { stickerMessage: {} } }])
+    await h.settle()
+    expect(h.calls.download).toBe(0)
+    expect(h.relayed[0]).toContain("holds a sticker, which ops-wa does not read yet")
   })
 })

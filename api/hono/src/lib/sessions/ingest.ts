@@ -9,6 +9,7 @@ import {
   type Database,
   type Transaction,
 } from "@packages/db"
+import type { HarnessId } from "@packages/settings"
 import { Glob } from "bun"
 import { and, desc, eq, gte, isNotNull, isNull, lt, ne, sql } from "drizzle-orm"
 
@@ -30,6 +31,15 @@ import {
   transcriptFile,
 } from "@/lib/sessions/lines"
 import { isOwnSession } from "@/lib/sessions/own"
+import {
+  addRolloutFacts,
+  isCompressed,
+  isRollout,
+  rolloutEntry,
+  rolloutFile,
+  threadOf,
+  rolloutPaths,
+} from "@/lib/sessions/rollout"
 
 // The importer: reads each transcript from where it last stopped, and in one transaction per chunk stores its new entries, folds its facts into the session and the chunk into its count and times (token totals are re-totalled at most once a window, and a reset re-read recomputes everything from the stored entries), and moves the file's offset. A crash loses nothing and a re-run adds nothing.
 
@@ -250,6 +260,8 @@ export const flushTokens = async (db: Database): Promise<void> => {
 
 type Stat = { dev: number; ino: number; size: number }
 
+type Position = { byteOffset: number; size: number }
+
 // A reset read keeps a tagged line's row through its wipe, marked by a negative seq (-1 - seq), so a re-read line takes its new content onto that row, its thread tag untouched, and the read that reaches the file's end deletes the marked rows no line took: a reader stopped part way through a reset leaves them marked, and its next pass carries on from the stored offset.
 type Reread = Exclude<keyof EntryRow, "uuid">
 const REREAD = Object.keys({
@@ -281,9 +293,10 @@ async function applyChunk(
   stat: Stat,
   entries: EntryRow[],
   facts: SessionFacts,
-  position: { byteOffset: number; size: number },
+  position: Position,
   meta: SubagentMeta | null,
   reset: boolean,
+  harness: HarnessId,
 ): Promise<{ duplicate: string | null; inserted: number }> {
   return db.transaction(async (tx) => {
     const [prev] = await tx
@@ -318,8 +331,10 @@ async function applyChunk(
         )
     }
     // While a longer transcript owns the session, its facts stand: the shorter copy's older ones do not fold in.
-    const row =
-      kept && prev ? prev : mergeSession(file, wiping ? null : (prev ?? null), facts, meta)
+    const row = {
+      ...(kept && prev ? prev : mergeSession(file, wiping ? null : (prev ?? null), facts, meta)),
+      harness,
+    }
     if (row.parentId) {
       await tx.insert(claudeSession).values({ id: row.parentId }).onConflictDoNothing()
     }
@@ -404,12 +419,30 @@ export type Stop = { readonly aborted: boolean }
 
 export type ReadOptions = { chunkBytes?: number; signal?: Stop }
 
+// How a file's lines become rows: a Claude Code transcript's or a Codex rollout's (rollout.ts).
+type Format = {
+  addFacts: (facts: SessionFacts, line: Record<string, unknown>) => SessionFacts
+  harness: HarnessId
+  toEntry: (line: Record<string, unknown>, seq: number) => EntryRow | null
+}
+
+const TRANSCRIPT: Format = { addFacts, harness: "claude-code", toEntry }
+const ROLLOUT: Format = { addFacts: addRolloutFacts, harness: "codex", toEntry: rolloutEntry }
+
+// The bytes of a file's text from start to end: a slice of the file, or of a compressed rollout's whole text.
+type Bytes = (start: number, end: number) => Promise<Uint8Array>
+
+const sliceOf =
+  (path: string): Bytes =>
+  async (start, end) =>
+    new Uint8Array(await Bun.file(path).slice(start, end).arrayBuffer())
+
 // Reads one transcript from its stored offset to its end in chunks, a line longer than a chunk widening it. Each chunk stores how far into the file it looked (size), so a read cut short after any chunk resumes from its offset on the next pass. A file replaced under the same path (a new inode) or cut shorter than its offset is read again from 0, its old entries and the session's facts from them replaced, and one emptied clears them. A transcript that is not Playground's own (own.ts), a subagent's judged by its parent's, is skipped unread, so another's never reaches the database.
 export async function ingestFile(
   db: Database,
   projects: string,
   path: string,
-  { chunkBytes = CHUNK_BYTES, signal }: ReadOptions = {},
+  options: ReadOptions = {},
 ): Promise<FileResult> {
   const file = transcriptFile(projects, path)
   if (!file || !isOwnSession(file.parentId ?? file.id)) return null
@@ -419,21 +452,74 @@ export async function ingestFile(
   } catch {
     return null
   }
+  const meta = file.subagent ? await readMeta(path) : null
+  return readInto(db, file, path, stat, sliceOf(path), TRANSCRIPT, meta, options)
+}
+
+// The first line of a file's text, read in growing slices until its newline.
+async function firstLine(bytes: Bytes, size: number): Promise<Record<string, unknown> | null> {
+  for (let end = Math.min(size, 64 * 1024); ; end = Math.min(size, end * 2)) {
+    const { lines } = splitLines(await bytes(0, end), 0)
+    if (lines[0]) return parseJson(lines[0].text)
+    if (end === size) return null
+  }
+}
+
+// Reads one Codex rollout as ingestFile reads a transcript, into the session its session_meta line names (threadOf), so a rollout and its compressed copy are one session and a second read adds nothing. A compressed rollout is written once, so it is read whole once per inode, in one chunk: its read row then lands only with all its lines, and a stop or a crash part way leaves none, so the next pass reads it again. A rollout that is not Playground's own is skipped as a transcript is.
+export async function ingestRollout(
+  db: Database,
+  sessions: string,
+  path: string,
+  options: ReadOptions = {},
+): Promise<FileResult> {
+  if (!isRollout(sessions, path)) return null
+  let stat: Stat
+  try {
+    stat = await Bun.file(path).stat()
+  } catch {
+    return null
+  }
+  const [known] = await db.select().from(claudeTranscript).where(eq(claudeTranscript.path, path))
+  const sameInode = known && known.dev === stat.dev && known.ino === stat.ino
+  if (sameInode && isCompressed(path)) return { entries: 0, id: known.sessionId }
+  let bytes = sliceOf(path)
+  let read = options
+  if (isCompressed(path)) {
+    const text = Bun.zstdDecompressSync(await Bun.file(path).bytes())
+    bytes = async (start, end) => text.subarray(start, end)
+    stat = { ...stat, size: text.length }
+    read = { ...options, chunkBytes: Math.max(1, text.length) }
+  }
+  const id = (sameInode && known.sessionId) || threadOf((await firstLine(bytes, stat.size)) ?? {})
+  if (!id || !isOwnSession(id)) return null
+  return readInto(db, rolloutFile(sessions, path, id), path, stat, bytes, ROLLOUT, null, read)
+}
+
+async function readInto(
+  db: Database,
+  file: TranscriptFile,
+  path: string,
+  stat: Stat,
+  bytes: Bytes,
+  format: Format,
+  meta: SubagentMeta | null,
+  { chunkBytes = CHUNK_BYTES, signal }: ReadOptions,
+): Promise<FileResult> {
   const [known] = await db.select().from(claudeTranscript).where(eq(claudeTranscript.path, path))
   const same =
     known && known.dev === stat.dev && known.ino === stat.ino && stat.size >= known.byteOffset
   if (same && stat.size === known.size) return { entries: 0, id: file.id }
   let offset = same ? known.byteOffset : 0
   let reset = Boolean(known) && !same
-  const meta = file.subagent ? await readMeta(path) : null
   let chunk = chunkBytes
   let inserted = 0
   let duplicate: string | null = null
   let looked = offset
+  const apply = (entries: EntryRow[], facts: SessionFacts, position: Position, again: boolean) =>
+    applyChunk(db, file, path, stat, entries, facts, position, meta, again, format.harness)
   while (offset < stat.size && !signal?.aborted) {
     const end = Math.min(stat.size, offset + chunk)
-    const bytes = new Uint8Array(await Bun.file(path).slice(offset, end).arrayBuffer())
-    const { consumed, lines } = splitLines(bytes, offset)
+    const { consumed, lines } = splitLines(await bytes(offset, end), offset)
     if (consumed === 0) {
       if (end === stat.size) {
         looked = end
@@ -447,12 +533,11 @@ export async function ingestFile(
     for (const line of lines) {
       const json = parseJson(line.text)
       if (!json) continue
-      facts = addFacts(facts, json)
-      const entry = toEntry(json, line.seq)
+      facts = format.addFacts(facts, json)
+      const entry = format.toEntry(json, line.seq)
       if (entry) entries.push(entry)
     }
-    const position = { byteOffset: offset + consumed, size: end }
-    const applied = await applyChunk(db, file, path, stat, entries, facts, position, meta, reset)
+    const applied = await apply(entries, facts, { byteOffset: offset + consumed, size: end }, reset)
     inserted += applied.inserted
     duplicate ??= applied.duplicate
     reset = false
@@ -461,8 +546,7 @@ export async function ingestFile(
     chunk = chunkBytes
   }
   if (reset && !signal?.aborted) {
-    const position = { byteOffset: offset, size: looked }
-    const applied = await applyChunk(db, file, path, stat, [], emptyFacts(), position, meta, true)
+    const applied = await apply([], emptyFacts(), { byteOffset: offset, size: looked }, true)
     duplicate ??= applied.duplicate
   } else if (same && looked > known.size) {
     await db.transaction(async (tx) => {
@@ -498,20 +582,24 @@ export type Pass = {
 const describe = (path: string, err: unknown) =>
   `${path}: ${err instanceof Error ? err.message : String(err)}`
 
-// One pass over the given transcripts, one at a time, until done or asked to stop. A failure skips that file for this pass and is counted, not logged per file.
+// One pass over the given transcripts and rollouts (any under sessions, Codex's folder), one at a time, until done or asked to stop. A failure skips that file for this pass and is counted, not logged per file.
 export async function readAll(
   db: Database,
   projects: string,
   paths: string[],
   signal?: Stop,
   onRead?: (id: string, entries: number) => void,
+  sessions?: string,
 ): Promise<Pass> {
   const pass: Pass = { duplicates: [], entries: 0, failed: 0, firstError: null, read: 0 }
   for (const path of paths) {
     if (signal?.aborted) break
     pass.read += 1
     try {
-      const result = await ingestFile(db, projects, path, { signal })
+      const result =
+        sessions && isRollout(sessions, path)
+          ? await ingestRollout(db, sessions, path, { signal })
+          : await ingestFile(db, projects, path, { signal })
       if (result?.entries) {
         pass.entries += result.entries
         onRead?.(result.id, result.entries)
@@ -527,21 +615,40 @@ export async function readAll(
   return pass
 }
 
-export async function backfill(db: Database, projects: string, signal?: Stop): Promise<Pass> {
-  const pass = await readAll(db, projects, await transcriptPaths(projects), signal)
+// Every transcript under projects, then every rollout under sessions when it is given.
+const allPaths = async (projects: string, sessions?: string) => [
+  ...(await transcriptPaths(projects)),
+  ...(sessions ? await rolloutPaths(sessions) : []),
+]
+
+export async function backfill(
+  db: Database,
+  projects: string,
+  signal?: Stop,
+  sessions?: string,
+): Promise<Pass> {
+  const pass = await readAll(
+    db,
+    projects,
+    await allPaths(projects, sessions),
+    signal,
+    undefined,
+    sessions,
+  )
   await flushTokens(db)
   return pass
 }
 
 export type Follower = { stop: () => Promise<void> }
 
-// Keeps the database current: a change under projects reads its file within a second, and at most once a second while it keeps changing; a rescan every 30s catches anything the watcher missed. What it read, and any reads that failed, are reported once a minute, so the log stays small; a duplicate transcript is reported once. When every read fails for several rescans in a row it calls giveUp.
+// Keeps the database current: a change under projects reads its file within a second, and at most once a second while it keeps changing; a rescan every 30s catches anything the watcher missed, and reads the rollouts under sessions when it is given. What it read, and any reads that failed, are reported once a minute, so the log stays small; a duplicate transcript is reported once. When every read fails for several rescans in a row it calls giveUp.
 export function follow(
   db: Database,
   projects: string,
   report: Report,
   giveUp: (reason: string) => void,
   rescanMs = RESCAN_MS,
+  sessions?: string,
 ): Follower {
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
   const tally = new Map<string, number>()
@@ -555,7 +662,7 @@ export function follow(
   const count = (id: string, entries: number) => tally.set(id, (tally.get(id) ?? 0) + entries)
   const run = (paths: string[]) => {
     const next = queue.then(async () => {
-      const pass = await readAll(db, projects, paths, stopper, count)
+      const pass = await readAll(db, projects, paths, stopper, count, sessions)
       failed += pass.failed
       firstError ??= pass.firstError
       for (const line of pass.duplicates) {
@@ -603,7 +710,7 @@ export function follow(
   const rescan = setInterval(() => {
     if (rescanning || stopper.aborted) return
     rescanning = true
-    void transcriptPaths(projects)
+    void allPaths(projects, sessions)
       .then(run)
       .then((pass) => {
         failedRescans = pass.read > 0 && pass.failed === pass.read ? failedRescans + 1 : 0

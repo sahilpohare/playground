@@ -138,6 +138,37 @@ describe("a list saved before the harness split", () => {
     const other = storedTemplates([{ ...old[0], backend: "gpt" }])
     expect(sessionTemplates.safeParse(other).success).toBe(false)
   })
+
+  test("reads a Claude row that named glm as its model, which never ran, with the model dropped, beside the rest of the list", () => {
+    const named = [{ ...old[0], id: "n", model: "glm" }, old[0]]
+    expect(storedTemplates(named)).toEqual([
+      {
+        brief: "orchestrator.md",
+        harness: "claude-code",
+        id: "n",
+        kind: "orchestrator",
+        label: "O",
+      },
+      {
+        brief: "orchestrator.md",
+        harness: "claude-code",
+        id: "o",
+        kind: "orchestrator",
+        label: "O",
+      },
+    ])
+    expect(
+      sessionSettings
+        .get(
+          settingsFor([{ key: "sessions.templates", scope: CORE, value: named }], "made-up-me"),
+          "sessions.templates",
+        )
+        .map((t) => [t.id, templateBackend(t)]),
+    ).toEqual([
+      ["n", "claude"],
+      ["o", "claude"],
+    ])
+  })
 })
 
 describe("saving sessions.templates", () => {

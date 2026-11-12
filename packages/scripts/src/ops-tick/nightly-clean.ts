@@ -108,12 +108,13 @@ export const rosterNames = (roster: unknown): { branches: Set<string>; texts: st
   return { branches, texts }
 }
 
-// The roster's names for one step, whole or the rows a filter keeps, or null when the file cannot be read.
-const readRoster = async (data: string, keep?: (rows: unknown[]) => unknown[]) =>
+// The roster's names for one step, whole or with the rows a predicate keeps, or null when the file cannot be read.
+const readRoster = async (data: string, keep?: (row: { status?: unknown }) => boolean) =>
   Bun.file(join(data, "roster.json"))
     .json()
     .then(
-      (r: { agents?: unknown[] }) => rosterNames(keep ? keep(r.agents ?? []) : r),
+      (r: { agents?: { status?: unknown }[] }) =>
+        rosterNames(keep ? { ...r, agents: (r.agents ?? []).filter(keep) } : r),
       () => null,
     )
 
@@ -460,9 +461,7 @@ export const nightlyClean =
       const entries = await readdir(dir, { withFileTypes: true }).catch(() => null)
       if (!entries) return "none: the data folder holds no folder of theirs"
       // a row whose status is ended holds no folder
-      const roster = await readRoster(data, (rows) =>
-        rows.filter((row) => (row as { status?: unknown })?.status !== "ended"),
-      )
+      const roster = await readRoster(data, (row) => row?.status !== "ended")
       if (roster === null) return "the roster unreadable, none removed"
       const idOf = (name: string) => name.split("-")[0]!
       const live = new Set((await deps.live()).map(idOf))
@@ -539,11 +538,23 @@ export const nightlyClean =
           const local = await git(["rev-parse", "-q", "--verify", `refs/tags/${tag}`])
           const held = local.code === 0 ? (lines(local.out)[0] ?? "") : ""
           if (held === sha) continue
+          // -f drops the old head when it is no ancestor of the new one, so a moved branch's first archive is tagged beside the re-point, and git branch <name> <old> still brings it back; is-ancestor's 1 alone says no, and a failed rescue leaves the old tag standing, skips the re-point, and names why
+          const rescued =
+            held !== "" && (await git(["merge-base", "--is-ancestor", held, sha])).code === 1
+          if (rescued) {
+            const rescue = await git(["tag", `${tag}-${held.slice(0, 7)}`, held])
+            if (rescue.code !== 0) {
+              const why = `its local ${tag} tag held ${held}, and keeping it at ${tag}-${held.slice(0, 7)} failed: ${lines(rescue.out).at(-1) ?? ""}`
+              out.push(`kept ${name}: ${why}`)
+              kept.push(`branch ${name} kept: ${why}`)
+              continue
+            }
+          }
           const said =
             (await git(["tag", "-f", tag, sha])).code !== 0
               ? `its head ${sha} is not on GitHub, and its local ${tag} tag failed`
               : held
-                ? `its local ${tag} tag held ${held}, now holds ${sha}`
+                ? `its local ${tag} tag held ${held}, now holds ${sha}${rescued ? `, the old head kept at ${tag}-${held.slice(0, 7)}` : ""}`
                 : `its head ${sha} is not on GitHub, so it is tagged ${tag} locally alone`
           out.push(`kept ${name}: ${said}`)
           kept.push(`branch ${name} kept: ${said}`)

@@ -1295,10 +1295,10 @@ describe("its registration", () => {
       }),
     )
 
-  test("both settings files send it every Bash call, every MCP tool and Claude Code's three MCP resource tools, and no other tool", async () => {
+  // Bash reaches it through guards (tests/scripts/hooks/guards.test.ts).
+  test("both settings files send it every MCP tool and Claude Code's three MCP resource tools, and no other tool", async () => {
     for (const { file, matcher } of await matchers()) {
       for (const tool of [
-        "Bash",
         "ListMcpResourcesTool",
         "ReadMcpResourceDirTool",
         "ReadMcpResourceTool",
@@ -1307,6 +1307,7 @@ describe("its registration", () => {
       ])
         expect({ file, tool, sent: matcher.test(tool) }).toEqual({ file, tool, sent: true })
       for (const tool of [
+        "Bash",
         "Edit",
         "Write",
         "WebFetch",

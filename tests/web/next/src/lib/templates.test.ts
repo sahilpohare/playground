@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
+import { GLM_MODEL as SETTINGS_GLM_MODEL } from "../../../../../packages/settings/src/harnesses"
 import {
+  GLM_MODEL,
   newDefaults,
   newTemplateId,
   resetTemplate,
@@ -243,4 +245,8 @@ describe("a default added after a save", () => {
     }
     expect(newDefaults(withTemplate(DEFAULTS, night), DEFAULTS)).toEqual([])
   })
+})
+
+test("the web's GLM model is the settings package's", () => {
+  expect(GLM_MODEL).toBe(SETTINGS_GLM_MODEL)
 })

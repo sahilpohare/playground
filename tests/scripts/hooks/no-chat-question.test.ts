@@ -217,9 +217,9 @@ describe("a manager's reply that asks Quilla a decision is refused until it is i
 
   test("the reason sends the session to an open item on the same thing before a new one", () => {
     expect(REASON).toBe(
-      "name the open #iN on the same thing if one exists (bun run ask open lists them), else post it with bun run ask new, then say in chat that it's in the inbox as #iN",
+      "name the open #iN on the same thing if one exists (playground ask open lists them), else post it with playground ask new, then say in chat that it's in the inbox as #iN",
     )
-    expect(REASON.indexOf("bun run ask open")).toBeLessThan(REASON.indexOf("bun run ask new"))
+    expect(REASON.indexOf("playground ask open")).toBeLessThan(REASON.indexOf("playground ask new"))
   })
 
   // cmux restores a session without PLAYGROUND_ROLE, so a manager is also known by its session name or roster kind, as role.ts reads them.
@@ -494,7 +494,7 @@ describe("a manager's reply that keeps steps or a table for Quilla goes in one I
 
   test("the reason sends the steps to one card whose progress is edited in place", () => {
     expect(STEPS_REASON).toBe(
-      "put these steps in one Inbox card (bun run ask new; the open #iN on the same thing if one exists, bun run ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line",
+      "put these steps in one Inbox card (playground ask new; the open #iN on the same thing if one exists, playground ask open lists them), edit each step's progress into that card, then name it in chat as #iN in one line",
     )
   })
 

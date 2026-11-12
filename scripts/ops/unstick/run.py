@@ -1151,9 +1151,9 @@ def cycle(state):
         stuck = slot_stuck(state, now_t)
         if stuck:
             alerts.append(stuck)
-            # one send per line kind in an episode, the no-fit and could-take lines each once, a kind change sending again
+            # one send per line kind in an episode, the no-fit and could-take lines each once, a kind change sending again; a hold's line is listed alone, since the hold stands on purpose (issue 1842)
             told = state["slot_free"].setdefault("told_cases", [])
-            if stuck["case"] not in told:
+            if stuck["case"] != "hold" and stuck["case"] not in told:
                 told.append(stuck["case"])
                 notify(stuck["line"], to="builder")
     except Exception as e:
@@ -1248,7 +1248,13 @@ def slot_stuck(state, now_t):
         return None
     if now_t - sf["since"] < 120:
         return None
-    can = subprocess.run(["bash", os.path.join(CODE, "run-slot.sh"), "can-take", "run-slot", head], env=env, capture_output=True, timeout=30)
+    can = subprocess.run(["bash", os.path.join(CODE, "run-slot.sh"), "can-take", "run-slot", head], env=env, capture_output=True, text=True, timeout=30)
+    # issue 1842: a standing battery or focus hold closes can-take on purpose, so the line names that hold, not a stall
+    hold = re.search(r"^run-slot\.sh: held by run-slot\.(battery|focus for (\S+))$", can.stderr, re.M)
+    if can.returncode != 0 and hold:
+        why = "the battery's red mark (run-slot.battery)" if hold.group(2) is None else f"{hold.group(2)}'s focus (run-slot.focus)"
+        line = f"run-slot free for {int(now_t - sf['since'])}s while {first[2]} (pid {first[1]}) heads the queue, held by {why}, a hold, not a stall"
+        return {"at": now(), "kind": "slot-stuck", "case": "hold", "line": line, "name": first[2], "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(sf["since"]))}
     if can.returncode != 0:
         # issue 1416: the units rule beside a free slot is as designed, so the alert only names it: the slot, the head's units, each holder's
         try:
