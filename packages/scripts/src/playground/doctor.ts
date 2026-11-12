@@ -29,7 +29,7 @@ const nodeAtLeast = (version: string): boolean => {
 const TOOLS: [string, boolean, string, string][] = [
   ["bun", true, "curl -fsSL https://bun.sh/install | bash", "runs playground"],
   ["claude", true, "install Claude Code: https://claude.com/claude-code", "every session"],
-  ["docker", true, "install Docker Desktop", "the Dashboard's database"],
+  ["docker", false, "install Docker Desktop", "a database in a container; PGlite needs none"],
   ["gh", true, "brew install gh", "clones, PRs and ext sync"],
   ["git", true, "brew install git", "the checkout"],
   ["node", true, `brew install node (${NODE_MIN.join(".")} or newer)`, "the Dashboard's next dev"],

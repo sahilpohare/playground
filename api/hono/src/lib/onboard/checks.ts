@@ -38,10 +38,10 @@ const TOOLS: [Tool, boolean, string, Action | null, string][] = [
   ],
   [
     "docker",
-    true,
-    "the database",
+    false,
+    "a database in a container",
     { id: "docker", label: "Install Docker" },
-    "Docker Desktop is not installed.",
+    "Docker Desktop is not installed. The database starts without it, as PGlite.",
   ],
   [
     "gh",
@@ -137,7 +137,7 @@ const toolCheck = async (
       return missing(
         "not running",
         { id: "docker", label: "Start Docker" },
-        "Docker is installed but not running.",
+        "Docker is installed but not running. The database starts without it, as PGlite.",
       )
     }
     return ok(versionOf(info.stdout) ?? "running")
@@ -224,7 +224,7 @@ const settingsCheck = (login: () => boolean): Check =>
         status: "optional",
       }
 
-// The database: running whenever the normal app answers; before that, setup mode's state, waiting on docker.
+// The database: running whenever the normal app answers; before that, setup mode's state, started in a Docker container when docker runs and as PGlite, with no Docker, when it does not.
 const databaseCheck = (database: "ok" | SetupState, docker: Check | undefined): Check => {
   const need = "the Dashboard's data"
   const row = (
@@ -234,10 +234,11 @@ const databaseCheck = (database: "ok" | SetupState, docker: Check | undefined): 
     action: Action | null = null,
   ): Check => ({ action, detail, name: "Database", need, note, status })
   if (database === "ok") return okRow("Database", need, "local Postgres is running")
-  if (docker?.status !== "ok")
-    return row("waiting", "waits for docker", "It starts once Docker runs.")
   if (database.status === "starting") return row("waiting", database.step, "Starting it now.")
-  const start = { id: "database", label: "Start the database" } as const
+  const start =
+    docker?.status === "ok"
+      ? ({ id: "database", label: "Start the database" } as const)
+      : ({ id: "pglite", label: "Start without Docker" } as const)
   return database.status === "failed"
     ? row("MISSING", database.reason, "Starting the database did not finish.", start)
     : row("MISSING", "not started", `${site.name} keeps its data in a database on this Mac.`, start)

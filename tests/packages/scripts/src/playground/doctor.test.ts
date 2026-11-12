@@ -42,20 +42,22 @@ describe("toolChecks", () => {
 
   test("a missing required tool is MISSING with its fix", () => {
     const checks = toolChecks(
-      (cmd) => cmd !== "docker",
+      (cmd) => cmd !== "git",
       () => true,
     )
-    const docker = checks.find((c) => c.name === "docker")!
-    expect(docker.status).toBe("MISSING")
-    expect(docker.detail).toStartWith("fix: ")
+    const git = checks.find((c) => c.name === "git")!
+    expect(git.status).toBe("MISSING")
+    expect(git.detail).toStartWith("fix: ")
     expect(missing(checks)).toBe(true)
   })
 
-  test("uv and the gh login are optional", () => {
+  test("docker, uv and the gh login are optional, since PGlite needs no Docker", () => {
     const checks = toolChecks(
-      (cmd) => cmd !== "uv",
+      (cmd) => cmd !== "uv" && cmd !== "docker",
       () => false,
     )
+    expect(checks.find((c) => c.name === "docker")!.detail).toContain("PGlite needs none")
+    expect(checks.find((c) => c.name === "docker")!.status).toBe("optional")
     expect(checks.find((c) => c.name === "uv")!.status).toBe("optional")
     expect(checks.find((c) => c.name === "gh login")).toEqual({
       detail: "sync is off; fix: gh auth login, then playground ext init",

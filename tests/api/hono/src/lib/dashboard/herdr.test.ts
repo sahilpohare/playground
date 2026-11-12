@@ -1036,7 +1036,11 @@ describe("herdr's boundary", () => {
       /["'`](?:agent\.prompt|events\.subscribe|pane\.(?:get|list|process_info|read|send_keys|send_text)|session\.snapshot)["'`]|\bunix\s*:(?!\/\/)|[{,]\s*unix\s*[,}]|["'`](?:node:)?net["'`]/
     expect(
       sources()
-        .filter(({ file, text }) => protocol.test(text) && file !== "lib/dashboard/herdr.ts")
+        // pglite.ts serves the Postgres wire protocol on 127.0.0.1 with node:net, not herdr's
+        .filter(
+          ({ file, text }) =>
+            protocol.test(text) && file !== "lib/dashboard/herdr.ts" && file !== "lib/pglite.ts",
+        )
         .map((s) => s.file),
     ).toEqual([])
   })

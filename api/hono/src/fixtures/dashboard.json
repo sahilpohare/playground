@@ -26,7 +26,7 @@
         "action": null,
         "detail": "28.3.1",
         "name": "docker",
-        "need": "the database",
+        "need": "a database in a container",
         "note": null,
         "status": "ok"
       },
@@ -127,9 +127,9 @@
         },
         "detail": "not found",
         "name": "docker",
-        "need": "the database",
-        "note": "Docker Desktop is not installed.",
-        "status": "MISSING"
+        "need": "a database in a container",
+        "note": "Docker Desktop is not installed. The database starts without it, as PGlite.",
+        "status": "optional"
       },
       {
         "action": {

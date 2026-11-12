@@ -17,6 +17,7 @@ process.env.BETTER_AUTH_SECRET ||= "fix-test-secret-not-for-use-anywhere"
 const { createFixes } = await import("../../../../../../api/hono/src/lib/onboard/fix")
 const { fixtureFixed } = await import("../../../../../../api/hono/src/lib/onboard/fix-ids")
 const { setupApp } = await import("../../../../../../api/hono/src/lib/setup/app")
+type StartSetup = import("../../../../../../api/hono/src/lib/setup/app").StartSetup
 const { onboardRoutes } = await import("../../../../../../api/hono/src/routers/onboard")
 const { env } = await import("../../../../../../packages/env/dist/api-hono.mjs")
 
@@ -82,10 +83,7 @@ type Read = {
   state: string
 }
 
-const setup = (
-  fixes: Fixes,
-  start: (onStep: (step: string) => void) => Promise<void> = async () => {},
-) => setupApp(start, fixes)
+const setup = (fixes: Fixes, start: StartSetup = async () => {}) => setupApp(start, fixes)
 
 type App = {
   request: (url: string, init?: RequestInit, env?: unknown) => Response | Promise<Response>
@@ -470,6 +468,24 @@ describe("one fix at a time", () => {
     finish()
     expect((await settled(app, `${FIX}/database`)).state).toBe("ok")
   })
+
+  test("each database fix hands setup its own engine: a container for database, PGlite for pglite", async () => {
+    const engines: string[] = []
+    for (const id of ["database", "pglite"]) {
+      const m = machine()
+      const app = setup(m.fixes, async (onStep, engine) => {
+        engines.push(engine)
+        onStep(`Starting ${engine}`)
+      })
+      expect((await begin(app, `${FIX}/${id}`)).status).toBe(202)
+      expect(await settled(app, `${FIX}/${id}`)).toMatchObject({
+        lines: [`Starting ${id}`],
+        state: "ok",
+      })
+      expect(m.calls()).toEqual([])
+    }
+    expect(engines).toEqual(["database", "pglite"])
+  })
 })
 
 describe("a failed fix", () => {
@@ -604,11 +620,13 @@ describe("the guards", () => {
     ])
   })
 
-  test("the app answers the database's fix with 409, since it runs on one", async () => {
-    const m = machine()
-    const refused = await begin(full(m.fixes, []), "/fix/database")
-    expect(refused.status).toBe(409)
-    expect((await refused.json()).error.message).toBe("The database is already running")
+  test("the app answers either database fix with 409, since it runs on one", async () => {
+    for (const id of ["database", "pglite"]) {
+      const m = machine()
+      const refused = await begin(full(m.fixes, []), `/fix/${id}`)
+      expect(refused.status).toBe(409)
+      expect((await refused.json()).error.message).toBe("The database is already running")
+    }
   })
 })
 
