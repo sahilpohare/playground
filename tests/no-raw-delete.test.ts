@@ -20,6 +20,11 @@ const CARVE_OUTS: Record<string, { lines: number; reason: string }> = {
     reason:
       "a Vibeground's stop, or its failed start, removes the stack's own clone of the data folder under the worktree's .turbo/vibe-data, a copy made to be thrown away",
   },
+  "extensions/core/skills/graphify/SKILL.md": {
+    lines: 1,
+    reason:
+      "graphify's vendored bytes (ADR 0014) clear its own temp chunk files in graphify-out with find -delete, and a local edit would be lost at the next vendor",
+  },
   "packages/scripts/src/clean.ts": {
     lines: 1,
     reason:
