@@ -1,0 +1,16 @@
+#!/bin/sh
+# Lets bwrap make a user namespace under Ubuntu's kernel.apparmor_restrict_unprivileged_userns, so Claude Code's sandbox can start; run as root from an approved Inbox card alone.
+set -eu
+umask 022
+cat >/etc/apparmor.d/bwrap <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+EOF
+apparmor_parser -r /etc/apparmor.d/bwrap
+echo "bwrap may now make a user namespace"

@@ -20,7 +20,6 @@ import {
   fixtureStackEnv,
   isDryRun,
   mainCheckoutOf,
-  prefixOf,
   preflight,
   setNextDevAside,
   type SettingsRead,
@@ -30,6 +29,7 @@ import {
   FALLBACK_PORT,
   fallbackDir,
   portlessDir,
+  prefixOf,
   proxyDown,
   proxySetup,
   serviceDir,
@@ -174,6 +174,7 @@ if (!dry) {
     )
   }
   console.error(`dev: database ${checked.proof}`)
+  if (checked.warning) console.error(`dev: ${checked.warning}`)
   // The live dashboard takes the bare names beside its own: the reconcile tick below points them at the ports its stack bound.
   const dashboard = dashboardEnv(checkout)
   if (Object.keys(dashboard).length > 0 && checkout.branch) {

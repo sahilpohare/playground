@@ -1,17 +1,24 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  apiRead,
   apiUp,
+  bootTime,
   cutDashboardCheckout,
   dashboardCheckout,
+  dashboardUrls,
+  graceEnded,
   homeDataDir,
   liveBranch,
   linesSince,
+  liveSessions,
+  upHolds,
   webUp,
 } from "../../../../../packages/scripts/src/playground/probe"
+import { pidsDir, withProc } from "../../../../scripts/fixtures/proc"
 
 const dir = mkdtempSync(join(tmpdir(), "dispatcher-probe-"))
 afterAll(() => rmSync(dir, { force: true, recursive: true }))
@@ -54,6 +61,25 @@ describe("apiUp and webUp", () => {
     const server = serve(307)
     const url = `http://127.0.0.1:${server.port}`
     expect(await webUp({ api: url, web: url })).toBe(true)
+    server.stop(true)
+  })
+
+  // the 1355 proxy with TLS answers an http address with a 302 to https (#2301)
+  test("a health read that answers a redirect is down, and names the URL asked and where it was sent", async () => {
+    const server = Bun.serve({
+      fetch: () => Response.redirect("https://api.example.localhost:1355/api/health", 302),
+      hostname: "127.0.0.1",
+      port: 0,
+    })
+    const url = `http://127.0.0.1:${server.port}`
+    expect(await apiRead({ api: url, web: url })).toEqual({
+      redirect: {
+        from: `${url}/api/health`,
+        status: 302,
+        to: "https://api.example.localhost:1355/api/health",
+      },
+      up: false,
+    })
     server.stop(true)
   })
 
@@ -121,6 +147,43 @@ describe("apiUp over https", () => {
 
   test("reads as down with no CA in portless's state folder", async () => {
     expect(await upUnder(join(dir, "missing"))).toBe(false)
+  })
+})
+
+// On Linux no portless service runs on 443, so the stack's API starts the 1355 proxy in ~/.portless/fallback with TLS on, and ~/.portless stays idle (#2299).
+describe("dashboardUrls", () => {
+  test("names the 1355 fallback proxy's https URLs while only it serves, not an idle ~/.portless's", () => {
+    const home = mkdtempSync(join(tmpdir(), "probe-urls-home-"))
+    const dashboard = mkdtempSync(join(tmpdir(), "probe-urls-desk-"))
+    symlinkSync(
+      join(import.meta.dir, "../../../../../node_modules"),
+      join(dashboard, "node_modules"),
+    )
+    mkdirSync(join(home, ".portless", "fallback"), { recursive: true })
+    writeFileSync(join(home, ".portless", "routes.json"), "[]")
+    // a stand-in for the fallback proxy: a port of the test's own, under the test's own pid
+    const proxy = Bun.serve({ fetch: () => new Response(""), hostname: "127.0.0.1", port: 0 })
+    const fallback = join(home, ".portless", "fallback")
+    writeFileSync(join(fallback, "proxy.pid"), String(process.pid))
+    writeFileSync(join(fallback, "proxy.port"), String(proxy.port))
+    writeFileSync(join(fallback, "proxy.tls"), "1")
+    // every PORTLESS* key is set aside, as install.test.ts's gitEnv drops them, so portless reads only the folders this test made
+    const saved = Object.entries(process.env).filter(([key]) => key.startsWith("PORTLESS"))
+    const savedHome = process.env.HOME
+    process.env.HOME = home
+    for (const [key] of saved) delete process.env[key]
+    try {
+      expect(dashboardUrls(dashboard)).toEqual({
+        api: `https://api.playground.localhost:${proxy.port}`,
+        web: `https://playground.localhost:${proxy.port}`,
+      })
+    } finally {
+      process.env.HOME = savedHome
+      for (const [key, value] of saved) process.env[key] = value
+      proxy.stop(true)
+      rmSync(home, { force: true, recursive: true })
+      rmSync(dashboard, { force: true, recursive: true })
+    }
   })
 })
 
@@ -251,5 +314,99 @@ describe("liveBranch before a first setting", () => {
     mkdirSync(join(data, "extensions"), { recursive: true })
     writeFileSync(join(data, "extensions", "policy.json"), "{")
     withData(data, () => expect(() => liveBranch()).toThrow("does not parse"))
+  })
+})
+
+// Claude Code on Linux records procStart as its process's start in clock ticks since boot, field 22 of /proc/<pid>/stat, where macOS records ps's lstart.
+describe("liveSessions on Linux", () => {
+  test("a record whose procStart is clock ticks is live while /proc gives its pid that start, and gone once the pid started at another", async () => {
+    const config = join(dir, "linux-config")
+    mkdirSync(join(config, "sessions"), { recursive: true })
+    writeFileSync(
+      join(config, "sessions", `${process.pid}.json`),
+      JSON.stringify({ name: "dispatcher", pid: process.pid, procStart: "1801742" }),
+    )
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = config
+    try {
+      const names = (ticks: string) =>
+        withProc(pidsDir({ [process.pid]: ticks }), () =>
+          liveSessions((name) => name === "dispatcher").map((d) => d.name),
+        )
+      expect(await names("1801742")).toEqual(["dispatcher"])
+      expect(await names("2900000")).toEqual([])
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
+  })
+})
+
+// Mirrors up.py's grace_ended: a start within grace is over only when the heartbeat recorded a later start, or the machine booted at or after the recorded one.
+describe("graceEnded", () => {
+  test("is over when the heartbeat recorded a start at or after the one up.py made", () => {
+    expect(graceEnded(100, 150, 0)).toBe(true)
+  })
+
+  test("is over when the machine booted at or after the one up.py made", () => {
+    expect(graceEnded(100, 50, 100)).toBe(true)
+  })
+
+  test("still holds when the heartbeat recorded an earlier start and the machine booted before it", () => {
+    expect(graceEnded(100, 50, 0)).toBe(false)
+  })
+})
+
+describe("upHolds", () => {
+  const writeOps = (data: string, state: unknown, beat?: Record<string, unknown>): void => {
+    const ops = join(data, "ops")
+    mkdirSync(ops, { recursive: true })
+    writeFileSync(join(ops, "up-state.json"), JSON.stringify(state))
+    if (beat) writeFileSync(join(ops, "ops-dashboard.json"), JSON.stringify(beat))
+  }
+  const withData = (data: string, read: () => boolean): boolean => {
+    const saved = process.env.PLAYGROUND_DATA_DIR
+    try {
+      process.env.PLAYGROUND_DATA_DIR = data
+      return read()
+    } finally {
+      if (saved === undefined) delete process.env.PLAYGROUND_DATA_DIR
+      else process.env.PLAYGROUND_DATA_DIR = saved
+    }
+  }
+
+  test("holds a start still within grace, so the wait keeps waiting for up.py to start it", () => {
+    const boot = bootTime()
+    const data = join(dir, "up-holds-holds")
+    const start = boot + 100
+    const beat = { startedAt: new Date((start - 10) * 1000).toISOString() }
+    writeOps(data, { "ops-dashboard": start }, beat)
+    expect(withData(data, () => upHolds(start * 1000 + 50_000))).toBe(true)
+  })
+
+  test("ends early when the heartbeat recorded a start at or after the one up.py made, so the wait stops holding it", () => {
+    const boot = bootTime()
+    const data = join(dir, "up-holds-beat")
+    const start = boot + 100
+    const beat = { startedAt: new Date((start + 10) * 1000).toISOString() }
+    writeOps(data, { "ops-dashboard": start }, beat)
+    expect(withData(data, () => upHolds(start * 1000 + 50_000))).toBe(false)
+  })
+
+  test("ends early when the machine booted at or after the start up.py made, so the wait stops holding it", () => {
+    const start = bootTime()
+    const data = join(dir, "up-holds-boot")
+    const beat = { startedAt: new Date((start - 10) * 1000).toISOString() }
+    writeOps(data, { "ops-dashboard": start }, beat)
+    expect(withData(data, () => upHolds(start * 1000 + 50_000))).toBe(false)
+  })
+
+  test("drops a start past its 600s grace, so the wait bails, even with a heartbeat up.py made later", () => {
+    const boot = bootTime()
+    const data = join(dir, "up-holds-past")
+    const start = boot + 100
+    const beat = { startedAt: new Date((start - 10) * 1000).toISOString() }
+    writeOps(data, { "ops-dashboard": start }, beat)
+    expect(withData(data, () => upHolds(start * 1000 + 700_000))).toBe(false)
   })
 })

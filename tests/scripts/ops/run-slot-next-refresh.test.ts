@@ -28,13 +28,13 @@ const setup = (idle: number) => {
       : ""
   return { m, t2, t3, named }
 }
-// the fake top reading `idle` next, and the gauges cache staled, so the next gauges read lands on it
+// the fake top reading `idle` next, and the gauges cache staled at `idle` too, so the next gauges read lands on it as the second reading in a row (issue 2405)
 const flip = (m: Machine, idle: number) => {
   writeFileSync(
     join(m.bin, "top"),
     `#!/bin/bash\necho "$*" >> ${join(m.root, "top.log")}\necho "CPU usage: 1.00% user, 1.00% sys, 98.00% idle "\necho "CPU usage: ${((100 - idle) / 2).toFixed(2)}% user, ${((100 - idle) / 2).toFixed(2)}% sys, ${idle}% idle "\n`,
   )
-  writeFileSync(join(m.ops, "run-slot.gauges"), "0 80 0 120 3.50\n")
+  writeFileSync(join(m.ops, "run-slot.gauges"), `0 ${idle} 0 120 3.50\n`)
 }
 // a fresh read, whose own lanes reading reads the gauges as they are now
 const head = async (m: Machine) => {

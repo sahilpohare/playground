@@ -33,6 +33,14 @@ A tool it cannot install goes on the **Left for you** list it prints at the end,
 | `python3` | the background jobs                                                  | `brew install python`                                                                                    |
 | `uv`      | optional: the skills' own tests                                      | `brew install uv`                                                                                        |
 
+On Linux it installs only the tools whose own installers need no root: `bun`, `claude`, the pinned `herdr`, and `uv`, whose installer (`curl -LsSf https://astral.sh/uv/install.sh | sh`) puts it in `~/.local/bin`, which the installer adds to your `PATH`.
+Each other missing tool goes on the list with its Linux fix in place of Homebrew's: your distro's `git` and `python3` packages, Node from [nodejs.org](https://nodejs.org/en/download), `gh` from [its Linux install page](https://github.com/cli/cli/blob/trunk/docs/install_linux.md), and [Docker Engine](https://docs.docker.com/engine/install/).
+On Linux arm64, `playground doctor` also checks the test browser agents check pages in, Playwright's Chromium named in agent-browser's settings, and names its setup steps when it is missing ([Troubleshooting](/docs/troubleshooting#the-test-browser-on-linux)).
+On Linux, first run's checks and `playground doctor` also check that your browsers trust the Dashboard's certificate. A Firefox profile that does not trust it gets a **Trust it in Firefox** button, and a Chromium-family browser gets the steps for its own certificate manager ([Troubleshooting](/docs/troubleshooting#the-browser-does-not-trust-the-dashboard-on-linux)).
+Helium and Chrome for Testing can instead trust it through one Inbox card, the `chromium-ca` root step: you approve it with your password, and it trusts the certificate for `.localhost` addresses alone.
+For another machine named in `PLAYGROUND_PEERS`, which has no screen to ask for a password, a root step card names that machine. You enter its admin password once, in a secret card. Its install card uses the password once, deletes it, and sets up a rule there so that each later step on that machine is one Approve with no password. To undo the rule, remove `/etc/polkit-1/rules.d/49-playground-root.rules` and `/usr/share/polkit-1/actions/org.playground.root.policy` on that machine.
+`playground doctor` names the same fixes.
+
 It stops to wait for you only where it cannot act alone, and only when it runs in a terminal; otherwise each of these goes on the list:
 
 - Homebrew's installer asks for your Mac's password.
@@ -50,13 +58,13 @@ A GitHub login (`gh auth login`) is optional for the install, and syncing your e
 
 ## What it does
 
-1. Installs whatever is missing of Homebrew, `git`, `node` and `bun`, since every later step runs on them; `playground doctor` checks that `node` is 20.9 or newer.
+1. Installs whatever is missing of Homebrew, `git`, `node` and `bun`, since every later step runs on them; `playground doctor` checks that `node` is 20.9 or newer. On Linux it installs `bun` alone, and a missing `git` or `node` goes on the list and stops the run.
 2. Prints every place outside its folder it will write to, before it writes there.
 3. Clones Playground into its folder, or, when the folder already holds a checkout, fast-forwards it. With a GitHub login it clones through `gh`, else over HTTPS.
 4. Installs the rest of `playground doctor`'s tool list that is missing, then the pinned `herdr`, and signs Claude Code in.
 5. Installs the dependencies (`bun install --frozen-lockfile`) and builds the shared packages.
 6. Runs `scripts/link-skills.sh`, which installs the home skill set and links the command.
-7. With a GitHub login, sets your settings up in your private repo, which it reuses, or makes once you answer `y` on the terminal, and clones your extensions from it; when it cannot, **Set up settings** in the app's Settings does it ([Your private repos](/docs/backup#your-private-repos)).
+7. With a GitHub login, sets your settings up in your private repo, which it reuses, or makes once you answer `y` on the terminal, and clones your extensions from it; when it cannot, **Set up settings** in the app's Settings does it ([Your private repos](/docs/backup#your-private-repos)), or on a new machine an Inbox card you approve clones them ([A new machine](/docs/backup#a-new-machine)).
 8. Sets up the Dashboard's local address, `https://playground.localhost`: it says why, then `sudo` asks for your Mac's password once to install portless's proxy, a service on port 443 that starts with your Mac and adds its own certificate to your Mac's trusted list. A run that finds the proxy running asks nothing, and one that finds it stopped sets it up again. When the password is refused, or there is no terminal, it goes on the list and `playground` does not start; run the installer again to set it up.
 9. Prints **Left for you**, or `Playground is ready.` when nothing is left.
 10. Starts `playground` once every required tool is there and the local address is set up. Its first start cuts the Dashboard's own checkout in `.claude/worktrees/desk`, installs it, starts the Dashboard and opens it, whose chat starts with **Let's check this Mac** ([Where to start](/docs#where-to-start)).
@@ -64,13 +72,15 @@ A GitHub login (`gh auth login`) is optional for the install, and syncing your e
 ## Pick what Alpha runs on
 
 After the database and settings steps, first run shows one card for each harness Alpha can start on: **Claude Code** and **Codex**.
-Each card checks three things, and a failed check has its own button:
+Each card checks these things, and a failed check has its own button:
 
 - **Installed**, at the version Playground tested: **Install** when it is missing, **Update** when it is older. A newer version reads "newer than tested" and still starts.
 - **Signed in**: Claude Code reads `claude auth status`, Codex reads `codex login status`. **Sign in** runs the sign-in for you and shows its link, and Codex's one-time code, to open in your browser.
+- **Trusted**, on Claude Code's card alone: Claude Code asks whether you trust a folder before its first session there, and Alpha would wait on that question. **Trust this folder** records your yes for Playground's folder in `~/.claude.json`, as answering the question yourself does, and it covers every session Playground starts in it.
+  The install script records that yes for the folder it cloned before it starts Alpha, so this row reads trusted after a fresh install; every other folder still asks here.
 - **Plan**: Codex's plan once it is signed in. Claude Code's reads "not read yet".
 
-Pick a card, and **Start** turns on once it reads Installed and Signed in; your pick is saved as the `harness.alpha` setting.
+Pick a card, and **Start** turns on once it reads Installed and Signed in, and Trusted for Claude Code; your pick is saved as the `harness.alpha` setting.
 Codex keeps its sign-in in its own folder, `~/.playground/codex`, and Playground copies it nowhere.
 For now Codex starts Alpha only on a test copy of Playground (`$PLAYGROUND_DATA_DIR` naming another folder), so on your own sessions its card says so and **Start** stays off.
 Settings > Harness shows the same cards with **Switch Alpha**: Alpha writes its handoff and stops, then starts again on the other harness from it.
@@ -79,19 +89,20 @@ Settings > Harness shows the same cards with **Switch Alpha**: Alpha writes its 
 
 Outside its own folder it writes in these places, besides the tools' own installers:
 
-- `~/.bun/bin`: the `playground` command, on a new terminal's `PATH`.
+- `~/.bun/bin`: the `playground` command, on a new terminal's `PATH`, and on Linux `security`, the store that keeps Playground's tokens where macOS has its Keychain.
 - `~/.playground`: the data folder (`$PLAYGROUND_DATA_DIR` when you set it, an absolute path), with your extensions, links to the brief templates and the background jobs' scripts, and the skill sets in `orgs`. Playground's own herdr stays at `~/.playground/bin/herdr` either way.
 - Claude Code's user settings: the home skill set, `ws-home@ws`, installed from the `ws` marketplace in `~/.playground/orgs` ([Skills and orgs](/docs/skills)).
+- `~/.claude.json`: Claude Code's yes to trusting the folder it cloned, the same key Claude Code's own folder question writes, so Alpha starts with no question waiting.
 - `/Library/LaunchDaemons/sh.portless.proxy.plist`: portless's proxy service, installed with sudo, and its certificate in the System keychain; the proxy keeps its own files in `~/.portless`.
 - Your shell's startup file (`~/.zshrc` for zsh, `~/.bashrc` for bash): one line for each tool folder it put on your `PATH` (Homebrew's `shellenv`, `~/.bun/bin`, `~/.local/bin`), added once, and after it upgrades an older bun that comes ahead of `~/.bun/bin`, one more line, last, that puts `~/.bun/bin` first. For any other shell it prints the lines for you to add. Open a new terminal, or run `source ~/.zshrc`, to pick them up.
 
-Every background job starts off but the Dashboard's own and the usage read ([Ops jobs](/docs/jobs)), so the installer adds nothing to `~/Library/LaunchAgents`.
+Every background job starts off but the Dashboard's own, the usage read and, on a Mac, the one that keeps an idle Mac awake ([Ops jobs](/docs/jobs)), so the installer adds nothing to `~/Library/LaunchAgents` (on Linux, to `~/.config/systemd/user`).
 
 ## The Dashboard's database
 
-On its first start the Dashboard's **Start a local container**, on the Database row of **Let's check this Mac**, makes its database with [pglaunch](https://www.npmjs.com/package/pglaunch): a Postgres container on Docker or OrbStack, on a random port.
-That database listens on every interface with pglaunch's own credentials (user, password and database `postgres`), so anyone who can reach this Mac on that port can read and change it.
-Keep the Mac on a network you trust, or block the port in its firewall.
+On its first start the Dashboard's **Start a local container**, on the Database row of **Let's check this Mac**, makes its database: a Postgres container on Docker or OrbStack, on a random port, with user and database `postgres` and a new random password.
+It listens on 127.0.0.1 alone, so only this Mac can reach it.
+An install made before that rule has a database that listens on every interface: the Dashboard's next update moves it onto 127.0.0.1, keeping its data, and leaves the old container stopped as `<name>-old`, with the one command that removes it (`docker rm -v <name>-old`) in the update's log.
 
 Docker is optional: while it is not running, the Database row offers **Start without Docker** instead, which keeps the database as [PGlite](https://pglite.dev), Postgres running inside Playground with no container, in `~/.playground/pglite/<name>/`.
 It listens on this Mac alone (127.0.0.1), and `bun run dev` starts it again after a restart.

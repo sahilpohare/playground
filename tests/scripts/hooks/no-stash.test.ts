@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { check } from "../../../scripts/hooks/no-stash"
+import { scratchEnv } from "../../scratch-env"
 import { overBaseline, stepsOf } from "./pace"
 
 // The worktree path every refusal gives: absolute, beside the main checkout's .git, so none nests in another worktree (AGENTS.md's Workflow rule).
@@ -80,6 +81,14 @@ describe("a git stash that can take another worktree's work is refused", () => {
   })
 })
 
+describe("a command built from a value the reader cannot read, in a call that names git stash", () => {
+  test("is refused, naming a script file as the way out", async () => {
+    const reason = await bash('A=(git stash); A+=(pop); "${A[@]}"')
+    expect(reason).toContain("a command built from a value it cannot read")
+    expect(reason).toContain("write the script to a file and run it")
+  })
+})
+
 describe("a long run of closing braces", () => {
   // a scan back for each brace's open grows with the square of their count, where the stack of opens grows with the count
   test("ahead of a stash is read in a time linear in its length", async () => {
@@ -114,6 +123,29 @@ describe("a stash found by name or SHA, and every other call, runs", () => {
     ["grep for the word", "grep -rn 'git stash' scripts"],
     ["a printer that names it", "echo git stash pop"],
     ["a name it cannot read with no stash after it", "$EDITOR notes.md"],
+    // #2244's controls
+    ["a glob used only as an argument", "ls /usr/bin/g?t; git stash list"],
+    ["a program path with no glob", "/usr/bin/git stash list"],
+    [
+      "a program glob that matches no file, which keeps its typed word",
+      "/no/such/folder/g?t stash pop",
+    ],
+    ["an array the reader resolves", 'A=(git stash list); "${A[@]}"'],
+    [
+      "an array a shell's -c sets and runs, which names no stash",
+      `bash -c 'A=(echo hi); "\${A[@]}"'`,
+    ],
+    // #2259's controls
+    [
+      "a commit subject holding (…) beside a stash list",
+      "git commit -m 'fix(PG-1): a (b|c) subject' && git stash list",
+    ],
+    ["a brace list used only as an argument", "git stash list && echo {a,b}"],
+    ["a brace list in a path used only as an argument", "ls /usr/bin/g{i,x}t; git stash list"],
+    [
+      "a zsh group of more alternatives than the reader reads, used only as an argument",
+      "echo g(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)t && git stash list",
+    ],
   ])("%s", async (_, command) => {
     expect(await bash(command)).toBeUndefined()
   })
@@ -245,14 +277,12 @@ describe("the factory settings run it through guards", () => {
   const hook = async (home: string, command: string, repo: string, role = "worker") => {
     const proc = Bun.spawn(["bash", "-c", (await entry()).hooks[0].command], {
       cwd: tmpdir(),
-      env: {
-        ...process.env,
+      env: scratchEnv(home, {
         CLAUDE_PROJECT_DIR: home,
         GIT_CEILING_DIRECTORIES: tmpdir(),
-        HOME: home,
         PLAYGROUND_REPO: repo,
         PLAYGROUND_ROLE: role,
-      },
+      }),
       stderr: "pipe",
       stdin: new Blob([JSON.stringify({ tool_input: { command }, tool_name: "Bash" })]),
       stdout: "pipe",

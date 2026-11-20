@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  HEALTHY_PREFIXES,
   jobName,
   jobsListed,
   OPS_DOES,
@@ -17,6 +18,7 @@ import {
   beat as herdrBeat,
   restoreResult,
 } from "../../../../../../packages/scripts/src/ops-herdr/herdr"
+import { HEALTHY_PREFIXES as SWEEP_HEALTHY_PREFIXES } from "../../../../../../packages/scripts/src/ops-sweep/sweep"
 import { liveReads } from "../../../../../live-reads"
 
 // readOps asks ps whether this process runs, a live read.
@@ -105,6 +107,40 @@ describe("opsRowOf", () => {
     expect(row).toMatchObject({
       reason: "no Claude account yet; add one in the Dashboard",
       status: "waiting",
+    })
+  })
+
+  // #2679: a job's steady healthy beat reads Running, as ops-sweep judges it, not Failing
+  test.each([
+    ["a tunnel job beating up:", "ops-tunnel", "up: 127.0.0.1:18000", "running"],
+    ["a model tunnel beating up:", "ops-model-tunnel", "up: 127.0.0.1:18000", "running"],
+    ["a peer relay idling:", "ops-peer-relay", "idle: PLAYGROUND_PEERS names no peer", "running"],
+  ] as const)("%s reads Running, a steady healthy beat", (_label, job, result, status) => {
+    expect(opsRowOf(job, beat({ job, lastResult: result }), true, NOW).status).toBe(status)
+  })
+
+  // #2679: a steady beat that is not one ops-sweep keeps healthy, or a failed result, reads Failing
+  test("Failing on a steady beat that is not a healthy one, and on a failed result", () => {
+    expect(
+      opsRowOf(
+        "ops-tick",
+        beat({ job: "ops-tick", lastResult: "up: spawn.sh exited 1" }),
+        true,
+        NOW,
+      ).status,
+    ).toBe("failing")
+    expect(
+      opsRowOf("ops-tick", beat({ job: "ops-tick", lastResult: "failed: x" }), true, NOW).status,
+    ).toBe("failing")
+  })
+
+  // #2679: the Dashboard's healthy-prefix copy is kept in step with ops-sweep's, so a new healthy beat never shows Failing before a test catches it.
+  test("the Dashboard keeps ops-sweep's healthy-prefix copy in step", () => {
+    expect(HEALTHY_PREFIXES).toEqual(SWEEP_HEALTHY_PREFIXES)
+    expect(HEALTHY_PREFIXES).toEqual({
+      "ops-model-tunnel": ["up: "],
+      "ops-peer-relay": ["idle: "],
+      "ops-tunnel": ["up: "],
     })
   })
 
@@ -282,6 +318,19 @@ describe("readOps", () => {
 
   test("a folder that is not there holds no jobs", async () => {
     expect(await opsJobs(join(dir, "missing"))).toEqual([])
+  })
+
+  test("a retired job shows no row, though its heartbeat file and its jobs.json row stay (#2313)", async () => {
+    const own = mkdtempSync(join(tmpdir(), "dashboard-ops-retired-"))
+    writeFileSync(
+      join(own, "jobs.json"),
+      JSON.stringify({ jobs: [{ disabled: true, heartbeat: "ops-awake", name: "ops-awake" }] }),
+    )
+    writeFileSync(join(own, "ops-awake.json"), beat({ job: "ops-awake", pid: process.pid }))
+    writeFileSync(join(own, "ops-report.json"), beat({ job: "ops-report", pid: process.pid }))
+    const rows = await readOps(own, NOW)
+    rmSync(own, { force: true, recursive: true })
+    expect(rows.map((row) => row.job)).toEqual(["ops-report"])
   })
 })
 

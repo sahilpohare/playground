@@ -1,9 +1,13 @@
 // PreToolUse hook, acting for a factory session alone (role.ts): refuses a Bash test run that reads green while no test ran or a test failed: bun with an option given its value as the next word (--cwd <dir>, --env-file <file>) before its run or test subcommand, which then prints bun's usage and exits 0 (run) or runs package.json's test script with the paths appended in place of the tests (test), and a test run (bun's, or a pytest, ty or ruff run) or a git push piped into another command in a script that sets no pipefail and reads no pipe status of its own shell, whose exit status is then the last command's.
 
+import { input } from "./input"
+import { gitCommand } from "./no-stash"
 import { fromFactory } from "./role"
 import {
+  ASSIGN,
   type Command,
-  GIT_TAKES,
+  type Env,
+  EXPORTS,
   lex,
   parse,
   parseFlags,
@@ -13,7 +17,10 @@ import {
   SHELLS,
   shellOperand,
   shellSlot,
+  slice,
   slotWords,
+  splitHeld,
+  type Text,
   UV_TAKES,
   type Word,
 } from "./shell"
@@ -60,17 +67,13 @@ function inner(cmd: Command, parsed: Parsed): Command[] | undefined {
   return inline && operand !== undefined ? lex(operand.value).commands : []
 }
 
-// Whether the command is a git push, past git's global options (-C <dir>, -c <key=value> and the rest of GIT_TAKES).
+// Whether the command is a git push, past git's global options (no-stash's gitCommand steps over GIT_TAKES).
 function pushes(cmd: Command): boolean {
   const parsed = parse(cmd)
   const commands = inner(cmd, parsed)
   if (commands) return commands.some(pushes)
   const { args, name } = parsed
-  if (name !== "git") return false
-  let k = 0
-  for (; k < args.length && args[k].value.startsWith("-"); k++)
-    if (GIT_TAKES.has(args[k].value)) k++
-  return args[k]?.value === "push"
+  return name === "git" && gitCommand(args).sub?.value === "push"
 }
 
 function runsTests(cmd: Command): boolean {
@@ -135,12 +138,29 @@ const KEEPS_STATUS = {
 type Dialect = keyof typeof KEEPS_STATUS
 const dialect = (shell: string): Dialect => (program(shell) === "zsh" ? "zsh" : "bash")
 
+// Each command's split readings beside the typed one: a command held in a variable the line set, and one feeding a pipe, so a held test run or push is judged too (`C="bun run test"; $C | tail`). This hook judges its own lexed line rather than through run(), so it tracks the line's variables itself.
+function heldVariants(cmd: Command, env: Env): Command[] {
+  const own = splitHeld(cmd, parse(cmd).name, env)
+  if (!cmd.stdin) return own
+  const fed = splitHeld(cmd.stdin, parse(cmd.stdin).name, env)
+  return [...own, ...fed.map((stdin) => ({ ...cmd, stdin }))]
+}
+
 // Each script is judged by its own guard, since a pipefail outside a shell's -c script never reaches the pipes inside it.
 function judge(script: string, shell: Dialect): string | undefined {
   const guarded = KEEPS_STATUS[shell](script)
+  const vars = new Map<string, Text>()
   for (const cmd of lex(script).commands) {
-    const reason = judgeCommand(cmd, guarded)
-    if (reason) return reason
+    const parsed = parse(cmd)
+    const env: Env = { files: new Map(), known: {}, process: {}, vars }
+    for (const variant of [cmd, ...heldVariants(cmd, env)]) {
+      const reason = judgeCommand(variant, guarded)
+      if (reason) return reason
+    }
+    if (parsed.name === "") for (const [key, value] of parsed.local) vars.set(key, value)
+    else if (EXPORTS.has(parsed.name))
+      for (const w of parsed.args.filter((a) => ASSIGN.test(a.value)))
+        vars.set(w.value.slice(0, w.value.indexOf("=")), slice(w, w.value.indexOf("=") + 1))
   }
 }
 
@@ -191,7 +211,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-false-green", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

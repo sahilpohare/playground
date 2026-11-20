@@ -2,6 +2,7 @@
 
 import { useForm } from "@tanstack/react-form"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { cn } from "cn"
 
 import { SetUpSettings } from "@/components/settings/set-up-settings"
 import { Button } from "@/components/ui/button"
@@ -15,6 +16,7 @@ import {
   ItemGroup,
   ItemTitle,
 } from "@/components/ui/item"
+import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { toast } from "@/components/ui/toast"
@@ -24,12 +26,14 @@ import {
   type JobRow,
   parseJobConfig,
   readJobs,
+  RESTORE_JOB,
+  restoreCheckout,
   saveJobConfig,
   saveJobToggle,
 } from "@/lib/jobs"
 import { useOps, whenWords } from "@/lib/ops"
 
-// Settings > Jobs: each ops job Playground ships and each org's own job, what it does, when it runs and whether it is on, and a switch that turns it on or off at its scope (your login's, or an org's for its own job), its enabled field alone, and for a job with a config that config with the job's last refusal of it and an edit that saves it at once. Before the settings are set up it shows Set up settings, as Privacy does.
+// Settings > Jobs: each ops job Playground ships and each org's own job, what it does, when it runs and whether it is on, and a switch that turns it on or off at its scope (your login's, or an org's for its own job), its enabled field alone, for a job with a config that config with the job's last refusal of it and an edit that saves it at once, and on ops-restore's row Restore now. Before the settings are set up it shows Set up settings, as Privacy does.
 export function Jobs() {
   const login = useQuery({ queryKey: ACCOUNTS_QUERY_KEY, queryFn: readAccounts })
   const scope = login.data?.scope
@@ -103,6 +107,7 @@ function JobList({ jobs, scope }: { jobs: JobRow[]; scope: string }) {
                   .filter(Boolean)
                   .join(" · ")}
               </p>
+              {job.name === RESTORE_JOB && <RestoreNow />}
               {job.config && (
                 <JobConfig
                   key={JSON.stringify(job.config)}
@@ -125,6 +130,33 @@ function JobList({ jobs, scope }: { jobs: JobRow[]; scope: string }) {
         ))}
       </ItemGroup>
     </>
+  )
+}
+
+// Restore now on ops-restore's row: the restore's steps run at once for a main checkout whose guards are gone, with the job on or off, and what it restored, or why it could not, under the button.
+function RestoreNow() {
+  const restore = useMutation({ mutationFn: restoreCheckout })
+  const failed = Boolean(restore.error) || restore.data?.status === "stopped"
+  return (
+    <div className="mt-1 flex flex-col items-start gap-1.5">
+      <Button
+        disabled={restore.isPending}
+        onClick={() => restore.mutate()}
+        size="sm"
+        variant="outline"
+      >
+        {restore.isPending && <Spinner />}
+        Restore now
+      </Button>
+      {(restore.error || restore.data) && (
+        <p
+          role="status"
+          className={cn("text-xs", failed ? "text-destructive" : "text-muted-foreground")}
+        >
+          {restore.error?.message ?? restore.data?.text}
+        </p>
+      )}
+    </div>
   )
 }
 

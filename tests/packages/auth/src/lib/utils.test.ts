@@ -21,6 +21,22 @@ describe("cookieConfig on a portless .localhost host", () => {
     expect(forUrl("https://stack-1.api.playground.localhost").cookiePrefix).toBe("stack-1")
   })
 
+  test("a stack on 443, or on no port, keeps today's names byte for byte, so the Mac's own signed-in users stay signed in (PG-2207)", () => {
+    for (const url of ["https://api.playground.localhost", "https://api.playground.localhost:443"])
+      expect(forUrl(url).cookiePrefix).toBeUndefined()
+    expect(forUrl("https://desk.api.playground.localhost:443").cookiePrefix).toBe("desk")
+  })
+
+  test("a stack on any other port names its cookie by its port too, so a tunnelled Dashboard and this Mac's keep their own (PG-2207)", () => {
+    expect(forUrl("https://api.playground.localhost:1355")).toEqual({
+      cookieDomain: ".playground.localhost",
+      cookiePrefix: "p1355",
+      isPrivate: false,
+    })
+    expect(forUrl("https://desk.api.playground.localhost:1355").cookiePrefix).toBe("desk.p1355")
+    expect(forUrl("https://api.playground.localhost:1356").cookiePrefix).toBe("p1356")
+  })
+
   test("keeps the default name on a stack with no branch prefix", () => {
     expect(forUrl("https://api.playground.localhost")).toEqual({
       cookieDomain: ".playground.localhost",

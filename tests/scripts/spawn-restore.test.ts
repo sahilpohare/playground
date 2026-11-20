@@ -1,7 +1,17 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 
-import { capacityLog, herdrPin, lw, placing, root, spawn, transcript } from "./spawn-fake"
+import {
+  capacityLog,
+  herdrPin,
+  lw,
+  minutesAgo,
+  placing,
+  root,
+  spawn,
+  transcript,
+} from "./spawn-fake"
 
 // Each case runs restore, which runs spawn.sh resume once a record, each starting fake processes.
 setDefaultTimeout(60_000)
@@ -248,5 +258,110 @@ describe("restore resumes every manager its records name, or says which it left 
     )
     expect(r.code).toBe(0)
     expect(readFileSync(lw(r.home, "runtimes", "optimizer"), "utf8")).toBe("herdr\n")
+  })
+})
+
+// #2065: after a reboot load5 still carries the boot's spike and each settled start still counts, so a manager is judged by the CPU's idle share (top -l 2 -n 0) and memory, while a worker keeps the load line.
+describe("a manager's start or resume goes by the CPU's idle share and memory, a worker's by the load line", () => {
+  const starts = `${[...Array(4)]
+    .map(() => JSON.stringify({ at: minutesAgo(1), gate: null, readings: {}, verdict: "pass" }))
+    .join("\n")}\n`
+  const busy = { CAPACITY_JSONL: starts, FAKE_FREE: "50", FAKE_LOAD1: "8.53", FAKE_LOAD5: "8.53" }
+  const roster = JSON.stringify({
+    agents: [
+      ...managers.map((name) => row(name, "starting")),
+      { kind: "worker", name: "worker-brave-otter", role: "worker", status: "working", task: "t" },
+    ],
+  })
+  const resume = (name: string, env: Record<string, string>) =>
+    spawn(
+      ["resume", name, root, ids.builder],
+      [],
+      { ...busy, ROSTER_JSON: roster, SPAWN_RESTORING: "1", ...env },
+      undefined,
+      undefined,
+      (home) => {
+        recorded(home)
+        writeFileSync(lw(home, "backends", "worker-brave-otter"), "claude\n")
+      },
+    )
+
+  test("a manager's restore passes a high load and recent starts while the CPU reads idle and memory free", async () => {
+    const r = await resume("builder", { FAKE_CPU_IDLE: "63.00" })
+    expect(r.err).not.toContain("gate holds it")
+    expect(r.code).toBe(0)
+    expect(placing(r).filter((c) => c[1] === "run")).toHaveLength(1)
+    expect(capacityLog(r).at(-1)).toEqual(
+      expect.objectContaining({
+        readings: expect.objectContaining({ cpu_idle: 63, load5: 8.53, starts: 4 }),
+        session: "builder",
+        verdict: "pass",
+      }),
+    )
+  })
+
+  test("a manager's start by manager mode passes on the same readings", async () => {
+    const r = await spawn(["manager", "optimizer", "b.md"], [], {
+      ...busy,
+      FAKE_CPU_IDLE: "63.00",
+      ROSTER_JSON: roster,
+    })
+    expect(r.err).not.toContain("gate holds it")
+    expect(r.code).toBe(0)
+  })
+
+  test("a manager's restore is held while the CPU reads busy, naming the idle share", async () => {
+    const r = await resume("builder", { FAKE_CPU_IDLE: "10.00" })
+    expect(r.code).not.toBe(0)
+    expect(placing(r).filter((c) => c[1] === "run")).toEqual([])
+    expect(r.err).toContain("the load gate holds it: max(load1, load5) is 8.53")
+    expect(r.err).toContain("the CPU reads 10% idle (top -l 2 -n 0), under the 40% a manager needs")
+  })
+
+  test("a manager's restore is held while memory shows no room, however idle the CPU", async () => {
+    const r = await resume("builder", { FAKE_CPU_IDLE: "63.00", FAKE_FREE: "3" })
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain("the memory gate holds it: free is 3%")
+  })
+
+  test("a worker's restore under the same readings is judged by the load line, as before", async () => {
+    const r = await resume("worker-brave-otter", { FAKE_CPU_IDLE: "63.00" })
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      "the load gate holds it: max(load1, load5) is 8.53 and 4 started in the last 5 minutes, at or over 11.25",
+    )
+    expect(existsSync(join(r.home, "top.calls"))).toBe(false)
+  })
+})
+
+describe("restore runs the managers ahead of the workers", () => {
+  test("a worker's record that sorts first resumes after every manager", async () => {
+    const r = await spawn(
+      ["restore"],
+      [],
+      {
+        ROSTER_JSON: JSON.stringify({
+          agents: [
+            { kind: "worker", name: "bcdfgh-worker", role: "worker", status: "working", task: "t" },
+            ...managers.map((name) => row(name, "starting")),
+          ],
+        }),
+      },
+      undefined,
+      undefined,
+      (home) => {
+        recorded(home)
+        writeFileSync(
+          lw(home, "resume", "bcdfgh-worker.sh"),
+          `#!/bin/bash\n# server: playground\nexec /x/scripts/spawn.sh resume bcdfgh-worker ${root} ${ids.planner}\n`,
+        )
+        writeFileSync(lw(home, "runtimes", "bcdfgh-worker"), "herdr\n")
+        writeFileSync(lw(home, "backends", "bcdfgh-worker"), "claude\n")
+      },
+    )
+    expect(r.out).toBe(
+      "restored builder\nrestored optimizer\nrestored planner\nrestored bcdfgh-worker\n",
+    )
+    expect(r.code).toBe(0)
   })
 })

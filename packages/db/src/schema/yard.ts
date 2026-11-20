@@ -2,6 +2,7 @@ import { MAX_TEXT, MESSAGE_KINDS, MESSAGE_STATUSES } from "@packages/message"
 import { sql } from "drizzle-orm"
 import {
   type AnyPgColumn,
+  boolean,
   check,
   index,
   integer,
@@ -134,6 +135,22 @@ export const yardToken = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
   },
   (table) => [uniqueIndex("yard_token_user_name_idx").on(table.userId, table.name)],
+)
+
+// A user row that is a bot, which its maker (the owner) made with `playground yard bot add`: its token reaches only its DM with made_by, and reads_log lets it read the dispatcher's log; the row goes with its maker while the bot's user and token stay, and a bot's login with no row here reads as no one (yardCaller).
+export const yardBot = pgTable(
+  "yard_bot",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    madeBy: text("made_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    readsLog: boolean("reads_log").default(false).notNull(),
+  },
+  (table) => [index("yard_bot_made_by_idx").on(table.madeBy)],
 )
 
 // A fixed-window counter: key names what is counted (a login per second or per day, a channel per hour), window_start the window's start.

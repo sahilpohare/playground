@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """account-watch.py <email>: one reading of a Claude account other than this Mac's own login, written to
-usage-<local part>.json in the data folder, in usage.json's shape, so the factory can move to another account near its week's end.
+usage-<local part>.json in the data folder, in usage.json's shape, so the factory can move to another account near its week's end and spawn.sh
+judges an --account start on it; ops-tick's other-logins beat runs it every 30 minutes for each Claude row of usage.accounts but the stored login.
 It reads the account's long-lived token from the Keychain (service usage.keychainService) into one 1-token call's header, to models.probe, and
 nowhere else (a setup-token has the inference scope alone, so the usage endpoint refuses it), and takes the 5-hour and week use from
 the rate-limit headers, as login-flip.py's probe does. Prints one line; exits 1 when it cannot read the account."""

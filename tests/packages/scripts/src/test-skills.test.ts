@@ -12,6 +12,8 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { scratchEnv } from "../../../scratch-env"
+
 const SCRIPT = join(import.meta.dir, "../../../../packages/scripts/src/test-skills.ts")
 
 // Runs one step through runSteps with the given fake binaries first on PATH and the real home in a scratch folder, and returns what the step wrote to its out file
@@ -28,13 +30,12 @@ const runStep = (fakes: Record<string, string>, script: string) => {
     const tmp = join(real, "tmp")
     mkdirSync(tmp)
     const step = ["sh", "-c", script.replaceAll("$OUT", JSON.stringify(out))]
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      HOME: real,
+    const env = scratchEnv(real, {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       TMPDIR: tmp,
-    }
-    for (const key of ["UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"]) delete env[key]
+      UV_CACHE_DIR: undefined,
+      UV_PYTHON_INSTALL_DIR: undefined,
+    })
     const run = Bun.spawnSync(
       [
         "bun",

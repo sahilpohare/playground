@@ -8,14 +8,14 @@ export type TargetDeps = {
   worktrees: string | null
 }
 
-// Pure: each word of a delete's what, stripped of the quotes and punctuation around it: the one reader ask and playground rm --decision share.
+// Pure: each word of a delete's what, stripped of the quotes and punctuation around it.
 export const targetWords = (what: string): string[] =>
   what
     .split(/\s+/)
     .map((word) => word.replace(/^[`'"(]+|[`'",.;:)]+$/g, "").replace(/(.)\/$/, "$1"))
     .filter((word) => word !== "")
 
-// The targets a delete's what names by a short name, each with the full path to write: a relative or ~ path that is there, or a worktree's bare folder name (a word of dots alone, as a stray ./, is prose), unless that full path stands in the what beside it, since playground rm --decision matches the full path alone.
+// The targets a delete's what names by a short name, each with the full path to write: a relative or ~ path that is there, or a worktree's bare folder name (a word of dots alone, as a stray ./, is prose), unless that full path stands in the what beside it.
 export function shortTargets(what: string, deps: TargetDeps): { full: string; word: string }[] {
   const words = targetWords(what)
   const named = new Set(words.filter((word) => word.startsWith("/")))
@@ -44,5 +44,5 @@ export function deleteRefusal(input: unknown, deps: TargetDeps): string | null {
   if (type !== "delete" || typeof what !== "string") return null
   const short = shortTargets(what, deps)
   if (short.length === 0) return null
-  return `a delete names each target by its full path, the one playground rm --decision matches: ${short.map(({ full, word }) => `write ${full} for ${word}`).join("; ")}`
+  return `a delete names each target by its full path, so the owner approves the very path that goes: ${short.map(({ full, word }) => `write ${full} for ${word}`).join("; ")}`
 }

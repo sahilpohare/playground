@@ -2,4 +2,11 @@
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   // The guards' bundles stay hooks-bundle's output
   "ignorePatterns": ["scripts/hooks/bundled/**"],
+  // An unused variable or import fails lint, since a warning never fails a run; a key dropped by a rest destructure (`{ id: _, ...rest }`) stays the idiom for omitting it
+  "rules": {
+    "no-unused-vars": [
+      "error",
+      { "argsIgnorePattern": "^_", "ignoreRestSiblings": true, "varsIgnorePattern": "^_" },
+    ],
+  },
 }

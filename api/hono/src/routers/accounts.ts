@@ -164,7 +164,7 @@ export const accountsRouter = new Hono<{ Variables: StoreVariables }>()
     describeRoute({
       tags: ["Settings"],
       description:
-        "Open the sign-in's own link in a new window on a fresh profile of a browser this Mac has, deleted when the sign-in ends: which one, or null when none opened",
+        "Open the sign-in's own link in a new window on a fresh profile of a browser this computer has, deleted when the sign-in ends: which one, or null when none opened",
       ...responses(validationErrorResponses, notFoundErrorResponses),
     }),
     sValidator("json", setupParam, invalid),

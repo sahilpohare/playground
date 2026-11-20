@@ -80,6 +80,20 @@ describe("a session cmux restored in a dispatcher checkout keeps the factory's h
     )
     expect(new RegExp(hook?.matcher ?? "^$").test(tool)).toBe(true)
   })
+
+  // #1280: guards runs on Bash alone, so a Monitor's command reaches no-outside-pr-code only through its own entry, and #2261: so does a file tool's write into a git folder
+  test.each([join("scripts", "factory-settings.json"), join(".claude", "settings.json")])(
+    "%s runs no-outside-pr-code on Monitor and the file tools",
+    async (file) => {
+      const hooks = (await preToolUse(file)).filter((h) =>
+        h.hooks.some((x) => x.command.includes("scripts/hooks/bundled/no-outside-pr-code.js")),
+      )
+      expect(hooks.map((h) => h.matcher)).toEqual([
+        "^Monitor$",
+        "^(Edit|MultiEdit|NotebookEdit|Write)$",
+      ])
+    },
+  )
 })
 
 // A factory subagent with no model named runs on Sonnet; the alias, not a Claude id, so a GLM session's subagent maps to GLM through ANTHROPIC_DEFAULT_SONNET_MODEL. The project file leaves the owner's own sessions here on Claude Code's default

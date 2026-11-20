@@ -1,8 +1,11 @@
+import { join } from "node:path"
+
 import { site } from "@packages/config/site"
 import { db } from "@packages/db"
 import { getBuildVersion } from "@packages/env"
 import { env } from "@packages/env/api-hono"
 import { answerKind } from "@packages/message"
+import { readPolicyOrDefaults, yardSettings } from "@packages/settings"
 import { describeRoute, openAPIRouteHandler, resolver } from "hono-openapi"
 import { HTTPException } from "hono/http-exception"
 import { z } from "zod"
@@ -10,17 +13,23 @@ import { z } from "zod"
 import { apiReference, serveScalarBundle } from "@/lib/api-reference"
 import { baseApp } from "@/lib/base-app"
 import { keepSweeping } from "@/lib/dashboard/attachments"
+import { deliver } from "@/lib/dashboard/deliver"
 import { readsLive } from "@/lib/dashboard/fixture"
-import { getItem } from "@/lib/dashboard/inbox"
+import { endLostRoots, getItem } from "@/lib/dashboard/inbox"
 import { startSdkProbe } from "@/lib/dashboard/sdk"
+import { seedFixtureThreadsAtStart } from "@/lib/dashboard/threads"
+import { DISPATCHER } from "@/lib/dashboard/workers"
 import { globalErrorResponses } from "@/lib/error"
 import { DB_TIMEOUT_MS, healthData } from "@/lib/health"
 import { startRelay } from "@/lib/relay/mac"
+import { checkoutEnvValues, keychainValues } from "@/lib/relay/redact"
 import { createServer, upgradeWebSocket } from "@/lib/server"
+import { dataDir } from "@/lib/sessions/paths"
 import { sessionCookie } from "@/lib/sign-in"
 import { yardClient } from "@/lib/yard/client"
 import { startYardPoll } from "@/lib/yard/inbound"
-import { keychain } from "@/lib/yard/keychain"
+import { keychain, pendingKeychain } from "@/lib/yard/keychain"
+import { outboxAlert, startRotation } from "@/lib/yard/rotate"
 import { requireFeature } from "@/middlewares"
 import {
   accountsRouter,
@@ -291,10 +300,30 @@ keepSweeping()
 // The session the dashboard hosts on the Agent SDK, when PLAYGROUND_SDK_PROBE_DIR names its folder.
 startSdkProbe()
 
+// A root step's run lives in the process that claimed its card, so each approved one with no result from before this start was lost: it reads failed and its poster is told, on a stack that reads this machine alone.
+if (readsLive()) {
+  endLostRoots(db, new Date(), {
+    actor: { label: "Dashboard" },
+    deliver,
+    dispatcher: DISPATCHER,
+  }).catch((error: unknown) =>
+    console.error(
+      `inbox: ending the root steps a restart cut off failed: ${error instanceof Error ? error.message : error}`,
+    ),
+  )
+}
+
 // Yard's mentions of the owner into the Inbox, once a minute, when YARD_API_URL names a hosted Yard.
 startYardPoll(db, yardClient)
 
-// The relay to the hosted Yard, on a stack that reads this Mac alone, never a fixture's: with YARD_API_URL set and the Keychain token, the owner's browser on Yard reads this dashboard through one socket this API dials out, and sends the writes its paired key signs, each run here as the one local owner.
+// A fresh fixture stack's threads page from its first load: an empty thread table takes the fixture's threads at start, one line saying so; a full table and any other source write nothing.
+seedFixtureThreadsAtStart(db).catch((error: unknown) =>
+  console.error(
+    `fixture: seeding the made-up threads failed: ${error instanceof Error ? error.message : error}`,
+  ),
+)
+
+// The relay to the hosted Yard, on a stack that reads this Mac alone, never a fixture's: with YARD_API_URL set and a relay-on token in the Keychain (keychain), the owner's browser on Yard reads this dashboard through one socket this API dials out, and sends the writes its paired key signs, each run here as the one local owner.
 if (env.YARD_API_URL && readsLive()) {
   const api = env.YARD_API_URL
   let made: Promise<string> | null = null
@@ -308,23 +337,42 @@ if (env.YARD_API_URL && readsLive()) {
       made = null
       throw error
     }))
-  startRelay({
-    api,
-    cookie,
-    // a session the API refuses (expired) is made again for the next read
-    dispatch: async (request) => {
-      const response = await app.fetch(request)
-      if (response.status === 401) made = null
-      return response
-    },
-    // a card's kind (answerKind) by its id, as its answer, schedule and dismiss read it, or by the exact `#iN` a message's reply names, never a bare `iN`
-    kindOf: async (key) => {
-      const item = await getItem(db, key)
-      if (!item || (key !== item.id && key !== `#i${item.ref}`)) return null
-      return answerKind(item)
-    },
-    login: async (token) => (await yardClient(api, token).me()).login,
-    token: () => keychain().read(),
+  // read at each bot's read, so a bot add --log or a revoke counts from the next one, and a policy.json that does not parse lets no bot read
+  const readers = () => {
+    const read = readPolicyOrDefaults(dataDir())
+    return read.refusal === undefined ? yardSettings.get(read.settings, "yard.logReaders") : {}
+  }
+  const relay = keychainValues(Object.keys(readers())).then((kept) =>
+    startRelay({
+      api,
+      cookie,
+      // a session the API refuses (expired) is made again for the next read
+      dispatch: async (request) => {
+        const response = await app.fetch(request)
+        if (response.status === 401) made = null
+        return response
+      },
+      // a card's kind (answerKind) by its id, as its answer, schedule and dismiss read it, or by the exact `#iN` a message's reply names, never a bare `iN`
+      kindOf: async (key) => {
+        const item = await getItem(db, key)
+        if (!item || (key !== item.id && key !== `#i${item.ref}`)) return null
+        return answerKind(item)
+      },
+      login: async (token) => (await yardClient(api, token).me()).login,
+      readers,
+      // the .env read at each bot's read, the Keychain's values once, before the relay opens
+      secretValues: () => [...checkoutEnvValues(), ...kept],
+      token: () => keychain().read(),
+    }),
+  )
+  // the Mac's swap of its own token once a day, with no step from the owner, which moves the relay to the new one; a failed swap tells Ops alone
+  startRotation({
+    alert: outboxAlert(dataDir()),
+    client: (token) => yardClient(api, token),
+    keychain: keychain(),
+    pending: pendingKeychain(),
+    renew: () => void relay.then((held) => held.renew()),
+    stamp: join(dataDir(), "yard-rotated.json"),
   })
 }
 

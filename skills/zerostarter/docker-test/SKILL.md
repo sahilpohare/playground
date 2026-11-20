@@ -14,7 +14,7 @@ bash ~/.playground/ops/runner-host/ci.sh web HEAD
 ```
 
 It exits with the build's code, or 255 when the box cannot take it; nothing falls back to the Mac.
-With no runner host set (`RUNNER_HOST`, or the data folder's `ops/runner-host/ip`), it exits 255 at once, and the live dashboard's Postgres stays up: set one up (`scripts/ops/runner-host/host.sh setup <ip>`, then write its address to that ip file), or build the web image on a machine with no live dashboard running.
+With no runner host set (`RUNNER_HOST`, or the data folder's `ops/runner-host/ip`), it exits 255 at once, and the live dashboard's Postgres stays up: set one up (a peer machine of your own user, by [scripts/ops/README.md](../../../scripts/ops/README.md#runner-host)'s runner-host section, then write its address to that ip file), or build the web image on a machine with no live dashboard running.
 The api image still builds here, so a recipe below that names `api` runs as written; a full-stack one runs only on a Mac whose Docker VM holds no live dashboard's Postgres.
 
 Full stack, the same Dockerfiles prod ships, built through run-slot, then started with `--no-build`, since a compose `up` builds every missing image at once.

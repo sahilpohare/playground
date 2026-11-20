@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { isBuild, replays, slotted } from "../../../../packages/scripts/src/commit-slot"
+import { scratchEnv } from "../../../scratch-env"
 
 const SCRIPT = join(import.meta.dir, "../../../../packages/scripts/src/commit-slot.ts")
 const DIR = mkdtempSync(join(tmpdir(), "commit-slot-"))
@@ -129,15 +130,7 @@ describe("commit-slot.ts", () => {
   const worktree = join(DIR, "repo/.claude/worktrees/wt-one")
   mkdirSync(ops, { recursive: true })
   mkdirSync(worktree, { recursive: true })
-  const env = () => {
-    const base = Object.fromEntries(
-      Object.entries(process.env).filter(
-        (entry): entry is [string, string] =>
-          entry[1] !== undefined && entry[0] !== "RUN_SLOT_NICE",
-      ),
-    )
-    return { ...base, HOME: home }
-  }
+  const env = () => scratchEnv(home)
   const run = (args: string[]) =>
     Bun.spawnSync(["bun", "--no-env-file", SCRIPT, ...args], {
       cwd: worktree,
@@ -260,12 +253,7 @@ describe("commit-slot.ts on a worktree whose install predates a workspace depend
   const run = () =>
     Bun.spawnSync(["bun", "--no-env-file", SCRIPT, "echo", "built"], {
       cwd: worktree,
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(([key]) => key !== "RUN_SLOT_NICE"),
-        ),
-        HOME: home,
-      },
+      env: scratchEnv(home),
       stderr: "pipe",
       stdout: "pipe",
     })

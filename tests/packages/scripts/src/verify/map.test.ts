@@ -60,6 +60,20 @@ describe("groupLabelChildren", () => {
     expect(groupLabelChildren(source)).toEqual([{ text: "Other" }])
   })
 
+  test("a MovableGroupLabel's label is read as a SidebarGroupLabel's, and a wrapper's bare children are skipped", () => {
+    const source = `<MovableGroupLabel open={open} setOpen={setOpen}>
+        Scripts
+        <LabelChevron open={open} />
+      </MovableGroupLabel>
+      <SidebarGroupLabel className="w-full pl-2.5" render={toggle}>
+        {children}
+      </SidebarGroupLabel>
+      <MovableGroupLabel open={open} setOpen={setOpen}>
+        {label}
+      </MovableGroupLabel>`
+    expect(groupLabelChildren(source)).toEqual([{ text: "Scripts" }, { expression: true }])
+  })
+
   test("a label's words come before an expression it holds, as Threads before its pager", () => {
     const source = `<SidebarGroupLabel className="pl-2.5">
         Threads

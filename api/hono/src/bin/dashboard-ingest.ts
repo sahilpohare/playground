@@ -1,3 +1,4 @@
+import "@/bin/needs-database"
 import { claudeSession, claudeTranscript } from "@packages/db"
 import { env } from "@packages/env/db"
 import { SQL } from "bun"

@@ -7,6 +7,7 @@ import type { SessionState } from "../../packages/config/src/session-state"
 import { dataDir } from "../../packages/env/src/data-dir"
 import { alertFor } from "../../packages/scripts/src/stuck-alert"
 import { writeAtomic } from "../../packages/scripts/src/write-atomic"
+import { input } from "./input"
 import { loadNames } from "./role"
 
 type Environment = Record<string, string | undefined>
@@ -274,16 +275,29 @@ export function procOf(pid: number): Proc | undefined {
   return { comm, env, ppid: Number(ps("ppid").trim()) || 0 }
 }
 
-// The claude process a Bash call runs under, the nearest at or above `pid` whose executable is claude: the role it was started with, and the session id Claude Code's registry holds for it (<config>/sessions/<pid>.json, whose pid is that process's), the config folder named by that process's own CLAUDE_CONFIG_DIR, else its own HOME's .claude, so a prefix that drops PLAYGROUND_ROLE or moves CLAUDE_CONFIG_DIR or HOME changes nothing it reads. A claude process whose environment reads back empty is returned with no role and no session id, so callerRefusal refuses it and rm still reads a session. Two readers: callerRefusal, below, refuses when it finds none, and playground rm --discard (callerOf in packages/scripts/src/playground/rm.ts) reads none as a terminal's own call.
+// The claude process a Bash call runs under, the nearest at or above `pid` whose executable is claude: the role it was started with, and the session id Claude Code's registry holds for it (<config>/sessions/<pid>.json, whose pid is that process's), the config folder named by that process's own CLAUDE_CONFIG_DIR, else its own HOME's .claude, so a prefix that drops PLAYGROUND_ROLE or moves CLAUDE_CONFIG_DIR or HOME changes nothing it reads. A claude process whose environment reads back empty is returned with no role and no session id, so callerRefusal refuses it. Its reader: callerRefusal, below, refuses when it finds none.
 export async function sessionAbove(
   pid: number = process.ppid,
   procs: (pid: number) => Proc | undefined = procOf,
 ): Promise<{ pid: number; role: string; sessionId?: string } | undefined> {
+  const above = await claudeAbove(pid, procs)
+  if (!above) return undefined
+  const { config: _config, env: _env, ...session } = above
+  return session
+}
+
+// sessionAbove's walk with the claude process's own environment and the config folder its registry was read from, for a reader that reads every folder from that process rather than its caller (ship:yard's launch).
+export async function claudeAbove(
+  pid: number = process.ppid,
+  procs: (pid: number) => Proc | undefined = procOf,
+): Promise<
+  { config?: string; env: Environment; pid: number; role: string; sessionId?: string } | undefined
+> {
   for (let at = pid, hop = 0; at > 1 && hop < HOPS; hop++) {
     const proc = procs(at)
     if (!proc) return undefined
     if (isClaude(proc.comm)) {
-      if (!Object.keys(proc.env).length) return { pid: at, role: "" }
+      if (!Object.keys(proc.env).length) return { env: {}, pid: at, role: "" }
       const config =
         proc.env.CLAUDE_CONFIG_DIR || (proc.env.HOME ? join(proc.env.HOME, ".claude") : "")
       const entry = (
@@ -295,7 +309,13 @@ export async function sessionAbove(
       ) as { pid?: unknown; sessionId?: unknown } | null
       const sessionId =
         entry?.pid === at && typeof entry.sessionId === "string" ? entry.sessionId : undefined
-      return { pid: at, role: proc.env.PLAYGROUND_ROLE ?? "", sessionId }
+      return {
+        config: config || undefined,
+        env: proc.env,
+        pid: at,
+        role: proc.env.PLAYGROUND_ROLE ?? "",
+        sessionId,
+      }
     }
     at = proc.ppid
   }
@@ -325,5 +345,5 @@ if (import.meta.main) {
     const [bin = "", ...rest] = process.argv.slice(3)
     const child = Bun.spawn([bin, ...rest], { stderr: "ignore", stdout: "ignore", timeout: 2000 })
     await child.exited
-  } else await run(await Bun.stdin.text())
+  } else await run(await input("session-state", "recorder"))
 }

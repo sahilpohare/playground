@@ -34,13 +34,13 @@ jobs:
       # bare checkout = base branch under pull_request_target; never set ref to the PR head
       - name: Checkout
         if: steps.gate.outputs.labelled == 'true'
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Setup Bun
         if: steps.gate.outputs.labelled == 'true'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
 
@@ -50,7 +50,7 @@ jobs:
 
       - name: Add labels based on files in PR
         if: steps.gate.outputs.labelled == 'true'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -263,7 +263,7 @@ jobs:
       - name: Get approval count
         if: steps.gate.outputs.labelled == 'true'
         id: approvals
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           result-encoding: string
@@ -294,7 +294,7 @@ jobs:
 
       - name: Apply dynamic approval label
         if: steps.gate.outputs.labelled == 'true'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -375,7 +375,7 @@ jobs:
 
       - name: Comment merge-method guidance
         if: steps.gate.outputs.labelled == 'true' && (github.event.action == 'opened')
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

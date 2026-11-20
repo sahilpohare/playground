@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import { REPLY_RE } from "../../../../../../api/hono/src/lib/dashboard/inbox"
 import {
+  BOT_GETS,
   cardsOf,
   REPLY_REFS,
   pathOn,
@@ -182,5 +183,15 @@ describe("cardsOf, the Inbox cards a relayed write reaches", () => {
         body,
         { refuse: true },
       ])
+  })
+})
+
+describe("BOT_GETS, the one route a bot's read takes (#1888)", () => {
+  test("is the dispatcher's log alone, on neither RELAY_GETS nor RELAY_WRITES, so the owner's relay never carries it", () => {
+    expect(BOT_GETS).toEqual(["/api/v1/dashboard/dispatcher/log"])
+    for (const route of BOT_GETS) {
+      expect(relayAllowed("GET", route)).toBe(false)
+      expect(pathOn(RELAY_WRITES, route)).toBe(false)
+    }
   })
 })

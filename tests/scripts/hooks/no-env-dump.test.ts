@@ -73,6 +73,8 @@ describe("a command that runs with the environment, or names it, runs", () => {
     'echo "env"',
     "envsubst < template",
     "bun run --env-file x dev",
+    'for s in bash zsh; do env -i PATH=/usr/bin:/bin $s -c "$f"; done',
+    'for f in a b; do for s in bash zsh; do env -i PATH=/usr/bin:/bin $s -c "$f"; done; done',
   ])("%s", async (command) => {
     expect(await bash(command)).toBeUndefined()
   })

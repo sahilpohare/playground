@@ -1,12 +1,13 @@
 import { join } from "node:path"
 
 import type { Schedule } from "@packages/config/schedule"
+import { RETIRED } from "@packages/settings"
 import { z } from "zod"
 
 import { processStarts } from "@/lib/dashboard/peers"
 import { dataDir } from "@/lib/sessions/paths"
 
-// The ops jobs Ops runs as scripts in its own terminals, with no Claude session behind them: each writes a heartbeat, ops/<job>.json under Claude Code's config folder, every beat (atomically, through ops/beat.py), and the dashboard only reads it. The board lists the jobs so what keeps the app running shows even with no runner session up: every ops-*.json there is a job, so a new one shows with no change here, the ops-report job (ops-report.json) among them, and so is every job jobs.json lists, whatever its prefix; report.json, alerts.log and any other file no row names are not.
+// The ops jobs Ops runs as scripts in its own terminals, with no Claude session behind them: each writes a heartbeat, ops/<job>.json under Claude Code's config folder, every beat (atomically, through ops/beat.py), and the dashboard only reads it. The board lists the jobs so what keeps the app running shows even with no runner session up: every ops-*.json there is a job, so a new one shows with no change here, the ops-report job (ops-report.json) among them, and so is every job jobs.json lists, whatever its prefix; report.json, alerts.log and any other file no row names are not, nor is a RETIRED job, whose files outlive it.
 const HEARTBEAT_FILES = "ops-*.json"
 // A job's name, with or without the ops- prefix, since an org's job may take any name of this shape; it holds no dot or slash, so its <name>.json heartbeat stays in the folder.
 const JOB_NAME = /^[a-z][\w-]*$/
@@ -16,19 +17,22 @@ export const JOBS_FILE = "jobs.json"
 
 // What each job core's registry holds does, in one line for its row's hover; any other job, an org's, shows its own jobs.json description, which its jobs setting gives, else NO_DESCRIPTION.
 export const OPS_DOES: Record<string, string> = {
-  "ops-awake": "Keeps this Mac awake on power and on battery",
   "ops-changelog": "Adds new merges to the Changelog",
   "ops-dashboard": "Keeps the Dashboard on its branch's latest head",
   "ops-dm-watch": "Passes your DM messages to Playground in Slack mode",
   "ops-ext-sync": "Syncs each extension with its private repo each night",
   "ops-flow": "Tells the leads when a run slot is held too long",
   "ops-herdr": "Keeps the herdr terminal servers up",
+  "ops-keep-awake": "Keeps an idle Mac awake, so the jobs run on",
   "ops-machine": "Saves this Mac's load and memory",
   "ops-merge-train": "Merges ready pull requests together",
+  "ops-model-tunnel": "Keeps the link to the model servers on the other machine open",
+  "ops-peer-relay": "Carries messages between sessions on this machine and the other one",
   "ops-restore": "Puts a lost main checkout back once its guards are gone",
   "ops-session-resume": "Tells each session to carry on once its usage limit resets",
   "ops-sweep": "Checks runners, probes, asks and heartbeats",
   "ops-tick": "Runs the timed checks and passes on what they find",
+  "ops-tunnel": "Keeps the link to the Dashboard on another machine open",
   "ops-unstick": "Finds stuck sessions no hook reported, and clears the usage-limit dialog",
   "ops-usage": "Reads Claude's 5-hour and week usage",
   "ops-wa": "Passes your WhatsApp messages to Playground and sends its replies",
@@ -37,19 +41,22 @@ export const OPS_DOES: Record<string, string> = {
 
 // Each registry job's shown name, in plain words with no "ops" in it; its id shows on hover alone.
 export const RUNNER_NAMES: Record<string, string> = {
-  "ops-awake": "Keep Mac awake",
   "ops-changelog": "Changelog",
   "ops-dashboard": "Dashboard updates",
   "ops-dm-watch": "Your DM watcher",
   "ops-ext-sync": "Extensions sync",
   "ops-flow": "Run slot alarm",
   "ops-herdr": "Herdr servers",
+  "ops-keep-awake": "Keep awake",
   "ops-machine": "Machine readings",
   "ops-merge-train": "Merge train",
+  "ops-model-tunnel": "Model tunnel",
+  "ops-peer-relay": "Peer messages",
   "ops-restore": "Checkout restore",
   "ops-session-resume": "Usage-limit resumes",
   "ops-sweep": "Cleanup sweep",
   "ops-tick": "Timed checks",
+  "ops-tunnel": "Dashboard tunnel",
   "ops-unstick": "Stuck session watcher",
   "ops-usage": "Claude usage readings",
   "ops-wa": "WhatsApp link",
@@ -106,10 +113,22 @@ export const STALE_CYCLES = 3
 
 const EXITED = /^(supervisor exited|loop exited)/
 
+// A job's steady healthy beat that is not `ok` but is not a failure, up: for the tunnels and idle: for the relay: a copy of HEALTHY_PREFIXES in packages/scripts/src/ops-sweep/sweep.ts, kept in step with it by a test (tests/api/hono/src/lib/dashboard/ops.test.ts).
+export const HEALTHY_PREFIXES: Record<string, string[]> = {
+  "ops-model-tunnel": ["up: "],
+  "ops-peer-relay": ["idle: "],
+  "ops-tunnel": ["up: "],
+}
+
+// A job's beat steady and healthy, so it reads Running like ops-sweep does and not Failing: it is not `ok`, but it starts one of its job's healthy prefixes.
+function healthyBeat(job: string, result: string): boolean {
+  return (HEALTHY_PREFIXES[job] ?? []).some((prefix) => result.startsWith(prefix))
+}
+
 // What jobs.json says a job calls, beside its pause mark.
 export type JobCalls = { callsModel: boolean; model: string | null }
 
-// Pure: a job's row from its heartbeat file's text (null when the file is missing) and whether its pid is still running (null when that could not be read). Down when the file is missing, does not read or names another job, the loop has exited, the pid is gone or the last beat is older than STALE_CYCLES cycles; Waiting when the last result starts `waiting: ` (a job with nothing to read yet, the reason after it); Failing when it is anything else but ok; else Running.
+// Pure: a job's row from its heartbeat file's text (null when the file is missing) and whether its pid is still running (null when that could not be read). Down when the file is missing, does not read or names another job, the loop has exited, the pid is gone or the last beat is older than STALE_CYCLES cycles; Waiting when the last result starts `waiting: ` (a job with nothing to read yet, the reason after it); Failing when it is not `ok` and not one of its job's steady healthy beats; a healthy steady beat, and `ok`, reads Running.
 export function opsRowOf(
   job: string,
   text: string | null,
@@ -170,7 +189,7 @@ export function opsRowOf(
   }
   const waiting = /^waiting: (.+)/.exec(beat.lastResult)?.[1]
   if (waiting) return { ...withRefused, lastBeatAt, problem, reason: waiting, status: "waiting" }
-  if (beat.lastResult !== "ok") {
+  if (beat.lastResult !== "ok" && !healthyBeat(job, beat.lastResult)) {
     return {
       ...withRefused,
       lastBeatAt,
@@ -265,12 +284,12 @@ export async function opsJobs(dir = opsDir()): Promise<string[]> {
   return jobs.toSorted()
 }
 
-// Every ops job's row, A to Z: each heartbeat file's, and each job jobs.json lists that has none, paused ones included, so the Scripts count and the Paused table hold them. A file that cannot be read reads as missing; whether each pid runs comes from the same ps read that proves a session live.
+// Every ops job's row, A to Z: each heartbeat file's, and each job jobs.json lists that has none, paused ones included, so the Scripts count and the Paused table hold them; a RETIRED job shows none, since its files outlive it. A file that cannot be read reads as missing; whether each pid runs comes from the same ps read that proves a session live.
 export async function readOps(dir = opsDir(), now = Date.now()): Promise<OpsRow[]> {
   const listed = jobsListed(await readText(join(dir, JOBS_FILE)).catch(() => null))
-  const jobs = [
-    ...new Set([...(await opsJobs(dir)), ...listed.enabled, ...listed.paused]),
-  ].toSorted()
+  const jobs = [...new Set([...(await opsJobs(dir)), ...listed.enabled, ...listed.paused])]
+    .filter((job) => !RETIRED.includes(job))
+    .toSorted()
   const texts = await Promise.all(
     jobs.map((job) => readText(join(dir, `${job}.json`)).catch(() => null)),
   )

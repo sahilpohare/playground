@@ -1,11 +1,14 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
+import { mkdirSync, writeFileSync } from "node:fs"
 
 import {
   capacityLog,
+  lw,
   minutesAgo,
   offUntil,
   offUntilUtc,
   placing,
+  root,
   spawn,
   usage,
   weekAt,
@@ -15,6 +18,8 @@ import {
 setDefaultTimeout(40_000)
 
 describe("the capacity gate refuses and spawns nothing", () => {
+  const SPARE_SKIPPED =
+    "skipped (--account spare@example.com: this machine holds no usage-spare.json for it under 60 minutes old, which the ops tick's other-logins beat writes)"
   const capResetsAt = new Date(Date.now() + 3_600_000)
   // Each row builds its file inside the test, so no stamp is older than the moment the case runs.
   const claudeUsageRefusals: [string, () => string, ...string[]][] = [
@@ -104,7 +109,7 @@ describe("the capacity gate refuses and spawns nothing", () => {
     ])
   })
 
-  test("a session on --account with no usage.json yet skips the usage check as before", async () => {
+  test("a session on --account with no usage.json and no usage-spare.json skips the usage check", async () => {
     const r = await spawn(
       ["worker", "worker-brave-otter", "b.md", "--account", "spare@example.com"],
       [],
@@ -114,7 +119,7 @@ describe("the capacity gate refuses and spawns nothing", () => {
     expect(capacityLog(r)).toEqual([
       expect.objectContaining({
         readings: expect.objectContaining({
-          usage: "skipped (--account spare@example.com, whose usage this machine does not read)",
+          usage: SPARE_SKIPPED,
         }),
         verdict: "pass",
       }),
@@ -215,7 +220,64 @@ describe("the capacity gate refuses and spawns nothing", () => {
     )
   })
 
-  test("a session on --account skips the usage check, since the readings name one login", async () => {
+  // A resume of a live row, or of one spawn.sh closed live in the last 15 minutes, brings back work already running, so the 98% backstop alone holds it; an ended row's resume and a fresh start still meet the pace line.
+  const ID = "a7e37f18-1fa1-4cb2-a26e-4ff414fd4b27"
+  const RESUMED = "t4n7vx-worker"
+  const roster = (status: string) =>
+    JSON.stringify({ agents: [{ name: RESUMED, role: "worker", status, task: "t" }] })
+  const resume = (status: string, week: number, setup?: (home: string) => void) =>
+    spawn(
+      ["resume", RESUMED, root, ID],
+      [],
+      { ROSTER_JSON: roster(status), USAGE_JSON: weekAt(week) },
+      undefined,
+      { name: RESUMED, backend: "claude" },
+      setup,
+    )
+  const closedMinutesAgo = (minutes: number) => (home: string) => {
+    mkdirSync(lw(home, "closes"), { recursive: true })
+    const at = new Date(Date.now() - minutes * 60_000)
+    writeFileSync(
+      lw(home, "closes", RESUMED),
+      `${Math.floor(at.getTime() / 1000)} ${at.toISOString().slice(0, 19)}Z working\n`,
+    )
+  }
+  const RESUME_PACE = "skipped (a resume of a live session: the 98% backstop alone)"
+
+  test.each([
+    ["a live row", () => resume("working", 29)],
+    ["a row spawn.sh closed live 2 minutes ago", () => resume("ended", 29, closedMinutesAgo(2))],
+  ])("Claude usage: a resume of %s passes a week past its pace", async (_, run) => {
+    const r = await run()
+    expect(r.err).not.toContain("the usage gate holds it")
+    expect(r.code).toBe(0)
+    expect(capacityLog(r)).toEqual([
+      expect.objectContaining({
+        readings: expect.objectContaining({ pace: RESUME_PACE, week: 29 }),
+        verdict: "pass",
+      }),
+    ])
+  })
+
+  test("Claude usage: a resume of a live row at 98% meets the backstop", async () => {
+    const r = await resume("working", 98)
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      "the usage gate holds it: the week is at 98% (usage.json seven_day.used_percentage), and 98% is the sanity backup for a resume of a live session",
+    )
+  })
+
+  test.each([
+    ["a resume of an ended row", () => resume("ended", 29)],
+    ["a fresh start", () => spawn(["worker", RESUMED, "b.md"], [], { USAGE_JSON: weekAt(29) })],
+  ])("Claude usage: %s still meets the pace line", async (_, run) => {
+    const r = await run()
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain(paceMessage)
+  })
+
+  test("a session on --account skips usage.json, whose readings name another login", async () => {
     const r = await spawn(
       ["worker", "worker-brave-otter", "b.md", "--account", "spare@example.com"],
       [],
@@ -226,9 +288,71 @@ describe("the capacity gate refuses and spawns nothing", () => {
       expect.objectContaining({
         verdict: "pass",
         readings: expect.objectContaining({
-          usage: "skipped (--account spare@example.com, whose usage this machine does not read)",
+          usage: SPARE_SKIPPED,
         }),
       }),
     ])
   })
+
+  // --account spare@example.com is judged on its own usage-spare.json, which the ops tick's other-logins beat writes every 30 minutes, at a bare start's pace while under 60 minutes old.
+  const spareWeek = (week: number, written = minutesAgo(10)) =>
+    JSON.stringify({
+      ...JSON.parse(weekAt(week)),
+      account: "spare@example.com",
+      writtenAt: written,
+    })
+  const onSpare = (env: Record<string, string>) =>
+    spawn(["worker", "worker-brave-otter", "b.md", "--account", "spare@example.com"], [], env)
+
+  test("a session on --account with a fresh usage-spare.json past its pace is refused", async () => {
+    const r = await onSpare({ SPARE_USAGE_JSON: spareWeek(29) })
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain(
+      "the usage gate holds it: --account spare@example.com: the week is at 29% (usage-spare.json seven_day.used_percentage), past 14.3 points a day (2.0 days in, 28.6 is its pace)",
+    )
+  })
+
+  test("a session on --account with a fresh usage-spare.json under its pace starts, and its row reads that week", async () => {
+    const r = await onSpare({ SPARE_USAGE_JSON: spareWeek(20) })
+    expect(r.code).toBe(0)
+    expect(placing(r)).not.toEqual([])
+    expect(capacityLog(r)).toEqual([
+      expect.objectContaining({ readings: expect.objectContaining({ week: 20 }), verdict: "pass" }),
+    ])
+  })
+
+  test("a session on --account with a fresh usage-spare.json past its pace starts while the pace check is off", async () => {
+    const r = await onSpare({ PACE_OFF_UNTIL: offUntilUtc, SPARE_USAGE_JSON: spareWeek(29) })
+    expect(r.code).toBe(0)
+    expect(capacityLog(r)).toEqual([
+      expect.objectContaining({
+        readings: expect.objectContaining({
+          pace: `skipped until ${offUntilUtc} (usage-pace-off-until)`,
+        }),
+        verdict: "pass",
+      }),
+    ])
+  })
+
+  test.each([
+    ["60 minutes old", () => spareWeek(29, minutesAgo(60))],
+    [
+      "naming another account",
+      () => JSON.stringify({ ...JSON.parse(spareWeek(29)), account: "spare@other.example" }),
+    ],
+    ["that does not read", () => "{ nope"],
+  ])(
+    "a session on --account with a usage-spare.json %s past its pace skips the usage check",
+    async (_, raw) => {
+      const r = await onSpare({ SPARE_USAGE_JSON: raw() })
+      expect(r.code).toBe(0)
+      expect(capacityLog(r)).toEqual([
+        expect.objectContaining({
+          readings: expect.objectContaining({ usage: SPARE_SKIPPED }),
+          verdict: "pass",
+        }),
+      ])
+    },
+  )
 })

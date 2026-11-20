@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -28,10 +35,15 @@ test("the dispatcher reads the Dashboard by /api/health and the Inbox by bun run
   expect(step).toContain("`dashboardCheckout()`")
   expect(step).toContain("a session the Dashboard hosts gets no `PLAYGROUND_REPO`")
   expect(step).toContain(
-    '`curl -sS ${C:+--cacert} ${C:+"$C"} "$(cd "$D" && bunx portless get api.playground)/api/health"`',
+    '`curl -sS ${C:+--cacert} ${C:+"$C"} "$(cd "$D" && PORTLESS_STATE_DIR="$P" bunx portless get api.playground)/api/health"`',
   )
-  expect(step).toContain('`"message":"ok"`')
-  expect(step).toContain('`"degraded"`')
+  expect(step).toContain(
+    'up in first-run setup, with no database yet, when it answers `"setup":true`',
+  )
+  expect(step).toContain(
+    'its database read from `db`, reachable on `"db":"ok"` and unreachable on `"db":"unreachable"`',
+  )
+  expect(step).not.toContain('`"message":"ok"`')
   expect(step).toContain("down on any other answer")
   expect(step).toContain('`bun run --cwd "$D" ask open`')
   expect(step).toContain("it has run neither read")
@@ -54,7 +66,7 @@ const stepTwo = async () => {
 // The step's call run in bash with fakes first on PATH: playground prints the setting given (or fails on null), bunx names an API, and curl prints its arguments one a line.
 const runStep = (
   shell: string,
-  opts: { branch: string | null; caDir?: string; cwd?: string; repo?: string },
+  opts: { branch: string | null; caDir?: string; cwd?: string; home?: string; repo?: string },
 ) => {
   const bin = mkdtempSync(join(tmpdir(), "dispatcher-step-bin-"))
   const fake = (name: string, body: string) => {
@@ -67,13 +79,13 @@ const runStep = (
       ? 'echo "playground: settings failed" >&2; exit 1'
       : `echo '{"key":"live.branch","value":"${opts.branch}"}'`,
   )
-  fake("bunx", 'echo "https://api.example.localhost"')
+  fake("bunx", 'echo "https://api.example.localhost"; echo "state:$PORTLESS_STATE_DIR" >&2')
   fake("curl", 'for a in "$@"; do echo "arg:$a"; done')
   const bun = dirname(process.execPath)
   const child = Bun.spawnSync(["bash", "-c", shell], {
     cwd: opts.cwd,
     env: {
-      HOME: process.env.HOME!,
+      HOME: opts.home ?? process.env.HOME!,
       PATH: `${bin}:${bun}:/usr/bin:/bin`,
       ...(opts.caDir ? { PORTLESS_STATE_DIR: opts.caDir } : {}),
       ...(opts.repo ? { PLAYGROUND_REPO: opts.repo } : {}),
@@ -81,7 +93,7 @@ const runStep = (
     stderr: "pipe",
     stdout: "pipe",
   })
-  return { code: child.exitCode, out: child.stdout.toString() }
+  return { code: child.exitCode, err: child.stderr.toString(), out: child.stdout.toString() }
 }
 
 const fixtureRepo = () => {
@@ -134,4 +146,15 @@ test("the health read passes portless's CA to curl when portless has one, as pro
   const withCa = runStep(call, { branch: "live", caDir, repo })
   expect(withCa.out).toContain(`arg:--cacert\narg:${join(caDir, "ca.pem")}\n`)
   expect(withCa.out).toContain("arg:https://api.example.localhost/api/health")
+})
+
+// On Linux the stack's API starts the 1355 proxy in ~/.portless/fallback with TLS on, so portless get names its https URL only when asked in that folder (#2299).
+test("the health read asks portless get in the folder portlessDir() names, the 1355 proxy's while only it serves (#2299)", async () => {
+  const { curl, finds } = await stepTwo()
+  const home = mkdtempSync(join(tmpdir(), "dispatcher-step-home-"))
+  const fallback = join(home, ".portless", "fallback")
+  mkdirSync(fallback, { recursive: true })
+  writeFileSync(join(fallback, "proxy.pid"), String(process.pid))
+  const got = runStep(`${finds}; ${curl}`, { branch: "live", home, repo: fixtureRepo() })
+  expect(got.err).toContain(`state:${fallback}\n`)
 })

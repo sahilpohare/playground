@@ -3,8 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { UNSET_REPOS } from "../../../packages/scripts/src/trace-count/kinds"
+import { reposOf } from "../../../packages/scripts/src/trace-count/kinds"
 import { FIGURE, publicDraftHit, publicRefusal } from "../../../scripts/hooks/public-draft"
+import { originCheckout } from "../../machine"
 import { storeWith } from "./render-set"
 
 const root = join(import.meta.dir, "..", "..", "..")
@@ -124,15 +125,16 @@ describe("publicDraftHit", () => {
       "no-public-leak.json": JSON.stringify(PUBLIC),
       "playground-terms.json": JSON.stringify(terms),
     })
-    expect(UNSET_REPOS.public).toHaveLength(1)
-    for (const repo of UNSET_REPOS.public) {
-      const checked = await publicDraftHit(
-        `The code is in ${repo}.`,
-        { PLAYGROUND_DATA_DIR: unset },
-        scratch,
-      )
-      expect(checked.hit?.detail).toBe("a repository's name")
-    }
+    const checkout = originCheckout(join(scratch, "origin-checkout"), "acme/made-up-origin")
+    expect(reposOf({ schemaVersion: 1, values: {} }, checkout).public).toEqual([
+      "acme/made-up-origin",
+    ])
+    const checked = await publicDraftHit(
+      "The code is in acme/made-up-origin.",
+      { PLAYGROUND_DATA_DIR: unset },
+      checkout,
+    )
+    expect(checked.hit?.detail).toBe("a repository's name")
   })
 
   test("refuses, as the guards do, when a list cannot be read", async () => {

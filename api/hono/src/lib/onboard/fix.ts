@@ -29,6 +29,8 @@ type Step =
       argv: string[]
       detached?: true
       env?: Env
+      // the reason shown for an exit code the step knows, in place of failed
+      exits?: Record<number, string>
       failed?: string
       label: string
       login?: true
@@ -39,11 +41,12 @@ type Step =
 
 type Env = Record<string, string | undefined>
 
-// What a test injects: the environment the steps are given theirs from, whether the stack reads this machine, the folders added after PATH (where Homebrew puts what it installs), one bound for every step and the wait between docker info tries.
+// What a test injects: the environment the steps are given theirs from, whether the stack reads this machine, the folders added after PATH (where Homebrew puts what it installs), the OS, one bound for every step and the wait between docker info tries.
 type Deps = {
   env?: () => Env
   live?: () => boolean
   paths?: string[]
+  platform?: NodeJS.Platform
   stepMs?: number
   waitMs?: number
 }
@@ -52,11 +55,18 @@ const KEEP = 40
 const NO_BROWSER = "/usr/bin/true"
 const GITHUB_DEVICE = "https://github.com/login/device"
 const CLAUDE_INSTALLER = "https://claude.ai/install.sh"
+// The script that imports portless's CA into each Firefox profile that does not trust it yet, as the signed-in user.
+const CA_TRUST = join(import.meta.dir, "../../../../../packages/scripts/src/playground/ca-trust.ts")
 const HERDR_PIN = join(
   import.meta.dir,
   "../../../../../packages/scripts/src/playground/herdr-pin.ts",
 )
-// portless's own CLI in this checkout, which the trust fix runs as the signed-in user and the proxy fix as root through macOS's administrator dialog: any password goes to macOS's own window.
+// The script that records the owner's yes to Claude Code's folder trust question for this checkout's main checkout.
+const CLAUDE_TRUST = join(
+  import.meta.dir,
+  "../../../../../packages/scripts/src/playground/claude-trust.ts",
+)
+// portless's own CLI in this checkout, which the trust fix runs as the signed-in user and the proxy fix as root through macOS's administrator dialog, on Linux pkexec's: any password goes to the OS's own window.
 const PORTLESS_CLI = join(import.meta.dir, "../../../../../node_modules/portless/dist/cli.js")
 const FAKE = join(import.meta.dir, "../../fixtures/fix.ts")
 const BREW_PATHS = ["/opt/homebrew/bin", "/usr/local/bin"]
@@ -89,8 +99,16 @@ const PASSED = [
 // Each fix's steps, from what is on PATH now, each with the most it may take; the database's two starts (a container, or PGlite with no Docker) are the setup app's own, so they have none here.
 const PLANS: Record<
   FixId,
-  ((has: (tool: string) => boolean, dir: string, from: Env) => Step[]) | null
+  ((has: (tool: string) => boolean, dir: string, from: Env, os: NodeJS.Platform) => Step[]) | null
 > = {
+  "ca-trust": () => [
+    {
+      argv: ["bun", "--no-env-file", CA_TRUST],
+      failed: "Firefox was not set to trust the certificate. Click Trust it in Firefox again.",
+      label: "Trusting the local web proxy's certificate in Firefox",
+      ms: MINUTE,
+    },
+  ],
   claude: (_, dir) => [
     {
       argv: [
@@ -115,6 +133,13 @@ const PLANS: Record<
       label: "Signing in to Claude Code",
       login: true,
       ms: 15 * MINUTE,
+    },
+  ],
+  "claude-trust": () => [
+    {
+      argv: ["bun", "--no-env-file", CLAUDE_TRUST],
+      label: `Trusting ${site.name}'s folder in Claude Code`,
+      ms: MINUTE,
     },
   ],
   codex: (has) => [
@@ -173,16 +198,29 @@ const PLANS: Record<
       : { argv: ["brew", "install", "node"], label: "Installing Node.js", ms: 20 * MINUTE },
   ],
   pglite: null,
-  proxy: () => [
+  proxy: (_, __, ___, os) => [
     {
       admin: true,
       argv: ["node", PORTLESS_CLI, "service", "install"],
       detached: true,
-      failed:
-        "Your Mac did not set up the web address. Click Set up the web address again, and enter your Mac's password in its window.",
       label: "Setting up the web address",
       ms: 5 * MINUTE,
-      note: "Your Mac asks for your password in its own window",
+      ...(os === "linux"
+        ? {
+            // pkexec's own codes: 126 when the owner closes its window, 127 when no window could ask
+            exits: {
+              126: "You closed the password window, so the web address is not set up. Click Set up the web address again and enter your password.",
+              127: "Your computer could not ask for your password, so the web address is not set up.",
+            },
+            failed:
+              "Your computer did not set up the web address. Click Set up the web address again, and enter your password in its window.",
+            note: "Your computer asks for your password in its own window",
+          }
+        : {
+            failed:
+              "Your Mac did not set up the web address. Click Set up the web address again, and enter your Mac's password in its window.",
+            note: "Your Mac asks for your password in its own window",
+          }),
     },
   ],
   python: () => [
@@ -242,12 +280,10 @@ const appleString = (words: string) => `"${words.replace(/[\\"]/g, (c) => `\\${c
 
 const shellWord = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`
 
-// An admin step's line for macOS's administrator dialog, which runs it as root as sudo does in a terminal: osascript's do shell script, built from the step's fixed argv and this user's own home, ids and portless folder alone, each word single-quoted for the shell and the line escaped for AppleScript, so a home or folder holding a quote, a space or `$(...)` stays one literal word.
-export const adminLine = (
-  command: string[],
-  base: Env,
-  user: { gid: number; homedir: string; uid: number; username: string } = userInfo(),
-): string => {
+type User = { gid: number; homedir: string; uid: number; username: string }
+
+// An admin step's command as root sees it: /usr/bin/env -i with this user's own home, ids and portless folder alone, as sudo would pass them, then the step's fixed argv.
+const rootCommand = (command: string[], base: Env, user: User) => {
   const vars = {
     HOME: user.homedir,
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -257,14 +293,20 @@ export const adminLine = (
     SUDO_UID: String(user.uid),
     SUDO_USER: user.username,
   }
-  const line = [
-    "/usr/bin/env",
-    "-i",
-    ...Object.entries(vars).map(([k, v]) => `${k}=${v}`),
-    ...command,
-  ]
-    .map(shellWord)
-    .join(" ")
+  return ["/usr/bin/env", "-i", ...Object.entries(vars).map(([k, v]) => `${k}=${v}`), ...command]
+}
+
+// An admin step's argv on Linux: pkexec, which asks for the password in the desktop's own window and, with its internal agent off, never in a terminal, then the root command as separate words, so no shell reads them.
+export const adminArgv = (
+  pkexec: string,
+  command: string[],
+  base: Env,
+  user: User = userInfo(),
+): string[] => [pkexec, "--disable-internal-agent", ...rootCommand(command, base, user)]
+
+// An admin step's line for macOS's administrator dialog, which runs it as root as sudo does in a terminal: osascript's do shell script, built from the root command, each word single-quoted for the shell and the line escaped for AppleScript, so a home or folder holding a quote, a space or `$(...)` stays one literal word.
+export const adminLine = (command: string[], base: Env, user: User = userInfo()): string => {
+  const line = rootCommand(command, base, user).map(shellWord).join(" ")
   return `do shell script ${appleString(line)} with prompt ${appleString(PROMPT)} with administrator privileges`
 }
 
@@ -285,6 +327,7 @@ export const createFixes = ({
   env = () => process.env,
   live = readsLive,
   paths = BREW_PATHS,
+  platform = process.platform,
   stepMs,
   waitMs = 2_000,
 }: Deps = {}) => {
@@ -335,9 +378,7 @@ export const createFixes = ({
       )
     }
     if (step.login) return login(job, command, { ...base, ...step.env }, step.ms)
-    const osascript = step.admin ? Bun.which("osascript", { PATH: base.PATH ?? "" }) : null
-    if (step.admin && !osascript) throw new Error("osascript is not on this Mac")
-    const child = Bun.spawn(osascript ? [osascript, "-e", adminLine(command, base)] : command, {
+    const child = Bun.spawn(step.admin ? asRoot(command, base) : command, {
       cwd: dir,
       detached: step.detached,
       env: base,
@@ -355,7 +396,18 @@ export const createFixes = ({
     // A grandchild left holding the pipes keeps reading open, so a step past its bound settles without it.
     if (timing.done()) throw new Error(LATE)
     await reading
-    if (code !== 0) throw new Error(step.failed ?? job.lines.at(-1) ?? `it exited with ${code}`)
+    if (code !== 0)
+      throw new Error(
+        step.exits?.[code] ?? step.failed ?? job.lines.at(-1) ?? `it exited with ${code}`,
+      )
+  }
+
+  const asRoot = (command: string[], base: Env) => {
+    const linux = platform === "linux"
+    const tool = Bun.which(linux ? "pkexec" : "osascript", { PATH: base.PATH ?? "" })
+    if (!tool)
+      throw new Error(linux ? "pkexec is not on this computer" : "osascript is not on this Mac")
+    return linux ? adminArgv(tool, command, base) : [tool, "-e", adminLine(command, base)]
   }
 
   // A sign-in in a pty (gh auth login --web, claude auth login, codex login --device-auth): Enter takes the default of each prompt LOGINS names for it (for gh, git over https and the browser it would open, which is /usr/bin/true), and the link and code it prints show in the pane until the owner finishes at the site and the login exits.
@@ -404,7 +456,7 @@ export const createFixes = ({
     const dir = makeScratch("playground-fix-")
     const real = live()
     const plan: Step[] = real
-      ? PLANS[job.id]!(has, dir, from)
+      ? PLANS[job.id]!(has, dir, from, platform)
       : [
           {
             argv: [process.execPath, FAKE, job.id],

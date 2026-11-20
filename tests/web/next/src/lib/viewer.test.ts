@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   asViewerPage,
+  documentNonce,
   fenced,
   frameLoad,
   viewerFrameMessage,
@@ -132,7 +133,40 @@ function page(scroll = { clientWidth: 800, scrollLeft: 0, scrollWidth: 800 }) {
   return { click, load, press, scrolled, served }
 }
 
+// a nonce as the hosted proxy makes it: the base64 of a UUID, 48 characters with no padding
+const NONCE = "MGI5YzZmMWUtMTExMS00MTExLTgxMTEtMDAwMDAwMDAwMDAx"
+
 describe("asViewerPage", () => {
+  // the hosted build's page CSP reaches a srcdoc frame too, so each script in it carries the page's nonce to run; the frame's sandbox, with no same-origin (documents.test.ts), keeps the nonce from the Dashboard's storage
+  test("on the hosted build, every script in the page and the keys script carries the page's nonce", () => {
+    const served = asViewerPage(
+      "<p>hi</p><script>a()</script><SCRIPT src=x></SCRIPT><script/><scripts><script-card></script-card>",
+      NONCE,
+    )
+    expect(served.match(new RegExp(`<script nonce=${NONCE} `, "gi"))?.length).toBe(4)
+    // a tag the nonce cannot run into: a self-closing slash stays its own, and another element named script-something stays itself
+    expect(served).toContain(`<script nonce=${NONCE} />`)
+    expect(served).toContain(`<script nonce=${NONCE}  src=x></SCRIPT>`)
+    expect(served).toContain("<scripts><script-card></script-card>")
+  })
+
+  // the nonce goes in unquoted, as base64 with no padding needs no quotes, so a script's own string that names a script tag stays one string
+  test("a script tag named inside a page's own string leaves that string whole", () => {
+    const served = asViewerPage(
+      `<script>const tag = "<script>"; const other = '<script>'</script>`,
+      NONCE,
+    )
+    expect(served).toContain(
+      `const tag = "<script nonce=${NONCE} >"; const other = '<script nonce=${NONCE} >'`,
+    )
+  })
+
+  test("with no nonce, as on the local build, the page is served as before", () => {
+    const html = "<p>hi</p><script>a()</script>"
+    expect(asViewerPage(html, undefined)).toBe(asViewerPage(html))
+    expect(asViewerPage(html)).not.toContain("nonce")
+  })
+
   test("puts the policy ahead of the page's own markup, since no header reaches a srcdoc page", () => {
     const served = page().served
     expect(served).toStartWith(
@@ -228,5 +262,17 @@ describe("asViewerPage", () => {
     const { press } = page({ clientWidth: 800, scrollLeft: 100, scrollWidth: 1200 })
     expect(press({ key: "ArrowLeft" })).toEqual([])
     expect(press({ key: "ArrowRight" })).toEqual([])
+  })
+})
+
+describe("documentNonce", () => {
+  test("reads the nonce the Dashboard's own scripts carry, and none where they carry none or there is no document", () => {
+    const doc = (nonce?: string) => ({
+      querySelector: (selector: string) =>
+        selector === "script[nonce]" && nonce ? { nonce } : null,
+    })
+    expect(documentNonce(doc("bm9uY2U="))).toBe("bm9uY2U=")
+    expect(documentNonce(doc())).toBeUndefined()
+    expect(documentNonce(undefined)).toBeUndefined()
   })
 })

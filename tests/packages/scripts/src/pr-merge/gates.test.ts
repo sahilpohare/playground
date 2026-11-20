@@ -345,6 +345,90 @@ describe("a head with no finished GitGuardian check", () => {
   })
 })
 
+// a web/next PR merged on ready while its tester's drive was still open, with no TesterBot line at its head (PG-2485).
+describe("the tester gate holds a web/next diff for its tester's PASS at the head", () => {
+  const tester = (word: "FAIL" | "PASS", sha = HEAD, author = "acme") =>
+    said(`## TesterBot · ${word} at ${sha.slice(0, 7)} · both shots attached`, author)
+  const ui = ["web/next/src/components/dashboard/row.tsx", "AGENTS.md"]
+  const gate = (patch: Partial<PrFacts>) => gatesOf(facts(patch)).find((g) => g.name === "tester")
+
+  test("a PASS at the head passes, naming the line", () => {
+    expect(gate({ comments: [review(), tester("PASS")], files: ui })).toEqual({
+      detail: "## TesterBot · PASS at 69a6a4c · both shots attached",
+      name: "tester",
+      ok: true,
+    })
+  })
+
+  test.each([
+    ["no verdict", [review()]],
+    ["a FAIL at the head", [review(), tester("FAIL")]],
+    ["a PASS at an older head", [review(), tester("PASS", OLD)]],
+    ["a PASS by anyone else", [review(), tester("PASS", HEAD, "someone-else")]],
+    ["a PASS then a FAIL at the head", [review(), tester("PASS"), tester("FAIL")]],
+  ])("%s refuses", (_, comments) => {
+    expect(failing({ comments, files: ui })).toEqual(["tester"])
+  })
+
+  test("its refusal names the line it waits for and the head", () => {
+    expect(gate({ files: ui })?.detail).toBe(
+      "a web/next diff waits for its tester's drive: missing ## TesterBot · PASS at 69a6a4c from acme; spawn or resume the PR's tester, which posts ## TesterBot · PASS at 69a6a4c",
+    )
+    expect(gate({ comments: [review(), tester("FAIL")], files: ui })?.detail).toBe(
+      "newest tester verdict is not a pass: ## TesterBot · FAIL at 69a6a4c · both shots attached",
+    )
+  })
+
+  test("a diff with no web/next file meets no tester gate", () => {
+    expect(gate({ files: ["packages/scripts/src/pr-merge/gates.ts", "web/nextish.md"] })).toBe(
+      undefined,
+    )
+  })
+})
+
+// a PR broke curl | bash and it showed only at the ship's new-user gate, so a diff on what a new user meets first waits for that gate's PASS at its head (PG-2496).
+describe("the new-user gate holds an installer or first-run diff for the gate's PASS at the head", () => {
+  const ran = (word: "FAIL" | "INCONCLUSIVE" | "PASS", sha = HEAD, why = "7 of 7 passed") =>
+    said(`## NewUserGate · ${word} at ${sha.slice(0, 7)} · ${why}`)
+  const files = ["install.sh", "AGENTS.md"]
+  const gate = (patch: Partial<PrFacts>) => gatesOf(facts(patch)).find((g) => g.name === "new-user")
+
+  test("a PASS at the head passes, naming the line", () => {
+    expect(gate({ comments: [review(), ran("PASS")], files })).toEqual({
+      detail: "## NewUserGate · PASS at 69a6a4c · 7 of 7 passed",
+      name: "new-user",
+      ok: true,
+    })
+  })
+
+  test.each([
+    ["no verdict", [review()]],
+    ["a FAIL at the head", [review(), ran("FAIL", HEAD, "6 of 7 passed")]],
+    ["an INCONCLUSIVE at the head", [review(), ran("INCONCLUSIVE", HEAD, "6 of 7 passed")]],
+    ["a PASS at an older head", [review(), ran("PASS", OLD)]],
+    ["a PASS by anyone else", [review(), said(ran("PASS").body, "someone-else")]],
+  ])("%s refuses", (_, comments) => {
+    expect(failing({ comments, files })).toEqual(["new-user"])
+  })
+
+  test("an INCONCLUSIVE refuses like a FAIL, printing its reason", () => {
+    const why = "6 of 7 passed, 1 inconclusive; 7. Usage: spawn refused"
+    expect(gate({ comments: [review(), ran("INCONCLUSIVE", HEAD, why)], files })?.detail).toBe(
+      `newest new-user gate verdict is not a pass: ## NewUserGate · INCONCLUSIVE at 69a6a4c · ${why}`,
+    )
+  })
+
+  test("its refusal names the matched files and the run that posts the verdict", () => {
+    expect(gate({ files })?.detail).toBe(
+      "install.sh waits for the new-user gate: missing ## NewUserGate · PASS at 69a6a4c from acme; run ~/.playground/ops/run-slot.sh <your name> -- bun run gate:new-user 69a6a4c5e6caf46c4abda6a89de4ce6f3b309e88 --pr 7",
+    )
+  })
+
+  test("a diff matching no path meets no new-user gate", () => {
+    expect(gate({})).toBe(undefined)
+  })
+})
+
 describe("the parent gate refuses a stacked PR while its parent is unmerged (PG-1274)", () => {
   const stacked = (line: string) => `${SKILL_BODY}\n- ${line}`
   const parent = (patch: Partial<PrFacts>) =>
@@ -412,5 +496,106 @@ describe("the parent gate refuses a stacked PR while its parent is unmerged (PG-
     expect(gate?.ok).toBe(false)
     expect(gate?.detail).toContain("#13")
     expect(gate?.detail).not.toContain("#12")
+  })
+})
+
+// a PR could change CI's workflows, the merge gates or a refused-forms row, and the same review passed it like any other diff (PG-2576).
+describe("the checks gate holds a PR that changes a check judging it for its 5/5 to name each change", () => {
+  const WORKFLOW = ".github/workflows/auto-test.yml"
+  const ROW = "tests/scripts/hooks/fixtures/refused-forms/2522.ts"
+  const named = (...paths: string[]) =>
+    said(
+      [
+        "## ReviewBot · round 2: 5/5 at 69a6a4c · 0 blocking",
+        "",
+        ...paths.map((path) => `Reviewed check change: \`${path}\``),
+      ].join("\n"),
+    )
+  const gate = (patch: Partial<PrFacts>) =>
+    gatesOf(facts({ removed: [], ...patch })).find((g) => g.name === "checks")
+
+  test("a workflow change with no line in its 5/5 is refused, naming the file and the line", () => {
+    expect(failing({ files: [WORKFLOW, "AGENTS.md"], removed: [] })).toEqual(["checks"])
+    expect(gate({ files: [WORKFLOW] })?.detail).toBe(
+      "the PR changes a check that judges it (.github/workflows/auto-test.yml): its 5/5 at 69a6a4c does not name .github/workflows/auto-test.yml in a `Reviewed check change: <path>` line",
+    )
+  })
+
+  test("the same change with the line in its 5/5 passes", () => {
+    expect(gate({ comments: [named(WORKFLOW)], files: [WORKFLOW, "AGENTS.md"] })).toEqual({
+      detail: "its 5/5 names each check change: .github/workflows/auto-test.yml",
+      name: "checks",
+      ok: true,
+    })
+  })
+
+  test.each([
+    "packages/config/src/verdicts.ts",
+    "packages/scripts/src/new-user-gate/paths.ts",
+    ".github/actions/install-zsh/action.yml",
+    "tests/scripts/hooks/fixtures/refused-forms.ts",
+    "tests/scripts/hooks/refused-forms.test.ts",
+  ])("%s, a check judging the PR, needs the checks gate", (path) => {
+    expect(failing({ files: [path], removed: [] })).toContain("checks")
+    expect(gate({ comments: [named(path)], files: [path] })?.ok).toBe(true)
+  })
+
+  test.each([".github/assets/banner.png", "packages/scripts/src/pr-merge-notes.md"])(
+    "%s, beside a check but none, meets a passing checks gate",
+    (path) => {
+      expect(gate({ files: [path] })?.ok).toBe(true)
+    },
+  )
+
+  test("a refused-forms file the diff deletes a line from, with no line, is refused", () => {
+    expect(failing({ files: [ROW], removed: [ROW] })).toEqual(["checks"])
+    expect(gate({ comments: [named(ROW)], files: [ROW], removed: [ROW] })?.ok).toBe(true)
+  })
+
+  test("a refused-forms file the diff only adds to changes no check", () => {
+    expect(gate({ files: [ROW] })).toEqual({
+      detail: "the PR changes no check that judges it",
+      name: "checks",
+      ok: true,
+    })
+  })
+
+  test("a PR touching none of them passes", () => {
+    expect(gate({ files: ["AGENTS.md", "packages/scripts/src/ship/cli.ts"] })?.ok).toBe(true)
+  })
+
+  test("a verdict naming a path outside the diff and missing one in it is refused, naming the missing one", () => {
+    const missed = "packages/scripts/src/pr-merge/gates.ts"
+    const result = gate({ comments: [named(WORKFLOW, "AGENTS.md")], files: [WORKFLOW, missed] })
+    expect(result?.ok).toBe(false)
+    expect(result?.detail).toBe(
+      "the PR changes a check that judges it (.github/workflows/auto-test.yml, packages/scripts/src/pr-merge/gates.ts): its 5/5 at 69a6a4c does not name packages/scripts/src/pr-merge/gates.ts in a `Reviewed check change: <path>` line",
+    )
+  })
+
+  test.each([
+    [
+      "a line under a 4/5",
+      () => said(`## ReviewBot · round 2: 4/5 at 69a6a4c\n\nReviewed check change: ${WORKFLOW}`),
+    ],
+    [
+      "a line under a 5/5 at an older head",
+      () => said(`## ReviewBot · round 1: 5/5 at 5740cea\n\nReviewed check change: ${WORKFLOW}`),
+    ],
+    [
+      "a line by anyone else",
+      () =>
+        said(
+          `## ReviewBot · round 2: 5/5 at 69a6a4c\n\nReviewed check change: ${WORKFLOW}`,
+          "someone-else",
+        ),
+    ],
+    ["a line in a comment that is no verdict", () => said(`Reviewed check change: ${WORKFLOW}`)],
+  ])("%s does not count", (_, comment) => {
+    expect(gate({ comments: [review(), comment()], files: [WORKFLOW] })?.ok).toBe(false)
+  })
+
+  test("facts read with no removed list, as a test's, meet no checks gate", () => {
+    expect(gatesOf(facts({ files: [WORKFLOW] })).find((g) => g.name === "checks")).toBe(undefined)
   })
 })

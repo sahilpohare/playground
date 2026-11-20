@@ -1,3 +1,4 @@
+import "@/bin/needs-database"
 import { THREAD_TITLE_MAX } from "@packages/config/threads"
 import { claudeSession, createDatabase, thread } from "@packages/db"
 import { env as apiEnv } from "@packages/env/api-hono"

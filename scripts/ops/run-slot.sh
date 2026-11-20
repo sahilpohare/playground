@@ -4,12 +4,15 @@
 # It takes ops/run-slot, run-slot-2, run-slot-3 or run-slot-4 by mkdir, as the load rules (lanes_open) open them and its size's load units fit, waiting and
 # retrying while none does; writes "<who> <its own pid> <iso> <units> <size>" to the slot's .holder file beside it
 # (a quick lane writes "<who> <pid> <iso>", the clone lane adding its two checkouts, clone_ends); runs the command as its
-# child, in a new session and process group; and gives the slot back (rmdir) however it ends: success, failure or a signal. A holder whose
+# child, in a new session and process group, which RUN_SLOT_HELD tells "<slot> <pid>" so it can give the slot back early (giveBackSlot);
+# and gives the slot back (rmdir) however it ends: success, failure or a signal. A holder whose
 # pid has died is reclaimed; a slot whose holder line has no pid, or has no holder line, is held until it is 2 hours old, or while its age reads back empty. It prints the slot
 # it took to stderr and exits with the command's code.
 set -u
 case ${PLAYGROUND_DATA_DIR:-/} in /*) ;; *) echo "run-slot.sh: PLAYGROUND_DATA_DIR is relative ($PLAYGROUND_DATA_DIR), so each process would read it from its own folder: set it to an absolute path" >&2; exit 1 ;; esac
 OPS=${RUN_SLOT_OPS:-${PLAYGROUND_DATA_DIR:-$HOME/.playground}/ops}
+# the data folder, where playground priority on keeps each session's window as priority-<session>.json (prio_holder)
+PDATA=${PLAYGROUND_DATA_DIR:-$HOME/.playground}
 # this copy's path and arguments, so a waiter can run a newer copy in its place (reread, below)
 SELF=$0
 ARGS=("$@")
@@ -38,7 +41,7 @@ stamp() { stat -L -c '%i %Y' "$1" 2>/dev/null || stat -L -f '%i %m' "$1" 2>/dev/
 STAMP=$(stamp "$SELF")
 # A hand-set runner-host/slot-off kept the runner box idle for two days, so each ops switch carries "<who> <iso set> <iso expiry> <reason>"
 # (run-slot.sh set, below) and drops itself past its expiry; a file with no such line counts as set at its mtime with the default 4 hours, and as off while that mtime reads back empty
-SWITCHES="run-slot.3-off run-slot.4-off run-slot.battery run-slot.clone-off run-slot.focus run-slot.idle-min run-slot.load1-max run-slot.load5-cap run-slot.single runner-host/off runner-host/slot-off"
+SWITCHES="run-slot.3-off run-slot.4-off run-slot.clone-off run-slot.focus run-slot.idle-min run-slot.load1-max run-slot.load5-cap run-slot.single runner-host/off runner-host/slot-off"
 # whether switch $1 (a path under ops) is on; one past its expiry is moved to <name>.expired-<ts> and logged in run-slot.runs.log
 switch_on() {
   local f="$OPS/$1" line ends now m
@@ -180,10 +183,42 @@ if issue:
 done("medium")
 PY
 }
+WIN_LINE='^[[:space:]]*"(by|reason|session|since)":[[:space:]]*"(([^"\\]|\\.)*)"(,?)$'
+# whether file $1 is a session's window, WIN_SESSION and WIN_SINCE its session and since, read only in the shape playground priority on writes it, which priority.ts's readWindow takes and so off and the lapse can lift: `{` first and `}` last, every line between one of by, reason, session and since with a string value and a comma on each but the last, all four there, the session naming its file and not start; window_holder and spawn.sh's --priority (run-slot.sh window) read a window through it alone
+window_session() {
+  local l s= since= by= why= open= close= bad= sep=
+  WIN_SESSION= WIN_SINCE=
+  while IFS= read -r l || [ -n "$l" ]; do
+    [ -z "$close" ] || { bad=1; break; }
+    if [ -z "$open" ]; then
+      [ "$l" = '{' ] || { bad=1; break; }
+      open=1
+    elif [ "$l" = '}' ]; then
+      [ "$sep" = none ] || { bad=1; break; }
+      close=1
+    else
+      [[ $l =~ $WIN_LINE ]] && [ "$sep" != none ] || { bad=1; break; }
+      case "${BASH_REMATCH[1]}" in by) by=1 ;; reason) why=1 ;; session) s=${BASH_REMATCH[2]} ;; since) since=${BASH_REMATCH[2]} ;; esac
+      [ -n "${BASH_REMATCH[4]}" ] && sep=, || sep=none
+    fi
+  done 2>/dev/null < "$1"
+  [ -z "$bad" ] && [ -n "$open" ] && [ -n "$close" ] && [ -n "$by" ] && [ -n "$why" ] && [[ $s =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] && [[ $since =~ ^[0-9][0-9TZ:.-]*$ ]] || return 1
+  [ "$s" != start ] && [ "${1##*/}" = "priority-$s.json" ] || return 1
+  WIN_SESSION=$s WIN_SINCE=$since
+}
+# run-slot.sh window <file>: print the session whose window file is, exit 1 when it is not one (window_session), so spawn.sh's --priority reads a window as the queue does
+if [ "${1:-}" = window ]; then
+  [ -f "${2:-}" ] && window_session "$2" || exit 1
+  printf '%s\n' "$WIN_SESSION"
+  exit 0
+fi
 # run-slot.sh box-off: print, one word a line, each precondition of the runner-box route (below) that fails, for ops-sweep's box-route-off finding, since a run otherwise falls back to this Mac without a word; nothing when the route can fire
 if [ "${1:-}" = box-off ]; then
   [ -x "$OPS/runner-host/ci.sh" ] || echo no-ci-sh
-  [ -e "${RUNNER_HOST_KEY:-$HOME/.ssh/playground_runner}" ] || echo no-ssh-key
+  # the host and key as ci.sh's HOST_DIR, KEY and IP lines read them; keep the two equal
+  [ -n "${RUNNER_HOST:-}" ] || [ -s "$OPS/runner-host/ip" ] || echo no-host
+  key=${RUNNER_HOST_KEY:-$(cat "$OPS/runner-host/key" 2>/dev/null)}
+  [ -e "${key:-$HOME/.ssh/playground_runner}" ] || echo no-ssh-key
   switch_on runner-host/off && echo runner-host-off
   switch_on runner-host/slot-off && echo slot-off
   exit 0
@@ -269,7 +304,7 @@ if [ "${1:-}" = set ]; then
   exit 0
 fi
 # every read subcommand below sets CAN_TAKE, so quick_kind never sends its bare true down the quick lane (run-slot-can-take.test.ts runs each)
-# run-slot.sh can-take <slot> <who>: exit 0 when that slot is free, its off-switches, load rules, the battery's and focus's holds and burst_held open it, and unit_fits passes (the
+# run-slot.sh can-take <slot> <who>: exit 0 when that slot is free, its off-switches, load rules, focus's hold and burst_held open it, and unit_fits passes (the
 # session's units and reserve, or a queue ticket's own when <who> names one, as ops-unstick asks for the head), else 1, so a script that takes its
 # slot itself reads them as every run here does (localci and the merge train still take theirs by their own mkdir for now); it reads no queue order and no other waiter, only the ticket it is given, and run-slot.priority only through may_reserve's reserve
 CAN_TAKE=
@@ -287,7 +322,7 @@ if [ "${1:-}" = slots ]; then
   SLOTS_ONLY=1 CAN_TAKE=run-slot
   set -- ops-unstick -- true
 fi
-# run-slot.sh room: prints "<lanes> <held> <free> <waiters>": the lanes slots counts, how many a run holds, how many the queue's next run can take now (the open, unheld ones while unit_fits passes for first_waiter's ticket, or a medium with no waiter; none while waiters wait and none can start, and none while the battery's or focus's hold stands), and the live tickets in the queue, which spawn.sh's slots gate reads
+# run-slot.sh room: prints "<lanes> <held> <free> <waiters>": the lanes slots counts, how many a run holds, how many the queue's next run can take now (the open, unheld ones while unit_fits passes for first_waiter's ticket, or a medium with no waiter; none while waiters wait and none can start, and none while focus's hold stands), and the live tickets in the queue, which spawn.sh's slots gate reads
 # run-slot.sh kind -- <command>: print the lane run-slot picks for that command (refuse for a run it refuses, docker for a docker build, else quick_kind's clone, commit, quick, or nothing for the queue) and exit, with no ask line, ticket or holder and nothing run, so a lane question reads run-slot's own pick
 KIND_ONLY=
 if [ "${1:-}" = kind ]; then
@@ -329,6 +364,8 @@ fi
 WHO=$1
 shift 2
 case "$WHO" in *[!A-Za-z0-9._#-]*|"") echo "run-slot.sh: <who> is a session name (letters, digits, . _ - #)" >&2; exit 2 ;; esac
+# the guards read the command after the first -- past <who> (slotWords in scripts/hooks/shell.ts), so a name that starts with - could read as that separator and they would judge other words than run here
+case "$WHO" in -*) echo "run-slot.sh: <who> is a session name, which never starts with -" >&2; exit 2 ;; esac
 # every run drops each expired switch, so the readers that only look for the file (the merge train, Checks, the leads' sweep) find it gone too
 [ -n "$KIND_ONLY" ] || for s in $SWITCHES; do switch_on "$s"; done
 # a dev stack never ends, so it would hold a slot for hours (dispatcher, 19 Oct: a tester's `bun run dev` held run-slot.single with 7 waiters)
@@ -427,100 +464,34 @@ if [ -z "$KIND_ONLY" ] && merge_pass "$@"; then
   echo "run-slot.sh: bun run $MERGE_NAME runs at once, outside the queue: a merge carries its own gates, and its type steps take their own slots (packages/scripts/src/pr-merge/README.md)" >&2
   exec "$@" 3<&-
 fi
-# dispatcher, 18 Oct: a test, type check (from the checkout's root), lint or format check runs on the runner host, taking no slot here. ci.sh exec
-# sends the working tree, tracked edits and untracked source alike, and gives back the command's output and exit code; anything else (a browser,
-# verify, an install, a dev stack) waits for a slot here, and so does a run the box cannot take (ci.sh exits 255, as on an untracked file it does not take).
-# The box has no /private/tmp, so a run that sets TMPDIR to a Mac path takes RUN_SLOT_HERE=1.
-# runner-host/off and runner-host/slot-off turn it off; every box run is a line in runner-host/runs.log.
-box_dir() {
-  local prev="" a
-  for a in "$@"; do
-    case "$a" in --cwd=*) echo "${a#--cwd=}"; return ;; esac
-    case "$prev" in --cwd|-C) echo "$a"; return ;; esac
-    prev=$a
-  done
-  pwd
-}
-box_fits() {
-  local a first="" line=" $* "
-  # RUN_SLOT_HERE=1, in run-slot's environment or as an env word of the command, keeps the run on this Mac (builder, 19 Oct: a Mac rerun of a red seen only on the box)
-  [ -n "${RUN_SLOT_HERE:-}" ] && return 1
-  for a in "$@"; do case "$a" in RUN_SLOT_HERE=?*) return 1 ;; esac; done
-  for a in "$@"; do
-    case "$a" in env|*=*) continue ;; esac
-    first=$a
-    break
-  done
-  case "$first" in bun|bunx) ;; *) return 1 ;; esac
-  # a build's output is this Mac's dist, so a build stays here (worker-firm-keel, 19 Oct)
-  printf '%s' "$line" | grep -qE ' (test|run test|test:file|check-types|run check-types|lint|run lint|test:skills|run test:skills|format:check|run format:check)( |$)' || return 1
-  if printf '%s' "$line" | grep -qE ' (check-types|run check-types)( |$)'; then
-    local d p
-    d=$(box_dir "$@")
-    # a type check goes only from a checkout's root: one from a subfolder (--cwd=<wt>/web/next) reads the other workspaces' dist, which the box lacks (worker-firm-keel, 19 Oct: 332 false errors)
-    [ -e "$d/.git" ] || return 1
-    # a type check here also builds this checkout's packages/*/dist, which a later run on the Mac imports, so it stays here while one is missing (round 2); this checks that a dist exists, not that it is fresh
-    for p in "$d"/packages/*/package.json; do
-      grep -q '"build"' "$p" 2>/dev/null && [ ! -d "$(dirname "$p")/dist" ] && return 1
-    done
-  fi
-  # a word that needs this Mac (a browser, a stack, docker, an install) keeps the run here; a path is judged only as an e2e test (a review's finding)
-  for a in "$@"; do
-    case "$a" in
-      */*) case "$a" in *.e2e.*) return 1 ;; esac ;;
-      *verify*|*e2e*|*install*|*shadcn*|*playwright*|agent-browser|--watch|dev|dev:*|*docker*) return 1 ;;
-    esac
-  done
-}
-# runner-host/slot-off keeps run-slot's runs here and leaves the box to Checks (ops, 20 Oct: 19 one-file runs queued ahead of 3 gate suites on its 2 slots)
-if [ -z "$KIND_ONLY" ] && [ -z "$CAN_TAKE" ] && [ -z "$MODEL_BOUND" ] && [ -x "$OPS/runner-host/ci.sh" ] && ! switch_on runner-host/off && ! switch_on runner-host/slot-off && box_fits "$@"; then
-  BOXDIR=$(box_dir "$@")
-  # the box runs BOXDIR's checkout, so a path in another one would run in the wrong tree there and go red as "Script not found" (9jhtsd, 24 Oct)
-  checkout_of() {
-    local d=$1
-    while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done
-    d=$(cd "$d" 2>/dev/null && pwd -P) || return
-    while [ "$d" != / ] && [ ! -e "$d/.git" ]; do d=$(dirname "$d"); done
-    [ "$d" != / ] && echo "$d"
-  }
-  here=$(checkout_of "$BOXDIR")
-  for a in "$@"; do
-    case "$a" in /*) there=$(checkout_of "$a") ;; *) continue ;; esac
-    if [ -n "$there" ] && [ "$there" != "$here" ]; then
-      echo "run-slot.sh: $a is in the checkout $there, but the runner host runs ${here:-$BOXDIR}'s: run from inside $there, or pass --cwd $there" >&2
-      exit 2
-    fi
-  done
-  echo "run-slot.sh: $WHO runs this on the runner host, with no slot here" >&2
-  echo "$(date -u +%FT%TZ) start $WHO $BOXDIR $*" >> "$OPS/runner-host/runs.log"
-  bash "$OPS/runner-host/ci.sh" exec "$BOXDIR" -- "$@"
-  rc=$?
-  echo "$(date -u +%FT%TZ) end $WHO rc=$rc" >> "$OPS/runner-host/runs.log"
-  [ "$rc" -ne 255 ] && exit "$rc"
-  echo "run-slot.sh: the runner host could not take it, so it waits for a slot here" >&2
-fi
 # A `sh -c`, `bash -c`, `zsh -c`, `dash -c` or `ksh -c` chain's steps, or a `bash <script file>`'s, behind any CHAIN_WRAPPERS words, which come out as a step of their own, one a line, each step's words joined by \x1f, as shlex splits the script at each run of &, |, ;, <, > and parentheses (5 Nov: a script that only commits waited in the general queue); see scripts/ops/README.md's commit lane for the comment, \ and newline reads, the cd and env-word steps, the -e, -u, -x, -v and -o pipefail options read past after -c, and the quoted ?, *, [, {, # and ~ each held as \x02 to \x07, and nothing for any other command, a docker or podman one included (exit 0), or for a chain it cannot read (exit 1: an option word it does not read, an option word before a file, a file it cannot read, a script holding a raw \x02 to \x07 byte, one shlex cannot split or one over 64 KB, or a first word it cannot place before a shell word), its steps with exit 3 for a chain with a program word, in any step, written as an unquoted glob or brace that can expand to docker or podman, and its steps with exit 1 for a chain with a step that eval or a $ word runs, past VAR=x words or behind a wrapper, a step holding a chain shell word anywhere (a nested chain, a script file or a shell fed its script on stdin), a program word, or the program word behind a wrapper (every later word past an option its list lacks), written as an unquoted brace or a glob that can expand to a shell or a wrapper, or with a command substitution beside docker, podman or a portless compose
-# the wrappers chain_steps reads past to the program they run, A to Z, each as <name>|<flags>|<options that take a value>, and the ones that take one count or duration before it: scripts/hooks/shell.ts's WRAPPERS and COUNTED, with the env and xargs options its parse reads by hand, which a test holds equal
-CHAIN_WRAPPER_OPTIONS="builtin||
+# the wrappers chain_steps reads past to the program they run, A to Z, each as <name>|<flags>|<options that take a value>, and the ones that take one word (a count, a duration, a lock file or a CPU mask) before it: scripts/hooks/shell.ts's WRAPPERS and COUNTED, with the env and xargs options its parse reads by hand, which a test holds equal
+CHAIN_WRAPPER_OPTIONS="-||
+builtin||
 busybox||
 caffeinate|-d -i -m -s -u|-t -w
+chrt|-a -b -d -e -f -i -m -o -p -R -r -v --all-tasks --batch --deadline --ext --fifo --idle --max --other --pid --reset-on-fork --rr --verbose|-D -P -T --sched-deadline --sched-period --sched-runtime
 command|-p -V -v|
 doas|-L -n -s|-a -C -u
 env|-0 -i -v --debug --ignore-environment --null|-C -P -S -u --chdir --unset
 exec|-c -l|-a
+flock|-F -n -o -s -u -x --close --exclusive --fcntl --nb --no-fork --nonblocking --shared --unlock --verbose|-E -w --conflict-exit-code --length --start --timeout --wait
+ionice|-t --ignore|-c -n -P -p -u --class --classdata --pgid --pid --uid
 nice||-n --adjustment
 nocorrect||
 noglob||
 nohup||
 pkexec|--disable-internal-agent --help --keep-cwd --version|--user
 repeat||
+setsid|-c -f -w --ctty --fork --wait|
 stdbuf||-e -i -o --error --input --output
 sudo|-A -B -b -E -e -H -i -K -k -l -N -n -P -S -s -V -v --askpass --background --bell --edit --help --list --login --non-interactive --preserve-env --preserve-groups --remove-timestamp --reset-timestamp --set-home --shell --stdin --validate --version|-C -D -g -h -p -R -r -T -t -U -u --chdir --chroot --close-from --command-timeout --group --host --other-user --prompt --role --type --user
+taskset|-a -c -p --all-tasks --cpu-list --pid|
 time|-a -h -l -p -q -V -v --append --portability --quiet --verbose|-f -o --format --output
 timeout|-f -p -v --foreground --preserve-status --verbose|-k -s --kill-after --signal
-xargs|-0 -i -o -p -r -t -x --exit --interactive --no-run-if-empty --null --open-tty --replace --show-limits --verbose|-a -d -E -I -J -L -n -P -R -S -s --arg-file --delimiter --max-args --max-chars --max-lines --max-procs --process-slot-var
+xargs|-0 -i -o -p -r -t -x --exit --interactive --max-lines --no-run-if-empty --null --open-tty --replace --show-limits --verbose|-a -d -E -I -J -L -n -P -R -S -s --arg-file --delimiter --max-args --max-chars --max-procs --process-slot-var
 "
-CHAIN_COUNTED="repeat timeout"
+CHAIN_COUNTED="flock repeat taskset timeout"
 CHAIN_WRAPPERS=
 while IFS='|' read -r CHAIN_NAME _; do [ -n "$CHAIN_NAME" ] && CHAIN_WRAPPERS+="$CHAIN_NAME "; done <<< "$CHAIN_WRAPPER_OPTIONS"
 CHAIN_SHELLS="sh bash zsh dash ksh"
@@ -963,7 +934,7 @@ chain_lane() {
   [ -n "$commits" ] || return
   if chain_safe "$@"; then echo commit; else echo "general $(shown "$CHAIN_BAD")"; fi
 }
-# Quick slots, outside the queue, one holder each: a plain git commit (its pre-commit build, about 17s) takes run-slot-commit (builder, 13 Oct: five commits waited in a fifteen-deep queue; a commit with a longer hook goes through the queue as <who> -- bash -c '...'), and a node_modules clone (cp -cR <sibling>/node_modules <worktree>/) takes run-slot-clone (dispatcher, 13 Oct: three load spikes, 77 and 43 among them, each with fseventsd near 100% while clones ran at once); a git merge or pull takes run-slot-commit too, and a bun install or a short bun test, docs:wrap or format:check takes run-slot-quick
+# Quick slots, outside the queue, one holder each: a plain git commit (its pre-commit build, about 17s) takes run-slot-commit (builder, 13 Oct: five commits waited in a fifteen-deep queue; a commit with a longer hook goes through the queue as <who> -- bash -c '...'), and a node_modules clone (cp -cR <sibling>/node_modules <worktree>/, or cp -R --reflink=auto on Linux: cp and a node_modules path, whatever the flags) takes run-slot-clone (dispatcher, 13 Oct: three load spikes, 77 and 43 among them, each with fseventsd near 100% while clones ran at once); a git merge or pull takes run-slot-commit too, and a bun install or a short bun test, docs:wrap or format:check takes run-slot-quick
 quick_rule() {
   local a first=""
   # a pre-commit step commit-slot.ts hands over (the build or a type check), marked RUN_SLOT_COMMIT_STEP=1 under its commit-<worktree> name, is a plain git commit's own step, so it takes run-slot-commit too (3 Nov: a plain commit's build waited about an hour in the queue)
@@ -1031,7 +1002,7 @@ file_ran_long() {
 quick_kind() {
   # a read command takes no slot and runs a bare true, so three short true runs in the log would take can-take and head down the quick lane, past their own exits (issue 285)
   [ -n "$CAN_TAKE" ] && return
-  [ -n "$HEAVY" ] && return
+  [ -n "${HEAVY:-}" ] && return
   local kind
   kind=$(quick_rule "$@")
   [ "$kind" = quick ] && ran_long "$@" && kind=""
@@ -1046,7 +1017,9 @@ types_cached() {
   turbo_cached check-types "$(box_dir "$@")" ${vars[@]+"${vars[@]}"}
 }
 # whether turbo's dry run of task $1, in folder $2 with the VAR=x words after them, finds every task it runs cached
-turbo_cached() {
+turbo_cached() { [ "$(turbo_misses "$@")" = 0 ]; }
+# how many tasks turbo's dry run of task $1, in folder $2 with the VAR=x words after them, would run rather than replay; it prints nothing and fails on a dry run that fails, takes over 10 s, holds no task or cannot be read
+turbo_misses() {
   (cd "$2" 2>/dev/null && python3 -I - "$1" "${@:3}" 2>/dev/null <<'PY'
 import json, os, signal, subprocess, sys
 env = dict(os.environ, **dict(v.split("=", 1) for v in sys.argv[2:]))
@@ -1058,7 +1031,9 @@ except subprocess.TimeoutExpired:
     p.wait()
     sys.exit(1)
 tasks = [t for t in json.loads(out)["tasks"] if t.get("command") != "<NONEXISTENT>"]
-sys.exit(0 if p.returncode == 0 and tasks and all(t["cache"]["status"] == "HIT" for t in tasks) else 1)
+if p.returncode != 0 or not tasks:
+    sys.exit(1)
+print(sum(t["cache"]["status"] != "HIT" for t in tasks))
 PY
   )
 }
@@ -1108,7 +1083,7 @@ runs_program() {
   esac
   return 1
 }
-# a commit whose pre-commit build runs next build goes through the queue as a big run (3 Nov, 04:05Z and 06:41Z: one built at 1.7 cores beside its own session's big run, and one beside a clone with load1 at 56): a git commit but -n, in a repo whose lefthook.yml pre-commit runs a build, staging a file @web/next#build builds from (unless every one is Markdown or a Python test under tests/, which lefthook's build skips), with -a or a pathspec file any it may stage, or one under a path it names, or commit-slot.ts's build (commit-<worktree>) for one; and, failing closed, a git run with a word outside these lists, or a verb that is an alias
+# a commit whose pre-commit build runs next build, and whose dry run cannot say how many tasks it would run, goes through the queue as a big run (3 Nov, 04:05Z and 06:41Z: one built at 1.7 cores beside its own session's big run, and one beside a clone with load1 at 56): a git commit but -n, in a repo whose lefthook.yml pre-commit runs a build, staging a file @web/next#build builds from (unless every one is Markdown or a Python test under tests/, which lefthook's build skips), with -a or a pathspec file any it may stage, or one under a path it names, or commit-slot.ts's build (commit-<worktree>) for one; and, failing closed, a git run with a word outside these lists, or a verb that is an alias
 heavy_build() {
   local a c f files top dir="" commit="" all="" gitc="" magic="" noverify="" unlisted="" loose="" prev="" after="" seen="" verb="" state=lead paths=() vars=() line words first adir="" merged=""
   # a chain that commits counts as a build unless chain_safe takes every step; then it builds when one of its commit steps would, read with what its git add steps stage, and when an add runs in another folder than a commit, whose paths it would misread
@@ -1208,9 +1183,13 @@ heavy_build() {
     [ ${#CHAIN_ADD[@]} -eq 0 ] || { git ${dir:+-C "$dir"} diff --name-only -- "${CHAIN_ADD[@]}"; git ${dir:+-C "$dir"} ls-files --others --exclude-standard --full-name -- "${CHAIN_ADD[@]}"; }; } 2>/dev/null)
   grep -Evq '^$|\.md$|^tests/.*\.py$' <<<"$files" || return 1
   grep -Eq '^(web/next|api/hono|packages)/|^(bun\.lock|package\.json|turbo\.json)$' <<<"$files" || return 1
-  # a build turbo replays whole from its cache runs in seconds, so only one with a task to run counts big (5 Nov: under run-slot, commit-slot.ts runs the build bare inside the commit's own slot, so a big one stays in the queue); the cache folder is lefthook.yml's pre-commit default
-  ! turbo_cached build "$top" "TURBO_CACHE_DIR=${TURBO_CACHE_DIR:-$HOME/.cache/turbo/playground}" ${vars[@]+"${vars[@]}"}
+  # a commit's build ends in seconds whatever turbo would run, so only a dry run that cannot say counts big, failing closed: on 17 Nov each commit build that waited 17 to 27 minutes in the queue held 3 to 9 tasks to run and ran 8 to 23 s, and 3 whole rebuilds of 11 tasks ran 13 to 19 s (5 Nov: under run-slot, commit-slot.ts runs the build bare inside the commit's own slot); the cache folder is lefthook.yml's pre-commit default
+  BUILD_TASKS=$(turbo_misses build "$top" "TURBO_CACHE_DIR=${TURBO_CACHE_DIR:-$HOME/.cache/turbo/playground}" ${vars[@]+"${vars[@]}"})
+  [[ "$BUILD_TASKS" =~ ^[0-9]+$ ]] && return 1
+  BUILD_TASKS=unread
 }
+# the tasks a commit's build would run, or unread, which main logs as a why line
+BUILD_TASKS=
 # packages/scripts/src/docker-build.ts, the docker build reader run-slot shares with the hooks
 docker_reader() { "$BUN" "$(checkout_root)/packages/scripts/src/docker-build.ts" "$@" </dev/null; }
 # the pieces of a command's words that hold a glob or brace character, one a line, each word split at blanks, quotes, backquotes and the shell's ; | & ( ) < >, its backslashes dropped as an outer shell's quote removal drops them
@@ -1261,6 +1240,86 @@ light_run() {
   [ -n "$turbo" ] && [ -n "$filter" ] && return
   [ -n "$types" ] && types_cached "$@"
 }
+# dispatcher, 18 Oct: a test, type check (from the checkout's root), lint or format check runs on the runner host, taking no slot here, once the quick
+# lane has passed on it: a run quick_kind sends to the quick, commit or clone lane stays on this machine. ci.sh exec
+# sends the working tree, tracked edits and untracked source alike, and gives back the command's output and exit code; anything else (a browser,
+# verify, an install, a dev stack) waits for a slot here, and so does a run the box cannot take (ci.sh exits 255, as on an untracked file it does not take).
+# The box has no /private/tmp, so a run that sets TMPDIR to a Mac path takes RUN_SLOT_HERE=1.
+# runner-host/off and runner-host/slot-off turn it off; every box run is a line in runner-host/runs.log.
+box_dir() {
+  local prev="" a
+  for a in "$@"; do
+    case "$a" in --cwd=*) echo "${a#--cwd=}"; return ;; esac
+    case "$prev" in --cwd|-C) echo "$a"; return ;; esac
+    prev=$a
+  done
+  pwd
+}
+box_fits() {
+  local a first="" line=" $* "
+  # RUN_SLOT_HERE=1, in run-slot's environment or as an env word of the command, keeps the run on this Mac (builder, 19 Oct: a Mac rerun of a red seen only on the box)
+  [ -n "${RUN_SLOT_HERE:-}" ] && return 1
+  for a in "$@"; do case "$a" in RUN_SLOT_HERE=?*) return 1 ;; esac; done
+  # the box gets no PLAYGROUND_REPO, so a run from the factory's main checkout stays here, where test:file's refusal of a relative path there reads it (PG-2368)
+  if [ -n "${PLAYGROUND_REPO:-}" ]; then
+    local repo dir
+    repo=$(cd "$PLAYGROUND_REPO" 2>/dev/null && pwd -P)
+    dir=$(cd "$(box_dir "$@")" 2>/dev/null && pwd -P)
+    [ -n "$repo" ] && [ "$dir" = "$repo" ] && return 1
+  fi
+  for a in "$@"; do
+    case "$a" in env|*=*) continue ;; esac
+    first=$a
+    break
+  done
+  case "$first" in bun|bunx) ;; *) return 1 ;; esac
+  # a build's output is this Mac's dist, so a build stays here (worker-firm-keel, 19 Oct)
+  printf '%s' "$line" | grep -qE ' (test|run test|test:file|check-types|run check-types|lint|run lint|test:skills|run test:skills|format:check|run format:check)( |$)' || return 1
+  if printf '%s' "$line" | grep -qE ' (check-types|run check-types)( |$)'; then
+    local d p
+    d=$(box_dir "$@")
+    # a type check goes only from a checkout's root: one from a subfolder (--cwd=<wt>/web/next) reads the other workspaces' dist, which the box lacks (worker-firm-keel, 19 Oct: 332 false errors)
+    [ -e "$d/.git" ] || return 1
+    # a type check here also builds this checkout's packages/*/dist, which a later run on the Mac imports, so it stays here while one is missing (round 2); this checks that a dist exists, not that it is fresh
+    for p in "$d"/packages/*/package.json; do
+      grep -q '"build"' "$p" 2>/dev/null && [ ! -d "$(dirname "$p")/dist" ] && return 1
+    done
+  fi
+  # a word that needs this Mac (a browser, a stack, docker, an install) keeps the run here; a path is judged only as an e2e test (a review's finding)
+  for a in "$@"; do
+    case "$a" in
+      */*) case "$a" in *.e2e.*) return 1 ;; esac ;;
+      *verify*|*e2e*|*install*|*shadcn*|*playwright*|agent-browser|--watch|dev|dev:*|*docker*) return 1 ;;
+    esac
+  done
+}
+# runner-host/slot-off keeps run-slot's runs here and leaves the box to Checks (ops, 20 Oct: 19 one-file runs queued ahead of 3 gate suites on its 2 slots)
+if [ -z "$KIND_ONLY" ] && [ -z "$CAN_TAKE" ] && [ -z "$MODEL_BOUND" ] && [ -x "$OPS/runner-host/ci.sh" ] && ! switch_on runner-host/off && ! switch_on runner-host/slot-off && box_fits "$@" && [ -z "$(quick_kind "$@")" ]; then
+  BOXDIR=$(box_dir "$@")
+  # the box runs BOXDIR's checkout, so a path in another one would run in the wrong tree there and go red as "Script not found" (9jhtsd, 24 Oct)
+  checkout_of() {
+    local d=$1
+    while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done
+    d=$(cd "$d" 2>/dev/null && pwd -P) || return
+    while [ "$d" != / ] && [ ! -e "$d/.git" ]; do d=$(dirname "$d"); done
+    [ "$d" != / ] && echo "$d"
+  }
+  here=$(checkout_of "$BOXDIR")
+  for a in "$@"; do
+    case "$a" in /*) there=$(checkout_of "$a") ;; *) continue ;; esac
+    if [ -n "$there" ] && [ "$there" != "$here" ]; then
+      echo "run-slot.sh: $a is in the checkout $there, but the runner host runs ${here:-$BOXDIR}'s: run from inside $there, or pass --cwd $there" >&2
+      exit 2
+    fi
+  done
+  echo "run-slot.sh: $WHO runs this on the runner host, with no slot here" >&2
+  echo "$(date -u +%FT%TZ) start $WHO $BOXDIR $*" >> "$OPS/runner-host/runs.log"
+  bash "$OPS/runner-host/ci.sh" exec "$BOXDIR" -- "$@"
+  rc=$?
+  echo "$(date -u +%FT%TZ) end $WHO rc=$rc" >> "$OPS/runner-host/runs.log"
+  [ "$rc" -ne 255 ] && exit "$rc"
+  echo "run-slot.sh: the runner host could not take it, so it waits for a slot here" >&2
+fi
 # one line when a Mac run asks, takes its slot and ends, so a run's wait sits beside its run time (optimizer, 19 Oct)
 rlog() { echo "$(date -u +%FT%TZ) $1 $WHO $$ $2" >> "$OPS/run-slot.runs.log" 2>/dev/null; }
 [ -n "$KIND_ONLY" ] || [ -n "$CAN_TAKE" ] || [ -n "$REREAD" ] || rlog ask "$*"
@@ -1290,6 +1349,8 @@ case "$UNITS" in 1|2|3) ;; *) SIZE=medium UNITS=2 ;; esac
 # a ticket's units come from the run, so a light run from a big session ranks as small; a suite or a full build keeps its session's size
 HEAVY=
 heavy_build "$@" && HEAVY=1
+# a commit's build names its uncached task count, so its lane can be read against its wait and run time
+[ -z "$BUILD_TASKS" ] || [ -n "$KIND_ONLY$CAN_TAKE$REREAD" ] || rlog why "build-tasks=$BUILD_TASKS"
 light_run "$@" && SIZE=small UNITS=1
 DOCKER=$(docker_kind "$@")
 # kind's answer: refuse for a docker run run-slot refuses, docker for one it takes to run-slot-docker, else quick_kind's lane (clone, commit, quick, or nothing for the queue)
@@ -1298,10 +1359,10 @@ case "$DOCKER" in refuse\ *) echo "${DOCKER#refuse }" >&2; rlog refused "docker"
 # a model-bound run skips the queue's lanes, run-slot-docker among them, and a build fills the VM rather than waiting on a model
 [ -n "$DOCKER" ] && [ -n "$MODEL_BOUND" ] && { echo "run-slot.sh refuses --model-bound for a docker build, which fills the Docker VM rather than waiting on a model: run it without --model-bound, so it takes run-slot-docker, one docker build at a time" >&2; rlog refused "docker"; exit 2; }
 [ -n "$HEAVY" ] && SIZE=big UNITS=3
-# Merging keeps going: a run that gates a merge (Checks, local CI, the merge train, the dashboard's build) and a ship's own runs (ops-ship) go before the
-# rest and may use the small reserve, as may an org's run (below) and the run-slot.priority pick. A checker's run is ranked by its worker's size (size_of), and
+# Merging keeps going: a run that gates a merge (Checks, local CI, the merge train, the dashboard's build), a ship's own runs (ops-ship) and ops-tick's upkeep go before the
+# rest and may use the small reserve, as may an org's run (below) and the priority pick (prio_holder). A checker's run is ranked by its worker's size (size_of), and
 # the rest keep class 2 so an older copy's ticket still ranks.
-case "$WHO" in ops-checks-*|ops-localci|ops-merge-train|ops-dashboard|ops-ship) CLASS=0 ;; *) CLASS=2 ;; esac
+case "$WHO" in ops-checks-*|ops-localci|ops-merge-train|ops-dashboard|ops-ship|ops-tick) CLASS=0 ;; *) CLASS=2 ;; esac
 # the session a run counts as for the priority pick and its class: a commit-<worktree> pre-commit step counts as the last named session that ran run-slot from
 # that worktree (run-slot.owner/<worktree>), since the hook's waiter carries no session's name (4 Nov: a commit's build waited from 20:45Z
 # while the priority named its session, until a lead named its commit-<worktree> by hand)
@@ -1359,10 +1420,11 @@ CLONE_GAP=180
 CLONE_MARGIN=4
 # a clone that has waited this long passes the big-run hold, so back-to-back big runs cannot starve the lane (issue 1317, 7 Nov 10:24 to 11:55Z: about 11 clones asked and none started while a big run held a slot); 10 minutes is past a cold install's 353 s (issue 1344)
 CLONE_WAIT_MAX=${RUN_SLOT_CLONE_WAIT_MAX:-600}
-# the clones' brake, the owner's load rule of 5 Nov (load5 under 15, the owner's Mac's core count), one per core: sysctl's hw.ncpu, the count spawn.sh's load gate starts from, else 15; never load_line, whose cap shuts run-slot-2 (6 Nov, 06:52Z to 07:03Z: a cap of 1 held every clone)
+# the clones' brake, the owner's load rule of 5 Nov (load5 under 15, the owner's Mac's core count), one per core: sysctl's hw.ncpu, the count spawn.sh's load gate starts from, else the cpu<n> lines of Linux's /proc/stat, else 15; never load_line, whose cap shuts run-slot-2 (6 Nov, 06:52Z to 07:03Z: a cap of 1 held every clone)
 clone_brake() {
   local n
   n=$(sysctl -n hw.ncpu 2>/dev/null | tr -cd 0-9)
+  [ -n "$n" ] || n=$(proc_cores)
   if [ "${n:-0}" -gt 0 ]; then echo "$n"; else echo 15; fi
 }
 
@@ -1433,7 +1495,8 @@ ordered_waiters() {
     [ -n "$t" ] || continue
     pid=${t#*-}; pid=${pid%%-*}
     if ! alive "$pid"; then rm -f "${QUEUE:?}/${t:?}"; continue; fi
-    if [ "$name" != "$t" ]; then mt=$(stat "${ST[0]}" "${ST[1]}" "$QUEUE/$t" 2>/dev/null); name=$t; fi
+    # ST's format prints "<mtime> <path>", so the time alone is kept, since the path read as arithmetic ended the walk under set -u (issue 2508)
+    if [ "$name" != "$t" ]; then mt=$(stat "${ST[0]}" "${ST[1]}" "$QUEUE/$t" 2>/dev/null); mt=${mt%% *}; name=$t; fi
     [ -n "$mt" ] || continue
     m=$mt
     rank="" ask=""
@@ -1525,6 +1588,9 @@ cheap_sig() {
   for d in "$@"; do
     for f in "$d"/run-slot*.holder; do l=; read -r l 2>/dev/null < "$f"; SIG="$SIG|$f=$l"; p=${l#* }; p=${p%% *}; case "$p" in '' | *[!0-9]*) ;; *) alive "$p" || SIG="$SIG!ended" ;; esac; done
   done
+  # the priority windows, so the head, which compares no next_sig, looks again when one opens
+  windows_sig
+  SIG="$SIG$WSIG"
   # a look mark whose pid has ended is swept here, since the waiter it belonged to was killed past its trap and free() never ran
   for f in "$OPS"/.run-slot-ref-*; do [ -e "$f" ] || continue; p=${f##*-}; case "$p" in '' | *[!0-9]*) continue ;; esac; [ "$p" = "$$" ] && continue; alive "$p" || rm -f "$f"; done
 }
@@ -1533,7 +1599,17 @@ cheap_load() { local l; l=$(loadavg); set -- $l; LOAD="${2%%.*} ${3%%.*}"; }
 # whether this waiter's ticket is the queue's oldest, the one that names who goes next in run-slot.next
 oldest_is_me() { local a=("$QUEUE"/*); [ -n "$TICKET" ] && [ "${a[0]}" = "$TICKET" ]; }
 # the lines a waiter behind the head watches: who the oldest waiter names next, and the lead's pick and focus, which name a session whatever its place
-next_sig() { local f l; NSIG=; for f in "$NEXTF" "$OPS/run-slot.priority" "$OPS/run-slot.focus"; do l=; read -r l 2>/dev/null < "$f"; NSIG="$NSIG|$l"; done; }
+next_sig() { local f l; NSIG=; for f in "$NEXTF" "$OPS/run-slot.priority" "$OPS/run-slot.focus"; do l=; read -r l 2>/dev/null < "$f"; NSIG="$NSIG|$l"; done; windows_sig; NSIG="$NSIG$WSIG"; }
+# each standing priority window by name with every line of it, builtins alone, so opening, lifting or rewriting one wakes every waiter and costs no process while none stands
+windows_sig() {
+  local f l
+  WSIG=
+  for f in "$PDATA"/priority-*.json; do
+    [ -e "$f" ] || continue
+    WSIG="$WSIG|$f"
+    while IFS= read -r l || [ -n "$l" ]; do WSIG="$WSIG=$l"; done 2>/dev/null < "$f"
+  done
+}
 # the epoch second the first rule a look reads by the clock alone turns, nothing while none will: a ticket reaching AGED (the queue's order),
 # run-slot.priority's hour, a switch's expiry and a holder line with no pid going stale at 2 hours, so a waiter at the head looks again then
 due_at() {
@@ -1634,16 +1710,45 @@ LOOKER=1
 LOOKED=
 G0_CACHE=
 
-# run-slot.priority (a lead's pick, under an hour old) works with the queue (builder, 12 Oct: a priority naming the 8th waiter deadlocked it):
+# the priority pick (run-slot.priority, a lead's pick under an hour old, or a session's window) works with the queue (builder, 12 Oct: a priority naming the 8th waiter deadlocked it):
 # the named session may take a slot whatever its place, and the reservation holds only while that session is itself waiting in the queue
 prio_holder() {
-  local m
+  local m h=
   # while run-slot.focus stands its session is the pick, whatever run-slot.priority says or its age, so focus never loses its slot to a lapse
   focus_holder && return
-  m=$(mtime "$OPS/run-slot.priority") || return
   # an mtime that reads back empty counts as no pick, rather than as a shell error, as in stale
-  case "$m" in '' | *[!0-9]*) return 1 ;; esac
-  [ $(( $(date +%s) - m )) -lt 3600 ] && cut -d' ' -f1 "$OPS/run-slot.priority"
+  if m=$(mtime "$OPS/run-slot.priority"); then
+    case "$m" in '' | *[!0-9]*) ;; *) [ $(( $(date +%s) - m )) -lt 3600 ] && h=$(cut -d' ' -f1 "$OPS/run-slot.priority") ;; esac
+  fi
+  # a standing priority window (playground priority on) comes after the lead's pick, which is Ops acting now, and goes ahead of it while the pick's session has no run waiting
+  if windows_stand; then
+    [ -n "$h" ] && session_waiting "$h" && { printf '%s\n' "$h"; return; }
+    window_holder && return
+  fi
+  [ -n "$h" ] && printf '%s\n' "$h"
+}
+# whether any priority-*.json stands in the data folder, a builtin glob, so a machine with none pays nothing more for the pick
+windows_stand() { local f; for f in "$PDATA"/priority-*.json; do [ -f "$f" ] && return 0; done; return 1; }
+# whether session $1 owns a live ticket in the queue, its worktree's commit step's included (owner_of)
+session_waiting() {
+  local t n pid o
+  for t in "$QUEUE"/*; do
+    [ -e "$t" ] || continue
+    n=${t##*/}; pid=${n#*-}; pid=${pid%%-*}; o=${n#*-*-}
+    case "$o" in commit-*) o=$(owner_of "$o") ;; esac
+    [ "$o" = "$1" ] && alive "$pid" && return 0
+  done
+  return 1
+}
+# the session of the oldest window, by its since, whose session has a run waiting (window_session)
+window_holder() {
+  local f best= bs=
+  for f in "$PDATA"/priority-*.json; do
+    [ -f "$f" ] && window_session "$f" || continue
+    [ -z "$bs" ] || [[ $WIN_SINCE < $bs ]] || continue
+    session_waiting "$WIN_SESSION" && best=$WIN_SESSION bs=$WIN_SINCE
+  done
+  [ -n "$best" ] && printf '%s\n' "$best"
 }
 # the session run-slot.focus names while it stands (playground focus); nothing, exit 1, when it does not or goes between the check and the read (issue 1491)
 focus_holder() {
@@ -1657,27 +1762,16 @@ focus_holds() {
   FOCUS_HOLDER=$(focus_holder) || return 1
   ! focus_spares "$FOCUS_HOLDER" "$WHO"
 }
-# the wait under the battery's red mark or focus, its line naming the battery's first
+# the wait under focus
 hold_wait() {
   waited=$((SECONDS - WAIT_FROM))
   # each wait line prints at its first poll, its threshold 0, and again each time the clock's waited count crosses the next 300 s mark, whatever the poll slept
   if [ "$waited" -ge "$FAT" ]; then
-    if battery_holds; then
-      echo "run-slot.sh: waiting for the Mac's charge to rise (run-slot.battery, which ops-awake lifts once it does)" >&2
-    else
-      echo "run-slot.sh: waiting for $(focus_holder)'s focus to end (run-slot.focus, until $(cut -d' ' -f3 "$OPS/run-slot.focus" 2>/dev/null))" >&2
-    fi
+    echo "run-slot.sh: waiting for $(focus_holder)'s focus to end (run-slot.focus, until $(cut -d' ' -f3 "$OPS/run-slot.focus" 2>/dev/null))" >&2
     FAT=$(((waited / 300 + 1) * 300))
   fi
   sleep "$POLL"
 }
-# true while the battery's red mark holds this run: ops-awake keeps run-slot.battery standing while the charge is at 5% or under and falling, on battery or on a charger losing to the load, so every heavy run on this Mac waits, a focused session's too, but ops' upkeep (ops-tick's beats, the dashboard), as under focus
-battery_holds() {
-  switch_on run-slot.battery || return 1
-  case "$WHO" in ops-dashboard | ops-tick) return 1 ;; esac
-}
-# whether a hold the wait list obeys first stands, the one check the verdict reads share, so they cannot drift apart
-verdict_holds() { battery_holds || focus_holds; }
 prio_for() { local h; h=$(prio_holder) && [ -n "$h" ] && [ "$(owner_of "$1")" = "$h" ]; }
 # the oldest live ticket the priority holder owns, its worktree's commit steps' included: the one of its tickets that skips the queue, so its runs go in the order it asked for them (4 Nov: a merge asked later took a slot before the same session's older merge)
 prio_first() {
@@ -1694,7 +1788,7 @@ prio_first() {
 prio_waiting() { [ -n "$(prio_first)" ]; }
 
 free() {
-  # give the slot back only while its holder line is still ours
+  # give the slot back only while its holder line is still ours; giveBackSlot (packages/scripts/src/playground/give-back.ts) removes the same files, so a file added here goes there too
   if [ -n "$SLOT" ] && [ "$(cut -d' ' -f2 "$SLOT.holder" 2>/dev/null)" = "$$" ]; then
     # the holder line goes first, so a waiter whose mkdir loses to the next taker never reads our dead pid and reclaims that taker's slot (reviewer-ops-load-units, 19 Oct)
     rm -f "$SLOT.holder" "$SLOT.child" "$SLOT.preempted"
@@ -1822,6 +1916,8 @@ run_command() {
     export BUILDX_BUILDER=$DOCKER_BUILDER DOCKER_BUILDKIT=1
   fi
   [ "${DOCKER:-}" = each ] && set -- "$BUN" "$(checkout_root)/packages/scripts/src/docker-build.ts" each -- "$@"
+  # the lane and this pid, so a command whose last step only waits can give the lane back while it waits, as free() would (giveBackSlot in packages/scripts/src/playground/give-back.ts; issue 2644)
+  [ -z "$SLOT" ] || export RUN_SLOT_HELD="$SLOT $$"
   python3 -I -c '
 import os, sys
 for step, call in (("its own process group", os.setsid), ("nice " + os.environ.get("RUN_SLOT_NICE", "10"), lambda: os.nice(int(os.environ.get("RUN_SLOT_NICE", "10"))))):
@@ -1918,7 +2014,7 @@ slot_open() {
   # run-slot.single (builder, 9 Oct: heavy suites one at a time) closes slots 2 and 3 to new holders while it exists
   # ...except for the dashboard's own build and the merge train (12 Oct: single-slot mode left both waiting an hour behind testers' runs), which shut lanes leave run-slot-2 open to as well (retro 22: two 5/5 PRs sat about 55 min while the train raced the queue for run-slot alone)
   # #i162: in single-slot mode run-slot-2 still opens for a second suite; since 13 Oct (dispatcher, so work runs while the
-  # machine allows) it opens on memory: free share 40% or more (ops, 19 Oct 01:16Z, from the optimizer: 9 Mac-only waiters at
+  # machine allows) it opens on memory: on macOS a free share of 40% or more (ops, 19 Oct 01:16Z, from the optimizer: 9 Mac-only waiters at
   # pressure 1 with 43% free), pressure normal and swap-ins under SWAPINS_MAX (mem_ok), and the 5-minute load under 22 as a backstop
   if [ "$s" != run-slot ] && switch_on run-slot.single && [ "$WHO" != ops-dashboard ] && [ "$WHO" != ops-merge-train ] && ! lifted; then
     if [ "$s" = run-slot-2 ] && [ "$(load5)" -lt "$(load_line)" ] && mem_ok; then :; else return 1; fi
@@ -1957,12 +2053,13 @@ load1_max() {
 # of starts and 73 after a clone; a run's verdict that differs from the last, run-slot.lanes, is a lanes line in run-slot.runs.log with the
 # gauges, mem_ok's free share and pressure level and, when shut, why: the first of load1, cpu and mem that shut it (dispatcher, 5 Nov: retro 39
 # counted 19 shuts by the CPU, 12 by memory and 6 by load1 from readings alone), while a read subcommand writes neither; an idle share that reads
-# - is a dark sensor, not a busy CPU, so it opens under the load stop and memory, and only a reading that says busy, or one below the bar, shuts (issue 1818)
+# - is a dark sensor, not a busy CPU, so it opens under the load stop and memory, and only a reading that says busy, or one below the bar, shuts (issue 1818);
+# a reading below the bar shuts only when the last one was below it too, or unread, as mem_ok reads the swap-ins, since a one-second sample spikes and falls back (issue 2405: on 16 Nov the next lanes line reopened all 59 CPU shuts, a median 17 s later)
 lanes_open() {
-  local idle swap tps mbs load need="" verdict=shut why="" seen free level
+  local idle swap tps mbs lastidle load need="" verdict=shut why="" seen free level
   # a read subcommand takes the verdict a waiter wrote in the last 30 s (the head rewrites it each poll while the gauges shut a slot, and, while they open one, whenever a fresh reading moves the readings past their stamp, gate_sig), so room, can-take and head see the lanes as the queue's head saw them, since the CPU gate can flip between two readings seconds apart (issue 1216: 55% then 33% idle); with none that fresh it reads the gauges itself
   if [ -n "$CAN_TAKE" ] && seen=$(fresh_lanes); then [ "$seen" = open ]; return; fi
-  read -r idle swap tps mbs _ <<< "$(gauges)"
+  read -r idle swap tps mbs _ lastidle <<< "$(gauges)"
   load=$(loadavg | awk '{print $2}')
   case "$idle" in
     -) told idle "run-slot.sh: cannot read the CPU's idle share (top -l 2 -n 0), so the lanes go by the load and memory alone" ;;
@@ -1971,7 +2068,7 @@ lanes_open() {
   if [ "${load%.*}" -lt "$(load1_max)" ] 2>/dev/null; then need=$(idle_min); fi
   if [ -z "$need" ]; then
     why=load1
-  elif [ "$idle" = busy ] || { [ "$idle" != - ] && ! [ "${idle%.*}" -ge "$need" ]; } 2>/dev/null; then
+  elif [ "$idle" = busy ] || { [ "$idle" != - ] && ! [ "${idle%.*}" -ge "$need" ] && ! [ "${lastidle%.*}" -ge "$need" ]; } 2>/dev/null; then
     why=cpu
   elif ! mem_ok; then
     why=mem
@@ -1983,7 +2080,7 @@ lanes_open() {
     # every waiter's reading rewrites the verdict, so its age says how fresh it is (fresh_lanes)
     echo "$verdict" > "$OPS/run-slot.lanes.$$" && mv -f "$OPS/run-slot.lanes.$$" "$OPS/run-slot.lanes"
     if [ "$seen" != "$verdict" ]; then
-      free=$(memstat level); level=$(memstat vm_pressure_level)
+      mem_read; free=$FREE level=$LEVEL
       rlog lanes "$verdict${why:+ why=$why} idle=$idle% load1=$load free=${free:--}${free:+%} pressure=${level:--} swapins=$swap disk0_tps=${tps:--} disk0_mbs=${mbs:--}"
     fi
   fi
@@ -2096,7 +2193,7 @@ unit_fits() {
 # whether a run of $2 units fits beside $1 held within a limit of $3; any run fits while no slot is held, so a big run still starts on a quiet machine
 fits() { [ "$1" -eq 0 ] || [ $(($1 + $2)) -le "$3" ]; }
 reserve() { local r=$(($1 / 4)); [ "$r" -ge 1 ] && echo "$r" || echo 1; }
-# the units a run must leave free: none for a small run, one that gates a merge (rank 0x), an org's run (1x) or the run-slot.priority pick, else the reserve; with $5 given it is set instead of echoed, and $6 given names the holder the walk read once, empty when none stands, so a walk pays no read a ticket; callers without $6 read their own (issue 1654), and the two no-holder shapes differ: empty says the walk found none and skips prio_for, unset says none was passed and prio_for reads its own, so the match needs a non-empty holder
+# the units a run must leave free: none for a small run, one that gates a merge (rank 0x), an org's run (1x) or the priority pick (prio_holder), else the reserve; with $5 given it is set instead of echoed, and $6 given names the holder the walk read once, empty when none stands, so a walk pays no read a ticket; callers without $6 read their own (issue 1654), and the two no-holder shapes differ: empty says the walk found none and skips prio_for, unset says none was passed and prio_for reads its own, so the match needs a non-empty holder
 may_reserve() {
   local rr
   case "$2" in small) rr=0 ;; *)
@@ -2109,8 +2206,47 @@ may_reserve() {
   if [ -n "${5:-}" ]; then printf -v "$5" '%s' "$rr"; else echo "$rr"; fi
 }
 
-# the load averages as `{ <1m> <5m> <15m> }`: from sysctl, else from uptime, since Claude Code's sandbox refuses the sysctl command's name lookup
-loadavg() { sysctl -n vm.loadavg 2>/dev/null || LC_ALL=C uptime 2>/dev/null | sed -nE 's/.*load averages?: *([^ ,]+),? +([^ ,]+),? +([^ ,]+).*/{ \1 \2 \3 }/p'; }
+# Linux's readings, from /proc's text where macOS's commands do not read (spawn.sh's and packages/scripts/src/ops-machine/readings.ts's sources), each nothing when it does not read, never 0; builtins alone but proc_idle's and proc_swapins' one sleep, the second also proc_disk_rate's window.
+# PROC is the folder that text comes from: PLAYGROUND_PROC under the test sandbox's marker alone (TEST_SANDBOX_HOME), where a test points it at recorded text, so a session that sets it cannot feed the lanes a reading; else /proc. SYS stands for /sys beside it: that folder's sys folder, else /sys.
+PROC=/proc SYS=/sys
+[ -n "${TEST_SANDBOX_HOME:-}" ] && [ -n "${PLAYGROUND_PROC:-}" ] && PROC=$PLAYGROUND_PROC SYS=$PLAYGROUND_PROC/sys
+# /proc/loadavg's three loads in sysctl's `{ <1m> <5m> <15m> }`
+proc_loadavg() { local a b c; read -r a b c _ 2>/dev/null < "$PROC/loadavg" && [ -n "$c" ] && echo "{ $a $b $c }"; }
+# /proc/stat's cpu<n> lines, one per core
+proc_cores() { local k n=0; while read -r k _; do case $k in cpu[0-9]*) n=$((n + 1)) ;; esac; done 2>/dev/null < "$PROC/stat"; [ "$n" -gt 0 ] && echo "$n"; }
+# /proc/stat's cpu line as `<idle and iowait> <all eight busy and idle fields>` (guest time is counted in user already)
+proc_cpu() {
+  local k u n s i w q sq st
+  read -r k u n s i w q sq st _ 2>/dev/null < "$PROC/stat" && [ "$k" = cpu ] || return 1
+  case "$u$n$s$i$w$q$sq$st" in '' | *[!0-9]*) return 1 ;; esac
+  echo "$((i + w)) $((u + n + s + i + w + q + sq + st))"
+}
+# the CPU's idle share in percent over two /proc/stat reads a second apart, two decimals
+proc_idle() {
+  local a b i1 t1 i2 t2 p
+  a=$(proc_cpu) || return; sleep 1; b=$(proc_cpu) || return
+  read -r i1 t1 <<< "$a"; read -r i2 t2 <<< "$b"
+  [ $((t2 - t1)) -gt 0 ] || return
+  p=$(((i2 - i1) * 10000 / (t2 - t1)))
+  printf '%d.%02d\n' $((p / 100)) $((p % 100))
+}
+# /proc/vmstat's pswpin, the pages swapped in since boot
+proc_pswpin() { local k v; while read -r k v; do [ "$k" = pswpin ] && case $v in '' | *[!0-9]*) return 1 ;; *) echo "$v"; return ;; esac; done 2>/dev/null < "$PROC/vmstat"; return 1; }
+# the swap-ins over a second, pswpin's rise between two reads
+proc_swapins() { local a b; a=$(proc_pswpin) || return; sleep 1; b=$(proc_pswpin) || return; [ "$b" -ge "$a" ] && echo $((b - a)); }
+# Linux's free share and pressure level into FREE and LEVEL: MemAvailable's whole share of MemTotal in /proc/meminfo, and PSI's /proc/pressure/memory on macOS's scale, 4 once full avg10 is 10% or more, 2 once some avg10 is, else 1 (spawn.sh's pressure_level, whose 10% lines are estimated)
+proc_mem() {
+  local k v total= avail= some= full=
+  FREE= LEVEL=
+  while read -r k v _; do case $k in MemTotal:) total=$v ;; MemAvailable:) avail=$v ;; esac; done 2>/dev/null < "$PROC/meminfo"
+  case "$total$avail" in *[!0-9]*) ;; *) [ -n "$avail" ] && [ "${total:-0}" -gt 0 ] && FREE=$((avail * 100 / total)) ;; esac
+  while read -r k v _; do case $k in some) some=${v#avg10=} ;; full) full=${v#avg10=} ;; esac; done 2>/dev/null < "$PROC/pressure/memory"
+  case "$some" in '' | *[!0-9.]* | .*) return 0 ;; esac
+  case "$full" in '' | *[!0-9.]* | .*) return 0 ;; esac
+  if [ "${full%%.*}" -ge 10 ]; then LEVEL=4; elif [ "${some%%.*}" -ge 10 ]; then LEVEL=2; else LEVEL=1; fi
+}
+# the load averages as `{ <1m> <5m> <15m> }`: from sysctl, else Linux's /proc/loadavg, else from uptime, since Claude Code's sandbox refuses the sysctl command's name lookup
+loadavg() { sysctl -n vm.loadavg 2>/dev/null || proc_loadavg || LC_ALL=C uptime 2>/dev/null | sed -nE 's/.*load averages?: *([^ ,]+),? +([^ ,]+),? +([^ ,]+).*/{ \1 \2 \3 }/p'; }
 load1() { loadavg | awk '{print int($2)}'; }
 load5() { loadavg | awk '{print int($3)}'; }
 # the swap-ins over vm_stat -c 2 1's one second: its second row under the header, never the first, which counts since boot; nothing when either row is missing
@@ -2121,34 +2257,62 @@ swapin_rate() {
 disk_rate() {
   iostat -d -c 2 -w 1 disk0 2>/dev/null | awk 'NF == 3 && $2 ~ /^[0-9]+$/ { n++; t = $2; m = $3 } END { if (n == 2) print t, m }'
 }
+# whether /proc/diskstats' device $1 is a whole disk: in /sys/class/block with no partition file, and not in /sys/devices/virtual/block, where loop, ram, zram and dm devices live
+whole_disk() { [ -e "$SYS/class/block/$1" ] && [ ! -e "$SYS/class/block/$1/partition" ] && [ ! -e "$SYS/devices/virtual/block/$1" ]; }
+# the first whole disk's `<reads and writes completed> <sectors read and written>` in /proc/diskstats, Linux's stand-in for disk0
+proc_disk() {
+  local maj min name r rmerged sr rtime w wmerged sw rest
+  while read -r maj min name r rmerged sr rtime w wmerged sw rest; do
+    whole_disk "$name" || continue
+    case "$r$sr$w$sw" in '' | *[!0-9]*) return 1 ;; esac
+    echo "$((r + w)) $((sr + sw))"
+    return
+  done 2>/dev/null < "$PROC/diskstats"
+  return 1
+}
+# that disk's `<transfers/s> <MB/s>` between proc_disk's reads $1 and $2, taken around proc_swapins' one-second wait, in iostat's units: sectors of 512 bytes, MB of 1,048,576
+proc_disk_rate() {
+  local io1 s1 io2 s2 c
+  read -r io1 s1 <<< "$1"; read -r io2 s2 <<< "$2"
+  [ -n "$s1" ] && [ -n "$s2" ] && [ "$io2" -ge "$io1" ] && [ "$s2" -ge "$s1" ] || return
+  c=$(((s2 - s1) * 512 * 100 / 1048576))
+  printf '%d %d.%02d\n' $((io2 - io1)) $((c / 100)) $((c % 100))
+}
 # the swap-ins a second at which memory has no room for another heavy run: spawn.sh's line for a GLM start, the gates.glmSwapinsMax setting's default (packages/settings/src/gates.ts): change both together
 SWAPINS_MAX=100
 # what a look says once a run while another takes the first reading of the gauges
 BUSY_TOLD="run-slot.sh: another look is reading the CPU's idle share and the swap-ins, so slots 2 to 4 stay shut until it lands"
-# `<idle> <swapins> <disk0 transfers/s> <disk0 MB/s> <the last reading's swapins>`: the CPU's idle share in top's second sample (top -l 2 -n 0), the swap-ins a second in
-# vm_stat -c 2 1's last row (as spawn.sh's swapins() reads them) and disk_rate's two figures, which lanes lines log and no verdict reads (a bound on disk load waits on a day of them), each - when unread; every look shares one reading through run-slot.gauges
-# (`<epoch> <idle> <swapins> <tps> <MB/s> <last swapins>`) for 10 s, since a top takes a second and about 0.7 s of system CPU, and the head waiter of a queue reads them every poll while they shut a slot, and, while they open one, whenever a fresh reading of them moves the readings past their stamp;
+# `<idle> <swapins> <disk0 transfers/s> <disk0 MB/s> <the last reading's swapins> <the last reading's idle>`: the CPU's idle share in top's second sample (top -l 2 -n 0), the swap-ins a second in
+# vm_stat -c 2 1's last row (one second, where spawn.sh's swapins() takes the median of 3) and disk_rate's two figures (on Linux proc_idle's, proc_swapins' and proc_disk_rate's over proc_swapins' second; a disk read with no swap-in read stays unread), which lanes lines log and no verdict reads (a bound on disk load waits on a day of them), each - when unread; every look shares one reading through run-slot.gauges
+# (`<epoch> <idle> <swapins> <tps> <MB/s> <last swapins> <last idle>`, a cache written before the last idle field reading it as -) for 10 s, since a top takes a second and about 0.7 s of system CPU, and the head waiter of a queue reads them every poll while they shut a slot, and, while they open one, whenever a fresh reading of them moves the readings past their stamp;
 # one look refreshes it, under gauges_lock, while the rest keep the reading they have, or `busy busy` when there is none yet, since without the
 # lock every look that found it stale ran its own top (3 Nov, 10:53Z: 16 to 23 tops at once from 26 waiters, and load1 56.8); the refresher
 # removes the lock only while it still carries the mtime it took, so a refresher that ran past a takeover leaves the new holder's lock
 gauges() {
-  local now cached= idle= swap= tps= mbs= last= took lock="$OPS/run-slot.gauges.lock"
+  local now cached= idle= swap= tps= mbs= last= lastidle= disk1= disk2= took lock="$OPS/run-slot.gauges.lock"
   now=$(date +%s)
-  { read -r cached idle swap tps mbs last < "$OPS/run-slot.gauges"; } 2>/dev/null
+  { read -r cached idle swap tps mbs last lastidle _ < "$OPS/run-slot.gauges"; } 2>/dev/null
   case "$cached" in ''|*[!0-9]*) cached=0 ;; esac
   if [ $((now - cached)) -ge 10 ]; then
     if took=$(gauges_lock "$now"); then
+      lastidle=$idle
       idle=$(top -l 2 -n 0 2>/dev/null | sed -nE 's/^CPU usage:.* ([0-9.]+)% idle.*/\1/p' | awk 'END { if (NR == 2) print }')
+      [ -n "$idle" ] || idle=$(proc_idle)
       last=$swap
       swap=$(swapin_rate)
+      if [ -z "$swap" ]; then
+        disk1=$(proc_disk)
+        swap=$(proc_swapins) && disk2=$(proc_disk)
+      fi
       read -r tps mbs <<< "$(disk_rate)"
-      printf '%s %s %s %s %s %s\n' "$now" "${idle:--}" "${swap:--}" "${tps:--}" "${mbs:--}" "${last:--}" > "$OPS/run-slot.gauges.$$" 2>/dev/null && mv -f "$OPS/run-slot.gauges.$$" "$OPS/run-slot.gauges" 2>/dev/null
+      [ -n "$tps" ] || read -r tps mbs <<< "$(proc_disk_rate "$disk1" "$disk2")"
+      printf '%s %s %s %s %s %s %s\n' "$now" "${idle:--}" "${swap:--}" "${tps:--}" "${mbs:--}" "${last:--}" "${lastidle:--}" > "$OPS/run-slot.gauges.$$" 2>/dev/null && mv -f "$OPS/run-slot.gauges.$$" "$OPS/run-slot.gauges" 2>/dev/null
       [ "$(mtime "$lock")" = "$took" ] && rmdir "$lock" 2>/dev/null
     elif [ "$cached" -eq 0 ]; then
-      idle=busy swap=busy
+      idle=busy swap=busy lastidle=
     fi
   fi
-  echo "${idle:--} ${swap:--} ${tps:--} ${mbs:--} ${last:--}"
+  echo "${idle:--} ${swap:--} ${tps:--} ${mbs:--} ${last:--} ${lastidle:--}"
 }
 # takes the gauges' refresh lock at epoch $1, or one aged 30 s or more by its mtime, which a refresher killed mid-refresh left (a refresh
 # takes about 2 s), and prints the mtime it took the lock at (scripts/ops/README.md says why two takeovers together are harmless)
@@ -2162,7 +2326,10 @@ gauges_lock() {
 }
 # macOS's memory reading $1: level (the free share) or vm_pressure_level (1 normal, 2 warn, 4 critical)
 memstat() { sysctl -n "kern.memorystatus_$1" 2>/dev/null | tr -cd 0-9; }
-# memory room for a second suite: macOS's free share at 40% or more, its pressure level normal (1; 2 is warn, 4 critical) and swap-ins under SWAPINS_MAX a
+# sets FREE and LEVEL, the free share and the pressure level: macOS's (memstat), else Linux's (proc_mem) with MEM_OS=linux, each empty when neither reads
+mem_read() { MEM_OS=macos FREE=$(memstat level); LEVEL=$(memstat vm_pressure_level); [ -n "$FREE$LEVEL" ] || { MEM_OS=linux; proc_mem; }; }
+# memory room for a second suite: the pressure level normal (1; 2 is warn, 4 critical), on macOS its memorystatus free share at 40% or more too, which counts compressible pages, while Linux
+# judges by PSI and swap-ins alone, since MemAvailable leaves out what a resident model holds (issue 2660: a local model of about 60 GB held it at 33% with PSI at 0), and swap-ins under SWAPINS_MAX a
 # second in this reading or the last, since a one-second sample spikes and falls back (5 Nov, 06:19 to 07:45Z: 17 of the 24 memory shuts came at pressure 1
 # with 70 to 80% free, from readings such as 128, 242 and 1116 between 0, 8, 20 and 44); an unread reading (Claude Code's sandbox refuses the first two) leaves no room, said once a run on stderr
 MEM_TOLD="${TMPDIR:-/tmp}/run-slot-mem-told.$$"
@@ -2171,17 +2338,17 @@ told() { [ -e "$MEM_TOLD-$1" ] || { echo "$2" >&2; : > "$MEM_TOLD-$1"; }; }
 mem_unread() { told "$1" "run-slot.sh: cannot read the memory (sysctl kern.memorystatus_*), so $2"; }
 mem_ok() {
   local free level swap last
-  free=$(memstat level); level=$(memstat vm_pressure_level)
+  mem_read; free=$FREE level=$LEVEL
   if [ -z "$free" ] || [ -z "$level" ]; then
     mem_unread suite "no second suite runs beside this one"
     return 1
   fi
-  read -r _ swap _ _ last <<< "$(gauges)"
+  read -r _ swap _ _ last _ <<< "$(gauges)"
   case "$swap" in
     -) told swap "run-slot.sh: cannot read the swap-ins (vm_stat -c 2 1), so no second suite runs beside this one"; return 1 ;;
     busy) told busy "$BUSY_TOLD"; return 1 ;;
   esac
-  [ "$free" -ge 40 ] && [ "$level" -eq 1 ] && { [ "$swap" -lt "$SWAPINS_MAX" ] || ! [ "$last" -ge "$SWAPINS_MAX" ] 2>/dev/null; }
+  { [ "$MEM_OS" = linux ] || [ "$free" -ge 40 ]; } && [ "$level" -eq 1 ] && { [ "$swap" -lt "$SWAPINS_MAX" ] || ! [ "$last" -ge "$SWAPINS_MAX" ] 2>/dev/null; }
 }
 
 # Dictation misses come from input delay under load, so every command runs under nice 10, and the
@@ -2250,8 +2417,9 @@ if [ -n "$KIND" ]; then
   # an unread memory reading (Claude Code's sandbox refuses it) holds the clone, said once a run
   clone_held() {
     [ "$KIND" = clone ] && switch_on run-slot.clone-off && ! printf "%s\n" "$WHO" | grep -qxf "$OPS/run-slot.clone-allow" 2>/dev/null || return 1
-    [ -n "$(memstat level)" ] || { mem_unread clone "run-slot.clone-off holds this clone until it expires or run-slot.clone-allow names $WHO"; return 0; }
-    ! { case "$(memstat vm_pressure_level)" in 1|2) true ;; *) false ;; esac && [ "$(memstat level)" -ge 8 ] 2>/dev/null && [ "$(load5)" -lt 30 ] && [ "$(load1)" -lt 30 ]; }
+    mem_read
+    [ -n "$FREE" ] || { mem_unread clone "run-slot.clone-off holds this clone until it expires or run-slot.clone-allow names $WHO"; return 0; }
+    ! { case "$LEVEL" in 1|2) true ;; *) false ;; esac && [ "$FREE" -ge 8 ] 2>/dev/null && [ "$(load5)" -lt 30 ] && [ "$(load1)" -lt 30 ]; }
   }
   # a clone waiter's place, run-slot.clone-waiters/<class>-<asked second>.<nanoseconds>-<pid>-<who>, keeps its name across a reread's exec, so a new copy a gate holds drops it until the gates pass (review round 1: it held back every clone clone-allow let through), and one no gate holds keeps its place; the nanoseconds keep two clones that ask in one second in ask order, where seconds alone tied and the glob fell to the pid (issues 1619, 1688)
   CLONE_QUEUE="$OPS/run-slot.clone-waiters"
@@ -2284,8 +2452,8 @@ if [ -n "$KIND" ]; then
       END { if (ENVIRON["CUTOFF"] != "" && t > ENVIRON["CUTOFF"]) print t }')
     [ -n "$last" ] && echo "${CLONE_GAP}s past the last clone's end at $last"
   }
-  # a commit's build, a merge or a clone is heavy, so it waits under focus or the battery's red mark; the quick slot's short runs go on
-  while [ "$KIND" != quick ] && verdict_holds; do
+  # a commit's build, a merge or a clone is heavy, so it waits under focus; the quick slot's short runs go on
+  while [ "$KIND" != quick ] && focus_holds; do
     [ -z "$CLONE_TICKET" ] || rm -f "$CLONE_TICKET"
     reread
     hold_wait
@@ -2420,7 +2588,7 @@ if [ -n "$ROOM_ONLY" ]; then
   free=0
   waiters=$(ordered_waiters | grep -c .)
   # the free lanes are the ones the queue's next run can take: first_waiter's own units, none while no waiter can start, a medium's with no waiter; none while a hold stands, since it holds the queue's next run (issue 1818)
-  if ! verdict_holds; then
+  if ! focus_holds; then
     t=$(first_waiter)
     if [ -n "$t" ]; then
       set -- $(cat "$QUEUE/$t" 2>/dev/null)
@@ -2442,10 +2610,9 @@ if [ -n "$CAN_TAKE" ]; then
     # the ticket's own wait, its ask's time_ns in its name, so a small one past the backlog line answers for the hold the queue holds it under (issue 1417); a session-name ask has no wait to read and reads as fresh
     waited=$((($(date +%s) - ${CAN_TICKET%%-*} / 1000000000)))
   fi
-  # the holds the wait loop obeys first (its hold check) answer here too, so a held run reads closed to the verdict while it holds (issue 1818), and the stderr line names the hold, the battery's first as hold_wait names it, for ops-unstick's slot-stuck alert (issue 1842); the line comes from the reads verdict_holds made, FOCUS_HOLDER set only when the battery did not hold, so a lapse between two reads prints no empty name (issue 1647)
-  FOCUS_HOLDER=
-  if verdict_holds; then
-    if [ -n "$FOCUS_HOLDER" ]; then echo "run-slot.sh: held by run-slot.focus for $FOCUS_HOLDER" >&2; else echo "run-slot.sh: held by run-slot.battery" >&2; fi
+  # the hold the wait loop obeys first (its hold check) answers here too, so a held run reads closed to the verdict while it holds (issue 1818), and the stderr line names the hold for ops-unstick's slot-stuck alert (issue 1842); the line comes from the read focus_holds made, so a lapse between two reads prints no empty name (issue 1647)
+  if focus_holds; then
+    echo "run-slot.sh: held by run-slot.focus for $FOCUS_HOLDER" >&2
     exit 1
   fi
   reclaim "$OPS/$CAN_TAKE"
@@ -2481,7 +2648,7 @@ while :; do
   # pick's next ticket included once its first has gone, looks again at once (its poll reads run-slot.next); each write is a `next` line in run-slot.runs.log,
   # so a window where head named a waiter the line passed over reads back who the oldest named and when (issue 1477)
   if [ -n "$TICKET" ] && oldest_is_me; then
-    pf=; [ -e "$OPS/run-slot.priority" ] || [ -e "$OPS/run-slot.focus" ] && pf=$(prio_first)
+    pf=; { [ -e "$OPS/run-slot.priority" ] || [ -e "$OPS/run-slot.focus" ] || windows_stand; } && pf=$(prio_first)
     nx=; read -r nx 2>/dev/null < "$NEXTF"
     if [ "$nx" != "${fw:--} ${fw2:--} ${pf:--}" ]; then
       printf '%s\n' "${fw:--} ${fw2:--} ${pf:--}" > "$NEXTF" 2>/dev/null && rlog next "${fw:--} ${fw2:--} ${pf:--}"
@@ -2499,8 +2666,8 @@ while :; do
     nap
     continue
   fi
-  # under the battery's red mark or focus a run keeps its place in the queue and takes no slot
-  if verdict_holds; then
+  # under focus a run keeps its place in the queue and takes no slot
+  if focus_holds; then
     hold_wait
     continue
   fi
@@ -2524,8 +2691,8 @@ while :; do
       continue
     fi
     slot_open "$s" || continue
-    # run-slot.priority names the one session that takes run-slot next (a lead sets it, as for the owner's SDK demo); everyone else leaves
-    # run-slot to it while the file is under an hour old
+    # the priority pick (prio_holder) names the one session that takes run-slot next (a lead sets it, as for the owner's SDK demo); everyone
+    # else leaves run-slot to it while it stands
     if [ "$s" = run-slot ] && [ -n "$(prio_holder)" ] && ! prio_for "$WHO" && prio_waiting; then
       continue
     fi

@@ -28,7 +28,9 @@ describe("the sidebar's rows", () => {
     expect(layout).toContain(
       "header={<DashboardDispatchers rows={dispatcherSlotsOf(await readHealth())} />}",
     )
-    expect(layout).toContain("nav={<DashboardNav />}")
+    expect(layout).toContain(
+      "nav={<DashboardNav account={session.user.login ?? session.user.id} />}",
+    )
     order(shell, "{site.name}", "{header}", "</SidebarHeader>", "<SidebarContent>{nav}")
     expect(dashboard).not.toContain('label === "Dispatchers" ? (')
     expect(dashboard).not.toContain("function DispatchersGroup")

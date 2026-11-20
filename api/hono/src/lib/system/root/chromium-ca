@@ -1,0 +1,32 @@
+#!/bin/sh
+# Lets Helium and Chrome for Testing trust the Dashboard's CA for .localhost names alone, through a managed policy built from the CA the install kept and checked against the approved card; run as root from an approved Inbox card alone.
+set -eu
+umask 022
+der=/usr/local/lib/playground/data/portless-ca.der
+key=CACertificatesWithConstraints
+dirs="/etc/chromium/policies/managed /etc/opt/chrome_for_testing/policies/managed"
+if [ ! -f "$der" ] || [ -L "$der" ]; then
+  echo "refused: no Dashboard CA is installed: approve a new install card once the Dashboard has its CA" >&2
+  exit 1
+fi
+for dir in $dirs; do
+  [ -d "$dir" ] || continue
+  for other in "$dir"/*.json; do
+    [ -f "$other" ] && [ "$other" != "$dir/portless-ca.json" ] || continue
+    if grep -q "$key" "$other"; then
+      echo "refused: $other already sets $key, and two files setting it conflict" >&2
+      exit 1
+    fi
+  done
+done
+b64=$(base64 <"$der" | tr -d '\n')
+for dir in $dirs; do
+  mkdir -p "$dir"
+  chown root:root "$dir"
+  chmod 0755 "$dir"
+  tmp=$(mktemp "$dir/.portless-ca.XXXXXX")
+  printf '{"%s":[{"certificate":"%s","constraints":{"permitted_dns_names":["localhost"]}}]}\n' "$key" "$b64" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$dir/portless-ca.json"
+done
+echo "Helium and Chrome for Testing now trust the Dashboard's CA for .localhost addresses; restart Helium once"

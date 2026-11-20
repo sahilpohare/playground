@@ -1,4 +1,5 @@
-import { rmSync, statSync } from "node:fs"
+import { createHash, X509Certificate } from "node:crypto"
+import { readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -6,6 +7,8 @@ import { site } from "@packages/config/site"
 
 import { chatLabel, homeTitle } from "../../../../web/next/src/lib/agent-label"
 import { VERIFY_VISIT } from "../../../../web/next/src/lib/verify-visit"
+import { networkChangedWait } from "../agent-browser-retry"
+import { portlessCa } from "../portless-ca"
 import type { Shift } from "./cls-observer"
 import { DASHBOARD_MAP, type DashboardPage, driftProblems } from "./map"
 
@@ -265,6 +268,27 @@ export const signInWaitArgs = (): string[] => [
   String(SIGNIN_WAIT_MS),
 ]
 
+// The sha256 of a certificate's public key, base64, the form Chrome's --ignore-certificate-errors-spki-list takes.
+export const spkiOf = (pem: string): string =>
+  createHash("sha256")
+    .update(new X509Certificate(pem).publicKey.export({ format: "der", type: "spki" }))
+    .digest("base64")
+
+// The one --args value every command of a session carries, since agent-browser keeps only the last --args and it replaces the args of its own config (~/.agent-browser/config.json, which `playground doctor`'s test browser line checks). On Linux it carries --no-sandbox, since AppArmor blocks Chromium's sandbox, and a pin of portless's CA key, since Chromium there did not trust that CA even from ~/.pki/nssdb (ERR_CERT_AUTHORITY_INVALID, measured 16 Nov); the pin ignores certificate errors only on a chain signed by that key. The mute goes everywhere, since headless Chrome plays sound.
+export const launchArgs = (platform: NodeJS.Platform, pem: string | null): string =>
+  [
+    ...(platform === "linux"
+      ? ["--no-sandbox", ...(pem ? [`--ignore-certificate-errors-spki-list=${spkiOf(pem)}`] : [])]
+      : []),
+    "--mute-audio",
+  ].join(",")
+
+// portless's CA as this run's launch reads it: withPortlessCa has already put it in NODE_EXTRA_CA_CERTS, which portlessCa reads as an extra CA of the process's own.
+const caPem = (): string | null => {
+  const ca = portlessCa({ ...process.env, NODE_EXTRA_CA_CERTS: undefined })
+  return ca ? readFileSync(ca, "utf8") : null
+}
+
 // One agent-browser session per check (verify-<pid>-<check>), so parallel workers never share a browser, its cookies or its console, and a check never reconnects to the session the last check is still closing. Init scripts (paths), VISIT_SCRIPT's first, are registered on its first command and then run before every page's own.
 export class Browser {
   readonly session: string
@@ -275,18 +299,37 @@ export class Browser {
     this.session = `verify-${process.pid}${name ? `-${name}` : ""}`
   }
 
-  // The argv for one agent-browser command; only the first, which launches the browser, carries the init scripts and the mute, since headless Chrome plays sound.
+  // The argv for one agent-browser command: the first, which launches the browser, carries the init scripts; every one carries the same launchArgs, since a command whose args differ from the running browser's, a config's included, relaunches it on its own (on Linux the config's `--no-sandbox` alone, dropping the CA pin, measured 16 Nov).
   async command(args: string[]): Promise<string[]> {
     const first = this.initScripts !== null
     const scripts = first ? [await visitScriptPath(), ...(this.initScripts ?? [])] : []
     this.initScripts = null
-    const launch = first
-      ? ["--args", "--mute-audio", ...scripts.flatMap((path) => ["--init-script", path])]
-      : []
-    return ["agent-browser", "--session", this.session, "--json", ...launch, ...args]
+    return [
+      "agent-browser",
+      "--args",
+      launchArgs(process.platform, caPem()),
+      "--session",
+      this.session,
+      "--json",
+      ...scripts.flatMap((path) => ["--init-script", path]),
+      ...args,
+    ]
   }
 
   async run(...args: string[]): Promise<Record<string, unknown>> {
+    for (let tries = 0; ; tries++) {
+      try {
+        return await this.once(args)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const wait = networkChangedWait(args, message, tries)
+        if (wait === null) throw error
+        await Bun.sleep(wait)
+      }
+    }
+  }
+
+  private async once(args: string[]): Promise<Record<string, unknown>> {
     const proc = Bun.spawn(await this.command(args), {
       stderr: "pipe",
       stdout: "pipe",

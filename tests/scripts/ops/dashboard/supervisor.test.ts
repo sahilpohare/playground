@@ -2,16 +2,19 @@ import { afterAll, describe, expect, test } from "bun:test"
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { scratchEnv } from "../../../scratch-env"
 import { SCRIPT as RUN_SLOT, machine as slotMachine } from "../run-slot-fake"
 
 const root = join(import.meta.dir, "..", "..", "..", "..")
@@ -19,17 +22,28 @@ const script = await Bun.file(join(root, "scripts", "ops", "dashboard", "supervi
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "supervisor-urls-")))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
+// This process's env with no PORTLESS* key, as install.test.ts's gitEnv drops them, so a test's portless reads only the folders it made.
+const noPortless = () =>
+  Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PORTLESS")))
+
 const fn = (name: string) => script.match(new RegExp(`^${name}\\(\\) \\{.*\\}$`, "m"))?.[0]
 
-// A stand-in for bunx that answers `portless get <name>` from a file, as portless 0.15 names a URL from whatever proxy runs when it is asked.
+// A stand-in for bunx that answers `portless get <name>` from a file, as portless 0.15 names a URL from whatever proxy runs when it is asked; STATE in the file reads as the PORTLESS_STATE_DIR it was asked under.
 const bunx = join(scratch, "bunx")
 const answer = join(scratch, "answer")
-await Bun.write(bunx, `#!/bin/sh\n[ "$1 $2" = "portless get" ] && sed "s/NAME/$3/" "${answer}"\n`)
+await Bun.write(
+  bunx,
+  `#!/bin/sh\n[ "$1 $2" = "portless get" ] && sed "s/NAME/$3/; s|STATE|$PORTLESS_STATE_DIR|" "${answer}"\n`,
+)
 chmodSync(bunx, 0o755)
 
-const run = (body: string) =>
+const run = (body: string, env: Record<string, string | undefined> = process.env) =>
   Bun.spawn(["bash", "-c", body], {
-    env: { ...process.env, PATH: `${scratch}:${process.env.PATH}` },
+    env: {
+      ...env,
+      D: join(root, "scripts", "ops", "dashboard"),
+      PATH: `${scratch}:${process.env.PATH}`,
+    },
     stdout: "pipe",
   })
 
@@ -163,6 +177,25 @@ describe("the supervisor's dashboard URLs", () => {
     )
   })
 
+  // on Linux no portless service runs on 443, so the stack's API starts the 1355 proxy in ~/.portless/fallback with TLS on, and an idle ~/.portless names http (#2299)
+  test("are read from the folder portlessDir() picks, the 1355 fallback proxy's while only it serves", async () => {
+    const home = join(scratch, "urls-home")
+    const fallback = join(home, ".portless", "fallback")
+    mkdirSync(fallback, { recursive: true })
+    await Bun.write(join(home, ".portless", "routes.json"), "[]")
+    await Bun.write(join(fallback, "proxy.pid"), String(process.pid))
+    await Bun.write(answer, "STATE NAME\n")
+    const env = noPortless()
+    const proc = run(`${fn("dashboard_urls")}\ndashboard_urls && echo "$WEB|$API"`, {
+      ...env,
+      HOME: home,
+    })
+    expect(await proc.exited).toBe(0)
+    expect((await new Response(proc.stdout).text()).trim()).toBe(
+      `${fallback} playground|${fallback} api.playground`,
+    )
+  })
+
   test("are read again on every try while the dashboard comes up, so a proxy that starts with the stack is found", async () => {
     // portless's guess before its proxy runs: a port nothing answers on
     await Bun.write(answer, "http://127.0.0.1:1/NAME\n")
@@ -254,7 +287,7 @@ describe("the supervisor's follower check", () => {
     expect(script).toContain("gave no answer in ${HELD_WAIT:-20}s; not restarting it")
     expect(script).toContain('say "follower: another importer holds the lock')
     expect(script).toContain("  elif ! alive dashboard-ingest; then\n    held_said_f=")
-    expect(script).toContain("  else\n    held_said_f=\n  fi\n  check_aliases\ndone")
+    expect(script).toContain("  else\n    held_said_f=\n  fi\n")
   })
 })
 
@@ -1241,8 +1274,9 @@ const slotRun = async (body: string, at: string) => {
   return { code, out: (await new Response(proc.stdout).text()).trim() }
 }
 const stage = join(kept, "staging")
+const cloneFlags = (system: string) => (system === "Darwin" ? "-cR" : "-R --reflink=auto")
 const steps = [
-  `slot cp -cR node_modules ${stage}/`,
+  `slot cp ${cloneFlags(process.platform === "darwin" ? "Darwin" : "Linux")} node_modules ${stage}/`,
   "slot bun install --frozen-lockfile --ignore-scripts",
   "slot bun run build",
 ]
@@ -1273,6 +1307,22 @@ describe("the supervisor's build before the stop queues in run-slot (#1099)", ()
     ])
     expect(existsSync(stage)).toBe(false)
   })
+
+  // GNU cp has no -c, so the macOS clone flag failed the clone on Linux (#2334); uname is a shell function here, which the prebuild's command substitution sees
+  for (const system of ["Darwin", "Linux"]) {
+    test(`on ${system} the clone runs cp ${cloneFlags(system)}`, async () => {
+      fresh()
+      await slotted()
+      const rolled = await slotRun(
+        `uname() { echo ${system}; }\nrunning=${c1}; roll_to ${c2} canary; echo "$running"`,
+        c1,
+      )
+      expect(rolled).toEqual({ code: 0, out: c2 })
+      expect((await keptLines(/^slot cp /))[0]).toBe(
+        `slot cp ${cloneFlags(system)} node_modules ${stage}/`,
+      )
+    })
+  }
 
   // the stand-in takes every argv, so the head's run-slot reads the lane each one takes, on a data folder of its own with no runs.log history to steer quick
   test("the head's run-slot sends the clone to the clone lane, the install to the quick lane and the build to the queue", async () => {
@@ -1652,7 +1702,7 @@ describe("the follower before first run's setup (#31)", () => {
 say() { echo "say $*" >> ${calls}; }; result() { echo "result $*" >> ${calls}; }
 start_dev() { :; }; check_dev() { echo dev=up; }; stop_all() { :; }; dev_down() { :; }
 start_follower() { echo start_follower >> ${calls}; }; check_follower() { echo follower=running; }
-follower_held() { return 1; }; alive() { [ "$1" = dashboard-dev ] || [ "$1" = dashboard-web ]; }; build_head() { :; }; keep_builds() { :; }; check_aliases() { :; }
+follower_held() { return 1; }; alive() { [ "$1" = dashboard-dev ] || [ "$1" = dashboard-web ]; }; build_head() { :; }; keep_builds() { :; }; check_aliases() { :; }; check_proxy() { :; }
 dashboard_urls() { :; }; ensure_web() { :; }
 ${fn("setup_pending") ?? ""}
 ${script.slice(script.indexOf("\nroll_up() {") + 1, script.indexOf("\n}\n", script.indexOf("\nroll_up() {")) + 2)}
@@ -1787,6 +1837,54 @@ describe("the supervisor's alias check", () => {
     expect(results[0]).toContain(`ALIAS FAIL no route file at ${routesFile}`)
   })
 
+  // on a first start web_route wrote the web's route into an idle ~/.portless 2 s before the stack's API started the 1355 proxy in ~/.portless/fallback, so the proxy never learned the web's names (#2300)
+  test("writes a web route that landed before the proxy started into the folder the proxy serves, and passes once the launcher's sync gives it its alias", async () => {
+    const home = join(scratch, "first-start-home")
+    const own = join(home, ".portless")
+    const fallback = join(own, "fallback")
+    const live = join(scratch, "first-start-state")
+    rmSync(home, { force: true, recursive: true })
+    rmSync(live, { force: true, recursive: true })
+    mkdirSync(fallback, { recursive: true })
+    mkdirSync(live, { recursive: true })
+    const route = (hostname: string, port: number, pid = process.pid) => ({ hostname, pid, port })
+    await Bun.write(
+      join(own, "routes.json"),
+      JSON.stringify([route("desk.playground.localhost", 4842)]),
+    )
+    // a stand-in for the 1355 proxy's state: the test's own pid, and the API's route and alias its launcher wrote
+    await Bun.write(join(fallback, "proxy.pid"), String(process.pid))
+    await Bun.write(
+      join(fallback, "routes.json"),
+      JSON.stringify([
+        route("desk.api.playground.localhost", 4843),
+        route("api.playground.localhost", 4843, 0),
+      ]),
+    )
+    await Bun.write(join(live, "dashboard-web.port"), "4842\n")
+    await Bun.write(join(live, "results.log"), "")
+    await Bun.write(answer, "https://desk.NAME.localhost\n")
+    // the API launcher's 2 s alias sync, run every 300 ms on the fallback folder until the check ends
+    const sync = `bun -e "const l = await import('${join(root, "api", "hono", "src", "lib", "dev", "launch.ts")}'); setInterval(() => l.syncAliases(l.dashboardAliasPairs('desk'), '${fallback}'), 300)" & SYNC=$!`
+    const env = noPortless()
+    const proc = Bun.spawn(
+      [
+        "bash",
+        "-c",
+        `D=${join(root, "scripts", "ops", "dashboard")} WT=${root} S=${live} RESULTS=${join(live, "results.log")} LOG=${join(live, "supervisor.log")} ALIAS_CONFIRM=3\n${fn("say")}\n${fn("result")}\n${fn("web_route")}\nalive() { [ "$1" = dashboard-web ]; }\n${fn("dashboard_urls")}\n${fn("read_aliases")}\n${fn("check_aliases")}\n${sync}\ncheck_aliases; kill $SYNC; read_aliases`,
+      ],
+      { env: { ...env, HOME: home, PATH: `${scratch}:${process.env.PATH}` }, stdout: "pipe" },
+    )
+    expect(await proc.exited).toBe(0)
+    expect((await new Response(proc.stdout).text()).trim()).toBe(
+      "playground.localhost and api.playground.localhost hold the live stack's ports 4842 and 4843",
+    )
+    expect(await Bun.file(join(live, "results.log")).text()).toBe("")
+    expect(await Bun.file(join(live, "supervisor.log")).text()).toContain(
+      `the web's route was missing (no route for desk.playground.localhost in ${join(fallback, "routes.json")}), so web_route wrote it again`,
+    )
+  }, 20_000)
+
   test("runs on every tick of the loop, and only reads the route file", async () => {
     const loop = script.slice(script.indexOf("while true; do"))
     expect(loop).toContain("check_aliases")
@@ -1807,7 +1905,7 @@ describe("trash_build", () => {
         `D=${join(root, "scripts", "ops", "dashboard")} LOG=${state}/supervisor.log\n${fn("say")}\n${fn("trash_build")}\ntrash_build "${path}" "a test"`,
       ],
       {
-        env: { ...process.env, HOME: home, PLAYGROUND_DATA_DIR: join(home, ".playground") },
+        env: scratchEnv(home, { PLAYGROUND_DATA_DIR: join(home, ".playground") }),
         stderr: "pipe",
         stdout: "pipe",
       },
@@ -1839,4 +1937,280 @@ describe("trash_build", () => {
       await Bun.file(join(home, ".playground", "ops", "outbox", "ops-safe-delete.jsonl")).text(),
     ).toContain(`dashboard-supervisor: ${staging} is not directly in ${join(state, "builds")}`)
   }, 30_000)
+})
+
+describe("the supervisor's owner idle", () => {
+  test("reads an Inbox answer's mtime in GNU stat's form or BSD's, so a fresh answer counts on Linux too", async () => {
+    const asks = join(scratch, "asks")
+    mkdirSync(asks, { recursive: true })
+    const owner = script.match(/^owner_idle\(\) \{\n[\s\S]*?\n\}$/m)?.[0]
+    expect(owner).toBeDefined()
+    const proc = Bun.spawn(
+      ["bash", "-c", `quiet_for() { echo 999999; }\n${owner}\ntouch "$ASKS/a.json"\nowner_idle`],
+      { env: { ...process.env, ASKS: asks }, stdout: "pipe" },
+    )
+    const idle = (await new Response(proc.stdout).text()).trim()
+    expect(idle).toMatch(/^\d+$/)
+    expect(Number(idle)).toBeLessThan(60)
+  })
+})
+
+// check_proxy as the loop runs it, each call a tick: the owner's address is up or down by the file `up`, and a stand-in portless in WT's node_modules records each start and, while `comes-back` exists, brings the address back; results and dispatcher alerts land in `calls`
+describe("the supervisor's proxy check (#2380)", () => {
+  const proxy = join(scratch, "proxy")
+  const proxyWt = join(proxy, "wt")
+  const fallback = join(proxy, ".portless", "fallback")
+  const own = join(proxy, ".portless")
+  const up = join(proxy, "up")
+  const comesBack = join(proxy, "comes-back")
+  const proxyCalls = join(proxy, "calls")
+  mkdirSync(join(proxyWt, "node_modules", ".bin"), { recursive: true })
+  mkdirSync(fallback, { recursive: true })
+  const portless = join(proxyWt, "node_modules", ".bin", "portless")
+  writeFileSync(
+    portless,
+    `#!/bin/sh\necho "start $* in $PORTLESS_STATE_DIR" >> ${proxyCalls}\n[ -e ${comesBack} ] && echo up > ${up}\nprintf '\\033[31mport 1355 is taken\\033[0m\\n'\n`,
+    { mode: 0o755 },
+  )
+
+  const ticks = async (dir: string, body: string) => {
+    rmSync(proxyCalls, { force: true })
+    const proc = Bun.spawn(
+      [
+        "bash",
+        "-c",
+        `S=${proxy} WT=${proxyWt} PROXY_EVERY=0 PROXY_WAIT=1
+result() { echo "result $*" >> ${proxyCalls}; }; tell_dispatcher() { echo "tell $1" >> ${proxyCalls}; }
+owner_url() { PDIR=$([ "$(cat ${up})" = up ] && echo ${dir} || echo ${own}); OWNER=https://playground.localhost:1355; }
+answers() { [ "$(cat ${up})" = up ]; }
+${block("check_proxy")}
+${body}`,
+      ],
+      { stdout: "pipe" },
+    )
+    await proc.exited
+    return (
+      await Bun.file(proxyCalls)
+        .text()
+        .catch(() => "")
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+  }
+  const down =
+    "DOWN proxy: https://playground.localhost:1355 answered nothing at 2 checks 0 s apart"
+
+  test("starts the fallback proxy once on its address's port after two misses, and tells the dispatcher once", async () => {
+    await Bun.write(comesBack, "")
+    const calls = await ticks(
+      fallback,
+      `echo up > ${up}; check_proxy; echo down > ${up}; check_proxy; check_proxy; check_proxy; check_proxy`,
+    )
+    expect(calls).toEqual([
+      `result ${down}`,
+      `tell ${down}; starting it again on 1355`,
+      `start proxy start -p 1355 --skip-trust in ${fallback}`,
+      "result RESTART proxy PASS on 1355: https://playground.localhost:1355 answers",
+    ])
+  })
+
+  test("tells the dispatcher a second time when the start fails, then nothing more until the address answers", async () => {
+    rmSync(comesBack, { force: true })
+    const calls = await ticks(
+      fallback,
+      `echo up > ${up}; check_proxy; echo down > ${up}; for i in 1 2 3 4 5 6; do check_proxy; done; echo up > ${up}; check_proxy; check_proxy`,
+    )
+    expect(calls).toEqual([
+      `result ${down}`,
+      `tell ${down}; starting it again on 1355`,
+      `start proxy start -p 1355 --skip-trust in ${fallback}`,
+      "result RESTART proxy FAIL on 1355: port 1355 is taken",
+      "tell The Dashboard's proxy did not come back on 1355: port 1355 is taken (ops/dashboard/proxy-start.log)",
+      "result UP proxy PASS https://playground.localhost:1355 answers again",
+    ])
+  })
+
+  test("leaves a service's proxy to the owner: it alerts once and starts nothing", async () => {
+    await Bun.write(comesBack, "")
+    const calls = await ticks(
+      own,
+      `echo up > ${up}; check_proxy; echo down > ${up}; check_proxy; check_proxy; check_proxy`,
+    )
+    expect(calls).toEqual([
+      `result ${down}`,
+      `tell ${down}; not restarting it, since a service owns the proxy in ${own}`,
+    ])
+  })
+
+  test("starts nothing when the supervisor never saw the address answer, since nothing names its port", async () => {
+    await Bun.write(comesBack, "")
+    const calls = await ticks(fallback, `echo down > ${up}; check_proxy; check_proxy; check_proxy`)
+    const unseen = "DOWN proxy: the Dashboard address answered nothing at 2 checks 0 s apart"
+    expect(calls).toEqual([
+      `result ${unseen}`,
+      `tell ${unseen}; not restarting it, since this supervisor never saw it answer and nothing names its port`,
+    ])
+  })
+
+  test("holds the aliases while the proxy misses, and checks no more often than PROXY_EVERY", async () => {
+    expect(script).toContain("  check_proxy && check_aliases\ndone")
+    const calls = await ticks(
+      fallback,
+      `echo up > ${up}; PROXY_EVERY=60; check_proxy; echo down > ${up}; check_proxy && echo not-due >> ${proxyCalls}; PROXY_EVERY=0; check_proxy || echo missed >> ${proxyCalls}; PROXY_EVERY=60; check_proxy || echo held >> ${proxyCalls}`,
+    )
+    expect(calls).toEqual(["not-due", "missed", "held"])
+  })
+
+  test("counts any HTTP answer, a 502 included, as the proxy up, and a refused connection as a miss", async () => {
+    const server = Bun.serve({
+      fetch: () => new Response("bad gateway", { status: 502 }),
+      hostname: "127.0.0.1",
+      port: 0,
+    })
+    try {
+      const proc = Bun.spawn(
+        [
+          "bash",
+          "-c",
+          `${fn("answers")}\nanswers http://127.0.0.1:${server.port}/ ${proxy}; echo "a=$?"; answers http://127.0.0.1:1/ ${proxy}; echo "b=$?"`,
+        ],
+        { stdout: "pipe" },
+      )
+      const out = (await new Response(proc.stdout).text()).trim().split("\n")
+      expect(out[0]).toBe("a=0")
+      expect(out[1]).not.toBe("b=0")
+    } finally {
+      server.stop(true)
+    }
+  })
+})
+
+// An install made before the loopback rule: the roll moves its database onto loopback before the API starts, and the follower's guard refusal of a database's publish is the machine's, never a bad build.
+describe("the supervisor's database move", () => {
+  test("moves the database before the API starts, and only once first run's setup has written it", () => {
+    expect(script).toContain("\n  setup_pending || move_database\n  start_dev; dev=$(check_dev)")
+  })
+
+  test("leaves a database on loopback alone: nothing printed, logged or written", async () => {
+    const { log, out, ran } = await inDashboard(
+      published,
+      `${fn("move_database")}\nmoved_note=; move_failure=; move_database; echo "note=$moved_note failure=$move_failure"`,
+    )
+    expect(out).toBe("note= failure=")
+    expect(log).toBe("")
+    expect(ran).toBe("")
+  }, 15_000)
+
+  test("reports a move that cannot run with its reason and no password", async () => {
+    const exposed = join(scratch, "exposed-bin")
+    await Bun.write(
+      join(exposed, "docker"),
+      `#!/bin/sh\ncase "$1" in\n  ps) echo c0ffee ;;\n  inspect) echo '[{"Id":"c0ffee","Name":"/playground-db-Ab12","Config":{"Image":"postgres:alpine"},"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"55432"}]}}}]' ;;\n  *) echo "$*" >> "${execs}"; exit 9 ;;\nesac\n`,
+    )
+    chmodSync(join(exposed, "docker"), 0o755)
+    const { log, out, ran } = await inDashboard(
+      published,
+      `PATH=${exposed}:$PATH\n${fn("move_database")}\nmove_failure=; move_database; echo "failure=$move_failure"`,
+    )
+    expect(out).toBe(
+      "failure=dashboard-db: playground-db-Ab12-old already exists, so playground-db-Ab12 cannot move aside; playground-db-Ab12 is untouched",
+    )
+    expect(log).toContain("database: dashboard-db: playground-db-Ab12-old already exists")
+    expect(`${out}${log}`).not.toContain(":pw@")
+    expect(ran).toBe("")
+  }, 15_000)
+
+  const inglog = join(state, "ingest.log")
+  const reason = async (lines: string) => {
+    await Bun.write(inglog, lines)
+    const proc = Bun.spawn(
+      ["bash", "-c", `INGLOG=${inglog}\n${fn("guard_reason")}\nguard_reason`],
+      {
+        stdout: "pipe",
+      },
+    )
+    return (await new Response(proc.stdout).text()).trim()
+  }
+
+  test("reads the follower's guard refusal of the database's publish, and nothing else", async () => {
+    expect(
+      await reason(
+        "x\nrefusing to write: playground-db publishes port 55432 beyond loopback (0.0.0.0); keep its data\n",
+      ),
+    ).toBe("refusing to write: playground-db publishes port 55432 beyond loopback")
+    expect(
+      await reason("refusing to write: no single running Docker container publishes port 55432\n"),
+    ).toBe("refusing to write: no single running Docker container publishes port 55432")
+    expect(await reason("TypeError: undefined is not a function\n")).toBe("")
+    expect(await reason("refusing to write: the server at 127.0.0.1:1 is not x's Postgres\n")).toBe(
+      "",
+    )
+  })
+
+  const failing = (refusal: string) =>
+    `roll_up() { echo "roll_up $1" >> ${calls}; [ "$1" = FALLBACK ] && return 0; guard_refusal="${refusal}"; return 1; }\nfinish_roll "ROLL canary" ${c2} ${c1} ""`
+
+  test("keeps a head whose follower the guard refused out of bad-builds, naming the refusal", async () => {
+    clean()
+    for (const path of [calls, join(state, "bad-builds"), join(state, "dev.log")]) {
+      rmSync(path, { force: true })
+    }
+    const refusal = "refusing to write: playground-db publishes port 55432 beyond loopback"
+    await sup(failing(refusal), c2)
+    expect(await Bun.file(join(state, "bad-builds")).exists()).toBe(false)
+    expect(await Bun.file(calls).text()).toContain(
+      `result ROLL canary ${c2.slice(0, 7)} FAIL dev refusing: ${refusal} (not the head's, no bad build)\n`,
+    )
+  })
+
+  test("puts a failed move's reason first in the line playground update prints, and keeps the head out of bad-builds", async () => {
+    clean()
+    for (const path of [calls, join(state, "bad-builds"), join(state, "dev.log")]) {
+      rmSync(path, { force: true })
+    }
+    const why =
+      "dashboard-db: the move failed (docker run failed: no); playground-db is started again as it was"
+    const refusal = "refusing to write: playground-db publishes port 55432 beyond loopback"
+    await sup(
+      `roll_up() { echo "roll_up $1" >> ${calls}; [ "$1" = FALLBACK ] && return 0; move_failure="${why}"; guard_refusal="${refusal}"; return 1; }\nfinish_roll "ROLL canary" ${c2} ${c1} ""`,
+      c2,
+    )
+    expect(await Bun.file(join(state, "bad-builds")).exists()).toBe(false)
+    expect(await Bun.file(calls).text()).toContain(
+      `FAIL dev refusing: database move: ${why}; ${refusal} (not the head's, no bad build)\n`,
+    )
+  })
+
+  test("names a move on the roll's PASS or FAIL line, which playground update prints", () => {
+    expect(script).toContain('result "$tag $sha PASS $dev $fol${moved_note:+ $moved_note}"')
+    expect(script).toContain(
+      'result "$tag $sha FAIL $dev $fol${move_failure:+ database move: $move_failure}${moved_note:+ $moved_note}"',
+    )
+  })
+
+  test("joins a move's lines with a semicolon, so the two read apart", async () => {
+    const moving = join(scratch, "moving-bin")
+    await Bun.write(
+      join(moving, "bun"),
+      `#!/bin/sh\nprintf 'Moved the database x onto 127.0.0.1:1 alone, keeping its data\\nx-old is stopped and kept; remove it with: docker rm -v x-old\\n'\n`,
+    )
+    chmodSync(join(moving, "bun"), 0o755)
+    const proc = Bun.spawn(
+      ["bash", "-c", `say() { :; }\n${fn("move_database")}\nmove_database; echo "$moved_note"`],
+      { env: { ...process.env, PATH: `${moving}:${process.env.PATH}`, WT: root }, stdout: "pipe" },
+    )
+    expect((await new Response(proc.stdout).text()).trim()).toBe(
+      "database: Moved the database x onto 127.0.0.1:1 alone, keeping its data; x-old is stopped and kept; remove it with: docker rm -v x-old",
+    )
+  })
+
+  test("still lists a head in bad-builds when its follower failed for any other reason", async () => {
+    clean()
+    for (const path of [calls, join(state, "bad-builds"), join(state, "dev.log")]) {
+      rmSync(path, { force: true })
+    }
+    await sup(failing(""), c2)
+    expect(await Bun.file(join(state, "bad-builds")).text()).toBe(`${c2}\n`)
+  })
 })

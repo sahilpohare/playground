@@ -27,6 +27,21 @@ const spawn = (...answers: { code: number; stderr?: string }[]) => {
 }
 
 describe("a restart after a login expires", () => {
+  test("an --ssh probe is refused before the close, since spawn.sh resume refuses its record and the close would end it", async () => {
+    const { calls, run } = spawn()
+    const restarted = await restartSession(
+      { ...SESSION, name: "rbwxpg-probe", remote: true },
+      {
+        live: true,
+        root: "/p",
+        run,
+      },
+    )
+    expect(restarted).toMatchObject({ status: "refused" })
+    expect(restarted.status === "refused" && restarted.detail).toContain("another machine")
+    expect(calls).toEqual([])
+  })
+
   test("a checker's resume names its pr first, then the rest of its prs, and one naming no pull request, issues alone included, reads null, which the route refuses before the close; a session that is no checker or has no row names none (#1135)", () => {
     const A = "https://github.com/acme/factory/pull/1"
     const B = "https://github.com/acme/factory/pull/2"

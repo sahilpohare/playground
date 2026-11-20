@@ -52,7 +52,7 @@ export const accountBody = (form: AccountForm) =>
         token: form.token.trim(),
       }
 
-// A Claude sign-in as the dialog holds it: started for an email and label, with its id, its link and the browser a fresh profile opens in, or null when this Mac has none.
+// A Claude sign-in as the dialog holds it: started for an email and label, with its id, its link and the browser a fresh profile opens in, or null when this computer has none or no display.
 export type SignIn = {
   browser: { name: string } | null
   email: string
@@ -83,7 +83,7 @@ export const setupBody = ({ email, label }: { email: string; label: string }) =>
   ...(label ? { label } : {}),
 })
 
-// Pure: the open button's words: Open sign-in before a sign-in starts, then the browser it opens a new window of on a fresh profile; null once a sign-in started on a Mac with no browser that takes a profile (Safari alone), where the link and Copy link are the way in.
+// Pure: the open button's words: Open sign-in before a sign-in starts, then the browser it opens a new window of on a fresh profile; null once a sign-in started on a computer with no browser that takes a profile (Safari alone) or no display, where the link and Copy link are the way in.
 export const openSignInLabel = (signIn: Pick<SignIn, "browser"> | null): string | null =>
   !signIn
     ? "Open sign-in"
@@ -91,7 +91,7 @@ export const openSignInLabel = (signIn: Pick<SignIn, "browser"> | null): string 
       ? `Open in ${signIn.browser.name} · fresh profile`
       : null
 
-// An Add's answer as the dialog shows it: the account added, with confirmed false when a Claude sign-in's account could not be read back, or the API's own words for a refusal (no login yet, a row already listed, a token the Keychain refused, a sign-in for another account), which the dialog shows in place.
+// An Add's answer as the dialog shows it: the account added, with confirmed false when a Claude sign-in's account could not be read back, or the API's own words for a refusal (no login yet, a row already listed, a token the secret store refused, a sign-in for another account), which the dialog shows in place.
 export const addOutcome = async <A>(
   post: () => Promise<{
     data: { account: A; confirmed?: boolean } | null

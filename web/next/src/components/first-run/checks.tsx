@@ -33,7 +33,8 @@ import {
 } from "@/lib/onboard"
 
 export const ONBOARD_URL = `${config.api.url}/api/v1/onboard`
-export const NO_API = "The app's server did not answer; it may be restarting"
+export const NO_API =
+  "The app's server did not answer. It may be restarting, or this browser may not trust the Dashboard's certificate yet: Troubleshooting in the docs says how to trust it."
 const POLL_MS = 1_000
 
 // GET the checks read, first run's by the done mark or Settings' live one; a refusal's words are thrown, so a query shows them.

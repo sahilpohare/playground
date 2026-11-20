@@ -51,6 +51,21 @@ describe("the capacity gate refuses and spawns nothing", () => {
       expect(memory.err).toContain("the memory gate holds it")
     })
 
+    // --reads-only lifts the slots gate alone, so the load and memory gates refuse it as they refuse a plain worker start (#833)
+    test.each([
+      ["load", { FAKE_LOAD5: "24.00" }],
+      ["memory", { FAKE_PRESSURE: "4" }],
+      ["memory", { FAKE_SWAPINS: "150" }],
+    ] as const)("the %s gate still holds a --reads-only worker start at %o", async (gate, env) => {
+      const worker = ["worker", "worker-brave-otter", "b.md", "--size", "small"]
+      for (const args of [worker, [...worker, "--reads-only"]]) {
+        const r = await spawn(args, [], { ...env })
+        expect(r.code).not.toBe(0)
+        expect(placing(r)).toEqual([])
+        expect(r.err).toContain(`the ${gate} gate holds it`)
+      }
+    })
+
     test.each(["priority.json", "priority-start.json"])(
       "a --priority start passes a load over the cores while %s stands (#1334)",
       async (file) => {
@@ -239,7 +254,7 @@ describe("the capacity gate refuses and spawns nothing", () => {
       const r = await spawn(glm, [], { FAKE_VMSTAT_BROKEN: "1" })
       expect(r.code).not.toBe(0)
       expect(r.err).toContain(
-        "the memory gate holds it: it cannot read the swap-ins (vm_stat -c 2 1)",
+        "the memory gate holds it: it cannot read the swap-ins (vm_stat -c 4 1)",
       )
     })
   })

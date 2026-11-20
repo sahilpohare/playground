@@ -2,7 +2,7 @@ import { appendFile, mkdir, readdir, rename } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { parseArgs } from "node:util"
 
-// playground priority: the one way to open a priority window, on the owner's or the dispatcher's word alone. While priority-<session>.json stands in the data folder, spawn.sh's --priority start passes the load and slots gates and focus (its priority*.json glob); off, or ops-tick's priority-lapse beat once LAPSE_HOURS pass, moves it aside as .lifted-<ts>, which the glob skips, and every on, off and lapse is a line in ops/priority.log.
+// playground priority: the one way to open a priority window, on the owner's or the dispatcher's word alone. While priority-<session>.json stands in the data folder, that session's own spawn.sh --priority start passes focus and the gates playbook's SPAWN.md, Capacity gate, names for a priority start (its priority*.json glob), and run-slot ranks that session's runs first after focus and a hand-written run-slot.priority (prio_holder in scripts/ops/run-slot.sh); off, or ops-tick's priority-lapse beat once LAPSE_HOURS pass, moves it aside as .lifted-<ts>, which the glob skips, and every on, off and lapse is a line in ops/priority.log.
 
 // How long a window stands before ops-tick's priority-lapse beat lifts it, LIFECYCLE.md's beat line citing this name
 export const LAPSE_HOURS = 2
@@ -87,7 +87,7 @@ const on = async (args: string[], deps: PriorityDeps): Promise<number> => {
   await logLine(deps.data, `${window.since} on ${session} by ${by}: ${reason}`)
   const lapses = new Date(now.getTime() + LAPSE_HOURS * 3_600_000).toISOString()
   console.log(
-    `priority: window open for ${session}: a --priority start passes the load and slots gates and focus until playground priority off ${session}, or its lapse at ${lapses}`,
+    `priority: window open for ${session}: its --priority start passes focus and the gates playbook's SPAWN.md, Capacity gate, names for a priority start until playground priority off ${session}, or its lapse at ${lapses}`,
   )
   return 0
 }

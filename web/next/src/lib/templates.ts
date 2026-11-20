@@ -17,8 +17,9 @@ export type TemplateRow = InferResponseType<
 
 export const TEMPLATES_QUERY_KEY = ["session-templates"] as const
 
-// The model a GLM template names, packages/settings' GLM_MODEL, which the web reads no package for; a test keeps the two equal.
+// The models a GLM and a local template name, packages/settings' GLM_MODEL and LOCAL_MODEL, which the web reads no package for; a test keeps each equal.
 export const GLM_MODEL = "glm"
+export const LOCAL_MODEL = "local"
 
 export async function readTemplates(): Promise<TemplateRow[]> {
   const { data, error } = await unwrap(apiClient.v1.sessions.templates.$get())
@@ -41,7 +42,7 @@ export const templateRowView = (
   secondRunning: boolean,
 ): { detail: string; label: string; reason: string | null } => ({
   detail: [
-    row.model === GLM_MODEL ? "GLM" : (row.model ?? "Claude"),
+    row.model === GLM_MODEL ? "GLM" : row.model === LOCAL_MODEL ? "Local" : (row.model ?? "Claude"),
     row.effort && isEffort(row.effort) ? EFFORT_LABELS[row.effort] : null,
   ]
     .filter(Boolean)
@@ -59,7 +60,7 @@ export const TEMPLATE_SETTING_QUERY_KEY = ["setting", TEMPLATES_KEY] as const
 // The manager kinds a template starts, as the settings schema lists them: the roster's managers.
 export const TEMPLATE_KINDS = ROSTER_KINDS.filter((kind) => ROSTER_ROLE_OF_KIND[kind] === "manager")
 
-// One template as sessions.templates stores it, its model a Claude id or glm; the API's schema checks every field on save.
+// One template as sessions.templates stores it, its model a Claude id, glm or local; the API's schema checks every field on save.
 export type Template = {
   account?: string
   brief: string
@@ -71,7 +72,7 @@ export type Template = {
   model?: string
 }
 
-// The editor's fields, each a string, empty for none: backend is claude or glm, a GLM template's model.
+// The editor's fields, each a string, empty for none: backend is claude, glm or local, a GLM or local template's model.
 export type TemplateForm = {
   account: string
   backend: string
@@ -155,22 +156,27 @@ export const newTemplateId = (label: string, rows: Template[]): string => {
 // Pure: the editor's fields for a template, or for a new one.
 export const templateForm = (template?: Template): TemplateForm => ({
   account: template?.account ?? "",
-  backend: template?.model === GLM_MODEL ? "glm" : "claude",
+  backend:
+    template?.model === GLM_MODEL ? "glm" : template?.model === LOCAL_MODEL ? "local" : "claude",
   brief: template?.brief ?? "",
   effort: template?.effort ?? "",
   kind: template?.kind ?? "orchestrator",
   label: template?.label ?? "",
-  model: template?.model === GLM_MODEL ? "" : (template?.model ?? ""),
+  model:
+    template?.model === GLM_MODEL || template?.model === LOCAL_MODEL ? "" : (template?.model ?? ""),
 })
 
-// Pure: the template the editor's fields save, on Claude Code, an empty field left out and a GLM template glm as its model, without the Claude-only account, effort and model.
+// Pure: the template the editor's fields save, on Claude Code, an empty field left out: a GLM template glm as its model, without the Claude-only account, effort and model, and a local one local as its model with its effort alone.
 export const templateOf = (form: TemplateForm, id: string): Template => {
-  const claude = form.backend !== "glm"
   const effort = isEffort(form.effort) ? form.effort : undefined
-  const optional = { account: form.account, effort, model: form.model.trim() }
+  const optional =
+    form.backend === "glm"
+      ? { model: GLM_MODEL }
+      : form.backend === "local"
+        ? { effort, model: LOCAL_MODEL }
+        : { account: form.account, effort, model: form.model.trim() }
   return {
-    ...Object.fromEntries(Object.entries(optional).filter(([, value]) => claude && value)),
-    ...(claude ? {} : { model: GLM_MODEL }),
+    ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value)),
     brief: form.brief.trim(),
     harness: "claude-code",
     id,
@@ -240,9 +246,11 @@ export const templateWords = (template: Template): string =>
     kindWord(template.kind),
     template.model === GLM_MODEL
       ? "GLM"
-      : isModel(template.model)
-        ? MODEL_LABELS[template.model]
-        : (template.model ?? "Claude"),
+      : template.model === LOCAL_MODEL
+        ? "Local"
+        : isModel(template.model)
+          ? MODEL_LABELS[template.model]
+          : (template.model ?? "Claude"),
     template.effort && EFFORT_LABELS[template.effort],
     template.account,
     template.brief,

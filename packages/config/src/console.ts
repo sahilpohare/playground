@@ -41,6 +41,18 @@ export const SESSION_MODELS = ["fable", "haiku", "opus", "sonnet"] as const
 
 export const SESSION_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
 
+// Each Claude Code backend's model maker, whose icon a session on it draws: the one map the API's icon route, a row's maker and Settings' accounts all read; a local model's maker is its repo id's org.
+export const BACKEND_MAKERS = { claude: "anthropic", glm: "zai" } as const
+
+// A maker's name as models.dev and Hugging Face spell one, a repo id's org: a plain name, never a path, so it can name a cache file and a URL segment; the one pattern the API's icon route and the web's providerOf build from.
+export const MAKER_NAME = "[A-Za-z0-9][A-Za-z0-9._-]{0,95}"
+
+// The name every local model is served under (scripts/spawn.sh's LOCAL_SERVED, which a test holds to this, and serve.sh's --served-model-name), so a local session's transcript records it as its model whatever the server loaded.
+export const LOCAL_SERVED = "local"
+
+// The local model server a --backend local session runs on, on this machine's loopback (scripts/spawn.sh's LOCAL_URL, which a test holds to this).
+export const LOCAL_URL = "http://127.0.0.1:8000"
+
 // A session nothing names, as people read it (the owner's ask: give the random ids a name): `session <folder>`, from the folder it runs in, since its first ask already shows beside its name wherever it is listed. Leading with the word keeps it from matching a role by name or prefix (a folder named dispatcher, worker-x or probe-x), so it is always other. null with no folder.
 export const folderName = (cwd: string | null): string | null => {
   const folder = (cwd ?? "").split("/").filter(Boolean).at(-1)

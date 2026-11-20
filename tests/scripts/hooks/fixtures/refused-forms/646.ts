@@ -65,7 +65,7 @@ export const groups: Group[] = [
       ["install of folders from a variable", `install -d "$D" /tmp/a`],
       ["git with a config home from a variable", `XDG_CONFIG_HOME="$C" git log`],
       ["git with a home from a variable", `HOME="$H" git log`],
-      ["ln of a lone operand after a cd to a variable", `cd "$D"; ln -s /tmp/x`],
+      ["ln of a lone operand after a cd to a variable", `cd "$D"; ln -s /.no-such-folder`],
       ["GNU rm by its g prefix on a variable", `grm -rf "$D"`],
       ["GNU mv by its g prefix to a variable", `gmv x "$D"`],
       ["GNU rmdir by its g prefix on a variable", `grmdir "$D"`],

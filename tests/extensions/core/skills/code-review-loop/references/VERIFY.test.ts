@@ -47,5 +47,8 @@ describe("VERIFY.md", () => {
     expect(line).toContain(
       "**Done when** every measuring sub-agent's prompt names its folder by absolute path, with its `mkdir -p` and its absolute-output instruction",
     )
+    expect(line).toContain(
+      "inside the reviewer's, `~/.playground/scratch/<name>/std/` or `<name>/spec/`, and the reviewer's own probes go in a sibling of them, `<name>/probe/`",
+    )
   })
 })

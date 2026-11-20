@@ -25,14 +25,15 @@ import STATUSES from "./roster-statuses.json"
 export const USAGE = `Usage:
   roster.ts set <name> key=value [key=value ...]    (creates the agent if missing, its role from kind= or its name; a new one needs task=; status=parked needs hold=, and a hold=<ref> needs the row parked)
   roster.ts report <name> <text> [key=value ...]    (sets lastReport, stamps lastReportAt; a new one needs task=)
-  roster.ts assign <name> <title> <task> [k=v ...]  (new task, or a checker's next PR with worker= pr=, which joins its prs list; clears pr/branch/repo/owner/lastReport)
+  roster.ts assign <name> <title> <task> [k=v ...]  (new task, or a checker's next PR with worker= pr=, or the extension item it scores with worker= item=, either joining its prs list; clears pr/item/branch/repo/owner/lastReport)
   roster.ts backlog <text>
   roster.ts backlog-done <index> <issue>            (marks the 0-based entry filed: "[#<issue>] <text>")
   roster.ts backfill                                (gives each entry with no kind the one its name's prefix gives)
   roster.ts who <kind>                              (prints the name holding a manager kind's seat; writes nothing)
   roster.ts who dispatcher [1|2]                    (prints the dispatcher in slot 1, Alpha, by default, or 2, Bravo; writes nothing)
   roster.ts who assistant                           (prints the live session the roster gives the assistant kind, else exits 1; writes nothing)
-A checker's prs list holds every PR it serves, so auto-end keeps it while one is open: prs=<pr>,<pr> sets it, prs+=<pr> adds one, prs-=<pr> removes one, a PR not yet opened goes in as its issue's URL, and an extension item as <scope>/<kind>/<key>, which assign's pr= adds to prs alone; a checker whose worker is unset or ended takes a new PR through assign with a live worker= alone.
+  roster.ts holders <pr>                            (prints each live row naming the PR, number or URL, in pr or prs, else exits 1, and exits 2 on a roster that does not read; writes nothing)
+A checker's prs list holds every PR it serves, so auto-end keeps it while one is open: prs=<pr>,<pr> sets it, prs+=<pr> adds one, prs-=<pr> removes one, and a prs-= of the row's own pr clears pr too, so holders stops naming it and an assign has nothing to re-add; a PR not yet opened goes in as its issue's URL, and an extension item as <scope>/<kind>/<key>, which assign's item= sets as the row's item and adds to prs (pr= adds it to prs alone); a checker whose row holds a pr or item takes worker= and pr= (or item=) together on assign, pr= naming an open pull request, and a checker whose worker is unset or ended takes a new PR only through that assign with a live worker=.
 Times always come from the UTC clock; titles are capped at 40 chars.`
 
 type Agent = Record<string, unknown> & { name: string }
@@ -56,6 +57,26 @@ async function load(): Promise<Roster> {
   const file = Bun.file(path)
   if (!(await file.exists())) return { agents: [], backlog: [] }
   return (await file.json()) as Roster
+}
+
+// A prs-= clears the row's pr and prs in memory, so the row read back must show the clear: if the write-back left one of the PRs the call removed still set, the clear did not persist, so refuse, naming the entry and that PR.
+async function clearedOnRead(
+  cmd: string,
+  name: string | undefined,
+  withdrawn: string[],
+): Promise<void> {
+  if (cmd !== "set" || !name || !withdrawn.length) return
+  const row = (await load()).agents.find((a) => a.name === name)
+  if (!row) return
+  const held = [...((row.prs as string[] | undefined) ?? []), row.pr].filter((pr): pr is string =>
+    Boolean(pr),
+  )
+  const still = withdrawn.find((pr) => held.includes(pr))
+  if (still)
+    throw new Refusal(
+      `roster.ts: ${name} cleared ${still} with prs-=, but the row read back still holds it in pr or prs, so the clear did not persist`,
+      1,
+    )
 }
 
 // The title cut keeps whole characters and fits the reader's 40.
@@ -121,11 +142,14 @@ const itemRef = (raw: string): string | null => {
     itemKeySchema.safeParse(key).success
   )
     return raw
-  throw new Refusal(
+  throw itemShape(raw)
+}
+
+const itemShape = (raw: string): Refusal =>
+  new Refusal(
     `roster.ts: an extension item is <scope>/<kind>/<key> as playground ext names it, a login's or org's scope, a kind of ${KINDS.join(", ")} and a key of lowercase letters, digits, dots, dashes and underscores, not ${raw}`,
     2,
   )
-}
 
 // A prs entry: a PR as pr takes one, the issue of a PR not yet opened by its URL, or an extension item.
 const prsEntry = (raw: string, repo: string): string => {
@@ -146,6 +170,21 @@ const PRS_KEYS = new Set(["prs", "prs+", "prs-"])
 const isChecker = (entry: Agent): boolean =>
   ["reviewer", "tester"].includes(kindOf(entry.name, entry.kind) ?? "")
 
+// The PRs a prs-= call withdrew, normalized as the row holds them: the ones still set on the row when the call began, so a read-back can confirm the clear took.
+const prsWithdrawn = (entry: Agent, pairs: [string, string][], repo: string): string[] => {
+  const held = (entry.prs as string[] | undefined) ?? []
+  const removed = new Set<string>()
+  for (const [, raw] of pairs.filter(([k]) => k === "prs-"))
+    for (const pr of raw
+      .split(",")
+      .map((one) => one.trim())
+      .filter(Boolean)) {
+      const url = prsEntry(pr, repo)
+      if (entry.pr === url || held.includes(url)) removed.add(url)
+    }
+  return [...removed]
+}
+
 function apply(entry: Agent, pairs: [string, string][], factoryRepo: string): void {
   const given = pairs.find(([k]) => k === "repo")
   const repo = (given ? given[1] : (entry.repo as string | undefined)) || factoryRepo
@@ -160,6 +199,21 @@ function apply(entry: Agent, pairs: [string, string][], factoryRepo: string): vo
         k === "prs-" ? held.filter((u) => !named.includes(u)) : [...new Set([...held, ...named])]
       if (next.length) entry.prs = next
       else delete entry.prs
+      // A prs-= of the row's own pr clears pr too: the row no longer serves it, so holders stops naming it and an assign has nothing to re-add
+      if (k === "prs-" && typeof entry.pr === "string" && named.includes(entry.pr)) delete entry.pr
+      continue
+    }
+    // item= names the extension item a checker is given to score: it joins prs as pr= would take one, and the row holds no pr
+    if (k === "item" && raw !== "") {
+      if (!itemRef(raw)) throw itemShape(raw)
+      if (!isChecker(entry))
+        throw new Refusal(
+          `roster.ts: item takes the extension item a reviewer or tester scores, and ${entry.name} is neither`,
+          2,
+        )
+      entry.item = raw
+      entry.prs = [...new Set([...((entry.prs as string[] | undefined) ?? []), raw])]
+      delete entry.pr
       continue
     }
     // an extension item joins a checker's prs and leaves its pr unset, since the dashboard reads pr as a GitHub pull request alone
@@ -176,6 +230,12 @@ function apply(entry: Agent, pairs: [string, string][], factoryRepo: string): vo
     const v = k === "title" ? titled(raw) : k === "pr" && raw !== "" ? prUrl(raw, repo) : raw
     if (v === "") delete entry[k]
     else entry[k] = v
+  }
+  // Why a row ended, which spawn.sh resume reads before it brings a session back: a done row records done, and a row back at a live status drops its reason.
+  const status = pairs.find(([k]) => k === "status")?.[1]
+  if (status && !pairs.some(([k]) => k === "endReason")) {
+    if (STATUSES.live.includes(status)) delete entry.endReason
+    else if (status === "done") entry.endReason = "done"
   }
 }
 
@@ -249,13 +309,96 @@ function checkHold(pairs: [string, string][]): void {
     )
 }
 
+// Every key set, report and assign take: a mistyped one once left two rows reading working for over an hour.
+const KNOWN_KEYS: readonly string[] = [
+  "asks",
+  "backlogNext",
+  "backlogTaken",
+  "branch",
+  "endReason",
+  "eta",
+  "hold",
+  "item",
+  "kind",
+  "lastReport",
+  "lastReportAt",
+  "lead",
+  "memory",
+  "mode",
+  "owner",
+  "pr",
+  "priority",
+  "prs",
+  "prs+",
+  "prs-",
+  "reportsTo",
+  "repo",
+  "role",
+  "sandbox",
+  "schedule",
+  "size",
+  "slot",
+  "status",
+  "surface",
+  "task",
+  "ticket",
+  "title",
+  "worker",
+  "workspace",
+]
+
+// The edit distance between two words, so a key one or two edits from a real one reads as its typo.
+const editDistance = (a: string, b: string): number => {
+  let row = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i]
+    for (let j = 1; j <= b.length; j++)
+      next.push(
+        Math.min(next[j - 1]! + 1, row[j]! + 1, row[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1)),
+      )
+    row = next
+  }
+  return row[b.length]!
+}
+
+function checkKeys(cmd: string, pairs: [string, string][]): void {
+  for (const [k] of pairs) {
+    if (KNOWN_KEYS.includes(k)) continue
+    let near: string | null = null
+    let best = 3
+    for (const known of KNOWN_KEYS) {
+      const at = editDistance(k, known)
+      if (at < best) {
+        best = at
+        near = known
+      }
+    }
+    throw new Refusal(
+      `roster.ts: ${cmd} takes a key the roster knows (${KNOWN_KEYS.join(", ")}), not "${k}"${near ? `: did you mean "${near}"?` : ""}`,
+      2,
+    )
+  }
+}
+
 // Every key=value check set, report and assign share.
-function checkPairs(name: string, pairs: [string, string][]): void {
+function checkPairs(cmd: string, name: string, pairs: [string, string][]): void {
+  checkKeys(cmd, pairs)
   checkKind(pairs)
   checkStatus(name, pairs)
   checkEta(pairs)
   checkOwner(pairs)
   checkHold(pairs)
+  checkTarget(pairs)
+}
+
+// A checker's next work is one pull request (pr=) or one extension item (item=), so a call naming both is refused before either is read.
+function checkTarget(pairs: [string, string][]): void {
+  const named = (k: string) => pairs.some(([p, v]) => p === k && v !== "")
+  if (named("pr") && named("item"))
+    throw new Refusal(
+      "roster.ts: a checker takes pr= or item=, not both: pr= for a pull request, item= for an extension item it scores",
+      2,
+    )
 }
 
 // a call that parks a row, or clears a parked row's hold, leaves it holding one, so the sweep can tell its lead once the wait ends; a call that moves it off parked drops its hold, so a later park names a fresh one, and a hold named on a row the call leaves not parked is refused, so the caller sees why it would not stay. A row parked before this check keeps taking writes that leave its park alone.
@@ -289,16 +432,21 @@ function checkRetask(
   apply(next, pairs, factoryRepo)
   if (!isChecker(next)) return
   const moved = (k: string) => entry[k] !== undefined && next[k] !== entry[k]
+  // A prs-= of the row's own pr clears it: clearing the PR a row served is not moving it, so the guard that moves a pr only through assign stays quiet
+  const prClearedByPrs =
+    typeof entry.pr === "string" &&
+    next.pr === undefined &&
+    prsWithdrawn(entry, pairs, factoryRepo).includes(entry.pr)
   const given = (k: string) => pairs.some(([p]) => p === k)
   // spawn.sh's restart of an ended checker names the PRs it serves now, prs and pr in one set
   const restart = entry.status === "ended" && given("prs")
   if (
     assign
-      ? entry.pr && given("pr") !== given("worker")
-      : (moved("pr") && !restart) || moved("worker")
+      ? (entry.pr || entry.item) && (given("pr") || given("item")) !== given("worker")
+      : (!prClearedByPrs && moved("pr") && !restart) || moved("worker") || given("item")
   )
     throw new Refusal(
-      `roster.ts: ${entry.name} is a checker, so it moves to another PR through roster.ts assign ${entry.name} <title> <task> worker=<worker> pr=<url> [repo=<owner>/<name>], which sets its worker, pr, repo and title together`,
+      `roster.ts: ${entry.name} is a checker, so it moves to another PR through roster.ts assign ${entry.name} <title> <task> worker=<worker> pr=<url> [repo=<owner>/<name>], which sets its worker, pr, repo and title together, or item=<scope>/<kind>/<key> in place of pr= for an extension item`,
       1,
     )
   // the checker reaper ends a checker whose worker has gone (checker-worker-gone), so a new PR on a live row names a live worker
@@ -316,8 +464,41 @@ function checkRetask(
     )
 }
 
+// A reviewer moves a clone only on exit 1, so a roster that does not read exits 2, never 1.
+async function holders(pr: string | undefined, rest: string[]): Promise<void> {
+  if (!pr || rest.length || (!/^#?[1-9]\d*$/.test(pr) && !PR_URL_RE.test(pr)))
+    throw new Refusal("roster.ts: holders takes one PR, its number or its URL", 2)
+  const repo = PR_URL_RE.test(pr)
+    ? ""
+    : await factoryRepoOf().catch((error: Error) => {
+        throw new Refusal(`roster.ts: ${error.message}`, 2)
+      })
+  const url = prUrl(pr, repo)
+  const agents = await Bun.file(path)
+    .json()
+    .then((r: Roster) => (Array.isArray(r?.agents) ? r.agents : null))
+    .catch(() => null)
+  if (!agents) throw new Refusal(`roster.ts: the roster ${path} cannot be read`, 2)
+  const { rowPullRequests } = await import("../packages/safe-delete/src/index")
+  const names = agents
+    .filter(
+      (a) =>
+        STATUSES.live.includes(String(a.status)) &&
+        rowPullRequests({ pr: a.pr, prs: a.prs }).includes(url),
+    )
+    .map((a) => a.name)
+  if (!names.length) throw new Refusal(`roster.ts: no live row holds ${url}`, 1)
+  console.log(names.join("\n"))
+}
+
 async function main(argv: string[]): Promise<void> {
   const [cmd, name, ...rest] = argv
+  // any other throw exits 1 under Bun, which reads as free, so holders turns it into 2
+  if (cmd === "holders")
+    return holders(name, rest).catch((error: Error) => {
+      if (error instanceof Refusal) throw error
+      throw new Refusal(`roster.ts: holders cannot read the roster ${path}: ${error.message}`, 2)
+    })
   const known = ["assign", "backfill", "backlog", "backlog-done", "report", "set", "who"]
   if (!cmd || !known.includes(cmd) || (cmd !== "backfill" && !name)) throw new Refusal(USAGE, 2)
   if (cmd === "set" || cmd === "report" || cmd === "assign") checkName(cmd, name!)
@@ -345,6 +526,8 @@ async function main(argv: string[]): Promise<void> {
     return
   }
   const roster = await load()
+  // The PRs a prs-= withdrew, read back after the write to confirm the clear persisted.
+  let withdrawn: string[] = []
   // A bare PR number links into factory.repo, read only when one is given.
   const factoryRepo = rest.some((word) => /^(?:pr|prs[+-]?)=(?:.*,)?#?[1-9]\d*(?:,|$)/.test(word))
     ? await factoryRepoOf().catch((error: Error) => {
@@ -353,9 +536,11 @@ async function main(argv: string[]): Promise<void> {
     : ""
   if (cmd === "set") {
     const pairs = pairsOf(rest)
-    checkPairs(name!, pairs)
+    checkPairs(cmd, name!, pairs)
     const entry = agent(roster, name!, pairs)
     checkRetask(roster, entry, pairs, factoryRepo)
+    // Captured before apply clears the row, so the read-back can confirm the clear persisted.
+    withdrawn = prsWithdrawn(entry, pairs, factoryRepo)
     // A new task on an agent holding a pr would show the old PR beside it, so it goes through assign; a title alone renames the row.
     if (entry.pr && pairs.some(([k]) => k === "task"))
       throw new Refusal(
@@ -363,12 +548,16 @@ async function main(argv: string[]): Promise<void> {
         1,
       )
     apply(entry, pairs, factoryRepo)
+    // a prs+= of the same PR later in the call puts it back on purpose, so only what the call left removed is read back
+    withdrawn = withdrawn.filter(
+      (pr) => entry.pr !== pr && !((entry.prs as string[] | undefined) ?? []).includes(pr),
+    )
     parkHold(entry, pairs, false)
   } else if (cmd === "report") {
     const [text, ...more] = rest
     if (text === undefined) throw new Refusal(USAGE, 2)
     const pairs = pairsOf(more)
-    checkPairs(name!, pairs)
+    checkPairs(cmd, name!, pairs)
     const entry = agent(roster, name!, pairs)
     checkRetask(roster, entry, pairs, factoryRepo)
     entry.lastReport = text
@@ -379,7 +568,7 @@ async function main(argv: string[]): Promise<void> {
     const [title, task, ...more] = rest
     if (title === undefined || task === undefined) throw new Refusal(USAGE, 2)
     const pairs = pairsOf(more)
-    checkPairs(name!, pairs)
+    checkPairs(cmd, name!, pairs)
     const entry = agent(roster, name!, pairs, task)
     checkRetask(roster, entry, pairs, factoryRepo, true)
     // A checker keeps every PR it served in its prs list, and its next PR joins it, so auto-end holds it while any is open.
@@ -388,6 +577,8 @@ async function main(argv: string[]): Promise<void> {
       checker && entry.pr && !pairs.some(([k]) => PRS_KEYS.has(k)) ? [entry.pr as string] : []
     for (const k of [
       "pr",
+      "endReason",
+      "item",
       "branch",
       "repo",
       "lastReport",
@@ -400,7 +591,7 @@ async function main(argv: string[]): Promise<void> {
     Object.assign(entry, { status: "working", task })
     apply(entry, [["title", title], ...pairs], factoryRepo)
     parkHold(entry, pairs, true)
-    if (checker && (entry.pr || pairs.some(([k, v]) => k === "pr" && v !== "")))
+    if (checker && (entry.pr || pairs.some(([k, v]) => (k === "pr" || k === "item") && v !== "")))
       entry.prs = [
         ...new Set([
           ...served,
@@ -443,6 +634,8 @@ async function main(argv: string[]): Promise<void> {
   }
   roster.updatedAt = now()
   await writeAtomic(path, JSON.stringify(roster, null, 2))
+  // A prs-= cleared pr and prs in memory, so the row read back must show the clear; a still-present PR means the write-back left the row holding what the call just removed.
+  await clearedOnRead(cmd, name, withdrawn)
 }
 
 if (import.meta.main) {

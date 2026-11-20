@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -13,6 +13,7 @@ import {
   fixtureDirOf,
   fixtureOnly,
   health,
+  launchArgs,
   problems,
   READY,
   resolveExpectation,
@@ -22,6 +23,7 @@ import {
   SIDEBAR_READY,
   signInWaitArgs,
   SIGNIN_WAIT_MS,
+  spkiOf,
   systemResults,
   THEMES,
   versionMatches,
@@ -29,6 +31,7 @@ import {
 } from "../../../../../packages/scripts/src/verify/checks"
 import { DASHBOARD_MAP } from "../../../../../packages/scripts/src/verify/map"
 import { VERIFY_VISIT } from "../../../../../web/next/src/lib/verify-visit"
+import { withFakeAgentBrowser } from "../../../../agent-browser-fake"
 
 const SHA = "8064f3d1c2b0a9e8f7d6c5b4a3928170e6d5c4b3"
 
@@ -639,8 +642,67 @@ describe("verify's browser", () => {
   test("launches muted", async () => {
     const browser = new Browser()
     const first = await browser.command(["open", "http://dashboard/"])
-    expect(first[first.indexOf("--args") + 1]).toBe("--mute-audio")
-    expect(await browser.command(["open", "http://dashboard/x"])).not.toContain("--mute-audio")
+    expect(first.filter((arg) => arg === "--args")).toHaveLength(1)
+    expect(first[first.indexOf("--args") + 1]!.split(",")).toContain("--mute-audio")
+  })
+
+  // agent-browser relaunched a session's browser on a later command whose args differed from its launch, the config's own --no-sandbox among them.
+  test("carries the same --args on every command", async () => {
+    const browser = new Browser()
+    const first = await browser.command(["open", "http://dashboard/"])
+    const later = await browser.command(["open", "http://dashboard/x"])
+    const value = (argv: string[]) => argv[argv.indexOf("--args") + 1]
+    expect(value(later)).toBe(value(first))
+    // a later call that relaunched on the config's --no-sandbox alone dropped the mute, so each call's one value keeps both
+    expect(value(later)!.split(",")).toEqual(
+      expect.arrayContaining(
+        process.platform === "linux" ? ["--no-sandbox", "--mute-audio"] : ["--mute-audio"],
+      ),
+    )
+  })
+
+  // #2385: verify's own --args replaced agent-browser's config, so on Linux Chromium lost --no-sandbox and died, and it refused portless's https stack as ERR_CERT_AUTHORITY_INVALID.
+  test("on Linux alone, launches without the sandbox and trusts portless's CA key, never every certificate error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verify-spki-"))
+    try {
+      const ca = join(dir, "ca.pem")
+      const made = Bun.spawnSync(
+        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"]
+          .concat(["-nodes", "-days", "1", "-subj", "/CN=test CA", "-keyout", join(dir, "k.pem")])
+          .concat(["-out", ca]),
+        { stderr: "pipe" },
+      )
+      expect(made.exitCode).toBe(0)
+      const pub = Bun.spawnSync(["openssl", "x509", "-pubkey", "-noout", "-in", ca]).stdout
+      const der = Bun.spawnSync(["openssl", "pkey", "-pubin", "-outform", "der"], { stdin: pub })
+      const spki = new Bun.CryptoHasher("sha256").update(der.stdout).digest("base64")
+      const pem = readFileSync(ca, "utf8")
+      expect(spkiOf(pem)).toBe(spki)
+      expect(launchArgs("linux", pem)).toBe(
+        `--no-sandbox,--ignore-certificate-errors-spki-list=${spki},--mute-audio`,
+      )
+      expect(launchArgs("linux", null)).toBe("--no-sandbox,--mute-audio")
+      expect(launchArgs("darwin", pem)).toBe("--mute-audio")
+      expect(launchArgs("linux", pem)).not.toContain("--ignore-certificate-errors,")
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  const open = `import { Browser } from ${JSON.stringify(join(import.meta.dir, "../../../../../packages/scripts/src/verify/checks.ts"))}; await new Browser().run("open", "http://dashboard/")`
+
+  test("tries an open again after a network change, through networkChangedWait", () => {
+    const run = withFakeAgentBrowser(1, "net::ERR_NETWORK_CHANGED at http://dashboard/", open)
+    expect(run.err).toContain("net::ERR_NETWORK_CHANGED, retry 1 of 2")
+    expect(run.code).toBe(0)
+    expect(run.calls).toHaveLength(2)
+  })
+
+  test("fails an open on any other net error at once", () => {
+    const run = withFakeAgentBrowser(1, "net::ERR_CONNECTION_REFUSED at http://dashboard/", open)
+    expect(run.err).toContain("ERR_CONNECTION_REFUSED")
+    expect(run.code).not.toBe(0)
+    expect(run.calls).toHaveLength(1)
   })
 })
 

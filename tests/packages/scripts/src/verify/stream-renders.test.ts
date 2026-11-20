@@ -19,11 +19,11 @@ describe("streamRendersResult", () => {
     )
   })
 
-  // the stream's clock ticks every 30s and draws every row, its name link and a bubble's words once; a run of 10 steps at 400ms may hold one tick
-  test("allows each component the rows once more, for a clock tick", () => {
-    expect(allowance(9, STEPS)).toBe(29)
-    expect(read({ AgentLink: 29, StepRow: 29, TranscriptMarkdown: 29 }).ok).toBe(true)
-    expect(read({ AgentLink: 10, StepRow: 10, TranscriptMarkdown: 30 }).ok).toBe(false)
+  // the stream's clock ticks on every inbox read, every 5s, and draws no row whose shown time it leaves alone, so a run's allowance is the steps' own draws, twice over for a board frame beside each
+  test("allows each component twice the steps, and no row more for a clock tick", () => {
+    expect(allowance(STEPS)).toBe(20)
+    expect(read({ AgentLink: 20, StepRow: 20, TranscriptMarkdown: 20 }).ok).toBe(true)
+    expect(read({ AgentLink: 10, StepRow: 29, TranscriptMarkdown: 10 }).ok).toBe(false)
   })
 
   // before the fix, each step rebuilt every message, so every row drew on every step, and every part's words drew through the dashboard's context
@@ -31,7 +31,7 @@ describe("streamRendersResult", () => {
     const result = read({ AgentLink: 90, StepRow: 90, TranscriptMarkdown: 4200 })
     expect(result.ok).toBe(false)
     expect(result.detail).toBe(
-      "AgentLink drew 90 times, over 29; StepRow drew 90 times, over 29; TranscriptMarkdown drew 4200 times, over 29, 10 steps into a stream of 9 rows and 420 parts",
+      "AgentLink drew 90 times, over 20; StepRow drew 90 times, over 20; TranscriptMarkdown drew 4200 times, over 20, 10 steps into a stream of 9 rows and 420 parts",
     )
   })
 

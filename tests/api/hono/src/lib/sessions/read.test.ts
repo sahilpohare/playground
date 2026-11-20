@@ -14,6 +14,7 @@ import {
   liveRegistered,
   liveSessions,
   readEntries,
+  readEntriesAfter,
   readSession,
   readSteps,
   relationOf,
@@ -24,6 +25,7 @@ import {
 import { testContainerName } from "../../../../../container"
 import { onLiveDashboard } from "../../../../../dashboard-fixture"
 import { liveReads } from "../../../../../live-reads"
+import { pidsDir, withProc } from "../../../../../scripts/fixtures/proc"
 
 // These drive the live paths against the test's own scratch files, every one of them stored as on a stack opted in to every session (own.ts).
 liveReads({ PLAYGROUND_ALL_SESSIONS: "true" })
@@ -415,6 +417,14 @@ describe.skipIf(!dockerUp())("reading sessions back", () => {
     expect([older.entries.map((entry) => entry.uuid), older.before]).toEqual([["w1", "w2"], null])
   })
 
+  test("the log pages forward after a cursor, for a bot's read of the dispatcher's log (#1888)", async () => {
+    const first = (await readEntries(db, WORKER, { kinds: [], limit: 10 })).entries[0]!.seq
+    const page = await readEntriesAfter(db, WORKER, { after: first, limit: 2 })
+    expect([page.entries.map((entry) => entry.uuid), page.hasMore]).toEqual([["w2", "w3"], true])
+    const next = await readEntriesAfter(db, WORKER, { after: page.entries.at(-1)!.seq, limit: 2 })
+    expect([next.entries.map((entry) => entry.uuid), next.hasMore]).toEqual([["w4"], false])
+  })
+
   test("the log can hold only the kinds asked for", async () => {
     const steps = await readEntries(db, WORKER, { kinds: ["assistant", "peer"], limit: 10 })
     expect(steps.entries.map((entry) => [entry.kind, entry.sender])).toEqual([
@@ -781,7 +791,9 @@ describe("liveSessions", () => {
       // A pid from this test's own process tree that has already exited, so no other process is ever probed.
       const gone = Bun.spawnSync(["true"]).pid
       writeFileSync(join(dir, `${gone}.json`), JSON.stringify({ pid: gone, sessionId: "gone" }))
-      writeFileSync(join(dir, "12.json"), "{ not json")
+      // a pid neither file above holds, since the test sandbox's pid view on Linux gives small pids, and a fixed 12.json once overwrote the live file of a test running as pid 12; three, since the two pids rule out two at most
+      const broken = [12, 13, 14].find((pid) => pid !== process.pid && pid !== gone)
+      writeFileSync(join(dir, `${broken}.json`), "{ not json")
       writeFileSync(
         join(dir, "notes.json"),
         JSON.stringify({ pid: process.pid, sessionId: "notes" }),
@@ -817,6 +829,24 @@ describe("liveSessions", () => {
     } finally {
       rmSync(own, { force: true, recursive: true })
       rmSync(recycled, { force: true, recursive: true })
+    }
+  })
+
+  test("a Linux file, its procStart clock ticks since boot, is live while /proc gives its pid that start, and a recycled pid once it gives another", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sessions-registry-"))
+    try {
+      writeFileSync(
+        join(dir, `${process.pid}.json`),
+        JSON.stringify({ pid: process.pid, procStart: "1801742", sessionId: "linux" }),
+      )
+      const live = (ticks: string) =>
+        withProc(pidsDir({ [process.pid]: ticks }), async () => [
+          ...(await liveSessions(dir)).keys(),
+        ])
+      expect(await live("1801742")).toEqual(["linux"])
+      expect(await live("2900000")).toEqual([])
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
     }
   })
 })

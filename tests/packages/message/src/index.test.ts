@@ -100,6 +100,11 @@ describe("the API's and the web's shared input rules", () => {
     }
   })
 
+  test("a bot's login, <name>[bot], is no GitHub login, so no invite or new DM can name it", () => {
+    expect(githubLoginSchema.safeParse("grok[bot]").success).toBe(false)
+    expect(githubLoginSchema.safeParse("a".repeat(30) + "[bot]").success).toBe(false)
+  })
+
   test("an invite code is any trimmed text of 1 to 64 characters", () => {
     expect(inviteCodeSchema.parse(" YARD-7Q2M ")).toBe("YARD-7Q2M")
     expect(inviteCodeSchema.safeParse("  ").success).toBe(false)

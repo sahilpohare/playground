@@ -108,6 +108,24 @@ async function eachInput(raw, guard, judge) {
   }
 }
 
+// scripts/hooks/input.ts
+var DEADLINE = 13000;
+async function input(name, kind, deadline = DEADLINE) {
+  let timer;
+  const raw = await Promise.race([
+    Bun.stdin.text(),
+    new Promise((done) => {
+      timer = setTimeout(() => done(undefined), deadline - performance.now());
+    })
+  ]).finally(() => clearTimeout(timer));
+  if (raw !== undefined)
+    return raw;
+  if (kind === "recorder")
+    process.exit(0);
+  console.error(`${name} hook: the call's input did not arrive by its deadline, about ${deadline / 1000} s, inside the runner's 15 s timeout, so the call is refused; report it to your lead.`);
+  process.exit(2);
+}
+
 // scripts/hooks/role.ts
 import { homedir as homedir2 } from "os";
 import { join as join2 } from "path";
@@ -262,7 +280,7 @@ function sessionOf(raw) {
 
 // scripts/hooks/shell.ts
 import { AsyncLocalStorage } from "async_hooks";
-import { realpathSync, statSync } from "fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename, dirname, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var UNKNOWN = "\x00";
@@ -296,7 +314,8 @@ function filled(script, mark, value) {
 var held2 = (text) => text.value.length > MAX_BYTES ? unknown(LARGE) : text;
 var BREAK = new Set([" ", "\t", `
 `, ";", "&", "|", "<", ">", "(", ")"]);
-var REDIRECT = /^(\d*|&)(<<<|<<-|<<|<>|<&|>&!?|>>[!|]?|>[!|]|<|>)/;
+var REDIRECT_OP = "(<<<|<<-|<<|<>|<&|>&!?|>>[!|]?|>[!|]|<|>)";
+var REDIRECT = new RegExp(`^(\\d*|&)${REDIRECT_OP}`);
 var RESERVED = new Set([
   "!",
   "{",
@@ -321,6 +340,7 @@ var FREES = new Set([`
 var tokens = 0;
 var freshToken = () => ++tokens;
 var BODIES = new Set(["do", "elif", "else", "then"]);
+var REPEAT_BODY = new Set(["do", "{"]);
 var MARKERS = new Set([...RESERVED, ...OPENS, ...CLOSES, ...BODIES]);
 function markers(words) {
   const out = [];
@@ -334,6 +354,8 @@ function markers(words) {
     } else if (MARKERS.has(w.value)) {
       out.push(w.value);
       k++;
+    } else if (w.value === "repeat" && REPEAT_BODY.has(words[k + 2]?.value ?? "") && !words[k + 2].quoted) {
+      k += 2;
     } else if (ASSIGN.test(w.value))
       k++;
     else
@@ -342,40 +364,138 @@ function markers(words) {
   return out;
 }
 var ownFirst = (cmd, first) => !!first && first === cmd.words.find((w) => w.quoted || !RESERVED.has(w.value));
+var onlyReserved = (cmd) => cmd.words.length > 0 && cmd.words.every((w) => !w.quoted && RESERVED.has(w.value));
 var GROUPING = new Set(["}", "done", "esac", "fi"]);
 var ASSIGN = /^[A-Za-z_]\w*=/;
 var WRAPPERS = new Map(Object.entries({
+  "-": ["", ""],
   builtin: ["", ""],
   busybox: ["", ""],
   caffeinate: ["-d -i -m -s -u", "-t -w"],
+  chrt: [
+    "-a -b -d -e -f -i -m -o -p -R -r -v --all-tasks --batch --deadline --ext --fifo --idle --max --other --pid --reset-on-fork --rr --verbose",
+    "-D -P -T --sched-deadline --sched-period --sched-runtime"
+  ],
   command: ["-p -V -v", ""],
   doas: ["-L -n -s", "-a -C -u"],
   env: ["-0 -i -v --debug --ignore-environment --null", "-P -S -u --unset"],
   exec: ["-c -l", "-a"],
+  flock: [
+    "-F -n -o -s -u -x --close --exclusive --fcntl --nb --no-fork --nonblocking --shared --unlock --verbose",
+    "-E -w --conflict-exit-code --length --start --timeout --wait"
+  ],
+  ionice: ["-t --ignore", "-c -n -P -p -u --class --classdata --pgid --pid --uid"],
   nice: ["", "-n --adjustment"],
   nocorrect: ["", ""],
   noglob: ["", ""],
   nohup: ["", ""],
   pkexec: ["--disable-internal-agent --help --keep-cwd --version", "--user"],
   repeat: ["", ""],
+  setsid: ["-c -f -w --ctty --fork --wait", ""],
   stdbuf: ["", "-e -i -o --error --input --output"],
   sudo: [
     "-A -B -b -E -e -H -i -K -k -l -N -n -P -S -s -V -v --askpass --background --bell --edit --help --list --login --non-interactive --preserve-env --preserve-groups --remove-timestamp --reset-timestamp --set-home --shell --stdin --validate --version",
     "-C -D -g -h -p -R -r -T -t -U -u --chdir --chroot --close-from --command-timeout --group --host --other-user --prompt --role --type --user"
   ],
+  taskset: ["-a -c -p --all-tasks --cpu-list --pid", ""],
   time: [
     "-a -h -l -p -q -V -v --append --portability --quiet --verbose",
     "-f -o --format --output"
   ],
   timeout: ["-f -p -v --foreground --preserve-status --verbose", "-k -s --kill-after --signal"],
   xargs: [
-    "-0 -o -p -r -t -x --exit --interactive --no-run-if-empty --null --open-tty --show-limits --verbose",
-    "-a -d -E -L -n -P -R -S -s --arg-file --delimiter --max-args --max-chars --max-lines --max-procs --process-slot-var"
+    "-0 -o -p -r -t -x --exit --interactive --max-lines --no-run-if-empty --null --open-tty --show-limits --verbose",
+    "-a -d -E -L -n -P -R -S -s --arg-file --delimiter --max-args --max-chars --max-procs --process-slot-var"
   ]
 }).map(([name, [flags, values]]) => [
   name,
   { flags: new Set(flags.split(" ")), values: new Set(values.split(" ")) }
 ]));
+var runner = (flags, values, more = {}) => ({
+  flags: new Set(flags.split(" ")),
+  folder: new Set(more.folder?.split(" ")),
+  joined: more.always ?? new Set(more.joined?.split(" ")),
+  script: new Set(more.script?.split(" ")),
+  spec: !!more.spec,
+  tools: !!more.tools,
+  values: new Set(values.split(" "))
+});
+var NPM = runner("-y --dangerously-allow-all-scripts --include-workspace-root --no --strict-allow-scripts --workspaces --yes", "-c -w --allow-scripts --call --package --workspace", { script: "-c --call", spec: true });
+var BUNX = runner("--bun --ignore-scripts --no-install --silent --trust --verbose", "-p --ca --cafile --cwd --env-file --minimum-release-age --package --registry", { folder: "--cwd", spec: true });
+var PNPM_FLAGS = "-c -r -w -y --aggregate-output --color --fail-if-no-match --ignore-workspace --include-workspace-root --no-fail-if-no-match --no-include-workspace-root --no-progress --no-sort --parallel --recursive --reverse --shell-mode --sort --stream --use-stderr --workspace-root --yes";
+var PNPM_VALUES = "-C -F --changed-files-ignore-pattern --dir --env-file --filter --filter-prod --http-proxy --https-proxy --loglevel --no-proxy --npmrc-auth-file --registry --reporter --state-dir --store-dir --test-pattern --userconfig --workspace-concurrency --workspace-packages";
+var PNPM_DLX = runner(`${PNPM_FLAGS} -v --version`, `${PNPM_VALUES} --allow-build --cpu --libc --os --package`, { folder: "-C --dir", joined: "-c --shell-mode", spec: true });
+var MISE = runner("--deny-all --deny-env --deny-net --deny-read --deny-unix --deny-write --fresh-env --no-deps --raw --secrets-all", "-c -j --allow-env --allow-net --allow-read --allow-unix --allow-write --command --jobs --secrets", { script: "-c --command", tools: true });
+var BUN_FLAGS = "-b -i --bun --check --hot --if-present --no-clear-screen --no-exit-on-error --no-install --no-orphans --parallel --sequential --silent --smol --watch --workspaces";
+var BUN_VALUES = "-e -F -p -r --cwd --elide-lines --env-file --eval --filter --import --preload --print --require --shell";
+var DENO = runner("-A -q -r --allow-all --allow-env --allow-ffi --allow-import --allow-net --allow-read --allow-run --allow-scripts --allow-sys --allow-write --cached-only --check --coverage --deny-env --deny-ffi --deny-import --deny-net --deny-read --deny-run --deny-sys --deny-write --env-file --frozen --hmr --inspect --inspect-brk --inspect-wait --lock --no-check --no-clear-screen --no-code-cache --no-config --no-lock --no-npm --no-remote --node-modules-dir --quiet --reload --unsafely-ignore-certificate-errors --unstable --use-env-proxy --v8-flags --vendor --watch", "-c --cert --conditions --config --ext --import-map --location --min-dep-age --node-modules-linker --preload --require --seed --watch-exclude", { spec: true });
+var RUNNERS = new Map([
+  ["bun exec", runner(BUN_FLAGS, BUN_VALUES, { always: true, folder: "--cwd" })],
+  ["bun run", runner(BUN_FLAGS, BUN_VALUES, { folder: "--cwd" })],
+  ["bun x", BUNX],
+  ["bunx", BUNX],
+  ["corepack", runner("", "", { spec: true })],
+  ["deno run", DENO],
+  ["deno x", DENO],
+  ["mise exec", MISE],
+  ["mise x", MISE],
+  ["npm exec", NPM],
+  ["npm x", NPM],
+  ["npx", NPM],
+  ["pnpm dlx", PNPM_DLX],
+  ["pnpm exec", runner(PNPM_FLAGS, PNPM_VALUES, { folder: "-C --dir", joined: "-c --shell-mode" })],
+  ["pnpx", PNPM_DLX],
+  ["volta run", runner("--bundled-npm --no-yarn --quiet --verbose", "--env --node --npm --yarn")],
+  ["yarn dlx", runner("-q --quiet", "-p --package", { spec: true })],
+  ["yarn exec", runner("", "", { always: true })]
+]);
+var MANAGERS = new Map([
+  ["bun", "bun run"],
+  ["deno", "deno run"],
+  ["mise", "mise exec"],
+  ["npm", "npm exec"],
+  ["pnpm", "pnpm exec"],
+  ["volta", "volta run"],
+  ["yarn", "yarn dlx"]
+]);
+var SCOPES = new Map([
+  ["yarn workspace", { names: 1, options: { flags: new Set, values: new Set } }],
+  [
+    "yarn workspaces foreach",
+    {
+      names: 0,
+      options: {
+        flags: new Set("-A -i -n -p -R -t -v -W --all --dry-run --interlaced --no-private --parallel --recursive --topological --topological-dev --verbose --worktree".split(" ")),
+        values: new Set("-j --exclude --from --include --jobs".split(" "))
+      }
+    }
+  ]
+]);
+var PNPM_COMMANDS = new Set("access add adduser approve approve-builds audit bin bugs c cache cat-file cat-index change ci clean clean-install completion config create dedupe deploy deprecate dislink dist-tag dist-tags dlx docs doctor edit env exec fetch find find-hash fund get help home i ic ignored-builds import info init install install-clean install-test issues it la lane licences licenses link list ll ln login logout ls m multi outdated owner owners pack pack-app patch patch-commit patch-remove peers permissions ping pipeline pkg prefix profile prune publish purge rb rebuild recursive remove repo restart rm root rt run run-script runtime s sbom se search self-update set set-script setup shim show ss stage star stars start stop store t tasks team test token tst un undeprecate uni uninstall unlink unpublish unstar up update upgrade v version view whoami why with xmas".split(" "));
+function caseOpener(cmd) {
+  const at = cmd.words.findIndex((w) => w.value === "case" && !w.quoted);
+  const before = cmd.words.slice(0, Math.max(at, 0));
+  const word = cmd.words[at + 2];
+  return at !== -1 && (before.length === 0 || onlyReserved({ ...cmd, words: before })) && word?.value === "in" && !word.quoted;
+}
+function casePatterns(all, scoped = false) {
+  const out = new Set;
+  for (let k = 0;k < all.length; k++) {
+    if (!caseOpener(all[k]) && all[k].follows !== ";;")
+      continue;
+    const commands = scoped ? all.slice(k).filter((c) => c.scope === all[k].scope) : all.slice(k);
+    let end = 0;
+    while (commands[end + 1]?.follows === "|")
+      end++;
+    const body = commands[end + 1];
+    const run = commands.slice(0, end + 1);
+    if (body?.follows !== ")" || run.some((c) => c.redirects.length > 0 || c.scope !== body.scope))
+      continue;
+    for (const c of run)
+      out.add(c);
+  }
+  return out;
+}
 function optionValue(word, { flags, values }) {
   if (word.startsWith("--")) {
     const eq = word.indexOf("=");
@@ -476,9 +596,168 @@ function envLong(v) {
   const name = hits.includes(m[1]) ? m[1] : hits.length === 1 ? hits[0] : undefined;
   return name ? { name, value: m[2] } : undefined;
 }
+var SSH_FLAGS = "46AaCfGgKkMNnqsTtVvXxYy";
+var SSH_VALUES = "BbcDEeFIiJLlmOoPpQRSWw";
+var SSH_LOCAL = new Set(["knownhostscommand", "localcommand", "proxycommand"]);
+function sshCall({ args, first }) {
+  if (program(first?.value ?? "") !== "ssh")
+    return;
+  const call = { env: [], local: [], noStdin: false, remote: [], unread: false };
+  let remoteCommand;
+  const option = (word) => {
+    const m = /^\s*([A-Za-z]+)\s*(?:=\s*|\s+)([\s\S]*)$/.exec(word.value);
+    const key = m?.[1]?.toLowerCase() ?? "";
+    if (marked(word.value.split(/[=\s]/)[0] ?? ""))
+      call.local.push(word);
+    else if (SSH_LOCAL.has(key))
+      call.local.push({ ...word, value: m?.[2] ?? "" });
+    else if (key === "remotecommand")
+      remoteCommand = { ...word, value: m?.[2] ?? "" };
+    else if (key === "sendenv" || key === "setenv")
+      call.env.push({ ...word, value: m?.[2] ?? "" });
+  };
+  for (let k = 0;k < args.length; k++) {
+    const { value } = args[k];
+    if (value === "--" || !value.startsWith("-") || value === "-") {
+      const at = value === "--" ? k + 1 : k;
+      if (call.host || value === "--") {
+        call.host ??= args[at];
+        call.remote = args.slice(call.host === args[at] ? at + 1 : at);
+        break;
+      }
+      call.host = args[k];
+      call.unread ||= marked(value);
+      continue;
+    }
+    for (let c = 1;c < value.length; c++) {
+      if (value[c] === "n")
+        call.noStdin = true;
+      if (SSH_VALUES.includes(value[c])) {
+        const attached = value.slice(c + 1);
+        const given = attached ? { ...args[k], value: attached } : args[++k];
+        if (value[c] === "o" && given)
+          option(given);
+        break;
+      }
+      if (!SSH_FLAGS.includes(value[c]))
+        return { ...call, unread: true };
+    }
+  }
+  if (call.remote.length === 0 && remoteCommand)
+    call.remote = [remoteCommand];
+  return call;
+}
+function sshStdin(cmd, call) {
+  if (call.noStdin)
+    return;
+  if (call.unread || call.remote.length === 0)
+    return "shell";
+  const kinds = lex(call.remote.map((w) => w.value).join(" ")).commands.map((c) => stdinShell({ ...c, stdin: c.stdin ?? cmd }));
+  return kinds.includes("root") ? "root" : kinds.includes("shell") ? "shell" : kinds.find(Boolean);
+}
+var DYNAMIC = /^(?:\.|bash|bun|busybox|dash|deno|env|eval|exec|expect|fish|g?awk|ksh|lua|mawk|mksh|node|perl|php|python[\d.]*|ruby|script|sh|source|su|sudo|tclsh|watch|zsh)$/;
+function staticLine(line) {
+  const joined = line.replace(/\\\n/g, "");
+  if (marked(joined) || /[$`]/.test(joined))
+    return false;
+  const words = (cmds) => cmds.flatMap((c) => [...c.words, ...c.inner ? words(c.inner()) : []]);
+  return !words(lex(joined).commands).some((w) => marked(w.value) || DYNAMIC.test(basename(w.value).toLowerCase()));
+}
+var GLOB_SWITCHES = [
+  /\b(?:emulate|setopt|shopt|unsetopt)\b|\boptions\[/i,
+  /bashopts|dotglob|fignore|globdot|globignore/i,
+  /(?:[?[]|\*(?!\d))[^\s;&|()]*\([^()\s|]*\)/
+];
+var DIGIT_QUALIFIER = /\*\d[^\s;&|()]*\([^()\s|]*\)/;
+var bareText = (text) => text.replace(/\\\n/g, "").replace(/['"\\_]/g, "");
+var NO_GLOB = new Set([
+  "errexit",
+  "errtrace",
+  "functrace",
+  "login",
+  "noclobber",
+  "noprofile",
+  "norc",
+  "nounset",
+  "pipefail",
+  "verbose",
+  "xtrace"
+]);
+var OPTION_REDIRECT = `(?:\\d*|&|\\{[A-Za-z_]\\w*\\})${REDIRECT_OP}`;
+var SHELL_HEAD = new RegExp(`(?<=^|[\\s;&|(/])(r?(?:bash|ksh|zsh)|dash|ksh93|mksh|set|sh|yash)(?:-?[\\d.]*\\d)?(?=[\\s<>;&|)]|$)(?=((?:${OPTION_REDIRECT}|[^;&|\\n])*))`, "gi");
+var LEADING_REDIRECT = new RegExp(`^${OPTION_REDIRECT}`);
+function optionSwitch(bare) {
+  for (const [, head, rest] of bare.matchAll(SHELL_HEAD)) {
+    const words = rest.split(/\s+/).filter(Boolean);
+    for (let i = 0;i < words.length; i++) {
+      const word = words[i];
+      const redirect = LEADING_REDIRECT.exec(word);
+      if (redirect) {
+        if (redirect[0] === word)
+          i++;
+        continue;
+      }
+      if (word === "--" || !/^[-+]/.test(word))
+        break;
+      const long = /^--([a-zA-Z][a-zA-Z0-9-]*)$/.exec(word);
+      if (long) {
+        if (!NO_GLOB.has(long[1].replace(/-/g, "").toLowerCase()))
+          return `${head} ${word}`;
+        continue;
+      }
+      if (!/^[-+][a-zA-Z0-9]+$/.test(word) || /[O4]/.test(word))
+        return `${head} ${word}`;
+      const o = word.indexOf("o");
+      if (o >= 0) {
+        const names = [word.slice(o + 1), words[i + 1] ?? ""].filter(Boolean);
+        if (names.length === 0 || names.some((name) => !NO_GLOB.has(name.toLowerCase())))
+          return `${head} ${word}${words[i + 1] ? ` ${words[i + 1]}` : ""}`;
+        i++;
+      }
+    }
+  }
+}
+function globSwitch(text) {
+  const bare = bareText(text);
+  for (const pattern of GLOB_SWITCHES) {
+    const found = pattern.exec(bare);
+    if (found)
+      return found[0].trim();
+  }
+  return optionSwitch(bare);
+}
+function remoteEnv(env, line, fed = false, text = line) {
+  const home = env.process.HOME || undefined;
+  const { PWD: _pwd, ...known } = env.known;
+  return {
+    ...env,
+    cwd: home,
+    cwdAnywhere: undefined,
+    cwdBack: [],
+    cwdChain: undefined,
+    cwdChainToken: undefined,
+    cwdChainUnread: undefined,
+    cwdHeld: [],
+    cwdMaybe: [],
+    cwdOr: undefined,
+    cwdSure: home,
+    cwdUnread: home === undefined,
+    known: home && !/\b(?:cd|popd|pushd)\b/.test(line) ? { ...known, PWD: home } : known,
+    old: { dir: home },
+    oldFrom: undefined,
+    remote: true,
+    remoteDots: fed || !staticLine(line) || DIGIT_QUALIFIER.test(bareText(text)),
+    remoteSwitch: env.remoteSwitch ?? globSwitch(text),
+    vars: new Map
+  };
+}
 function stdinShellOf(cmd, { args, first, name, xargs }) {
   const fed = !!cmd.stdin || !!xargs;
   if (first && !marked(first.value)) {
+    if (name === "ssh") {
+      const call = sshCall({ args, first });
+      return call && (fed || stdinFed(cmd)) ? sshStdin(cmd, call) : undefined;
+    }
     if (name === "." || name === "source" || name === "eval")
       return fed || name !== "eval" && STDIN_PATHS.has(args[0]?.value ?? "") ? "shell" : undefined;
     const family = familyOf(name);
@@ -486,7 +765,7 @@ function stdinShellOf(cmd, { args, first, name, xargs }) {
       return fed && interpreted(family, args, xargs) ? "code" : undefined;
     if (name === "su")
       return suCommand(args) ? undefined : "root";
-    if (!SHELLS.has(name))
+    if (!SHELLS.has(name) || noExec(args, name))
       return;
     if (fed)
       return "shell";
@@ -504,6 +783,8 @@ function stdinShellOf(cmd, { args, first, name, xargs }) {
   }
   const end = first ? cmd.words.indexOf(first) : -1;
   const before = cmd.words.slice(at, end === -1 ? undefined : end);
+  if (before.some((w, k) => !w.quoted && program(w.value) === "command" && /^-p?[vV]/.test(before[k + 1]?.value ?? "")))
+    return;
   const firstWrapper = before.find((w) => !w.quoted && ROOT_SHELLS.has(program(w.value)));
   const wrappers = [];
   for (const w of before) {
@@ -675,7 +956,8 @@ function bodyOf(commands, k) {
   }
   return [];
 }
-var COUNTED = new Set(["repeat", "timeout"]);
+var COUNTED = new Set(["flock", "repeat", "taskset", "timeout"]);
+var REPEATS = new Set(["repeat", "timeout"]);
 var SHELLS = new Set(["bash", "csh", "dash", "fish", "ksh", "sh", "tcsh", "zsh"]);
 var QUOTED_ONE_WORD = /^(?:\$(?:[A-Za-z_]\w*|\d|\{(?:[A-Za-z_]\w*|\d+)(?::?[-+=?][^}@]*|(?:[#%]{1,2}|\/{1,2})[^}]*)?\}|\([\s\S]*\))|`[\s\S]*`)$/;
 var STDIN_PATHS = new Set(["-", "/dev/fd/0", "/dev/stdin", "/proc/self/fd/0"]);
@@ -730,6 +1012,7 @@ var CURL_TAKES = new Set([
   "--cookie",
   "-c",
   "--cookie-jar",
+  "--cacert",
   "-D",
   "--dump-header",
   "-e",
@@ -903,7 +1186,12 @@ function lex(src, known = {}) {
   const lx = { commands: [], i: 0, known, scope: 0, scopes: [-1], src, token: freshToken() };
   list(lx, 0, false);
   calledAgain(lx.commands, src);
+  if (lx.commands.some((c) => c.words.some((w) => /^chpwd/.test(w.value))))
+    for (const c of lx.commands)
+      c.cdRedefined = true;
   braced(lx.commands);
+  for (const c of casePatterns(lx.commands, true))
+    c.casePattern = true;
   return { commands: lx.commands, scopes: lx.scopes };
 }
 var BRACED = new Set([
@@ -947,6 +1235,9 @@ function calledAgain(commands, src) {
     }
     const body = commands.slice(k, end + 1);
     const name = word.value.replace(/\(\)$/, "");
+    if (name === "cd" || name === "chpwd")
+      for (const c of commands)
+        c.cdRedefined = true;
     if (word.quoted || !/^[\w.:-]+$/.test(name)) {
       for (const c of body)
         c.repeated = true;
@@ -983,20 +1274,32 @@ function list(lx, scope, nested, inherit) {
 function walk(lx, scope, nested, inherit) {
   const { src } = lx;
   const pending = [];
-  const fresh = () => ({ redirects: [], scope, stdin: inherit, words: [] });
+  const fedOpens = [];
+  const fresh = () => {
+    const braceFed = fedOpens.at(-1);
+    return { ...braceFed && { braceFed }, redirects: [], scope, stdin: inherit, words: [] };
+  };
   let cmd = fresh();
+  const twins = new Map;
+  const past = (from) => {
+    const twin = twins.get(cmd);
+    return twin && from >= twin.from ? twin : undefined;
+  };
   const opens = [];
   let depth = 0;
   let loops = 0;
+  const counted = [];
   let after = "";
   const bodies = [];
   const heads = [];
   const end = (op) => {
     const done = cmd;
+    const twin = twins.get(done);
     const pipe = op === "|" || op === "|&";
     const brace = (c, value) => c.words[0]?.value === value && !c.words[0].quoted;
     if (brace(done, "}")) {
       const open = opens.pop();
+      fedOpens.pop();
       if (open !== undefined) {
         const { commands } = lx;
         const close = commands.length;
@@ -1044,25 +1347,48 @@ function walk(lx, scope, nested, inherit) {
         heads.push(false);
       else if (each === "end" && heads.length > 0 && !loop)
         heads.pop();
-      if (loops > 0 || loop || head || each === "foreach")
+      const counting = each === "repeat" && reserved.includes("{");
+      if (loops > 0 || loop || head || each === "foreach" || counting)
         done.repeated = true;
       if (outer && !loop && reserved.some((w) => w === "while" || w === "until"))
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
+      if (counting) {
+        counted.push(depth);
+        loops++;
+      }
+      while (counted.length > 0 && depth < counted[counted.length - 1]) {
+        counted.pop();
+        loops = Math.max(0, loops - 1);
+      }
       if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
         lx.orRun = op === "||";
       }
       after = op;
+      if (counting) {
+        opens.push(lx.commands.length);
+        fedOpens.push(fedOpens.at(-1));
+      }
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
           break;
         opens.push(lx.commands.length);
+        fedOpens.push(done.stdin ?? done.braceFed);
       }
+      const called = done.words.find((w) => w.value !== "{" || w.quoted);
+      if (fedOpens.length > 0 && called?.value === "exec" && !called.quoted && done.redirects.length > 0)
+        fedOpens[fedOpens.length - 1] = undefined;
       lx.commands.push(done);
+      if (twin && lx.i >= twin.from) {
+        const { of, redirects, words } = twin;
+        of.glob = { detached: of.detached || done.detached, redirects, words };
+      }
     }
     cmd = fresh();
+    if (twin && lx.i < twin.from)
+      twins.set(cmd, twin);
     cmd.follows = op;
     if (pipe) {
       cmd.stdin = done;
@@ -1093,6 +1419,7 @@ function walk(lx, scope, nested, inherit) {
       if (nested)
         return;
     } else if (c === "(") {
+      const twin = globOpens(cmd, src, lx.i) ? globTwin(lx, cmd) : undefined;
       lx.i++;
       const piped = cmd.words.length === 0 && cmd.redirects.length === 0 ? cmd.stdin : undefined;
       end(";");
@@ -1102,15 +1429,20 @@ function walk(lx, scope, nested, inherit) {
       cmd.group = true;
       const members = topLevel(lx.commands.slice(from), scope);
       cmd.inner = () => members;
-    } else if ((c === "<" || c === ">") && src[lx.i + 1] === "(") {
+      if (twin)
+        twins.set(cmd, twin);
+    } else if ((c === "<" || c === ">" || c === "=") && src[lx.i + 1] === "(") {
+      const from = lx.i;
       cmd.words.push(procSub(lx));
+      past(from)?.words.push(cmd.words[cmd.words.length - 1]);
     } else if (redirect) {
+      const from = lx.i;
       lx.i += redirect[0].length;
       while (src[lx.i] === " " || src[lx.i] === "\t")
         lx.i++;
       const [, fd] = redirect;
       const op = redirect[2].replace(/!$/, "|").replace(/^(>[>&])\|$/, "$1");
-      const target = src.startsWith("<(", lx.i) ? procSub(lx) : word(lx);
+      const target = src.startsWith("<(", lx.i) || src.startsWith("=(", lx.i) ? procSub(lx) : word(lx);
       const entry = { fd, op, target };
       if (op === "<<" || op === "<<-") {
         pending.push({
@@ -1123,6 +1455,7 @@ function walk(lx, scope, nested, inherit) {
         entry.body = { ...target, value: `${target.value}
 ` };
       cmd.redirects.push(entry);
+      past(from)?.redirects.push(entry);
     } else if (c === ";" || c === "&" || c === "|") {
       const two = src.slice(lx.i, lx.i + 2);
       const op = ["&&", ";;", "|&", "||"].includes(two) ? two : c;
@@ -1133,6 +1466,8 @@ function walk(lx, scope, nested, inherit) {
       cmd.words.push(word(lx));
       if (lx.i === from)
         lx.i++;
+      else
+        past(from)?.words.push(cmd.words[cmd.words.length - 1]);
     }
   }
   heredocs(lx, pending, nested);
@@ -1200,17 +1535,97 @@ function expandHeredoc(body) {
   const value = joined.replace(/\\([\\$`])/g, "$1");
   return /\$[\w{(@*#?!$-]|`/.test(joined.replace(/\\[\\$`]/g, "")) ? { unknown: "an expansion in an unquoted heredoc", value } : { value };
 }
-function word(lx) {
+function globOpens(cmd, src, at) {
+  const program = cmd.words.findIndex((w) => w.quoted || !MARKERS.has(w.value));
+  if (program < 0)
+    return false;
+  const lead = cmd.words.slice(program);
+  const next = { quoted: false, value: "(" };
+  let words = [...cmd.words, next];
+  let { first } = parse({ ...cmd, words });
+  while (first && first !== next && words.includes(first) && maySkip(first)) {
+    const dropped = first;
+    words = words.filter((w) => w !== dropped);
+    ({ first } = parse({ ...cmd, words }));
+  }
+  const close = balanced(src, at, "(", ")", false, true);
+  const group = src.slice(at, close);
+  return first === next && src[at + 1] !== ")" && !group.includes("/") && plainAlternative(group, close < src.length && !/[\s;&|<>)]/.test(src[close])) && !subshellPrefix(lead) && !HEADERS2.has(cmd.words[0]?.value ?? "");
+}
+function plainAlternative(group, glued) {
+  let depth = 0;
+  let plain = true;
+  let empty = true;
+  for (let i = 1;i < group.length - 1; i++) {
+    const c = group[i];
+    if (c === "|" && depth === 0) {
+      if (plain && (glued || !empty))
+        return true;
+      plain = true;
+      empty = true;
+      continue;
+    }
+    empty = false;
+    if (c === "\\")
+      i++;
+    else if (c === "'") {
+      const end = group.indexOf("'", i + 1);
+      i = end === -1 ? group.length : end;
+    } else if (c === '"') {
+      i++;
+      while (i < group.length && group[i] !== '"')
+        i += group[i] === "\\" ? 2 : 1;
+    } else if (c === "(")
+      depth++;
+    else if (c === ")")
+      depth--;
+    else if (/[\s;&]/.test(c))
+      plain = false;
+  }
+  return plain && (glued || !empty);
+}
+function subshellPrefix(lead) {
+  let at = 0;
+  while (at < lead.length && !lead[at].quoted)
+    if (lead[at].value === "time" && lead[at - 1]?.value === "time")
+      break;
+    else if (lead[at].value === "time" || lead[at].value === "nocorrect")
+      at++;
+    else if (lead[at].value === "repeat" && at + 1 < lead.length)
+      at += 2;
+    else
+      break;
+  return at > 0 && at === lead.length;
+}
+var maySkip = (w) => !!w.source && /^\u0000+$/.test(w.value) && (/^\u0000+$/.test(w.source) || vanishingParts(w.source));
+var HEADERS2 = new Set(["case", "for", "foreach", "function", "select"]);
+function globTwin(lx, of) {
+  const copy = { ...lx, commands: [], scopes: [...lx.scopes] };
+  const glob = word(copy, true);
+  const program = of.words.findIndex((w) => w.quoted || !MARKERS.has(w.value));
+  return {
+    from: copy.i,
+    of,
+    redirects: [...of.redirects],
+    words: [...of.words.slice(program), glob]
+  };
+}
+function word(lx, opening = false) {
   const { src } = lx;
   const start = lx.i;
   const out = { quoted: false, value: "" };
   let bare = "";
-  while (lx.i < src.length && (!BREAK.has(src[lx.i]) || src[lx.i] === "(" && lx.i > start && src[lx.i + 1] !== ")")) {
+  while (lx.i < src.length && (!BREAK.has(src[lx.i]) || src[lx.i] === "(" && (lx.i > start || opening) && src[lx.i + 1] !== ")")) {
     tick();
     const c = src[lx.i];
     const next = src[lx.i + 1] ?? "";
-    if (c === "(") {
-      const end = balanced(src, lx.i, "(", ")");
+    if (c === "(" && /^(?:[A-Za-z_]\w*(?:\[[^\]]*\])?|\[[^\]]*\])\+?==$/.test(src.slice(start, lx.i))) {
+      out.value = out.value.slice(0, -1);
+      bare = bare.slice(0, -1);
+      lx.i--;
+      merge(out, procSub(lx));
+    } else if (c === "(") {
+      const end = balanced(src, lx.i, "(", ")", false, opening);
       out.value += src.slice(lx.i, end);
       bare += src.slice(lx.i, end);
       inner(lx, src.slice(lx.i + 1, end - 1));
@@ -1254,8 +1669,8 @@ function word(lx) {
       lx.i++;
     }
   }
-  if (/\{(?=[^{}]*\})[^{}]*(?:,|\.\.)/.test(bare))
-    out.unknown ??= "a brace expansion";
+  if (BRACE_LIST.test(bare))
+    out.unknown ??= BRACE;
   if (GLOB_CHARS.test(bare))
     out.glob = true;
   out.source = src.slice(start, lx.i);
@@ -1266,6 +1681,8 @@ function word(lx) {
   return out;
 }
 var GLOB_CHARS = /[*?[{(]/;
+var BRACE_LIST = /\{(?=[^{}]*\})[^{}]*(?:,|\.\.)/;
+var BRACE = "a brace expansion";
 var TILDE = /^~[-+](?=\/|$|\u0000)/;
 var ends = (c = "") => c === "" || c === "/" || BREAK.has(c);
 function double(lx) {
@@ -1322,7 +1739,7 @@ function dollar(lx, plain = false) {
   }
   if (next === "{") {
     const end = balanced(src, lx.i + 1, "{", "}", plain);
-    const name = /^\$\{([A-Za-z_]\w*)\}$/.exec(src.slice(lx.i, end))?.[1];
+    const name = /^\$\{([A-Za-z_]\w*)(?::?\?[^}]*)?\}$/.exec(src.slice(lx.i, end))?.[1];
     readText(lx, src.slice(lx.i + 2, end - 1));
     lx.i = end;
     return variable(name);
@@ -1333,6 +1750,8 @@ function dollar(lx, plain = false) {
     const from = lx.i;
     while (/\w/.test(src[lx.i] ?? ""))
       lx.i++;
+    if (/^:[A-Za-z&]/.test(src.slice(lx.i, lx.i + 2)))
+      return unknown("a zsh modifier");
     return variable(src.slice(from, lx.i));
   }
   if (next === "$") {
@@ -1351,7 +1770,7 @@ function inner(lx, src) {
   while (sub.i < src.length) {
     tick();
     const from = sub.i;
-    if ((src[sub.i] === "<" || src[sub.i] === ">") && src[sub.i + 1] === "(")
+    if ((src[sub.i] === "<" || src[sub.i] === ">" || src[sub.i] === "=") && src[sub.i + 1] === "(")
       procSub(sub);
     else
       word(sub);
@@ -1359,7 +1778,7 @@ function inner(lx, src) {
       sub.i++;
   }
 }
-function balanced(src, from, open, close, plain = false) {
+function balanced(src, from, open, close, plain = false, doubles = false) {
   let depth = 0;
   for (let i = from;i < src.length; i++) {
     tick();
@@ -1369,6 +1788,10 @@ function balanced(src, from, open, close, plain = false) {
     else if (c === "'" && !plain) {
       const end = src.indexOf("'", i + 1);
       i = end === -1 ? src.length : end;
+    } else if (c === '"' && doubles) {
+      i++;
+      while (i < src.length && src[i] !== '"')
+        i += src[i] === "\\" ? 2 : 1;
     } else if (c === open)
       depth++;
     else if (c === close && --depth === 0)
@@ -1434,6 +1857,79 @@ function mktempPath(cmd, known) {
   return template ? template.value : `${known.TMPDIR.replace(/\/$/, "")}/tmp.mktemp`;
 }
 var SPLIT = /^(?:-[0iv]*S|--split-string(?:=|$))(.*)$/;
+var XARGS_LONG = [
+  "arg-file",
+  "delimiter",
+  "eof",
+  "exit",
+  "help",
+  "interactive",
+  "max-args",
+  "max-chars",
+  "max-lines",
+  "max-procs",
+  "no-run-if-empty",
+  "null",
+  "open-tty",
+  "process-slot-var",
+  "replace",
+  "show-limits",
+  "verbose",
+  "version"
+];
+var XARGS_FLAGS = "0oprtx";
+function delimiterOf(word) {
+  if (!word || word.unknown)
+    return;
+  if (word.value.length === 1)
+    return word.value;
+  const [, hex, octal, letter] = /^\\(?:x([\da-f]+)|([0-7]+)|(.))$/i.exec(word.value) ?? [];
+  const code = hex ? parseInt(hex, 16) : octal ? parseInt(octal, 8) : undefined;
+  if (code !== undefined)
+    return code < 256 ? String.fromCharCode(code) : undefined;
+  return letter ? ESCAPES[letter] : undefined;
+}
+var XARGS_REPLACE = /^(?:-[IiJ]|--replace)/;
+function xargsOption(xargs, w, next, state) {
+  const split = (delimiter) => {
+    xargs.delimiters = [...xargs.delimiters ?? [], delimiter];
+  };
+  if (XARGS_REPLACE.test(w.value))
+    return;
+  const long = /^--([^=]+)(=?)/.exec(w.value);
+  let name;
+  let value;
+  if (long) {
+    const names = XARGS_LONG.filter((n) => n.startsWith(long[1]));
+    name = names.includes(long[1]) ? long[1] : names.length === 1 ? names[0] : undefined;
+    if (long[2])
+      value = slice(w, long[0].length);
+  } else if (w.value.startsWith("-")) {
+    let k = 1;
+    while (XARGS_FLAGS.includes(w.value[k] ?? "-"))
+      k++;
+    if (w.value.slice(1, k).includes("0"))
+      split("\x00");
+    name = w.value[k];
+    if (k + 1 < w.value.length)
+      value = slice(w, k + 1);
+  }
+  if (name === "i" || name === "replace")
+    xargs.replace = value?.value || "{}";
+  else if (name === "null")
+    split("\x00");
+  else if (name === "I" || name === "J")
+    xargs.replace = (value ?? next)?.value;
+  else if (name === "a" || name === "arg-file")
+    xargs.files = [
+      ...xargs.files ?? [],
+      ...[value ?? next].filter((file) => file !== undefined).map((file) => ({ chdir: state.chdir, file, moved: state.moved }))
+    ];
+  else if (name === "d" || name === "delimiter")
+    split(delimiterOf(value ?? next));
+}
+var splitFrom = new WeakMap;
+var chdirOf = (state, word) => state.chdir && word ? { ...word, ...unknown("a second env -C") } : word;
 var READINGS = 16;
 function parse(cmd) {
   const state = { local: new Map, rest: cmd.words.toReversed(), xargs: undefined };
@@ -1460,6 +1956,7 @@ var assign = (local, w) => {
 function unwrap(state, inside, budget) {
   const { local, rest } = state;
   const peek = () => rest[rest.length - 1];
+  const next = () => rest[rest.length - 2];
   const take = () => rest.pop();
   const also = [];
   const fork = (wrapper, drop) => {
@@ -1471,42 +1968,82 @@ function unwrap(state, inside, budget) {
     also.push(unwrap({
       chdir: state.chdir,
       local: new Map(local),
+      moved: state.moved,
       rest: rest.slice(0, Math.max(0, rest.length - drop)),
       xargs: state.xargs && { ...state.xargs }
     }, wrapper, budget));
   };
+  let spec = false;
   for (let wrapper = inside;; wrapper = undefined) {
     if (!wrapper) {
-      wrapper = program(peek()?.value ?? "");
+      const word = peek();
+      const held = [state.xargs?.replace ?? "", ...state.xargs?.outer ?? []];
+      for (const replace of held.filter((r) => r && word?.value.includes(r)))
+        if (word) {
+          const typed = splitFrom.get(word) ?? word;
+          state.xargs = {
+            ...state.xargs,
+            filled: [...state.xargs?.filled ?? [], [typed, replace]]
+          };
+        }
+      wrapper = program(word?.value ?? "");
       if (!WRAPPERS.has(wrapper))
         break;
+      if (ROOT_SHELLS.has(wrapper))
+        state.moved = true;
+      if (wrapper === "xargs" && state.xargs?.replace)
+        state.xargs = { ...state.xargs, outer: [...state.xargs.outer ?? [], state.xargs.replace] };
       if (wrapper === "xargs")
         state.xargs ??= {};
       take();
     }
-    const options = WRAPPERS.get(wrapper);
+    const runs = RUNNERS.get(wrapper);
+    const options = WRAPPERS.get(wrapper) ?? runs;
+    spec = !!runs?.spec;
+    let joined = runs?.joined === true;
     for (let w = peek();w; w = peek()) {
       const v = w.value;
+      const script = runs && namedOption(v, runs, runs.script);
+      const folder = runs && namedOption(v, runs, runs.folder);
+      if (wrapper === "xargs")
+        xargsOption(state.xargs ??= {}, w, next(), state);
+      if (runs && runs.joined !== true && joinsWords(v, runs.joined))
+        joined = true;
       if (ASSIGN.test(v))
         assign(local, take());
       else if (wrapper === "env" && SPLIT.test(v)) {
         const attached = SPLIT.exec(v)?.[1] ?? "";
         take();
-        const split = (attached || take()?.value || "").split(/\s+/).filter(Boolean);
-        for (let j = split.length - 1;j >= 0; j--)
-          rest.push({ quoted: false, value: split[j] });
+        const from = attached ? w : take();
+        const split = (attached || from?.value || "").split(/\s+/).filter(Boolean);
+        for (let j = split.length - 1;j >= 0; j--) {
+          const word = { quoted: false, value: split[j] };
+          if (from)
+            splitFrom.set(word, splitFrom.get(from) ?? from);
+          rest.push(word);
+        }
       } else if (wrapper === "env" && (v === "-C" || v === "--chdir")) {
         take();
-        state.chdir = take();
+        state.chdir = chdirOf(state, take());
       } else if (wrapper === "env" && /^(?:-C|--chdir=)./.test(v)) {
-        state.chdir = slice(w, v.startsWith("-C") ? 2 : "--chdir=".length);
+        state.chdir = chdirOf(state, slice(w, v.startsWith("-C") ? 2 : "--chdir=".length));
         take();
-      } else if (state.xargs && /^(?:-[IiJ]|--replace)/.test(v)) {
+      } else if (wrapper === "xargs" && XARGS_REPLACE.test(v)) {
         const attached = /^(?:-[IiJ]|--replace=?)(.*)$/.exec(v)?.[1] ?? "";
         take();
+        state.xargs ??= {};
         state.xargs.replace = v === "-I" || v === "-J" ? take()?.value : attached || "{}";
       } else if (wrapper === "env" && v === "-") {
         take();
+      } else if (folder !== undefined) {
+        take();
+        state.chdir = chdirOf(state, folder === -1 ? take() : slice(w, folder));
+      } else if (script !== undefined) {
+        take();
+        const text = script === -1 ? take() : slice(w, script);
+        if (text)
+          rest.push(text, ...SH_C);
+        break;
       } else if (v === "--") {
         take();
         while (ASSIGN.test(peek()?.value ?? ""))
@@ -1516,19 +2053,37 @@ function unwrap(state, inside, budget) {
         const end = wrapper === "nice" && /^-\d+$/.test(v) ? "own" : marked(v) ? undefined : optionValue(v, options);
         if (!end)
           fork(wrapper, 2);
-        else if (end === "next" && marked(rest[rest.length - 2]?.value ?? "")) {
+        else if (end === "next" && marked(next()?.value ?? "")) {
           fork(wrapper, 1);
           fork(wrapper, 3);
         }
         rest.length = Math.max(0, rest.length - (end === "next" ? 2 : 1));
-      } else
+      } else if (runs?.tools && rest.some((r) => !r.quoted && r.value === "--"))
+        take();
+      else
         break;
+    }
+    if (joined && rest.length > 0) {
+      const text = rest.toReversed().map((r) => r.value).join(" ");
+      rest.length = 0;
+      rest.push({ quoted: true, value: text }, ...SH_C);
     }
     if (COUNTED.has(wrapper))
       take();
+    if (wrapper === "chrt" && /^\d+$/.test(peek()?.value ?? ""))
+      take();
+    if (wrapper === "flock" && !peek()?.quoted && FLOCK_SCRIPT.has(peek()?.value ?? "")) {
+      take();
+      const text = take();
+      if (text)
+        rest.push(text, ...SH_C);
+    }
+    if (wrapper === "repeat" && REPEAT_BODY.has(peek()?.value ?? "") && !peek()?.quoted)
+      take();
   }
-  const first = take();
-  return {
+  const typed = take();
+  const first = spec && typed ? packageName(typed) : typed;
+  const parsed = {
     also,
     args: rest.reverse(),
     chdir: state.chdir,
@@ -1537,6 +2092,140 @@ function unwrap(state, inside, budget) {
     name: first ? program(first.value) : "",
     xargs: state.xargs
   };
+  const via = viaRunner(parsed, state, budget);
+  if (via)
+    also.push(via);
+  return parsed;
+}
+var SH_C = [
+  { quoted: false, value: "-c" },
+  { quoted: false, value: "sh" }
+];
+var FLOCK_SCRIPT = new Set(["-c", "--command"]);
+function namedOption(v, { values }, names) {
+  if (!v.startsWith("-") || v === "-" || v === "--")
+    return;
+  if (v.startsWith("--")) {
+    const eq = v.indexOf("=");
+    if (!names.has(eq === -1 ? v : v.slice(0, eq)))
+      return;
+    return eq === -1 ? -1 : eq + 1;
+  }
+  for (let k = 1;k < v.length; k++) {
+    const option = `-${v[k]}`;
+    if (values.has(option))
+      return names.has(option) ? k === v.length - 1 ? -1 : k + 1 : undefined;
+  }
+}
+function joinsWords(v, joined) {
+  if (v.startsWith("--"))
+    return joined.has(v.split("=")[0]);
+  return v.startsWith("-") && [...v.slice(1)].some((letter) => joined.has(`-${letter}`));
+}
+function packageName(word) {
+  const from = word.value.startsWith("npm:") ? 4 : 0;
+  const name = word.value.slice(from).replace(/(?<=.)@[^@/]*$/, "");
+  if (from === 0 && name === word.value)
+    return word;
+  const cut = slice(word, from);
+  return { ...cut, source: word.source === word.value ? name : word.source, value: name };
+}
+function subcommandAt(manager, args, options) {
+  for (let k = 0;k < args.length; k++) {
+    const v = args[k].value;
+    if (!v.startsWith("-") || v === "-" || v === "--")
+      return k;
+    const end = optionValue(v, options);
+    if (end === "next")
+      k++;
+    else if (end === undefined && !RUNNERS.has(`${manager} ${args[k + 1]?.value}`) && RUNNERS.has(`${manager} ${args[k + 2]?.value}`))
+      k++;
+  }
+  return args.length;
+}
+function viaRunner(parsed, state, budget) {
+  const { args, name } = parsed;
+  let key = RUNNERS.has(name) ? name : undefined;
+  let words = args;
+  let implicit = false;
+  const manager = MANAGERS.get(name);
+  if (!key && manager) {
+    let at = subcommandAt(name, args, RUNNERS.get(manager));
+    const from = at;
+    for (let scope = scopeAt(name, args, at);scope; scope = scopeAt(name, args, at)) {
+      const after = at + scope.words + scope.names;
+      at = after + subcommandAt(name, args.slice(after), scope.options);
+    }
+    const sub = args[at]?.value;
+    if (sub === undefined)
+      return;
+    if (RUNNERS.has(`${name} ${sub}`)) {
+      key = `${name} ${sub}`;
+      words = args.toSpliced(from, at + 1 - from);
+    } else if (name === "pnpm" && !PNPM_COMMANDS.has(sub) || name === "deno" && sub.startsWith("npm:")) {
+      key = manager;
+      implicit = true;
+    }
+  }
+  if (!key)
+    return;
+  tick();
+  if (budget.left-- <= 0) {
+    budget.capped = true;
+    return;
+  }
+  const reading = unwrap({
+    chdir: parsed.chdir,
+    local: new Map(parsed.local),
+    moved: state.moved,
+    rest: words.toReversed(),
+    xargs: parsed.xargs && { ...parsed.xargs }
+  }, key, budget);
+  if (!reading.first)
+    return;
+  const file = reading.first.value;
+  if (key === "bun run" && (file.includes("/") || SCRIPT_FILE.test(file)))
+    return;
+  if (key === "deno run" && words.includes(reading.first))
+    return;
+  return { ...reading, via: implicit ? name : key };
+}
+var SCRIPT_FILE = /\.[cm]?[jt]sx?$/;
+function scopeAt(name, args, at) {
+  const two = `${name} ${args[at]?.value} ${args[at + 1]?.value}`;
+  const one = `${name} ${args[at]?.value}`;
+  const scope = SCOPES.get(two) ?? SCOPES.get(one);
+  return scope && { ...scope, words: SCOPES.has(two) ? 2 : 1 };
+}
+function runsScript({ first, via }, env) {
+  if (via !== "bun run" && via !== "pnpm")
+    return false;
+  const name = first?.value;
+  const unsure = env.cwdUnread || env.cwdAnywhere || (env.cwdMaybe?.length ?? 0) > 0;
+  const start = env.cwdSure ?? (unsure ? undefined : env.cwd);
+  if (!name || marked(name) || !start)
+    return false;
+  for (let dir = start;; dir = dirname(dir)) {
+    const scripts = packageScripts(`${dir}/package.json`);
+    if (scripts)
+      return Object.hasOwn(scripts, name);
+    if (dirname(dir) === dir)
+      return false;
+  }
+}
+function packageScripts(path) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+  try {
+    const scripts = JSON.parse(text).scripts;
+    return scripts && typeof scripts === "object" ? scripts : {};
+  } catch {
+    return {};
+  }
 }
 function shellSlot(args, shell) {
   const { inline, operand } = shellOperand(args, shell);
@@ -1572,13 +2261,440 @@ async function runAll(lexed, env, visit, builtins) {
     producer.feedsShell = true;
     consumer.runsStdin = kind !== "code";
   }
-  for (const cmd of lexed.commands) {
-    const verdict = await examine(cmd, envOf(cmd.scope), visit, builtins);
+  env.namings ??= namings(lexed.commands);
+  const unbind = new Map;
+  for (const [k, cmd] of lexed.commands.entries()) {
+    const at = envOf(cmd.scope);
+    if (cmd.repeated && !lexed.commands[k - 1]?.repeated)
+      repass(lexed.commands.slice(k), envs);
+    const verdict = await examine(cmd, at, visit, builtins) ?? (cmd.glob && await examine({ ...cmd, ...cmd.glob, glob: undefined }, at, visit, builtins));
     if (verdict)
       return verdict;
+    unbind.get(cmd)?.();
+    bind(lexed.commands, k, at, unbind);
+    change(cmd, at);
   }
 }
+var NAME_SETTERS = new Set([
+  "compgen",
+  "declare",
+  "export",
+  "float",
+  "getln",
+  "getopts",
+  "integer",
+  "let",
+  "local",
+  "mapfile",
+  "nameref",
+  "pcre_match",
+  "print",
+  "printf",
+  "private",
+  "read",
+  "readarray",
+  "readonly",
+  "set",
+  "shift",
+  "stat",
+  "strftime",
+  "syserror",
+  "sysopen",
+  "sysread",
+  "syswrite",
+  "typeset",
+  "unset",
+  "vared",
+  "wait",
+  "zcurses",
+  "zformat",
+  "zgdbmpath",
+  "zgetattr",
+  "zlistattr",
+  "zmodload",
+  "zparseopts",
+  "zpty",
+  "zregexparse",
+  "zselect",
+  "zsocket",
+  "zstat",
+  "zstyle",
+  "zsystem",
+  "ztcp",
+  "ztie",
+  "zuntie"
+]);
+var PRINTS = new Set(["print", "printf"]);
+var RUNS_TEXT = new Set([
+  ".",
+  "alias",
+  "autoload",
+  "emulate",
+  "enable",
+  "eval",
+  "fc",
+  "mapfile",
+  "r",
+  "readarray",
+  "sched",
+  "source",
+  "trap",
+  "zmodload",
+  "zregexparse",
+  "zstyle"
+]);
+var CHANGED = { ...unknown("a value a builtin may change"), vanishes: true };
+var DECLARES = new Set([...EXPORTS, "float", "integer", "private"]);
+function change(cmd, env) {
+  const { args, first, name } = parse(cmd);
+  const words = args.map((a) => a.value);
+  if (marked(name)) {
+    const array = arrayRun(cmd, first, env);
+    if (array === null || array && RUNS_TEXT.has(parse(array).name)) {
+      for (const key of env.vars.keys())
+        setVar(env.vars, key, CHANGED);
+      return;
+    }
+    const variants = array ? [array] : [...splitHeld(cmd, name, env), ...splitHeld(cmd, name, env, true)].filter((variant) => !marked(parse(variant).name));
+    for (const variant of variants)
+      change(variant, env);
+    if (variants.length > 0)
+      return;
+    const known = heldKnown(env);
+    const unread = args.some((a) => {
+      const value = marked(a.value) && a.raw ? relexedValue(a.raw, known) : a.value;
+      return value === undefined || marked(value);
+    });
+    const names = unread ? [...env.vars.keys()] : words.filter((w) => NAME.test(w));
+    for (const key of names)
+      if (env.vars.has(key))
+        setVar(env.vars, key, CHANGED);
+    return;
+  }
+  const element = (first?.source ?? first?.value ?? "").match(SUBSCRIPTED)?.[1];
+  if (element) {
+    if (env.vars.has(element))
+      setVar(env.vars, element, CHANGED);
+    return;
+  }
+  const options = words.filter((w) => /^[-+]./.test(w) && w !== "--");
+  const prints = PRINTS.has(name);
+  const vNames = prints ? words.flatMap((w, k) => /^-[^-\s]*v/.test(w) ? [w.slice(w.indexOf("v") + 1), words[k + 1] ?? ""] : []) : [];
+  const nameWords = prints ? vNames : words.map((w) => w.split("=")[0]);
+  const all = RUNS_TEXT.has(name) && (name !== "eval" || args.some(unreadWord)) || NAME_SETTERS.has(name) && nameWords.some(marked) || name === "unset" && options.some((w) => w.includes("m"));
+  const read = name === "read" ? binds(cmd) : [];
+  const names = all ? [...env.vars.keys()] : name === "unset" ? options.some((w) => w.includes("f")) ? [] : words : name === "read" ? read.length > 0 ? read : ["REPLY"] : prints ? printsText(words) ? [] : vNames : DECLARES.has(name) ? words.filter((w) => options.some((o) => o !== "-a") || !ASSIGN.test(w) && (options.length > 0 || name !== "export" && name !== "readonly")) : name === "set" ? words.flatMap((w, k) => /^[-+]\w*A$/.test(w) && words[k + 1] ? [words[k + 1]] : []) : NAME_SETTERS.has(name) && name !== "getopts" ? words.flatMap((w) => w.match(/[A-Za-z_]\w*/g) ?? []) : [];
+  for (const key of names.map((w) => w.split("=")[0].replace(/\[[\s\S]*$/, ""))) {
+    if (!NAME.test(key))
+      continue;
+    if (env.vars.has(key) || name === "read" || prints)
+      setVar(env.vars, key, CHANGED);
+  }
+}
+function namings(commands) {
+  const counts = new Map;
+  const add = (name) => void counts.set(name, (counts.get(name) ?? 0) + 1);
+  const count = (source, value) => {
+    for (const [, name] of (source ?? "").matchAll(/\$\{?[#!+^=~]?([A-Za-z_]\w*)/g))
+      add(name);
+    const text = value ?? "";
+    for (const [, name] of text.matchAll(/(?<=^|=)([A-Za-z_]\w*)(?=\[|\+?=|$)/g))
+      add(name);
+    const cluster = text.match(/^-(\w+)/)?.[1] ?? "";
+    for (let k = 1;k < cluster.length; k++) {
+      const name = cluster.slice(k).match(/^[A-Za-z_]\w*/)?.[0];
+      if (name && /^(?:\[|\+?=|$)/.test(text.slice(k + 1 + name.length)))
+        add(name);
+    }
+  };
+  for (const cmd of commands) {
+    const { args, first, name } = parse(cmd);
+    if (name === "eval")
+      for (const a of args)
+        for (const [key] of a.value.matchAll(/[A-Za-z_]\w*/g))
+          add(key);
+    for (const w of cmd.words)
+      if (w !== first || !WHOLE_RUN.test(w.raw ?? w.source ?? ""))
+        count(w.source ?? w.raw, w.value);
+    for (const r of cmd.redirects) {
+      count(r.target?.source, r.target?.value);
+      count(r.body?.value, undefined);
+    }
+  }
+  return counts;
+}
+function arrayRun(cmd, first, env) {
+  const run = (first?.raw ?? first?.source)?.match(WHOLE_RUN);
+  const key = run?.[1] ?? run?.[2];
+  const set = key ? env.vars.get(key) : undefined;
+  if (!key || !set)
+    return;
+  if ((env.namings?.get(key) ?? 0) > 1)
+    return null;
+  if (set.unknown !== undefined || set.vanishes)
+    return null;
+  const inner = set.source?.match(/^[A-Za-z_]\w*=\(([\s\S]*)\)$/)?.[1];
+  if (inner === undefined)
+    return;
+  const { commands } = lex(inner);
+  const elements = commands.length === 1 ? commands[0].words : [];
+  const asWritten = (w) => !unreadWord({ ...w, source: w.source?.replace(/^~(?=\/|$)/, "") });
+  if (elements.length === 0 || commands[0].redirects.length > 0 || !elements.every(asWritten))
+    return null;
+  const seps = ifsSplit(env);
+  const words = run?.[2] ? elements.flatMap((w) => splitValue(w.value, seps)) : elements;
+  if (words.length === 0)
+    return null;
+  return { ...cmd, words: cmd.words.flatMap((w) => w === first ? words : [w]) };
+}
+function globRun(cmd, first, env, glob = !!first?.glob) {
+  const pattern = first?.value ?? "";
+  if (!first || !glob || marked(pattern) || SUBSCRIPTED.test(first.source ?? ""))
+    return;
+  const seen = (first.source ?? "").replace(/\\\n/g, "").replace(QUOTED, maskQuoted);
+  const grouped = seen.includes("(");
+  const qualifiers = grouped ? /\(([^()|]*)\)$/.exec(seen) : null;
+  const joined = pattern.replace(/\\\n/g, "");
+  const groups = grouped ? groupWords(qualifiers ? joined.slice(0, joined.length - qualifiers[0].length) : joined) : [pattern];
+  if (groups === null || qualifiers?.[1].includes("N"))
+    return null;
+  const patterns = groups ?? [pattern];
+  if ((!grouped || !groups) && !GLOB_PATTERN.test(pattern))
+    return;
+  const [only, ...more] = patterns;
+  const unsure = !env.cwd || env.cwdUnread || env.cwdAnywhere;
+  if (more.length === 0 && !GLOB_PATTERN.test(only) && !isAbsolute3(only) && unsure)
+    return [
+      { ...cmd, words: cmd.words.map((w) => w === first ? { quoted: true, value: only } : w) }
+    ];
+  const found = [];
+  for (const each of patterns) {
+    const matched = globMatches(each, env);
+    if (matched === null)
+      return null;
+    found.push(...matched);
+  }
+  if (found.length > READINGS || qualifiers && found.length > 0)
+    return null;
+  if (found.length === 0)
+    return;
+  return found.map((value) => ({
+    ...cmd,
+    words: cmd.words.map((w) => w === first ? { quoted: true, value } : w)
+  }));
+}
+function globMatches(pattern, env) {
+  const absolute = isAbsolute3(pattern);
+  if (!absolute && (!env.cwd || env.cwdUnread || env.cwdAnywhere))
+    return null;
+  const base = absolute ? "/" : env.cwd;
+  let paths = [""];
+  for (const [k, part] of pattern.split("/").entries()) {
+    const join = (path, name) => k === 0 ? name : `${path}/${name}`;
+    if (!GLOB_PATTERN.test(part)) {
+      paths = paths.map((path) => join(path, part));
+      continue;
+    }
+    const glob = shellGlob(part);
+    const next = [];
+    for (const path of paths) {
+      let names;
+      try {
+        names = readdirSync(resolve3(base, path || "."));
+      } catch (error) {
+        if (/^(?:ENOENT|ENOTDIR)$/.test(error.code ?? ""))
+          continue;
+        return null;
+      }
+      for (const name of names)
+        if ((part.startsWith(".") || !name.startsWith(".")) && glob.match(name))
+          next.push(join(path, name));
+    }
+    if (next.length > READINGS)
+      return null;
+    paths = next;
+  }
+  const found = [];
+  for (const path of paths) {
+    try {
+      lstatSync(resolve3(base, path));
+      found.push(path);
+    } catch (error) {
+      if (!/^(?:ENOENT|ENOTDIR)$/.test(error.code ?? ""))
+        return null;
+    }
+  }
+  return found;
+}
+function groupWords(pattern, spelling = false) {
+  const seen = pattern.replace(QUOTED, maskQuoted);
+  const open = seen.indexOf("(");
+  if (open < 0)
+    return seen.includes(")") ? undefined : [pattern.replace(QUOTED, unquote)];
+  const cuts = [open];
+  let close = -1;
+  for (let k = open, depth = 0;k < seen.length && close < 0; k++) {
+    if (seen[k] === "(")
+      depth++;
+    else if (seen[k] === "|" && depth === 1)
+      cuts.push(k);
+    else if (seen[k] === ")" && --depth === 0)
+      close = k;
+  }
+  if (close < 0 || pattern.slice(open, close).includes("/"))
+    return;
+  if (!spelling && /[#^~]/.test(seen.slice(open, close)))
+    return null;
+  const out = [];
+  for (const [n, from] of cuts.entries()) {
+    const alternative = pattern.slice(from + 1, cuts[n + 1] ?? close);
+    const extended = spelling && /[#^~]/.test(seen.slice(from + 1, cuts[n + 1] ?? close));
+    for (const each of extended ? [alternative, "*"] : [alternative]) {
+      const words = groupWords(pattern.slice(0, open) + each + pattern.slice(close + 1), spelling);
+      if (!words || out.push(...words) > (spelling ? BRACE_WORDS : READINGS))
+        return words === undefined ? undefined : null;
+    }
+  }
+  return out;
+}
+var unquote = (part) => part.startsWith("\\") ? part.slice(1) : part.slice(1, part.endsWith(part[0]) && part.length > 1 ? -1 : undefined);
+function braceRun(cmd, first) {
+  if (first?.unknown !== BRACE)
+    return;
+  const source = (first.source ?? "").replace(/\\\n/g, "");
+  if (/[$`]/.test(source))
+    return null;
+  const masked = source.replace(QUOTED, (part) => part.replace(/[{,}()]/g, hide));
+  const grouped = masked.includes("(");
+  const expanded = braceWords(masked);
+  if (!expanded || expanded.some((w) => BRACE_LIST.test(w)))
+    return null;
+  const words = [];
+  for (const each of expanded) {
+    const { commands } = lex(unhide(each));
+    if (commands.length > 1 || commands[0]?.redirects.length)
+      return grouped ? undefined : null;
+    words.push(...commands[0]?.words ?? []);
+  }
+  if (words.length === 0)
+    return null;
+  return { ...cmd, words: cmd.words.flatMap((w) => w === first ? words : [w]) };
+}
+var QUOTED = /'[^']*'?|"(?:[^"\\]|\\[\s\S])*"?|\\[\s\S]/g;
+var HIDDEN = "{,}()";
+var maskQuoted = (part) => "\uE005".repeat(part.length);
+var hide = (c) => String.fromCharCode(57344 + HIDDEN.indexOf(c));
+var HIDDEN_CHARS = new RegExp(`[${[...HIDDEN].map(hide).join("")}]`, "g");
+var unhide = (text) => text.replace(HIDDEN_CHARS, (c) => HIDDEN[c.charCodeAt(0) - 57344]);
+function heldGlob(cmd, first, env) {
+  if (!first?.glob || !first.raw || !marked(first.value))
+    return;
+  const value = relexedValue(first.raw, heldKnown(env));
+  if (value === undefined || marked(value))
+    return;
+  const word = { ...first, value };
+  return globRun({ ...cmd, words: cmd.words.map((w) => w === first ? word : w) }, word, env, true);
+}
+var GLOB_PATTERN = /[*?]|\[[^\]]*\]/;
+var shellGlob = (part) => new Bun.Glob(part.replace(/^!/, "\\!").replace(BRACKET, (bracket) => bracket.slice(1, -1).replace(/\[:([a-z]+):\]/g, (_, name) => POSIX_CLASSES[name] ?? " -~").replace(/\[([=.])(.)\1\]/g, "$2").replace(/^/, "[").concat("]")));
+var BRACKET = /\[[!^]?\]?(?:\[:[a-z]+:\]|\[([=.]).\1\]|[^\]])*\]/g;
+var POSIX_CLASSES = {
+  alnum: "0-9A-Za-z",
+  alpha: "A-Za-z",
+  blank: " \t",
+  digit: "0-9",
+  lower: "a-z",
+  space: ` 	
+\r\f\v`,
+  upper: "A-Z",
+  xdigit: "0-9A-Fa-f"
+};
+function repass(commands, envs) {
+  for (const cmd of commands) {
+    if (!cmd.repeated)
+      return;
+    const env = envs.get(cmd.scope);
+    if (!env)
+      continue;
+    change(cmd, env);
+    const { local, name } = parse(cmd);
+    if (name !== "")
+      continue;
+    for (const key of local.keys())
+      if (env.vars.has(key))
+        setVar(env.vars, key, CHANGED);
+  }
+}
+function printsText(words) {
+  const v = words.findIndex((w) => w === "-v" || /^-v\w/.test(w));
+  const format = words[v + (words[v] === "-v" ? 2 : 1)];
+  return v >= 0 && format !== undefined && !marked(format) && /^[^%\\]*\S[^%\\]*$/.test(format);
+}
+function bind(commands, k, env, unbind) {
+  const cmd = commands[k];
+  const names = binds(cmd);
+  if (names.length === 0 || cmd.detached)
+    return;
+  const close = loopHeader(cmd) ? loopClose(commands, k) : undefined;
+  if (!close && (loopHeader(cmd) || cmd.unsure || cmd.chained || cmd.kept))
+    return;
+  const value = close ? loopWord(cmd) : undefined;
+  const held = close ? heldKnown(env) : {};
+  const prior = names.flatMap((name) => (name in held) ? [[name, held[name]]] : []);
+  for (const name of names)
+    setVar(env.vars, name, value ?? unknown("a value a builtin gives"));
+  if (!close)
+    return;
+  for (const name of names)
+    capture(env, name, value);
+  unbind.set(close, () => {
+    for (const name of names)
+      setVar(env.vars, name, CHANGED);
+    if (prior.length === 0)
+      return;
+    let record = loopBefore.get(env.vars);
+    if (!record)
+      loopBefore.set(env.vars, record = {});
+    for (const [name, was] of prior)
+      record[name] = was;
+  });
+}
+function capture(env, key, value) {
+  if (value)
+    recordHeld(env, key, value);
+  else
+    delete heldResolved.get(env.vars)?.[key];
+}
+function loopWord({ words }) {
+  const at = words.findIndex((w) => w.value === "in" && !w.quoted);
+  const list = at < 0 ? [] : words.slice(at + 1);
+  return list.length === 1 && !unreadWord(list[0]) ? list[0] : undefined;
+}
+function heads({ words }) {
+  const out = [];
+  for (const w of words) {
+    if (w.quoted || !(RESERVED.has(w.value) || OPENS.has(w.value) || CLOSES.has(w.value)))
+      break;
+    out.push(w.value);
+  }
+  return out;
+}
+var loopHeader = (cmd) => {
+  const last = heads(cmd).at(-1);
+  return last === "for" || last === "select";
+};
+function loopClose(commands, k) {
+  let depth = 1;
+  for (const cmd of commands.slice(k + 1))
+    for (const word of heads(cmd)) {
+      if (CLOSES.has(word) && --depth === 0)
+        return cmd;
+      if (OPENS.has(word))
+        depth++;
+    }
+}
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
+var PLAIN_PREFIXES = new Set(["HOME", "PLAYGROUND_REPO"]);
 async function examine(cmd, env, visit, builtins) {
   tick();
   orElse(cmd, env);
@@ -1589,12 +2705,43 @@ async function examine(cmd, env, visit, builtins) {
     env.cwdUnread = true;
   }
   const [primary, ...others] = readings(parse(cmd));
-  const expanded = expandTilde(cmd, primary.name, env);
+  const vanished = emptyProgram(cmd, env);
+  const array = arrayRun(cmd, primary.first, env);
+  const prior = splitHeld(cmd, primary.name, env, true);
+  const split = splitHeld(cmd, primary.name, env);
+  const brace = braceRun(cmd, primary.first);
+  const globs = [
+    brace === null ? null : undefined,
+    globRun(cmd, primary.first, env),
+    heldGlob(cmd, primary.first, env),
+    ...[...split, ...prior].map((v) => globRun(v, parse(v).first, env, true)),
+    ...brace ? [globRun(brace, parse(brace).first, env)] : [],
+    ...vanished.map((v) => globRun(v, parse(v).first, env))
+  ];
+  const resolving = [
+    ...split,
+    ...array ? [array] : [],
+    ...brace ? [brace] : [],
+    ...heldScripts(cmd, primary, env),
+    ...globs.flatMap((globbed) => globbed ?? [])
+  ];
+  if (globs.includes(null) || unreadCommand(cmd, primary, resolving))
+    for (const parsed of [primary, ...others])
+      parsed.unread = true;
+  const expanded = [
+    ...expandTilde(cmd, primary.name, env),
+    ...resolving,
+    ...prior,
+    ...vanished,
+    ...await xargsFilled(cmd, [primary, ...others], env)
+  ];
   const before = others.length > 0 || expanded.length > 0 ? apart(env) : env;
   const verdict = await examineReading(cmd, primary, env, visit, builtins);
   if (verdict)
     return verdict;
   for (const parsed of others) {
+    if (runsScript(parsed, readingEnv(cmd, parsed, before)))
+      continue;
     const verdict = await examineReading(cmd, parsed, apart(before), visit, builtins);
     if (verdict)
       return verdict;
@@ -1604,13 +2751,53 @@ async function examine(cmd, env, visit, builtins) {
     if (verdict)
       return verdict;
   }
-  if (!cmd.runsStdin || stdinScript(primary))
+  for (const variant of vanished) {
+    const parsed = parse(variant);
+    if (MOVES.has(parsed.name))
+      await chdirTo(parsed.name, { ...variant, unsure: true }, parsed, env);
+  }
+  const remote = primary.name === "ssh" && ["root", "shell"].includes(stdinShellOf(cmd, primary) ?? "");
+  if (!remote && (!cmd.runsStdin || stdinScript(primary)))
     return;
   for (const script of await scriptStdin(cmd, env)) {
-    const verdict = await nested(cmd, env, () => run(lexScript(known(script), env), subshell(env), visit, builtins));
+    const at = remote ? remoteEnv(env, known(script), true) : subshell(env);
+    const verdict = await nested(cmd, env, () => run(lexScript(known(script), at), at, visit, builtins));
     if (verdict)
       return verdict;
   }
+}
+function heldScripts(cmd, parsed, env) {
+  const scripts = scriptWords(parsed).filter((w) => w.raw && marked(w.value));
+  if (scripts.length === 0)
+    return [];
+  const known = heldKnown(env);
+  let resolved = false;
+  const words = cmd.words.map((w) => {
+    if (!scripts.includes(w) || !w.raw)
+      return w;
+    const value = relexedValue(w.raw, known);
+    if (value === undefined || value === w.value)
+      return w;
+    resolved = true;
+    return { quoted: true, value };
+  });
+  return resolved ? [{ ...cmd, words }] : [];
+}
+function scriptWords({ args, name }) {
+  if (name === "eval")
+    return args[0]?.value === "--" ? args.slice(1) : args;
+  if (!SHELLS.has(name))
+    return [];
+  const { inline, operand } = shellOperand(args, name);
+  return inline && operand ? [operand] : [];
+}
+function unreadCommand(cmd, parsed, resolving) {
+  const others = resolving.map(parse);
+  if (marked(parsed.name))
+    return /[$`]/.test(parsed.first?.source ?? "") && others.every((p) => marked(p.name));
+  if (!scriptWords(parsed).some((w) => marked(w.value)))
+    return false;
+  return others.every((p) => scriptWords(p).some((w) => marked(w.value)));
 }
 function stdinScript({ args, name }) {
   if (name === "." || name === "source")
@@ -1619,6 +2806,59 @@ function stdinScript({ args, name }) {
     return false;
   const { inline, operand } = shellOperand(args, name);
   return !operand || !inline && STDIN_PATHS.has(operand.value);
+}
+async function argFile({ chdir, file, moved }, cmd, env) {
+  if (file.procs)
+    return held2(await outputs(file.procs, env));
+  if (moved)
+    return unknown(`${file.value}, which a privilege wrapper before xargs may read from another folder or root`);
+  const cwd = chdir && pathOf(landsHeld(chdir, cmd, env) ?? chdir, env);
+  return held2(await readPath(file, chdir && !isAbsolute3(file.value) ? { ...env, cwd } : env));
+}
+var itemsOf = (fed, split) => {
+  if (fed.unknown || split === undefined)
+    return;
+  if (split === null)
+    return [fed.value, ...fed.value.split(`
+`), ...fed.value.split(/\s+/)];
+  return [fed.value, ...fed.value.split(split)];
+};
+async function xargsFilled(cmd, parsed, env) {
+  const filled = new Map;
+  for (const [word, replace] of parsed.flatMap((p) => p.xargs?.filled ?? []))
+    filled.set(word, [...new Set([...filled.get(word) ?? [], replace])]);
+  if (filled.size === 0)
+    return [];
+  const xargs = parsed.map((p) => p.xargs);
+  const files = xargs.flatMap((x) => x?.files ?? []).filter((f) => !STDIN_PATHS.has(f.file.value));
+  const splits = [null, ...new Set(xargs.flatMap((x) => x?.delimiters ?? []))];
+  const inputs = [
+    await stdinOf(cmd, env),
+    ...await Promise.all(files.map((f) => argFile(f, cmd, env)))
+  ];
+  const texts = new Set;
+  for (const raw of inputs.flatMap((fed) => splits.map((split) => itemsOf(fed, split)))) {
+    const items = [...new Set(raw?.map((text) => text.replace(/["'\\]/g, "").trim()))].filter(Boolean);
+    if (!raw || items.length > READINGS)
+      texts.add(undefined);
+    else
+      for (const text of items)
+        texts.add(text);
+    if (raw?.some((text) => /["'\\]/.test(text)))
+      texts.add(undefined);
+  }
+  const fill = (text) => ({
+    ...cmd,
+    words: cmd.words.flatMap((w) => {
+      const held = filled.get(w);
+      if (!held)
+        return [w];
+      if (text === undefined)
+        return [{ ...w, ...unknown(`the program xargs puts in place of ${held.join(" or ")}`) }];
+      return held.reduce((value, replace) => value.replaceAll(replace, text), w.value).split(/\s+/).filter(Boolean).map((value) => ({ quoted: false, value }));
+    })
+  });
+  return [...texts].map(fill);
 }
 var BLIND = "zsh's ~-, the folder the shell last left, which the hook cannot name on this line";
 function expandTilde(cmd, name, env) {
@@ -1648,6 +2888,142 @@ function expandTilde(cmd, name, env) {
     };
   });
 }
+var holdsCommand = (w) => !!w.source && /^(?:\$\{\w+\}|\$\w+)+$/.test(w.source.replace(/["']/g, "").replace(/\$\{[=~^]+/g, "${").replace(/\$[=~^](?=\w)/g, "$"));
+function splitHeld(cmd, name, env, prior = false) {
+  if (name === "cd" || name === "popd" || name === "pushd")
+    return [];
+  const first = cmd.words.some((w) => w.splits && w.raw && !holdsCommand(w)) ? parse(cmd).first : undefined;
+  const holds = (w) => !!w.splits && !!w.raw && (holdsCommand(w) || w === first);
+  if (!cmd.words.some(holds))
+    return [];
+  const known = heldKnown(env);
+  const seps = ifsSplit(env);
+  const splitWith = (known) => {
+    let split = false;
+    const words = cmd.words.flatMap((w) => {
+      if (!holds(w) || !w.raw)
+        return [w];
+      const value = relexedValue(w.raw, known);
+      if (value === undefined)
+        return [w];
+      const parts = splitValue(value, seps);
+      if (!parts.some((part) => !part.unknown))
+        return [w];
+      split = true;
+      return parts;
+    });
+    return split ? [{ ...cmd, words }] : [];
+  };
+  if (!prior)
+    return splitWith(known);
+  const before = loopBefore.get(env.vars);
+  return before && Object.keys(before).length > 0 ? splitWith({ ...known, ...before }) : [];
+}
+function relexedValue(raw, known) {
+  const words = lex(raw.replace(/\$\{[=~^]+/g, "${"), known).commands.at(-1)?.words;
+  return words?.length === 1 ? words[0].value : undefined;
+}
+var tildeHome = (value, quoted = false) => quoted || marked(value) ? value : value.replace(/^~(?=\/|$)/, homedir3());
+function heldKnown(env) {
+  const known = { ...env.known };
+  for (const [key, text] of env.vars) {
+    if (!text.unknown && !marked(text.value))
+      known[key] = tildeHome(text.value, "quoted" in text && text.quoted === true);
+    else if ("raw" in text && typeof text.raw === "string") {
+      const value = relexedValue(text.raw, known);
+      const eq = value?.indexOf("=") ?? -1;
+      if (value !== undefined && eq >= 0)
+        known[key] = tildeHome(value.slice(eq + 1));
+    }
+  }
+  return Object.assign(known, heldResolved.get(env.vars));
+}
+var loopBefore = new WeakMap;
+var heldResolved = new WeakMap;
+function recordHeld(env, key, value) {
+  delete loopBefore.get(env.vars)?.[key];
+  let record = heldResolved.get(env.vars);
+  if (!record)
+    heldResolved.set(env.vars, record = {});
+  if (!value.unknown && !marked(value.value))
+    record[key] = tildeHome(value.value, "quoted" in value && value.quoted === true);
+  else if ("raw" in value && typeof value.raw === "string") {
+    const built = relexedValue(value.raw, { ...env.known, ...record });
+    const eq = built?.indexOf("=") ?? -1;
+    if (built !== undefined && eq >= 0)
+      record[key] = tildeHome(built.slice(eq + 1));
+  }
+}
+function ifsSplit(env) {
+  const ifs = env.vars.get("IFS");
+  if (!ifs || ifs.unknown || marked(ifs.value) || !ifs.value)
+    return /\s+/;
+  return new RegExp(`[\\s${ifs.value.replace(/[\]\\^-]/g, "\\$&")}]+`);
+}
+function splitValue(value, seps) {
+  return value.split(seps).filter(Boolean).map((part) => marked(part) ? { quoted: false, unknown: "a shell variable", value: part } : { quoted: false, value: tildeHome(part) });
+}
+var VANISHING_PART = /\$[=~^]*(?:\w+|[@*])|\$\{[=~^]*!?(?:\w+|[@*])(?:\[[@*]\])?(?::?[-=]|:?\+[^{}]*|(?:#|%|\/|:(?![-=?+]))[^{}]*)?\}|"\$(?:@|\{@\}|\{\w+\[@\]\})"/y;
+var MOVES = new Set(["cd", "popd", "pushd"]);
+var vanishingParts = (source) => {
+  VANISHING_PART.lastIndex = 0;
+  while (VANISHING_PART.lastIndex < source.length)
+    if (!VANISHING_PART.exec(source))
+      return false;
+  return true;
+};
+var READ_VALUES = new Set(["d", "i", "n", "N", "p", "t", "u"]);
+var NAME = /^[A-Za-z_]\w*$/;
+var SUBSCRIPTED = /^([A-Za-z_]\w*)(?:\[[^\]]*\]\+?|\+)=/;
+var WHOLE_RUN = /^(?:"\$\{([A-Za-z_]\w*)\[@\]\}"|\$\{([A-Za-z_]\w*)\[[@*]\]\})$/;
+function binds({ words }) {
+  let at = 0;
+  while (at < words.length && (!words[at].quoted && RESERVED.has(words[at].value) || ASSIGN.test(words[at].value)))
+    at++;
+  const [head, ...rest] = words.slice(at).map((w) => w.value);
+  if (head === "for" || head === "select")
+    return rest[0] && NAME.test(rest[0]) ? [rest[0]] : [];
+  if (head === "getopts")
+    return rest[1] && NAME.test(rest[1]) ? [rest[1]] : [];
+  if (head === "printf") {
+    const v = rest.findIndex((w) => w === "-v" || /^-v\w/.test(w));
+    const name = v < 0 ? undefined : rest[v] === "-v" ? rest[v + 1] : rest[v].slice(2);
+    return name && NAME.test(name) ? [name] : [];
+  }
+  if (head !== "read")
+    return [];
+  const names = [];
+  for (let i = 0;i < rest.length; i++) {
+    const w = rest[i];
+    if (w === "--" || !w.startsWith("-") || w.length < 2) {
+      names.push(...rest.slice(w === "--" ? i + 1 : i));
+      break;
+    }
+    const letters = w.slice(1);
+    const taker = [...letters].findIndex((c) => c === "a" || READ_VALUES.has(c));
+    if (taker < 0)
+      continue;
+    const value = letters.slice(taker + 1) || rest[++i];
+    if (letters[taker] === "a" && value)
+      names.push(value);
+  }
+  return names.filter((w) => NAME.test(w));
+}
+var mayVanish = (w, env) => maySkip(w) && [...(w.source ?? "").matchAll(/\$\{?[=~^]*!?(\w+)/g)].every(([, name]) => {
+  const set = env.vars.get(name);
+  return !set || !!set.vanishes || !set.unknown && /^[ \t\n]*$/.test(set.value);
+});
+function emptyProgram(cmd, env) {
+  if (!cmd.words.some((w) => mayVanish(w, env)))
+    return [];
+  let words = cmd.words;
+  for (let { first } = parse(cmd);first && words.includes(first) && mayVanish(first, env); ) {
+    const dropped = first;
+    words = words.filter((w) => w !== dropped);
+    ({ first } = parse({ ...cmd, words }));
+  }
+  return words === cmd.words ? [] : [{ ...cmd, words }];
+}
 async function examineExpanded(cmd, expanded, before, visit, builtins) {
   const { redirects, words } = cmd;
   cmd.redirects = expanded.redirects;
@@ -1674,17 +3050,22 @@ var apart = (env) => ({
   process: { ...env.process },
   vars: new Map(env.vars)
 });
-async function examineReading(cmd, parsed, env, visit, builtins) {
-  const { args, chdir, local, name } = parsed;
-  const into = chdir && pathOf(chdir, env);
-  const here = chdir ? {
+function readingEnv(cmd, { chdir, via }, env) {
+  const into = chdir && pathOf(landsHeld(chdir, cmd, env) ?? chdir, env);
+  if (!chdir || via && into === undefined)
+    return env;
+  return {
     ...env,
     cwd: into,
     cwdHeld: [],
     cwdMaybe: [],
     cwdSure: into,
     cwdUnread: into === undefined
-  } : env;
+  };
+}
+async function examineReading(cmd, parsed, env, visit, builtins) {
+  const { args, local, name } = parsed;
+  const here = readingEnv(cmd, parsed, env);
   let verdict;
   const followed = SHELLS.has(name) || [".", "cd", "eval", "popd", "pushd", "source"].includes(name);
   if (followed && builtins && cmd.redirects.length > 0) {
@@ -1694,8 +3075,10 @@ async function examineReading(cmd, parsed, env, visit, builtins) {
       return verdict;
   }
   if (name === "") {
-    for (const [key, value] of local)
+    for (const [key, value] of local) {
       setVar(env.vars, key, value);
+      recordHeld(env, key, value);
+    }
     if (builtins || cmd.feedsShell || rootFed(cmd))
       verdict = await visit(cmd, parsed, here);
   } else if (name === "cd" || name === "popd" || name === "pushd") {
@@ -1705,7 +3088,9 @@ async function examineReading(cmd, parsed, env, visit, builtins) {
   } else if (EXPORTS.has(name)) {
     for (const w of args.filter((a) => ASSIGN.test(a.value))) {
       const eq = w.value.indexOf("=");
-      setVar(env.vars, w.value.slice(0, eq), slice(w, eq + 1));
+      const value = slice(w, eq + 1);
+      setVar(env.vars, w.value.slice(0, eq), value);
+      recordHeld(env, w.value.slice(0, eq), value);
     }
     if (builtins)
       verdict = await visit(cmd, parsed, here);
@@ -1720,12 +3105,13 @@ async function examineReading(cmd, parsed, env, visit, builtins) {
         break;
     }
   } else if (name === "eval") {
-    verdict = (args.some(unreadWord) ? await visit(cmd, parsed, here) : undefined) ?? await nested(cmd, env, () => run(again(lexScript(args.map((a) => a.value).join(" "), env), cmd, parsed), here, visit, builtins));
+    verdict = (args.some(unreadWord) ? await visit(cmd, parsed, here) : undefined) ?? await nested(cmd, env, () => run(again(lexScript(evalText(args), env), cmd, parsed), here, visit, builtins));
   } else
     verdict = await visit(cmd, parsed, here);
   await record(cmd, name, args, here);
   return verdict;
 }
+var evalText = (args) => (args[0]?.value === "--" ? args.slice(1) : args).map((a) => a.value).join(" ");
 function again(lexed, cmd, parsed) {
   if (!manyTimes(cmd, parsed))
     return lexed;
@@ -1763,7 +3149,7 @@ var throughBuiltin = (cmd, { first }) => {
   const before = cmd.words.slice(0, cmd.words.indexOf(first));
   return before.some((w) => !w.quoted && BUILTIN.has(w.value)) && before.every((w) => !w.quoted && (BUILTIN.has(w.value) || w.value.startsWith("-") || MARKERS.has(w.value) || ASSIGN.test(w.value)));
 };
-var manyTimes = (cmd, { first }) => !!cmd.repeated || cmd.words.slice(0, first ? cmd.words.indexOf(first) : 0).some((w) => !w.quoted && COUNTED.has(program(w.value)));
+var manyTimes = (cmd, { first }) => !!cmd.repeated || cmd.words.slice(0, first ? cmd.words.indexOf(first) : 0).some((w) => !w.quoted && REPEATS.has(program(w.value)));
 var startFolders = (env) => [
   ...env.cwdSure === undefined ? [] : [env.cwdSure],
   ...env.cwdMaybe ?? []
@@ -1778,10 +3164,11 @@ function ancestors(path) {
   }
 }
 var tildeSign = (name, dir, env) => (name === "cd" || name === "pushd") && env.old && dir?.tilde && !dir.unknown && !dir.reads?.length ? dir.value[1] : undefined;
-async function cdTarget(name, args, env) {
-  const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
-  if (!dir)
+async function cdTarget(name, cmd, args, env) {
+  const typedDir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
+  if (!typedDir)
     return homedir3();
+  const dir = landsHeld(typedDir, cmd, env) ?? typedDir;
   const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
   const typed = await folder(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
@@ -1793,6 +3180,10 @@ async function folder(path) {
     return;
   return isFolder(path) ? path : undefined;
 }
+var landsHeld = (word, cmd, env) => {
+  const held = env.hold?.(word, cmd, env);
+  return held && isAbsolute3(held.value) && !held.glob && !/[:\s]/.test(held.value) ? held : undefined;
+};
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
   const [dir] = dirs;
@@ -1807,7 +3198,9 @@ function cdTargets(name, cmd, parsed, env, from) {
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
-    if (word !== typed)
+    if (word !== typed && !landsHeld(typed, cmd, env))
+      unread = true;
+    if (env.cwdUnread && pathOf(word, { ...env, cwd: undefined }) === undefined)
       unread = true;
     for (const base of from.length > 0 ? from : [undefined]) {
       tick();
@@ -1853,7 +3246,7 @@ function tildeMove(move, name, parsed, env, from, back) {
 }
 async function chdirTo(name, cmd, parsed, env) {
   const left = env.cwd;
-  env.cwd = name === "popd" || cmd.detached ? undefined : await cdTarget(name, parsed.args, env);
+  env.cwd = name === "popd" || cmd.detached ? undefined : await cdTarget(name, cmd, parsed.args, env);
   if (env.old)
     env.old = name === "popd" ? {} : { dir: env.cwd === undefined ? undefined : left };
   if (env.old)
@@ -1862,7 +3255,8 @@ async function chdirTo(name, cmd, parsed, env) {
   const back = [...new Set([...env.cwdBack ?? [], ...from])];
   const bases = [...new Set([...from, ...env.cwdHeld ?? []])];
   const move = name === "popd" ? { back: true, paths: [], unread: true } : tildeMove(cdTargets(name, cmd, parsed, env, bases), name, parsed, env, from, back);
-  const { paths, unread } = move;
+  const { paths } = move;
+  const unread = move.unread || !!cmd.cdRedefined;
   const named = [left, env.cwd].filter((dir) => dir !== undefined);
   env.cwdBack = keep([...new Set([...back, ...paths, ...named])], env);
   if (cmd.held) {
@@ -1874,6 +3268,8 @@ async function chdirTo(name, cmd, parsed, env) {
   if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
+    if (chained)
+      env.cwdChainUnread ||= env.cwdUnread;
     env.cwdUnread = false;
     env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
@@ -1924,9 +3320,18 @@ function orElse(cmd, env) {
   env.cwdOr = undefined;
 }
 function unchain(cmd, env) {
-  if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
+  if (!env.cwdChain?.length && !env.cwdChainUnread || cmd.chain === env.cwdChainToken)
     return;
-  env.cwdMaybe = keep([...new Set([...env.cwdMaybe ?? [], ...env.cwdSure ? [env.cwdSure] : [], ...env.cwdChain])], env);
+  if (env.cwdChainUnread)
+    env.cwdUnread = true;
+  env.cwdChainUnread = undefined;
+  env.cwdMaybe = keep([
+    ...new Set([
+      ...env.cwdMaybe ?? [],
+      ...env.cwdSure ? [env.cwdSure] : [],
+      ...env.cwdChain ?? []
+    ])
+  ], env);
   env.cwdSure = undefined;
   if (env.old)
     env.oldFrom = [];
@@ -1951,6 +3356,19 @@ function isFolder(path) {
 }
 var SHELL_TAKES = new Set(["-o", "+o", "--init-file", "--rcfile"]);
 var BASH_TAKES = new Set([...SHELL_TAKES, "-O", "+O"]);
+function noExec(args, shell) {
+  const takes = shell === "bash" || shell === "sh" ? BASH_TAKES : SHELL_TAKES;
+  let set = false;
+  for (const { value } of args) {
+    if (/^[-+][A-Za-z]*[oO]/.test(value) || value.startsWith("--") && value !== "--")
+      return false;
+    if (takes.has(value) || !/^[-+][A-Za-z]+$/.test(value))
+      break;
+    if (value.includes("n"))
+      set = value.startsWith("-");
+  }
+  return set;
+}
 function shellOperand(args, shell) {
   const takes = shell === "bash" || shell === "sh" ? BASH_TAKES : SHELL_TAKES;
   let inline = false;
@@ -1958,7 +3376,7 @@ function shellOperand(args, shell) {
     const v = args[k].value;
     if (takes.has(v))
       k++;
-    else if (/^[-+][A-Za-z]+$/.test(v))
+    else if (/^[-+][A-Za-z0-9]+$/.test(v))
       inline ||= v.startsWith("-") && v.includes("c");
     else if (!v.startsWith("--"))
       return { inline, operand: args[k] };
@@ -1969,6 +3387,8 @@ async function shell(name, args, cmd, env, visit, builtins, xargs) {
   const slot = shellSlot(args, name);
   if (slot)
     return examine({ ...cmd, words: slot }, env, visit, builtins);
+  if (noExec(args, name))
+    return;
   const { inline, operand } = shellOperand(args, name);
   if (operand && inline) {
     let script = operand.value;
@@ -2022,7 +3442,9 @@ async function existing(path, env) {
 }
 async function outputOf(cmd, env) {
   tick();
-  const { args, name } = parse(cmd);
+  const { args, name, xargs } = parse(cmd);
+  if (xargs)
+    return unknown(`the output of ${name || "echo"} under xargs`);
   if (name === "") {
     if (cmd.inner)
       return outputs(cmd.inner(), env);
@@ -2054,7 +3476,7 @@ async function outputOf(cmd, env) {
   if (hidden)
     return hidden;
   if (name === "printf")
-    return { value: printf(values.map((v) => v.value)) };
+    return { value: printf(values.slice(values[0]?.value === "--" ? 1 : 0).map((v) => v.value)) };
   let k = 0;
   while (k < values.length && /^-[neE]+$/.test(values[k].value))
     k++;
@@ -2316,6 +3738,37 @@ function knownVariables(command, environment, cwd) {
       known[name] = value;
   }
   return known;
+}
+var BRACE_WORDS = 64;
+function braceWords(word) {
+  const done = [];
+  const todo = [word];
+  while (todo.length > 0) {
+    if (done.length + todo.length > BRACE_WORDS)
+      return;
+    const next = todo.pop();
+    let split;
+    for (let open = next.indexOf("{");open >= 0 && !split; open = next.indexOf("{", open + 1)) {
+      const cuts = [open];
+      let depth = 0;
+      for (let k = open;k < next.length; k++) {
+        if (next[k] === "{")
+          depth++;
+        else if (next[k] === "," && depth === 1)
+          cuts.push(k);
+        else if (next[k] === "}" && --depth === 0) {
+          if (cuts.length > 1)
+            split = [...cuts, k].slice(1).map((end, n) => next.slice(0, open) + next.slice(cuts[n] + 1, end) + next.slice(k + 1));
+          break;
+        }
+      }
+    }
+    if (split)
+      todo.push(...split.reverse());
+    else
+      done.push(next);
+  }
+  return done;
 }
 
 // scripts/hooks/no-linear-ticket.ts
@@ -2611,7 +4064,7 @@ async function inspect(raw, environment, now) {
   return mcp(tool, input, environment, now);
 }
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text());
+  const reason = await check(await input("no-linear-ticket", "guard"));
   if (reason) {
     console.error(reason);
     process.exit(2);

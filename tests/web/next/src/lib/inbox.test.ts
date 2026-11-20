@@ -1975,9 +1975,25 @@ describe("a card's verbs on each state (#882)", () => {
     expect(verbs(cleared, "archived")).toEqual(["moveBack", "dismiss"])
   })
 
-  test("a card on Done keeps Dismiss until dismissed, and one dismissed while it waited takes Move back", () => {
+  test("an answered card archived from Done takes Move back and Dismiss, with no Later, which it would refuse (PG-1909)", () => {
+    const archived = answered({ answer: { archivedAt: READ, at: "x", choice: "deny" } } as never)
+    expect(verbs(archived, "archived")).toEqual(["moveBack", "dismiss"])
+  })
+
+  test("a card on Done takes Archive and Dismiss until dismissed, one whose send failed Dismiss alone, and one dismissed while it waited Move back (PG-1909)", () => {
     const done = answered({ answer: { at: "x", choice: "approve", dismissedAt: READ } } as never)
-    expect(verbs(done, "done")).toEqual(["dismiss"])
+    expect(verbs(done, "done")).toEqual(["archive", "dismiss"])
+    const doneUpdate = item({
+      answer: { dismissedAt: READ },
+      kind: "update",
+      readAt: READ,
+    } as never)
+    expect(verbs(doneUpdate, "done")).toEqual(["archive", "dismiss"])
+    const failed = answered({
+      answer: { at: "x", choice: "approve", dismissedAt: READ },
+      delivery: { code: "LOST", reason: "lost", status: "failed" },
+    } as never)
+    expect(verbs(failed, "done")).toEqual(["dismiss"])
     const dismissed = answered({
       answer: { at: "x", choice: "approve", dismissed: true, dismissedAt: READ },
     } as never)

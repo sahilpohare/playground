@@ -11,6 +11,7 @@ import {
 import { basename, dirname, join, sep } from "node:path"
 
 import { makeScratch, removeScratch } from "@packages/safe-delete"
+import { orphanReapers } from "@packages/scripts/orphan-reapers"
 
 // The launcher records its pid, process group, start time and the stack's task groups in its checkout, so `bun run dev:stop` can end a stack whose starting session has gone, by that record alone, never by a name or a pattern.
 export const RECORD = ".turbo/dev.pgid"
@@ -283,11 +284,12 @@ export const groupsOf = (procs: Proc[], stack: Set<number>, launcherPgid: number
 const strangerNote = (held: RecordedOutcome): string =>
   `process group ${held.pgid} also holds pid ${(held.others ?? []).join(", ")}, which is not this stack's, so it is left alone`
 
-// The members of those groups that are not the stack's. Besides the stack itself, the launcher's group may hold what started it (the shell and `bun run`), and any of them an orphan (adopted by pid 1) whose real working directory is in this checkout, as a task whose parent died is. Anything else shares a group by chance, and stopping it is not this command's to do.
+// The members of those groups that are not the stack's. Besides the stack itself, the launcher's group may hold what started it (the shell and `bun run`), and any of them an orphan (adopted by one of reapers: pid 1, or the user's systemd --user on Linux) whose real working directory is in this checkout, as a task whose parent died is. Anything else shares a group by chance, and stopping it is not this command's to do.
 export const strangers = (
   procs: Proc[],
   { pgid, pid }: Pick<DevRecord, "pgid" | "pid">,
   ownOrphan: (pid: number) => boolean,
+  reapers: Set<number>,
 ): number[] => {
   const stack = stackOf(procs, pid)
   const groups = new Set(groupsOf(procs, stack, pgid))
@@ -302,7 +304,7 @@ export const strangers = (
       (proc) =>
         !stack.has(proc.pid) &&
         !(proc.pgid === pgid && starters.has(proc.pid)) &&
-        !(proc.ppid === 1 && ownOrphan(proc.pid)),
+        !(reapers.has(proc.ppid) && ownOrphan(proc.pid)),
     )
     .map((proc) => proc.pid)
 }
@@ -613,7 +615,7 @@ export async function stopStack(
   }
   if (refusal) return { ok: false, reason: `${refusal.reason}, so nothing is signalled` }
   const procs = processes()
-  const others = strangers(procs, record, (pid) => within(cwdOf(pid), root))
+  const others = strangers(procs, record, (pid) => within(cwdOf(pid), root), orphanReapers())
   if (others.length > 0) {
     return {
       ok: false,

@@ -1,5 +1,6 @@
 // SessionStart hook, matcher "compact": after a compaction it puts what to reread in front of a factory session (playbook's **context** rule), since Claude Code re-attaches a skill after a compaction cut short or not at all; the rules hook puts the standing rules beside it.
 
+import { input } from "./input"
 import { fromFactory, MANAGER_ROLES, sessionOf, sessionRole } from "./role"
 
 export const REREAD =
@@ -29,6 +30,6 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const out = await check(await Bun.stdin.text())
+  const out = await check(await input("after-compact", "recorder"))
   if (out) console.log(out)
 }

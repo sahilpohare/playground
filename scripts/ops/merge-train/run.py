@@ -11,7 +11,7 @@ import fcntl, json, os, subprocess, sys, threading, time
 HERE = os.path.join((os.path.abspath(os.environ.get("PLAYGROUND_DATA_DIR") or os.path.expanduser("~/.playground")) if os.path.isabs(os.environ.get("PLAYGROUND_DATA_DIR") or "/") else sys.exit(f"PLAYGROUND_DATA_DIR is relative ({os.environ['PLAYGROUND_DATA_DIR']}), so each process would read it from its own folder: set it to an absolute path")), "ops", "merge-train")  # the state folder by name, so a run by its repo path still reads the live state
 OPS = os.path.dirname(HERE)
 sys.path.insert(0, OPS)
-from beat import beat, checkout  # noqa: E402
+from beat import beat, checkout, gh_down  # noqa: E402
 
 ROOT = checkout()
 WT = os.path.join(ROOT, ".claude", "worktrees", "train")
@@ -166,6 +166,9 @@ def graphql_reset():
 
 def cycle():
     sync()
+    down = gh_down()
+    if down:
+        return "ok", f"skipped: gh unreachable: {down}, next cycle"
     # GitHub's GraphQL budget (5000/h, shared by the whole factory) went on scanning every open PR every minute (8 Oct): scan only when an
     # open PR's head or update time, or canary, changed since the last scan; one cheap list call per cycle decides
     fp = fingerprint()

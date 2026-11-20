@@ -103,7 +103,7 @@ describe("the hosted mount allowlist", () => {
 })
 
 // The packages only the local dashboard runs on, and the API folders that read this machine or serve its local pages: none may reach the hosted build.
-const LOCAL_PACKAGES = ["@anthropic-ai/claude-agent-sdk", "@packages/settings"]
+const LOCAL_PACKAGES = ["@anthropic-ai/claude-agent-sdk", "@packages/scripts", "@packages/settings"]
 const LOCAL_DIRS = [
   "bin",
   "fixtures",

@@ -15,7 +15,17 @@ test("its retro runs on ops-tick's two beats, reads the table script, and keeps 
   expect(text).toContain("`optimizer tick`")
   expect(text).toContain("`optimizer daily`")
   expect(text).toContain("packages/scripts/src/retro/table.ts")
-  expect(text).toContain("--log-failed")
+  expect(text).toContain("mkdir -p ~/.playground/scratchpad/optimizer/ci")
+  expect(text).toContain("actions/runs/<run id>/jobs")
+  expect(text).toContain("actions/jobs/<job id>/logs")
+  expect(text).toContain("~/.playground/scratchpad/optimizer/ci/<run id>-job-<job id>.log")
+  expect(text).toContain("as a background task")
+})
+
+// gh run view --log-failed hung and wrote nothing on a 26-job run, and ops/ is protected, so playground rm refused to clear the saved logs (PG-2523)
+test("it saves a failed job's whole log to its scratchpad, never through gh run view --log-failed or into ops/", () => {
+  expect(text).not.toContain("gh run view <run id> --log-failed")
+  expect(text).not.toContain("ops/optimizer/ci")
 })
 
 test("a first retro with no state file has a since and a ship to start from, and the next starts where this one's table read", () => {

@@ -27,7 +27,7 @@ On the hosted Yard it shows Remote alone, under the line "Read-only on Yard: sen
 
 ### Things to fix
 
-While something Playground needs is missing on this Mac, or an optional row has a button that fixes it (such as **Set up the web address** or **Trust the certificate** for portless), Settings lists it under **N things to fix** with the same rows as **Let's check this Mac**, each with the button that fixes it, and **Re-check**; the section goes once every one is fixed.
+While something Playground needs is missing on this Mac, or an optional row has a button that fixes it (such as **Set up the web address** or **Trust the certificate** for portless, or on Linux **Trust it in Firefox** for the Certificate row), Settings lists it under **N things to fix** with the same rows as **Let's check this Mac**, each with the button that fixes it, and **Re-check**; the section goes once every one is fixed.
 
 ### Accounts
 
@@ -39,27 +39,28 @@ Accounts are kept in your settings (`usage.accounts`), so a machine needs a GitH
 
 Add as many Claude and GLM accounts as you like.
 On this page, **Add account** takes the provider.
-A Claude account takes its email (and an optional label), then three steps: open sign-in, which opens in a new window on a fresh profile of Chrome, Brave, Edge or Firefox (the button names the browser), deleted when the sign-in ends, so the sign-in uses the new account, not the one already signed in; sign in there with the account you are adding and approve access; then paste the code the page shows.
+A Claude account takes its email (and an optional label), then three steps: open sign-in, which opens in a new window on a fresh profile of Chrome, Brave, Edge or Firefox on a Mac, or of Helium, Chrome, Chromium or Firefox on Linux (the button names the browser), deleted when the sign-in ends, so the sign-in uses the new account, not the one already signed in; sign in there with the account you are adding and approve access; then paste the code the page shows.
 While Claude checks the code the dialog reads **Checking the code with Claude…**, for up to about 70 seconds; a code Claude refuses, no answer in that time, a sign-in that ended (most likely because Playground restarted) and a lost connection each say what happened over **Start again**, which opens a new sign-in.
-When this Mac has none of those (Safari alone takes no fresh profile), the dialog shows the link with **Copy link**: open it in a private or guest window yourself.
-The account is listed once the sign-in names the email you gave; a sign-in for another account is refused and its token dropped, and one whose account cannot be read back is listed with **account not confirmed**.
+When the computer has none of those (Safari alone takes no fresh profile), or a Linux desktop's display cannot be found, the dialog shows the link with **Copy link**: open it in a private or guest window yourself.
+An account already on the list whose token this computer does not hold, such as one carried over from another computer, can be added again the same way: it keeps its row and gains the token, while one whose token is here is refused as already listed.
+The account is listed once the sign-in names the email you gave; a sign-in for another account is refused and its token dropped, a token Claude refuses is shown as refused and never kept, and one whose account cannot be read back is listed with **account not confirmed**.
 A GLM key takes its label and your Z.ai API key.
-The token goes to this Mac's Keychain and is never shown again, and **Remove**, the bin on each row, takes the account off the list and its token out of the Keychain.
+The token goes to this computer's secret store, the Keychain on a Mac and on Linux a file only you can read in Playground's data folder, and is never shown again, and **Remove**, the bin on each row, takes the account off the list and its token out of the store.
 
-From a terminal, `playground accounts add --provider claude --email <email>` signs one in through Claude Code and keeps its token in the Keychain, and `playground accounts add --provider glm --label <label>` keeps a Z.ai key there under that label.
+From a terminal, `playground accounts add --provider claude --email <email>` signs one in through Claude Code and keeps its token in the secret store, and `playground accounts add --provider glm --label <label>` keeps a Z.ai key there under that label.
 `playground accounts list` shows each with its usage and `playground accounts remove <email|label>` takes one off; no token or key is ever shown ([The playground command](/docs/cli#accounts-playground-accounts)).
 
 ### Harness
 
 Harness shows a card for each harness Alpha can run on, Claude Code and Codex, the same cards as first run's ([Pick what Alpha runs on](/docs/install#pick-what-alpha-runs-on)), its radio on the one Alpha runs on now.
-Pick the other card, and once it reads Installed and Signed in, **Switch Alpha** asks you to confirm, then sends Alpha a message in your chat asking it to write its handoff and stop; once the handoff is written, Alpha starts again on the new harness from it and the pick saves as `harness.alpha`, so a switch that stops partway leaves the setting on the harness Alpha still runs.
+Pick the other card, and once it reads Installed and Signed in (and Trusted, for Claude Code), **Switch Alpha** asks you to confirm, then sends Alpha a message in your chat asking it to write its handoff and stop; once the handoff is written, Alpha starts again on the new harness from it and the pick saves as `harness.alpha`, so a switch that stops partway leaves the setting on the harness Alpha still runs.
 The section shows each step while it runs, or why it stopped.
 When Alpha is not running, it starts on the new harness at once.
 
 ### Templates
 
-Templates lists the sessions the plus on Alpha's row in the sidebar can start ([the Dashboard](/docs/dashboard)), each with its kind, its model or GLM, its effort, its account and its brief, and whether it is a **Default**, an **Edited default**, one you **Added** or a **New default**.
-**Edit** opens a form of its kind and backend, then on Claude its model, effort and account (**Default**, or a Claude account from Accounts), and its brief, a file name in the data folder or `scripts/briefs`; one you added also takes a new label, while a default keeps its name.
+Templates lists the sessions the plus on Alpha's row in the sidebar can start ([the Dashboard](/docs/dashboard)), each with its kind, its model, GLM or Local, its effort, its account and its brief, and whether it is a **Default**, an **Edited default**, one you **Added** or a **New default**.
+**Edit** opens a form of its kind and backend (Claude, GLM or Local, your machine's local model), then on Claude its model, effort and account (**Default**, or a Claude account from Accounts), on Local its effort, and its brief, a file name in the data folder or `scripts/briefs`; one you added also takes a new label, while a default keeps its name.
 A default's own values stay in Playground, and **Reset** puts them back.
 A save keeps the whole list as it is then: a default Playground changes later reads **Edited default**, with Reset taking the new values, and a default Playground adds later shows as **New default**, and **Add** puts it in your list with your edits kept.
 The plus's list starts a new default once it is added.
@@ -88,6 +89,7 @@ WhatsApp's card also holds its two numbers, **Device number** (`wa.device`, the 
 
 Privacy holds two settings: **Names you go by**, your first name and handles, lowercase and separated by commas (`owner.names`, which the trace count and the inbox gate read), and **Private archive repository**, as owner/name, whose links count as private history (`factory.archiveRepo`, which the trace count and the leak guard read).
 **Save** writes each field that holds a value, and each one you cleared, at your login's scope, so it also rebuilds a settings file a guard could not read; a value the setting refuses shows under its field.
+A name that is one word, such as a first name alone, also matches a made-up name or a common word, so after a Save each one shows under **Names you go by** with the tracked files the trace count finds it in; the save still goes through.
 Until both are set, the trace count counts nothing, and a session that runs it asks you, through its lead, to fill them in here.
 Before your settings are set up the section shows the same **Set up settings** step as Accounts.
 

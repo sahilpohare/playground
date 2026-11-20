@@ -8,7 +8,7 @@ setDefaultTimeout(40_000)
 const ID = "a7e37f18-1fa1-4cb2-a26e-4ff414fd4b27"
 
 describe("the capacity gate refuses and spawns nothing", () => {
-  // No cap on the count of sessions: no count of live sessions or workers holds a spawn; the load, memory, slots and usage gates guard the Mac.
+  // With gates.sessionCap unset, no count of live sessions or workers holds a spawn; the load, memory, slots and usage gates guard the Mac.
   test.each([30, 50])("%d live sessions, workers among them, hold nothing", async (n) => {
     const r = await spawn(
       ["column", "tester", "tester-x", "worker-x", "w1:p2", "b.md", "--pr", "1"],
@@ -199,7 +199,7 @@ describe("the memory gate holds a fresh worker start while the machine pages", (
     const r = await spawn(["worker", "worker-brave-otter", "b.md"], [], { FAKE_VMSTAT_BROKEN: "1" })
     expect(r.code).not.toBe(0)
     expect(r.err).toContain(
-      "the memory gate holds it: it cannot read the swap-ins (vm_stat -c 2 1)",
+      "the memory gate holds it: it cannot read the swap-ins (vm_stat -c 4 1)",
     )
   })
 

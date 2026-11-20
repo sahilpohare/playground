@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { check } from "../../../scripts/hooks/no-unslotted-run"
+import { type Env, lex, run, UNKNOWN } from "../../../scripts/hooks/shell"
 
 const root = join(import.meta.dir, "..", "..", "..")
 const script = join(root, "scripts", "hooks", "no-unslotted-run.ts")
@@ -475,6 +476,25 @@ describe("a git commit whose message commitlint refuses is refused before its pr
   })
 })
 
+describe("a runner's option the reader does not list keeps its verdict when no reading reaches a heavy run (PG-2103)", () => {
+  test.each([
+    ["npx's help with -y", "npx -y inscope@0.18.0 --help"],
+    ["bun's evaluated script", "bun -e 'console.log(1)'"],
+    ["bun's script with no env file", "bun --no-env-file packages/scripts/src/x.ts"],
+    ["a nested runner's version", "npx npx --version"],
+    ["a nested runner's help", "npx bunx --help"],
+  ])("in a worktree, %s, runs", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    ["a quiet build", "bun run --silent build"],
+    ["a build past bun's env file option", "bun --env-file /tmp/e run build"],
+  ])("in a worktree, %s, is refused", async (_, command) => {
+    expect(await bash(command)).toBeDefined()
+  })
+})
+
 describe("a git commit whose message commitlint passes, or one the hook cannot read, runs", () => {
   test.each([
     ...forms(GOOD, "good.txt"),
@@ -531,5 +551,75 @@ describe("a git commit whose header is 100 characters or fewer, or one the hook 
     ["a multi-line -m whose first line is under the limit", `git commit -m "${GOOD}\n\nbody line"`],
   ])("%s", async (_, command) => {
     expect(await commit(command)).toBeUndefined()
+  })
+})
+
+// #2158: an xargs replace string that sits in the program's arguments alone leaves the program typed, so each keeps canary's verdict
+describe("an xargs replace string outside the program word keeps the call's verdict", () => {
+  test.each([
+    ["grep under a plain xargs", "ls /tmp | xargs grep -l x"],
+    ["echo under xargs -I{}", "echo a | xargs -I{} echo {}"],
+    ["cat under xargs -I %", "echo a | xargs -I % cat %"],
+    ["cp to /tmp under xargs -J %", "echo a | xargs -J % cp % /tmp/"],
+    ["a sh -c script holding xargs' -I{} string", "echo a | xargs -I{} sh -c 'echo {}'"],
+    ["cat under nice under xargs -J %", "echo a | xargs -J % nice cat %"],
+    [
+      "echo under env -S with xargs' -I % string in its arguments",
+      "echo a | xargs -I % env -S 'echo %'",
+    ],
+    [
+      "cat under env -S with xargs' -J % string as its argument",
+      "echo a | xargs -J % env -S cat %",
+    ],
+    ["echo under xargs -I % from input holding a quote", 'echo "it\'s" | xargs -I % echo %'],
+    ["echo under xargs -n1", "echo a b | xargs -n1 echo"],
+    ["echo under an xargs -I zz inside xargs -I %", "echo a | xargs -I % xargs -I zz echo %"],
+  ])("%s runs in a worktree", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test("a build under xargs -I {} with the string in its arguments stays refused", async () => {
+    expect(await bash("echo a | xargs -I {} turbo run build {}")).toContain(
+      "no-unslotted-run hook refuses",
+    )
+  })
+})
+
+// #2198: GNU xargs' input options, and a replace option at the end of a cluster of flags, beside a typed program leave it typed, so each keeps canary's verdict
+describe("an xargs input option beside a typed program keeps the call's verdict", () => {
+  test.each([
+    ["echo under xargs -d,", "printf 'a,b' | xargs -d, echo"],
+    ["echo under xargs --delimiter given apart", "printf 'a,b' | xargs --delimiter , echo"],
+    ["echo under xargs -d, fed a program's name", "printf 'a,turbo' | xargs -d, echo"],
+    ["grep under xargs -0 fed by find -print0", "find . -print0 | xargs -0 grep -l x"],
+    ["echo under xargs -a of a process substitution", "xargs -a <(echo a) echo"],
+    ["echo under a shortened --arg=", "xargs --arg=/tmp/list echo"],
+    ["echo under xargs -d, -I %", "printf 'a,b' | xargs -d, -I % echo %"],
+    ["cat under xargs -0I %", "printf a | xargs -0I % cat %"],
+    ["cat under nice under xargs -rJ %", "echo a | xargs -rJ % nice cat %"],
+    ["echo under a shortened --repl=%", "echo a | xargs --repl=% echo %"],
+  ])("%s runs in a worktree", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test("a build under xargs -d, -I {} with the string in its arguments stays refused", async () => {
+    expect(await bash("printf a,b | xargs -d, -I {} turbo run build {}")).toContain(
+      "no-unslotted-run hook refuses",
+    )
+  })
+
+  // shell.test.ts imports the refused-forms fixture, so it names no way to run a command, and mkfifo runs here
+  test("an -a named fifo reads as unread, and the hook returns without opening it", async () => {
+    const fifo = join(OUTSIDE, "fifo")
+    Bun.spawnSync(["mkfifo", fifo])
+    const line = `echo a | xargs -a ${fifo} -I X nice X run build`
+    const env: Env = { cwd: WORKTREE, files: new Map(), known: {}, process: {}, vars: new Map() }
+    const seen: string[] = []
+    await run(lex(line), env, async (_cmd, parsed) => {
+      seen.push([parsed.name, ...parsed.args.map((a) => a.value)].join(" "))
+      return undefined
+    })
+    expect(seen).toContain(`${UNKNOWN} run build`)
+    expect(await bash(line)).toBeUndefined()
   })
 })

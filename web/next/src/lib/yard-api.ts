@@ -22,6 +22,7 @@ import {
   type YardMessage,
 } from "@/lib/yard"
 
+export const BOTS_KEY = [...YARD_KEY, "bots"] as const
 export const CHANNELS_KEY = [...YARD_KEY, "channels"] as const
 export const INVITES_KEY = [...YARD_KEY, "invites"] as const
 export const TOKENS_KEY = [...YARD_KEY, "tokens"] as const
@@ -38,6 +39,15 @@ async function yard<T>(path: string, init?: { body?: unknown; method?: string })
   )
   if (error) throw Object.assign(new Error(error.message), { code: error.code })
   return data as T
+}
+
+// A bot the owner made with `playground yard bot add`: its login, <name>[bot], the id of its DM with the owner, and whether it may read the dispatcher's log.
+export type YardBot = {
+  createdAt: string
+  dm: string
+  login: string
+  name: string
+  readsLog: boolean
 }
 
 // An invite as the API sends it: an invite request names who asked and for whom, and its code comes back once, when the owner opens it.
@@ -67,9 +77,13 @@ export const yardApi = {
     yard<{ message: YardMessage }>(`/messages/${segment(id)}/approve`, { method: "POST" }),
   approveInvite: (id: string) =>
     yard<{ invite: YardInvite }>(`/invites/${segment(id)}/approve`, { method: "POST" }),
+  bots: () => yard<{ bots: YardBot[] }>("/bots"),
   channels: () => yard<{ channels: YardChannel[] }>("/channels"),
-  createToken: (name: string) =>
-    yard<{ token: YardToken & { secret: string } }>("/tokens", { body: { name }, method: "POST" }),
+  createToken: (name: string, relay = false) =>
+    yard<{ token: YardToken & { secret: string } }>("/tokens", {
+      body: { name, relay },
+      method: "POST",
+    }),
   deny: (id: string) =>
     yard<{ message: YardMessage }>(`/messages/${segment(id)}/deny`, { method: "POST" }),
   denyInvite: (id: string) =>
@@ -93,8 +107,12 @@ export const yardApi = {
     yard<{ member: true }>("/invites/redeem", { body: { code }, method: "POST" }),
   requestInvite: (forLogin: string) =>
     yard<{ invite: unknown }>("/invites/request", { body: { forLogin }, method: "POST" }),
+  revokeBot: (name: string) =>
+    yard<{ bot: YardBot }>(`/bots/${segment(name)}`, { method: "DELETE" }),
   revokeToken: (id: string) =>
     yard<{ token: YardToken }>(`/tokens/${segment(id)}`, { method: "DELETE" }),
+  setReadsLog: (name: string, readsLog: boolean) =>
+    yard<{ bot: YardBot }>(`/bots/${segment(name)}`, { body: { readsLog }, method: "PATCH" }),
   tokens: () => yard<{ tokens: YardToken[] }>("/tokens"),
 }
 
@@ -113,7 +131,7 @@ export const useYardChannels = (enabled = true) =>
       (error as { code?: string }).code !== "NOT_FOUND" && queryRetry(count, error),
   })
 
-// How long the sidebar's nav waits on Yard's first read before it draws without Yard's groups, which then arrive above Orchestrators: a hosted Yard read can run to its 15s timeout.
+// How long the sidebar's nav waits on Yard's first read before it draws without Yard's groups, which then arrive at their place in the group order: a hosted Yard read can run to its 15s timeout.
 export const YARD_HOLD_MS = 1_000
 
 // Pure: whether the nav waits on Yard's channels read: its first try alone (holdsForFirstTry), and never once YARD_HOLD_MS has passed (late).

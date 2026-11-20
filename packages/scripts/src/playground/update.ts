@@ -2,6 +2,7 @@
 import { basename, join } from "node:path"
 
 import { swapBundles, unswapBundles } from "../swap-bundles"
+import { giveBackSlot } from "./give-back"
 import { BUNDLED_ROOT, CORE_SKILLS } from "./orgs"
 import { unlinked } from "./unlinked"
 
@@ -38,6 +39,7 @@ export const updateSteps = (changed: string[]) => ({
 })
 
 // With a tag, the checkout's main is moved to that release instead, back or on, and the Dashboard, which rolls on its own branch, is left as it is; a plain update later moves it on to origin/main again.
+// `peers` then moves each peer's clone to the commit this one reached (peer-sync.ts); a failure there is logged, never the update's.
 // `done` holds the commit the last finished update reached, or, for a run with no record, the reflog's last fast-forward onto origin/main, else where that run started, so a run after one cut short past its fast-forward still installs, builds and restarts what that merge changed.
 export const runUpdate = async (
   repo: string,
@@ -46,6 +48,8 @@ export const runUpdate = async (
   log: (line: string) => void = console.log,
   to?: string,
   done?: string,
+  briefs?: (old: string) => Promise<void>,
+  peers?: (sha: string) => Promise<void>,
 ): Promise<number> => {
   const git = (...args: string[]) => run(["git", "-C", repo, ...args])
   // a step whose output the terminal shows, named before it runs and again when it fails
@@ -204,6 +208,10 @@ export const runUpdate = async (
     ["bash", join(repo, "scripts", "link-skills.sh")],
   ]
   if (!(await shown(linkSkills))) return 1
+  // each manager's brief copy follows its template while unedited (brief-refresh.ts); a failure there is logged, never a reason to stop the update
+  await briefs?.(old).catch((error: Error) =>
+    log(`playground update: brief refresh failed: ${error.message}`),
+  )
   const changed = (await git("diff", "--name-only", old, "HEAD")).out.split("\n").filter(Boolean)
   const { build, install, skills } = updateSteps(changed)
   if (skills.length)
@@ -232,7 +240,20 @@ export const runUpdate = async (
   after.push(["ops-restart", [process.execPath, "--no-env-file", restart, repo, old, "HEAD"]])
   for (const step of after) if (!(await shown(step))) return 1
   if (done) await Bun.write(done, (await git("rev-parse", "HEAD")).out)
-  if (!to) return roll()
+  if (peers) {
+    const at = (await git("rev-parse", "HEAD")).out.trim()
+    await peers(at).catch((error: Error) =>
+      log(`playground update: peer sync failed: ${error.message}`),
+    )
+  }
+  if (!to) {
+    // the roll only waits on the supervisor, whose own steps queue in run-slot, so the lane this update holds goes back to the queue first
+    if (giveBackSlot())
+      log(
+        "playground update: gave its run slot back for the Dashboard roll, whose own steps queue in run-slot",
+      )
+    return roll()
+  }
   log(
     `playground update: at ${to}; the Dashboard rolls on its own, and playground update moves on to origin/main`,
   )

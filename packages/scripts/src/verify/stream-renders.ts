@@ -10,8 +10,8 @@ const STEP_GAP_MS = 400
 export const COUNTED = ["AgentLink", "StepRow", "TranscriptMarkdown"] as const
 export type Shown = { parts: number; renders: Record<string, number>; rows: number }
 
-// Pure: what the steps may draw of each counted component: each step its own turn's row, name link and new words, twice over for a board frame landing beside it, and the stream's clock (useNow, every 30s) once a row, since its tick draws every row, its name link and a bubble's words again.
-export const allowance = (rows: number, steps: number): number => 2 * steps + rows
+// Pure: what the steps may draw of each counted component: each step its own turn's row, name link and new words, twice over for a board frame landing beside it; the stream's clock (the inbox read's time, every 5s) draws no row whose shown time it leaves alone (sameStep).
+export const allowance = (steps: number): number => 2 * steps
 
 // Pure: passes when no counted component drew more than its allowance over the steps, else names each that did, with what the stream held; a stream that drew no row measured nothing.
 export const streamRendersResult = (
@@ -21,13 +21,13 @@ export const streamRendersResult = (
 ): Result => {
   if (rows === 0 || !(renders.StepRow ?? 0))
     return { check, detail: `no row drew over ${steps} steps (${rows} rows shown)`, ok: false }
-  const over = COUNTED.filter((name) => (renders[name] ?? 0) > allowance(rows, steps))
+  const over = COUNTED.filter((name) => (renders[name] ?? 0) > allowance(steps))
   const draws = COUNTED.map((name) => `${name} ${renders[name] ?? 0}`).join(", ")
   const shown = `${steps} steps into a stream of ${rows} rows and ${parts} parts`
   return {
     check,
     detail: over.length
-      ? `${over.map((name) => `${name} drew ${renders[name]} times, over ${allowance(rows, steps)}`).join("; ")}, ${shown}`
+      ? `${over.map((name) => `${name} drew ${renders[name]} times, over ${allowance(steps)}`).join("; ")}, ${shown}`
       : `${shown}: ${draws} draws`,
     ok: over.length === 0,
   }

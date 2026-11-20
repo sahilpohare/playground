@@ -19,6 +19,7 @@ sys.modules["fcntl"] = fcntl_stub
 beat_stub = types.ModuleType("beat")
 beat_stub.beat = lambda *a, **k: None
 beat_stub.checkout = lambda: "/checkout"
+beat_stub.gh_down = lambda: None
 sys.modules["beat"] = beat_stub
 
 # the settings reads run bun when run.py loads, and the job's own main loop is top-level code from run.py's `while True:` on, which the test must never run, so both come out.
@@ -95,12 +96,13 @@ class MergeReady(unittest.TestCase):
 
 
 class Cycle(unittest.TestCase):
-    def cycle_with(self, fp, rebuild=False):
+    def cycle_with(self, fp, rebuild=False, down=None):
         calls = []
-        saved = {k: ns[k] for k in ("sync", "fingerprint", "merge_ready")}
+        saved = {k: ns[k] for k in ("sync", "fingerprint", "merge_ready", "gh_down")}
         saved_state = dict(ns["state"])
         ns["sync"] = lambda: None
-        ns["fingerprint"] = lambda: fp
+        ns["gh_down"] = lambda: down
+        ns["fingerprint"] = lambda: (calls.append("fingerprint"), fp)[1]
         ns["state"].update(fingerprint="same", rebuild_now=rebuild)
         ns["merge_ready"] = lambda: (calls.append("merge_ready"), None)[1]
         try:
@@ -111,14 +113,18 @@ class Cycle(unittest.TestCase):
             ns["state"].update(saved_state)
 
     def test_an_unchanged_fingerprint_merges_nothing(self):
-        self.assertEqual(self.cycle_with("same"), (("ok", "nothing changed since the last scan"), []))
+        self.assertEqual(self.cycle_with("same"), (("ok", "nothing changed since the last scan"), ["fingerprint"]))
 
     def test_a_moved_fingerprint_or_a_merge_asks_pr_train_ready(self):
-        self.assertEqual(self.cycle_with("moved"), (("ok", "no PR ready to merge"), ["merge_ready"]))
-        self.assertEqual(self.cycle_with("same", rebuild=True)[1], ["merge_ready"])
+        self.assertEqual(self.cycle_with("moved"), (("ok", "no PR ready to merge"), ["fingerprint", "merge_ready"]))
+        self.assertEqual(self.cycle_with("same", rebuild=True)[1], ["fingerprint", "merge_ready"])
 
     def test_a_list_gh_cannot_read_skips_the_cycle(self):
-        self.assertEqual(self.cycle_with(None)[1], [])
+        self.assertEqual(self.cycle_with(None)[1], ["fingerprint"])
+
+    def test_a_failed_gh_sign_in_probe_skips_gh_for_the_cycle(self):
+        # the train's list call each minute against a locked keyring helped flood it
+        self.assertEqual(self.cycle_with("moved", down="gh token invalid"), (("ok", "skipped: gh unreachable: gh token invalid, next cycle"), []))
 
 
 class Fingerprint(unittest.TestCase):

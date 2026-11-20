@@ -75,7 +75,7 @@ export const anyOf = (items: string[], tail = ""): RegExp | undefined =>
     : undefined
 
 // A name in either case, standing alone, never inside an address, and never followed by a slash and a path word, which reads as data (a repository URL, a slug such as the archive's own link, which archiveLinks counts, or any path).
-const ownerWord = (name: string): string => {
+export const ownerWord = (name: string): string => {
   const cased = [...name].map((c) =>
     /[a-z]/i.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : escape(c),
   )

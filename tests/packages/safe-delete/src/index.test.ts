@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -13,27 +14,37 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import { hasManagerRole, ROSTER_KINDS } from "../../../../packages/config/src/kinds"
 import {
+  archiveUnlanded,
+  bundleToTrash,
+  bytesOf,
   CARVE_OUTS,
   type CarveOut,
   type Clone,
+  deleteWeights,
   isProtected,
+  isWeights,
   LIMITS,
   linkPlaces,
   listTrash,
   MARKER,
   makeScratch,
+  movesLeft,
   type Proc,
   purgeTrash,
   quarantine,
   type Quarantined,
+  removeReplay,
   removeScratch,
+  removeStale,
   restore,
   type Roots,
+  rowPullRequests,
   stripTrash,
+  unpushed,
   worktreeRefusal,
 } from "../../../../packages/safe-delete/src"
 
@@ -150,6 +161,76 @@ describe("isProtected", () => {
     mkdirSync(own, { recursive: true })
     symlinkSync(join(roots.home, ".ssh"), join(own, "keys"))
     expect(isProtected(join(own, "keys"), roots, opts.session)).toBeString()
+  })
+
+  // #2229: a loose regular file directly in scratch/ named after the session, then - or ., is that session's own, as the nightly clean already reads it.
+  test("lets the caller's own loose scratch file go, and refuses another's, a link, a folder, a longer name and one in a subfolder", () => {
+    const roots = machine()
+    const scratch = join(roots.home, ".playground", "scratch")
+    for (const name of [`${opts.session}-probe.txt`, `${opts.session}.tmp`]) {
+      const path = file(join(scratch, name))
+      expect(isProtected(path, roots, opts.session)).toBeNull()
+      expect(isProtected(path, roots)).toBeString()
+    }
+    const link = join(scratch, `${opts.session}-link.txt`)
+    symlinkSync(file(join(roots.root, "elsewhere.txt")), link)
+    const folder = join(scratch, `${opts.session}-dir`)
+    file(join(folder, "a"))
+    for (const path of [
+      file(join(scratch, "a4b5c6-worker-probe.txt")),
+      link,
+      folder,
+      file(join(scratch, `${opts.session}x.txt`)),
+      file(join(scratch, "sub", `${opts.session}-probe.txt`)),
+    ])
+      expect(isProtected(path, roots, opts.session)).toBeString()
+  })
+
+  // #2247's review: a scratch/ that is a symlink would carry the own loose file's exemption into the link's target, so it holds only while scratch/ is a real folder reached through no link from HOME.
+  test.each([".ssh", ".playground/elsewhere"])(
+    "refuses the caller's own loose file name through a scratch/ linked into %s, by either path",
+    (target) => {
+      const roots = machine()
+      const into = join(roots.home, target)
+      const kept = file(join(into, `${opts.session}-key`), "secret")
+      symlinkSync(into, join(roots.home, ".playground", "scratch"))
+      const linked = join(roots.home, ".playground", "scratch", `${opts.session}-key`)
+      expect(isProtected(linked, roots, opts.session)).toBeString()
+      expect(isProtected(kept, roots, opts.session)).toBeString()
+      expect(quarantine(linked, opts, roots, { now: NOW })).toMatchObject({ kind: "protected" })
+      expect(readFileSync(kept, "utf8")).toBe("secret")
+    },
+  )
+
+  test("moves the caller's own loose scratch file to the trash, and restore puts it back", () => {
+    const roots = machine()
+    const path = file(
+      join(roots.home, ".playground", "scratch", `${opts.session}-probe.txt`),
+      "probe",
+    )
+    expect(quarantine(path, opts, roots, { now: NOW })).toMatchObject({ files: 1 })
+    expect(existsSync(path)).toBe(false)
+    const [entry] = listTrash(roots.trash)
+    expect(restore(entry!.id, roots)).toEqual({ path })
+    expect(readFileSync(path, "utf8")).toBe("probe")
+  })
+
+  // #2407: a worker's end takes the memory trial's settings file spawn.sh wrote for it, which sits in the protected data folder.
+  test("lets the caller's own memory settings file go, and refuses another's, a link and the shared file", () => {
+    const roots = machine()
+    const data = join(roots.home, ".playground")
+    const own = file(join(data, `factory-settings-400k-memory-${opts.session}.json`), "{}")
+    expect(isProtected(own, roots, opts.session)).toBeNull()
+    expect(isProtected(own, roots)).toBeString()
+    expect(quarantine(own, opts, roots, { now: NOW })).toMatchObject({ files: 1 })
+    expect(existsSync(own)).toBe(false)
+    symlinkSync(file(join(roots.root, "elsewhere.json")), own)
+    for (const path of [
+      own,
+      file(join(data, "factory-settings-400k-memory-a4b5c6-worker.json")),
+      file(join(data, "factory-settings-400k.json")),
+    ])
+      expect(isProtected(path, roots, opts.session)).toBeString()
   })
 })
 
@@ -283,7 +364,7 @@ describe("quarantine, listTrash and restore", () => {
     const worktrees = join(roots.main, ".claude", "worktrees")
     expect(quarantine(big, { ...opts, worktree: holders }, roots, { now: NOW })).toEqual({
       kind: "refused",
-      refused: `--worktree takes a folder in ${worktrees}, not ${big}: playground rm ${big} moves a folder outside it to the trash, with no --worktree or --discard, up to 5,000 files or 2 GB; leave a bigger tree in place for your lead's cleanup`,
+      refused: `--worktree takes a folder in ${worktrees} or a git worktree in another repo's .claude/worktrees, not ${big}: playground rm ${big} moves a folder outside it to the trash, with no --worktree or --discard, up to 5,000 files or 2 GB; leave a bigger tree in place for your lead's cleanup`,
     })
     expect(quarantine(big, opts, roots, { now: NOW })).toMatchObject({ kind: "tripwire" })
     expect(existsSync(big)).toBe(true)
@@ -298,6 +379,78 @@ describe("the tripwire", () => {
     for (let i = 0; i <= 5000; i++) writeFileSync(join(big, String(i)), "")
     expect(quarantine(big, opts, roots, { now: NOW })).toMatchObject({ kind: "tripwire" })
     expect(existsSync(big)).toBe(true)
+  })
+
+  // #2407: an end moves the session's own temp folder, which hook test data fills past 5,000 files, whole under the 2 GB cap alone, and a refusal past the cap pages no one
+  test("the session's own temp folder moves whole past 5,000 files, a plain refusal past 2 GB; another's and a longer name's keep the alert, and a link in its name moves alone", () => {
+    const roots = machine()
+    const tmp = join(roots.root, "tmp")
+    const big = (name: string) => {
+      mkdirSync(join(tmp, name, "deep"), { recursive: true })
+      for (let i = 0; i <= 5000; i++) writeFileSync(join(tmp, name, "deep", String(i)), "")
+      return join(tmp, name)
+    }
+    const own = big(`playground-${opts.session}.AbC123`)
+    expect(quarantine(own, opts, roots, { now: NOW, tmp })).toMatchObject({ files: 5001 })
+    expect(existsSync(own)).toBe(false)
+    for (const name of ["playground-a4b5c6-worker.Q1", `playground-${opts.session}2.Q2`])
+      expect(quarantine(big(name), opts, roots, { now: NOW, tmp })).toMatchObject({
+        kind: "tripwire",
+      })
+    const target = big("elsewhere")
+    const link = join(tmp, `playground-${opts.session}.L1`)
+    symlinkSync(target, link)
+    expect(quarantine(link, opts, roots, { now: NOW, tmp })).toMatchObject({ files: 1 })
+    expect(readdirSync(join(target, "deep"))).toHaveLength(5001)
+    const huge = join(tmp, `playground-${opts.session}.H1`)
+    mkdirSync(huge)
+    truncateSync(file(join(huge, "data.bin"), ""), 2 * 1024 ** 3 + 1)
+    expect(quarantine(huge, opts, roots, { now: NOW, tmp })).toEqual({
+      kind: "refused",
+      refused: `${huge} holds over 2 GB, past the tripwire: it stays in place`,
+    })
+  })
+
+  // #2088: the nightly clean's gone option moves an entry directly in scratch/ whole, a loose file included, under the 2 GB cap alone; without it a session's own scratch folder keeps the file count
+  test("a gone session's entry directly in scratch/ moves whole past 5,000 files and comes back; without gone it is refused, and gone reaches nothing else", () => {
+    const roots = machine()
+    const dir = join(roots.home, ".playground", "scratch")
+    const big = (name: string) => {
+      mkdirSync(join(dir, name, "deep"), { recursive: true })
+      for (let i = 0; i <= 5000; i++) writeFileSync(join(dir, name, "deep", String(i)), "")
+      return join(dir, name)
+    }
+    const own = big("j6rjgy-worker")
+    expect(quarantine(own, opts, roots, { now: NOW })).toMatchObject({ kind: "refused" })
+    expect(existsSync(own)).toBe(true)
+    const gone = { gone: true as const, reason: "test", session: "q1w2e3-worker" }
+    const folder = big("q1w2e3-worker")
+    expect(quarantine(folder, gone, roots, { now: NOW })).toHaveProperty("id")
+    expect(existsSync(folder)).toBe(false)
+    const loose = file(join(dir, "q1w2e3-page.html"))
+    const moved = quarantine(loose, { ...gone, session: "q1w2e3-page-html" }, roots, { now: NOW })
+    expect(existsSync(loose)).toBe(false)
+    expect(restore((moved as Quarantined).id, roots)).toEqual({ path: loose })
+    expect(existsSync(loose)).toBe(true)
+    const huge = file(join(dir, "q1w2e3-huge.bin"), "")
+    truncateSync(huge, 2 * 1024 ** 3 + 1)
+    expect(
+      quarantine(huge, { ...gone, session: "q1w2e3-huge" }, roots, { now: NOW }),
+    ).toMatchObject({
+      kind: "tripwire",
+    })
+    symlinkSync(join(roots.home, ".ssh"), join(dir, "q1w2e3-keys"))
+    for (const path of [
+      join(own, "deep", "1"),
+      join(dir, "q1w2e3-keys"),
+      file(join(roots.home, ".playground", "roster.json")),
+      join(roots.home, ".ssh", "id_ed25519"),
+    ])
+      expect(
+        quarantine(path, { ...gone, session: "q1w2e3-other" }, roots, { now: NOW }),
+      ).toMatchObject({
+        kind: "protected",
+      })
   })
 
   test("refuses a path of more than 2 GB", () => {
@@ -607,23 +760,58 @@ describe.each(Object.entries(CARVE_OUTS))("the %s carve-out", (name, carve) => {
   test("lets its own entry through and refuses its parent, a sibling and an entry over its cap", () => {
     const roots = machine()
     const folder = join(roots.home, carve.home ? "" : ".playground", carve.folder)
-    const own = file(join(folder, carve.name ? "com.playground.own.plist" : "own"))
+    // a named carve-out's own entry is the file its pattern takes: a Playground plist or unit, or a kept page
+    const named = (stem: string) =>
+      [`com.playground.${stem}.plist`, `com.playground.${stem}.service`, `${stem}.html`].find((n) =>
+        carve.name!.test(n),
+      )!
+    const own = file(join(folder, carve.name ? named("own") : "own"))
     const sibling = file(join(folder, "..", "sibling-of-carve-out", "own"))
-    const over = join(folder, carve.name ? "com.playground.over.plist" : "over")
+    const over = join(folder, carve.name ? named("over") : "over")
     if (carve.name) file(over, "x".repeat(carve.bytes + 1))
     else file(join(over, "big"), "x".repeat(Math.min(carve.bytes + 1, 4096)))
     if (!carve.name && carve.bytes >= 4096)
       for (let i = 0; i <= carve.files; i++) file(join(over, `f${i}`))
-    const named = { ...opts, carveOut: name }
-    expect(quarantine(own, named, roots, { now: NOW })).toMatchObject({ files: 1 })
-    expect(quarantine(join(folder, ".."), named, roots, { now: NOW })).toMatchObject({
+    const carved = { ...opts, carveOut: name }
+    expect(quarantine(own, carved, roots, { now: NOW })).toMatchObject({ files: 1 })
+    expect(quarantine(join(folder, ".."), carved, roots, { now: NOW })).toMatchObject({
       kind: "protected",
     })
-    expect(quarantine(sibling, named, roots, { now: NOW })).toMatchObject({ kind: "protected" })
-    expect(quarantine(over, { ...named, session: "over-cap" }, roots, { now: NOW })).toMatchObject({
-      kind: "tripwire",
-    })
+    expect(quarantine(sibling, carved, roots, { now: NOW })).toMatchObject({ kind: "protected" })
+    expect(quarantine(over, { ...carved, session: "over-cap" }, roots, { now: NOW })).toMatchObject(
+      {
+        kind: "tripwire",
+      },
+    )
   })
+
+  // #2238: a carve-out whose folder is a symlink into a protected folder would move a file out of the link's target, so every carve-out takes its folder only as a real one, and its refusal names the link and where it leads.
+  test.each([".ssh", ".config"])(
+    "refuses its folder as a symlink into %s, and the target keeps its file",
+    (target) => {
+      const roots = machine()
+      const folder = join(roots.home, carve.home ? "" : ".playground", carve.folder)
+      const into = join(roots.home, target)
+      const entry = carve.name
+        ? [`com.playground.x.plist`, `com.playground.x.service`, `notes.html`].find((n) =>
+            carve.name!.test(n),
+          )!
+        : "notes"
+      const kept = file(join(into, entry), "secret")
+      mkdirSync(dirname(folder), { recursive: true })
+      symlinkSync(into, folder)
+      const moved = quarantine(join(folder, entry), { ...opts, carveOut: name }, roots, {
+        now: NOW,
+      })
+      expect(moved).toMatchObject({
+        kind: "protected",
+        refused: expect.stringContaining(
+          `${folder}, the ${name} carve-out's folder, goes through the symlink ${folder} and leads to ${into}`,
+        ),
+      })
+      expect(readFileSync(kept, "utf8")).toBe("secret")
+    },
+  )
 })
 
 // jobs.ts boots out a turned-off launchd job and moves its installed plist from HOME's LaunchAgents, which holds every other app's agents too.
@@ -644,6 +832,60 @@ test("the jobs-installed carve-out moves only a plain com.playground plist, and 
     })
   expect(readFileSync(theirs, "utf8")).toBe("theirs")
   expect(existsSync(join(folder, "a"))).toBe(true)
+  expect(quarantine(ours, named, roots, { now: NOW })).toMatchObject({ files: 1 })
+  expect(existsSync(ours)).toBe(false)
+  const [entry] = listTrash(roots.trash)
+  expect(restore(entry!.id, roots)).toEqual({ path: ours })
+  expect(readFileSync(ours, "utf8")).toBe("ours")
+})
+
+// #2238: on Linux ~/.config is often a dotfiles link. Into a protected folder the jobs-units refusal names the link on the way and where it leads, for Ops to act on; into a folder nothing protects, the unit moves as before.
+test("the jobs-units carve-out names the link and its real path behind a linked parent, and a link to an unprotected folder still moves", () => {
+  const roots = machine()
+  const link = join(roots.home, ".config", "systemd")
+  const folder = join(link, "user")
+  const unit = "com.playground.x.service"
+  const units = { ...opts, carveOut: "jobs-units" }
+  const protectedDots = join(roots.home, ".playground", "dotfiles", "systemd")
+  const kept = file(join(protectedDots, "user", unit), "unit")
+  symlinkSync(protectedDots, link)
+  expect(quarantine(join(folder, unit), units, roots, { now: NOW })).toMatchObject({
+    kind: "protected",
+    refused: expect.stringContaining(
+      `${folder}, the jobs-units carve-out's folder, goes through the symlink ${link} and leads to ${join(protectedDots, "user")}`,
+    ),
+  })
+  expect(readFileSync(kept, "utf8")).toBe("unit")
+  const plainDots = join(roots.root, "dotfiles", "systemd")
+  file(join(plainDots, "user", unit), "unit")
+  rmSync(link)
+  symlinkSync(plainDots, link)
+  expect(quarantine(join(folder, unit), units, roots, { now: NOW })).toMatchObject({ files: 1 })
+  expect(existsSync(join(plainDots, "user", unit))).toBe(false)
+})
+
+// #2203: on Linux jobs.ts disables a turned-off job and moves its unit from ~/.config/systemd/user, which holds every other user unit too.
+test("the jobs-units carve-out moves only a plain com.playground unit, and restore puts it back", () => {
+  const roots = machine()
+  const units = join(roots.home, ".config", "systemd", "user")
+  const named = { ...opts, carveOut: "jobs-units" }
+  const ours = file(join(units, "com.playground.ops-x.service"), "ours")
+  const theirs = file(join(units, "syncthing.service"), "theirs")
+  const plist = file(join(units, "com.playground.ops-x.plist"), "plist")
+  const folder = join(units, "com.playground.ops-dir.service")
+  file(join(folder, "a"))
+  const link = join(units, "com.playground.ops-link.service")
+  symlinkSync(theirs, link)
+  const deeper = file(join(units, "default.target.wants", "com.playground.ops-x.service"))
+  for (const path of [theirs, plist, folder, link])
+    expect(quarantine(path, named, roots, { now: NOW })).toMatchObject({
+      kind: "protected",
+      refused: expect.stringContaining("not a file the jobs-units carve-out names"),
+    })
+  expect(quarantine(deeper, named, roots, { now: NOW })).toMatchObject({ kind: "protected" })
+  expect(readFileSync(theirs, "utf8")).toBe("theirs")
+  expect(existsSync(join(folder, "a"))).toBe(true)
+  expect(existsSync(deeper)).toBe(true)
   expect(quarantine(ours, named, roots, { now: NOW })).toMatchObject({ files: 1 })
   expect(existsSync(ours)).toBe(false)
   const [entry] = listTrash(roots.trash)
@@ -724,6 +966,56 @@ describe("worktreeRefusal", () => {
     )
   })
 
+  // PG-2017: a clean detached checkout at a commit origin/canary holds is a reader of canary, not the row's work; each broken condition keeps the hold. The row holds by the folder's name, since a detached tree reads no branch.
+  test("a clean detached checkout at a commit origin/canary holds passes a live row whole, and a dirty, untracked, branched or past-canary one keeps it", () => {
+    const row = [{ name: "pg-1", status: "working" }]
+    const withRow = () => {
+      const w = withWorktree()
+      writeFileSync(w.holders.roster, JSON.stringify({ agents: row }))
+      return w
+    }
+    const clean = withRow()
+    git(clean.wt, "checkout", "-q", "--detach", "origin/canary")
+    expect(worktreeRefusal(clean.wt, clean.roots, clean.holders)).toBeNull()
+    const dirty = withRow()
+    git(dirty.wt, "checkout", "-q", "--detach", "origin/canary")
+    file(join(dirty.wt, "README.md"), "dirty")
+    expect(worktreeRefusal(dirty.wt, dirty.roots, dirty.holders)).toContain("is held by pg-1")
+    const untracked = withRow()
+    git(untracked.wt, "checkout", "-q", "--detach", "origin/canary")
+    file(join(untracked.wt, "extra.txt"), "x")
+    expect(worktreeRefusal(untracked.wt, untracked.roots, untracked.holders)).toContain(
+      "is held by pg-1",
+    )
+    const branched = withRow()
+    git(branched.wt, "checkout", "-q", "-B", "PG-1-thing", "origin/canary")
+    expect(worktreeRefusal(branched.wt, branched.roots, branched.holders)).toContain(
+      "is held by pg-1",
+    )
+    const past = withRow()
+    git(past.wt, "checkout", "-q", "--detach", "PG-1-thing")
+    expect(worktreeRefusal(past.wt, past.roots, past.holders)).toContain("is held by pg-1")
+  })
+
+  // status.showUntrackedFiles=no hides an untracked file from a plain git status --porcelain, so both clean-tree reads name every untracked file themselves.
+  test("an untracked file counts under status.showUntrackedFiles=no: it keeps a live row's hold on a detached canary checkout, and is named as an uncommitted change", () => {
+    const held = withWorktree()
+    git(held.roots.main, "config", "status.showUntrackedFiles", "no")
+    writeFileSync(
+      held.holders.roster,
+      JSON.stringify({ agents: [{ name: "pg-1", status: "working" }] }),
+    )
+    git(held.wt, "checkout", "-q", "--detach", "origin/canary")
+    file(join(held.wt, "extra.txt"), "x")
+    expect(worktreeRefusal(held.wt, held.roots, held.holders)).toContain("is held by pg-1")
+    const changed = withWorktree()
+    git(changed.roots.main, "config", "status.showUntrackedFiles", "no")
+    file(join(changed.wt, "extra.txt"), "x")
+    expect(worktreeRefusal(changed.wt, changed.roots, changed.holders)).toContain(
+      "holds 1 uncommitted change (extra.txt)",
+    )
+  })
+
   test("refuses a worktree a live session holds by branch, by name, or by a process's folder", () => {
     const { holders, roots, wt } = withWorktree()
     git(wt, "push", "-q", "origin", "PG-1-thing")
@@ -759,6 +1051,41 @@ describe("worktreeRefusal", () => {
       worktreeRefusal(wt, roots, { ...holders, procs: [proc(7, "zsh", join(wt, "packages"))] }),
     ).toContain("pid 7")
     expect(worktreeRefusal(wt, roots, { ...holders, procs: null })).toContain("process")
+  })
+
+  // PG-2154: a checker serves every PR in its prs list, so a PR there holds the clone as its pr does, and --pr lifts it the same way
+  test("a live row holds a worktree by a PR in its prs list, a row whose pr and prs leave it out does not, and --pr lifts a prs hold as it lifts a pr one", () => {
+    const { holders, roots, wt } = withWorktree()
+    git(wt, "push", "-q", "origin", "PG-1-thing")
+    const rosterOf = (agents: object[]) => writeFileSync(holders.roster, JSON.stringify({ agents }))
+    const url = (n: number) => `https://github.com/o/r/pull/${n}`
+    rosterOf([{ name: "x9y8z7-reviewer", pr: url(11), prs: [url(11), url(1)], status: "working" }])
+    expect(worktreeRefusal(wt, roots, holders)).toContain("x9y8z7-reviewer")
+    rosterOf([{ name: "x9y8z7-reviewer", prs: [url(1)], status: "working" }])
+    expect(worktreeRefusal(wt, roots, holders)).toContain("x9y8z7-reviewer")
+    rosterOf([{ name: "x9y8z7-reviewer", pr: url(11), prs: [url(11), url(12)], status: "working" }])
+    expect(worktreeRefusal(wt, roots, holders)).toBeNull()
+    rosterOf([{ name: "abc123-worker", pr: url(11), prs: [url(11), url(1)], status: "working" }])
+    const of = (pr: string) => worktreeRefusal(wt, roots, { ...holders, pr })
+    expect(of(url(1))).toBeNull()
+    expect(of(url(2))).toContain("abc123-worker")
+    // the lift frees the one PR it names: another PR in the same prs list that names the folder still holds it
+    const other = "https://github.com/o/other/pull/1"
+    rosterOf([{ name: "abc123-worker", prs: [url(1), other], status: "working" }])
+    expect(of(url(1))).toContain("abc123-worker")
+    expect(of(other)).toContain("abc123-worker")
+  })
+
+  test("rowPullRequests reads a row's pr and every pull request in its prs once each, leaving out an issue's URL, an extension item and a non-string", () => {
+    const url = (n: number) => `https://github.com/o/r/pull/${n}`
+    expect(
+      rowPullRequests({
+        pr: url(1),
+        prs: [url(1), url(2), "https://github.com/o/r/issues/3", "home/doc/plan-x", 4],
+      }),
+    ).toEqual([url(1), url(2)])
+    expect(rowPullRequests({ prs: "not a list" })).toEqual([])
+    expect(rowPullRequests({})).toEqual([])
   })
 
   test("a live session holds a folder by its name only when the slug after PG-<n>- is that name or starts with it and a dash", () => {
@@ -872,9 +1199,12 @@ describe("worktreeRefusal", () => {
     expect(refusal(proc(44, "agent-browser --session s2 open http://x", wt))).toContain(
       "agent-browser --session s2 close",
     )
-    expect(refusal(proc(45, daemon, wt))).toContain(
-      "agent-browser session default, which agent-browser --session default close frees",
+    // a bare daemon with no --session and no .sock shows no name, so the line names none and has the reader close their own
+    const bare = refusal(proc(45, daemon, wt))
+    expect(bare).toBe(
+      `${wt} is held by pid 45 (${daemon}) working in ${wt}: an agent-browser session whose name it does not show, so close your own by its name: agent-browser --session <your-name> close`,
     )
+    expect(bare).not.toContain("default")
   })
 
   test("refuses a worktree another worktree's node_modules links into, naming the link", () => {
@@ -983,11 +1313,11 @@ describe("worktreeRefusal", () => {
     const { holders, roots, wt } = withWorktree()
     file(join(wt, "wip.txt"))
     expect(worktreeRefusal(wt, roots, holders)).toBe(
-      `${wt} holds 1 uncommitted change (wip.txt): playground rm --worktree ${wt} --discard removes it anyway, which a session runs as it is once the worktree's PR has merged or closed, else with --decision <id> once an Inbox delete decision naming it is approved`,
+      `${wt} holds 1 uncommitted change (wip.txt): playground rm --worktree ${wt} --discard removes it anyway, its commits no remote holds kept first in a git bundle beside it in the trash`,
     )
     for (const name of ["new.txt", "b", "c", "d"]) file(join(wt, name), "changed")
     expect(worktreeRefusal(wt, roots, holders)).toBe(
-      `${wt} holds 5 uncommitted changes (new.txt, b, c, and 2 more): playground rm --worktree ${wt} --discard removes it anyway, which a session runs as it is once the worktree's PR has merged or closed, else with --decision <id> once an Inbox delete decision naming it is approved`,
+      `${wt} holds 5 uncommitted changes (new.txt, b, c, and 2 more): playground rm --worktree ${wt} --discard removes it anyway, its commits no remote holds kept first in a git bundle beside it in the trash`,
     )
     expect(worktreeRefusal(wt, roots, { ...holders, discard: true })).toBeNull()
     const moved = quarantine(wt, { ...opts, worktree: { ...holders, discard: true } }, roots, {
@@ -997,20 +1327,157 @@ describe("worktreeRefusal", () => {
     expect(existsSync(wt)).toBe(false)
   })
 
-  test("refuses a worktree whose branch has not landed on canary, pushed or not, and --discard lets it go", () => {
+  test("refuses a worktree whose branch has not landed on canary or been pushed, and --discard lets it go", () => {
     const { holders, roots, wt } = withWorktree()
     const unmerged = { ...holders, merged: () => false }
     expect(worktreeRefusal(wt, roots, unmerged)).toBe(
-      `${wt}'s HEAD holds work not landed on origin/canary (fetch origin canary if it merged since): playground rm --worktree ${wt} --discard removes it anyway, which a session runs as it is once the worktree's PR has merged or closed, else with --decision <id> once an Inbox delete decision naming it is approved`,
+      `${wt}'s HEAD holds work not landed on origin/canary or on any remote branch (fetch origin if it merged or was pushed since): playground rm --worktree ${wt} --discard removes it anyway, its commits no remote holds kept first in a git bundle beside it in the trash`,
     )
-    git(wt, "push", "-q", "origin", "PG-1-thing")
-    expect(worktreeRefusal(wt, roots, unmerged)).toContain("not landed on origin/canary")
     expect(worktreeRefusal(wt, roots, { ...holders, merged: () => null })).toContain("not landed")
     expect(worktreeRefusal(wt, roots, { ...unmerged, discard: true })).toBeNull()
     expect(quarantine(wt, { ...opts, worktree: unmerged }, roots, { now: NOW })).toHaveProperty(
       "refused",
     )
     expect(existsSync(wt)).toBe(true)
+  })
+
+  // #1348
+  test("--discard keeps a worktree's commits no remote holds in a bundle beside its move, named in its trash entry, which brings HEAD back at its sha", () => {
+    const { holders, roots, wt } = withWorktree()
+    const head = git(wt, "rev-parse", "HEAD")
+    const discard = { ...holders, discard: true, merged: () => false }
+    const moved = quarantine(wt, { ...opts, worktree: discard }, roots, { now: NOW }) as Quarantined
+    const batch = dirname(dirname(moved.to))
+    expect(moved.bundle).toBe(join(batch, "pg-1.bundle"))
+    expect(readFileSync(join(batch, "pg-1.shas"), "utf8")).toBe(`${head} HEAD\n`)
+    expect(listTrash(roots.trash).find((e) => e.path === wt)?.bundle).toBe(moved.bundle)
+    git(roots.main, "worktree", "prune")
+    git(roots.main, "branch", "-D", "PG-1-thing")
+    git(roots.main, "fetch", "-q", moved.bundle!, "HEAD:refs/heads/back")
+    expect(git(roots.main, "rev-parse", "back")).toBe(head)
+  })
+
+  test("--discard writes no bundle for a worktree whose every commit a remote holds", () => {
+    const { holders, roots, wt } = withWorktree()
+    git(wt, "push", "-q", "origin", "PG-1-thing")
+    const discard = { ...holders, discard: true, merged: () => false }
+    const moved = quarantine(wt, { ...opts, worktree: discard }, roots, { now: NOW }) as Quarantined
+    expect(moved.id).toBeDefined()
+    expect(moved.bundle).toBeUndefined()
+    expect(readdirSync(dirname(dirname(moved.to))).filter((f) => f.endsWith(".bundle"))).toEqual([])
+  })
+
+  // #2132: a remote-tracking ref is the remote's branch as last fetched, so --discard reads the remote itself: a branch deleted there since, its tracking ref kept, and a remote that cannot be read each hold no commit
+  test.each([
+    [
+      "whose remote branch was deleted since, its tracking ref kept",
+      (roots: Roots) =>
+        git(roots.root, "--git-dir", join(roots.root, "remote.git"), "branch", "-D", "PG-1-thing"),
+    ],
+    [
+      "whose remote cannot be read",
+      (roots: Roots & { root: string }) =>
+        git(roots.main, "remote", "set-url", "origin", join(roots.root, "gone.git")),
+    ],
+  ])("--discard bundles the commits of a pushed worktree %s, which bring HEAD back", (_, arm) => {
+    const { holders, roots, wt } = withWorktree()
+    git(wt, "push", "-q", "origin", "PG-1-thing")
+    arm(roots)
+    expect(git(wt, "rev-parse", "--verify", "-q", "refs/remotes/origin/PG-1-thing")).not.toBe("")
+    const head = git(wt, "rev-parse", "HEAD")
+    const discard = { ...holders, discard: true, merged: () => false }
+    const moved = quarantine(wt, { ...opts, worktree: discard }, roots, { now: NOW }) as Quarantined
+    expect(existsSync(wt)).toBe(false)
+    expect(moved.bundle).toBe(join(dirname(dirname(moved.to)), "pg-1.bundle"))
+    git(roots.main, "worktree", "prune")
+    git(roots.main, "branch", "-D", "PG-1-thing")
+    git(roots.main, "fetch", "-q", moved.bundle!, "HEAD:refs/heads/back")
+    expect(git(roots.main, "rev-parse", "back")).toBe(head)
+  })
+
+  // #2132: archiveUnlanded counts a commit as held only when the remote itself holds it now
+  test("archiveUnlanded archives a commit whose remote branch was deleted since, its tracking ref kept, and leaves out one the remote holds", () => {
+    const { roots, wt } = withWorktree()
+    const archive = join(roots.root, "archive")
+    const work = git(wt, "rev-parse", "HEAD")
+    git(wt, "push", "-q", "origin", "PG-1-thing")
+    expect(archiveUnlanded(wt, archive)).toEqual({
+      refused: "it holds no commit past its remotes to archive",
+    })
+    git(roots.root, "--git-dir", join(roots.root, "remote.git"), "branch", "-D", "PG-1-thing")
+    const path = join(archive, "playground", `pg-1-${work.slice(0, 7)}`)
+    expect(archiveUnlanded(wt, archive)).toEqual({ count: 1, path })
+    expect(
+      readdirSync(path).map(
+        (f) => /^From ([0-9a-f]+) /.exec(readFileSync(join(path, f), "utf8"))?.[1],
+      ),
+    ).toEqual([work])
+  })
+
+  // #2139: a remote that cannot be read gives no tip to archive past, so archiveUnlanded writes nothing and keeps the tree, then archives only what no remote holds once it reads
+  test("archiveUnlanded refuses, writing no archive, while a remote cannot be read, then archives only the commits no remote holds once it reads", () => {
+    const { roots, wt } = withWorktree()
+    const archive = join(roots.root, "archive")
+    git(wt, "push", "-q", "origin", "PG-1-thing")
+    file(join(wt, "late.txt"))
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "late")
+    const late = git(wt, "rev-parse", "HEAD")
+    const path = join(archive, "playground", `pg-1-${late.slice(0, 7)}`)
+    git(roots.main, "remote", "set-url", "origin", join(roots.root, "gone.git"))
+    expect(archiveUnlanded(wt, archive)).toEqual({
+      refused: "its remote origin could not be read, so its work stays until it answers",
+    })
+    expect(existsSync(archive)).toBe(false)
+    git(roots.main, "remote", "set-url", "origin", join(roots.root, "remote.git"))
+    expect(archiveUnlanded(wt, archive)).toEqual({ count: 1, path })
+    expect(
+      readdirSync(path).map(
+        (f) => /^From ([0-9a-f]+) /.exec(readFileSync(join(path, f), "utf8"))?.[1],
+      ),
+    ).toEqual([late])
+  })
+
+  // #2132: ssh's options go on the command git would run, so a configured core.sshCommand still reads the remote
+  test("unpushed reads an ssh remote through core.sshCommand, with BatchMode and a connect limit added", () => {
+    const { roots, wt } = withWorktree()
+    const said = join(roots.root, "ssh-args")
+    const ssh = file(join(roots.root, "fake-ssh"), `#!/bin/sh\necho "$@" > '${said}'\nexit 1\n`)
+    chmodSync(ssh, 0o755)
+    git(roots.main, "config", "core.sshCommand", ssh)
+    // the test sandbox's git refuses ssh, so the repo allows it for this fake alone
+    git(roots.main, "config", "protocol.ssh.allow", "always")
+    git(roots.main, "remote", "set-url", "origin", "ssh://git@example.invalid/remote.git")
+    expect(unpushed(wt)).toMatchObject({ unread: ["origin"] })
+    expect(readFileSync(said, "utf8")).toStartWith("-o BatchMode=yes -o ConnectTimeout=10 ")
+  })
+
+  test("bundleToTrash holds each ref at its sha past the excluded ones, its sha list beside it, and leaves out a ref the exclusion holds", () => {
+    const { roots, wt } = withWorktree()
+    const head = git(wt, "rev-parse", "HEAD")
+    const base = git(roots.main, "rev-parse", "canary")
+    const made = bundleToTrash(
+      roots.main,
+      [
+        { ref: "refs/heads/PG-1-thing", sha: head },
+        { ref: "refs/heads/canary", sha: base },
+      ],
+      ["origin/canary"],
+      { name: "branches", now: NOW, session: "nightly-clean", trash: roots.trash },
+    )
+    const path = join(roots.trash, "20261102T120000Z-nightly-clean", "branches.bundle")
+    expect(made).toEqual({ held: ["refs/heads/PG-1-thing"], path })
+    expect(readFileSync(join(dirname(path), "branches.shas"), "utf8")).toBe(
+      `${head} refs/heads/PG-1-thing\n${base} refs/heads/canary\n`,
+    )
+    expect(
+      bundleToTrash(roots.main, [{ ref: "refs/heads/PG-1-thing", sha: head }], ["origin/canary"], {
+        name: "branches",
+        now: NOW,
+        session: "nightly-clean",
+        trash: roots.trash,
+      }),
+    ).toEqual({ refused: `its bundle ${path} is taken or not a trash path` })
   })
 
   test("removes a clean worktree whose branch canary squash-merged, and asks for a merged PR once canary changes its files again", () => {
@@ -1100,6 +1567,33 @@ describe("removeScratch", () => {
   })
 })
 
+describe("removeStale", () => {
+  test("removes an old marked folder with the prefix, and keeps a young one, an unmarked one and a link to an old one", () => {
+    const { root } = machine()
+    const tmp = join(root, "tmp")
+    mkdirSync(tmp)
+    const now = new Date("2026-11-17T03:00:00Z")
+    const at = (dir: string, h: number) => {
+      const when = new Date(now.getTime() - h * 3_600_000)
+      utimesSync(dir, when, when)
+      return dir
+    }
+    const old = at(makeScratch("job-", tmp), 25)
+    file(join(old, "deep", "x"))
+    at(old, 25)
+    const young = at(makeScratch("job-", tmp), 1)
+    mkdirSync(join(tmp, "job-plain"))
+    const plain = at(join(tmp, "job-plain"), 25)
+    const away = join(root, "away")
+    mkdirSync(away)
+    const target = at(makeScratch("job-", away), 25)
+    symlinkSync(target, join(tmp, "job-link"))
+    expect(removeStale("job-", tmp, 86_400_000, now)).toEqual([{ bytes: 1, path: old }])
+    expect(existsSync(old)).toBe(false)
+    for (const dir of [young, plain, target]) expect(existsSync(dir)).toBe(true)
+  })
+})
+
 describe("purgeTrash", () => {
   const DAY = 86_400_000
   const GB = 1e9
@@ -1158,6 +1652,33 @@ describe("purgeTrash", () => {
     }
   })
 
+  // a file flagged immutable (macOS chflags uchg), or on Linux a folder with no write bit, which rmSync cannot clear
+  const lock = (item: string, on: boolean) =>
+    process.platform === "darwin"
+      ? Bun.spawnSync(["chflags", on ? "uchg" : "nouchg", item])
+      : chmodSync(dirname(item), on ? 0o555 : 0o755)
+
+  test("skips a batch it cannot remove, removes the rest, and names it once until it goes (#2918)", () => {
+    const { trash } = machine()
+    const stuck = batchAt(trash, new Date(NOW.getTime() - 9 * DAY), "x")
+    const old = batchAt(trash, new Date(NOW.getTime() - 8 * DAY))
+    const item = join(trash, stuck, "1", "item")
+    lock(item, true)
+    try {
+      const first = purgeTrash(trash, { free: () => 100 * GB, now: NOW })
+      expect(first.removed).toEqual([old])
+      expect(first.stuck).toEqual([expect.stringMatching(new RegExp(`^${stuck} \\(E[A-Z]+\\)$`))])
+      const second = purgeTrash(trash, { free: () => 100 * GB, now: NOW })
+      expect(second).toEqual({ removed: [], skipped: [], stuck: [] })
+      expect(existsSync(item)).toBe(true)
+    } finally {
+      lock(item, false)
+    }
+    expect(purgeTrash(trash, { free: () => 100 * GB, now: NOW }).removed).toEqual([stuck])
+    expect(existsSync(join(trash, stuck))).toBe(false)
+    expect(existsSync(join(trash, ".purge-stuck", stuck))).toBe(false)
+  })
+
   test("removes the oldest batches early while free space is under 50 GB", () => {
     const { trash } = machine()
     const first = batchAt(trash, new Date(NOW.getTime() - 3 * DAY))
@@ -1191,7 +1712,7 @@ describe("purgeTrash", () => {
     const { trash } = machine()
     const old = batchAt(trash, new Date(NOW.getTime() - 8 * DAY))
     const done = purgeTrash(trash, { free: () => 20 * GB, now: NOW })
-    expect(done).toEqual({ removed: [old], skipped: [] })
+    expect(done).toEqual({ removed: [old], skipped: [], stuck: [] })
     expect(existsSync(join(trash, old))).toBe(false)
   })
 })
@@ -1364,4 +1885,237 @@ test("a path outside a tree's node_modules and web/next/.next is never removed o
   expect(existsSync(join(tree, "web", "next", ".next-cache", "y.js"))).toBe(true)
   expect(existsSync(join(tree, "packages", "app", ".next", "y.js"))).toBe(true)
   expect(existsSync(join(tree, "src", "index.ts"))).toBe(true)
+})
+
+// #2191: playground page --remove moves one kept page's files out of the previews folder in the data folder, which holds pages.jsonl and every other preview beside them.
+test("the page carve-out moves only a plain HTML, caption or PDF directly in previews, never pages.jsonl, and restore puts it back; with no carve-out each stays refused", () => {
+  const roots = machine()
+  const previews = join(roots.home, ".playground", "previews")
+  const named = { ...opts, carveOut: "page" }
+  const html = file(join(previews, "report.html"), "page")
+  const caption = file(join(previews, "report.txt"), "caption")
+  const pdf = file(join(previews, "report.pdf"), "pdf")
+  const index = file(join(previews, "pages.jsonl"), "{}\n")
+  const image = file(join(previews, "shot.png"), "png")
+  const deeper = file(join(previews, "sub", "deep.html"))
+  for (const path of [html, caption, pdf, index])
+    expect(quarantine(path, opts, roots, { now: NOW })).toMatchObject({ kind: "protected" })
+  for (const path of [index, image])
+    expect(quarantine(path, named, roots, { now: NOW })).toMatchObject({
+      kind: "protected",
+      refused: expect.stringContaining("not a file the page carve-out names"),
+    })
+  expect(quarantine(deeper, named, roots, { now: NOW })).toMatchObject({
+    kind: "protected",
+    refused: expect.stringContaining("not directly in"),
+  })
+  for (const path of [html, caption, pdf])
+    expect(quarantine(path, named, roots, { now: NOW })).toMatchObject({ files: 1 })
+  expect(readdirSync(previews).sort()).toEqual(["pages.jsonl", "shot.png", "sub"])
+  for (const entry of listTrash(roots.trash))
+    expect(restore(entry.id, roots)).toEqual({ path: entry.path })
+  expect(readFileSync(html, "utf8")).toBe("page")
+  expect(readFileSync(caption, "utf8")).toBe("caption")
+  expect(readFileSync(pdf, "utf8")).toBe("pdf")
+})
+
+// #2191: playground page --remove asks how many moves a session has left before it moves a page's first file, so the per-minute cap never stops a page partway.
+test("movesLeft counts a session's own moves inside the minute and changes nothing", () => {
+  const roots = machine()
+  expect(movesLeft(roots.trash, opts.session, NOW)).toBe(LIMITS.perMinute)
+  for (const name of ["a", "b"])
+    expect(quarantine(file(join(roots.root, name)), opts, roots, { now: NOW })).toMatchObject({
+      files: 1,
+    })
+  const before = readdirSync(roots.trash).sort()
+  expect(movesLeft(roots.trash, opts.session, NOW)).toBe(LIMITS.perMinute - 2)
+  expect(movesLeft(roots.trash, "other-worker", NOW)).toBe(LIMITS.perMinute)
+  expect(movesLeft(roots.trash, opts.session, new Date(NOW.getTime() + 61_000))).toBe(
+    LIMITS.perMinute,
+  )
+  expect(readdirSync(roots.trash).sort()).toEqual(before)
+})
+
+describe("an approved card's removal", () => {
+  const card = "11111111-2222-3333-4444-555555555555"
+  const weightsOf = () => {
+    const roots = machine()
+    const repo = join(roots.home, "models", "hf", "hub", "models--nvidia--Qwen-27B")
+    file(join(repo, "blobs", "b"), "weights")
+    symlinkSync(
+      join(repo, "blobs", "b"),
+      join(dirname(file(join(repo, "snapshots", "s", "x"))), "model.safetensors"),
+    )
+    const gguf = file(join(roots.home, "probe-local-model", "gguf", "GLM-Flash.gguf"), "gguf")
+    return { gguf, repo, roots }
+  }
+  const at = (bytes: number) => ({ bytes, card })
+
+  test("approved weights are deleted outright at the card's size, logged in deleted.jsonl, never trashed", () => {
+    const { gguf, repo, roots } = weightsOf()
+    expect(bytesOf(repo)).toBe(8)
+    const folders = [dirname(gguf)]
+    expect(
+      deleteWeights(
+        repo,
+        { approved: at(8), folders, reason: "nightly-clean", session: "shell" },
+        roots,
+        NOW,
+      ),
+    ).toEqual({ size: 8 })
+    expect(
+      deleteWeights(
+        gguf,
+        { approved: at(4), folders, reason: "nightly-clean", session: "shell" },
+        roots,
+        NOW,
+      ),
+    ).toEqual({ size: 4 })
+    expect(existsSync(repo) || existsSync(gguf)).toBe(false)
+    const log = readFileSync(join(roots.trash, "deleted.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l))
+    expect(log.map((l) => [l.path, l.bytes, l.card])).toEqual([
+      [repo, 8, card],
+      [gguf, 4, card],
+    ])
+    expect(listTrash(roots.trash)).toEqual([])
+  })
+
+  test("weights whose size changed since the card, a symlink, the models folder itself and a file outside the folders are refused, each left in place", () => {
+    const { gguf, repo, roots } = weightsOf()
+    const folders = [dirname(gguf)]
+    const del = (path: string, bytes: number) =>
+      deleteWeights(
+        path,
+        { approved: at(bytes), folders, reason: "t", session: "shell" },
+        roots,
+        NOW,
+      )
+    expect(del(repo, 7)).toMatchObject({ refused: expect.stringContaining("its size changed") })
+    const link = join(roots.home, "models", "link.gguf")
+    symlinkSync(gguf, link)
+    expect(del(link, 4)).toMatchObject({ refused: expect.stringContaining("is a symlink") })
+    const models = join(roots.home, "models")
+    expect(del(models, bytesOf(models))).toMatchObject({
+      refused: expect.stringContaining("is not model weights"),
+    })
+    const outside = file(join(roots.home, "Downloads", "x.gguf"), "abcd")
+    expect(isWeights(outside, roots.home, folders)).toBe(false)
+    expect(del(outside, 4)).toMatchObject({
+      refused: expect.stringContaining("is not model weights"),
+    })
+    expect(del(`${dirname(gguf)}/../gguf/GLM-Flash.gguf`, 4)).toMatchObject({
+      refused: expect.stringContaining("no .."),
+    })
+    for (const path of [repo, gguf, link, outside]) expect(existsSync(path)).toBe(true)
+  })
+
+  test("an approved rehearsal in Ops' scratchpad moves whole past the caps, and --restore puts it back; unapproved it stays protected", () => {
+    const roots = machine()
+    const rehearsal = join(roots.home, ".playground", "scratchpad", "ops", "rehearse142")
+    for (let i = 0; i < LIMITS.files + 1; i++) file(join(rehearsal, "clone", String(i)), "")
+    expect(quarantine(rehearsal, opts, roots, { now: NOW })).toMatchObject({ kind: "protected" })
+    expect(quarantine(rehearsal, { ...opts, approved: at(1) }, roots, { now: NOW })).toMatchObject({
+      refused: expect.stringContaining("its size changed"),
+    })
+    const moved = quarantine(rehearsal, { ...opts, approved: at(0) }, roots, {
+      now: NOW,
+    }) as Quarantined
+    expect(moved.files).toBe(LIMITS.files + 1)
+    expect(existsSync(rehearsal)).toBe(false)
+    expect(listTrash(roots.trash)[0]).toMatchObject({ approved: card, path: rehearsal })
+    expect(restore(moved.id, roots)).toEqual({ path: rehearsal })
+    expect(existsSync(join(rehearsal, "clone", "0"))).toBe(true)
+  })
+})
+
+describe("a model test's replay worktree", () => {
+  // A main checkout pushed to origin/canary, with one replay worktree detached at canary's commit under ~/models/kit/runs, holding a tracked edit and an untracked file.
+  const replay = () => {
+    const roots = machine()
+    const remote = join(roots.root, "remote.git")
+    git(roots.root, "init", "--bare", "-q", remote)
+    git(roots.main, "init", "-q", "-b", "canary")
+    file(join(roots.main, "README.md"), "one\n")
+    git(roots.main, "add", ".")
+    git(roots.main, "commit", "-qm", "init")
+    git(roots.main, "remote", "add", "origin", remote)
+    git(roots.main, "push", "-q", "origin", "canary")
+    const add = (wt: string) => {
+      mkdirSync(dirname(wt), { recursive: true })
+      git(roots.main, "worktree", "add", "-q", "--detach", wt, "HEAD")
+      writeFileSync(join(wt, "README.md"), "two\n")
+      file(join(wt, "answer.ts"), "export const a = 1\n")
+      return wt
+    }
+    const wt = add(join(roots.home, "models", "kit", "runs", "MB-1", "pr0001"))
+    return { add, roots, wt }
+  }
+
+  test("one under kit/runs at a canary commit goes through git worktree remove, its work written to <name>.diff first", () => {
+    const { roots, wt } = replay()
+    expect(removeReplay(wt, { folders: [], procs: [] }, roots)).toEqual({ diff: `${wt}.diff` })
+    expect(existsSync(wt)).toBe(false)
+    const diff = readFileSync(`${wt}.diff`, "utf8")
+    expect(diff).toContain("+two")
+    expect(diff).toContain("+export const a = 1")
+    expect(git(roots.main, "worktree", "list")).not.toContain(wt)
+  })
+
+  test("the diff is written before the worktree goes: a remove git refuses leaves both, naming the diff", () => {
+    const { roots, wt } = replay()
+    git(roots.main, "worktree", "lock", wt)
+    expect(removeReplay(wt, { folders: [], procs: [] }, roots)).toMatchObject({
+      refused: expect.stringContaining(`its work is kept in ${wt}.diff`),
+    })
+    expect(existsSync(wt)).toBe(true)
+    expect(readFileSync(`${wt}.diff`, "utf8")).toContain("+two")
+  })
+
+  test("a recorded folder outside kit/runs with a tracked edit, a commit canary lacks, and a folder no rule names are refused, each left in place", () => {
+    const { add, roots, wt } = replay()
+    const recorded = join(roots.home, "trials")
+    const outside = add(join(recorded, "pr0002"))
+    expect(removeReplay(outside, { folders: [recorded], procs: [] }, roots)).toMatchObject({
+      refused: expect.stringContaining("has a tracked edit"),
+    })
+    git(wt, "commit", "-qam", "test output")
+    expect(removeReplay(wt, { folders: [], procs: [] }, roots)).toMatchObject({
+      refused: expect.stringContaining("a commit origin/canary does not hold"),
+    })
+    const loose = add(join(roots.home, "elsewhere", "pr0003"))
+    expect(removeReplay(loose, { folders: [], procs: [] }, roots)).toMatchObject({
+      refused: expect.stringContaining("is not a replay worktree's place"),
+    })
+    for (const path of [outside, wt, loose]) expect(existsSync(path)).toBe(true)
+    expect(existsSync(`${outside}.diff`) || existsSync(`${wt}.diff`)).toBe(false)
+  })
+
+  test("a process working in it holds it, as one holds any worktree, and an unreadable process list keeps it", () => {
+    const { roots, wt } = replay()
+    const running = proc(4242, "bun run kit replay", join(wt, "src"))
+    expect(removeReplay(wt, { folders: [], procs: [running] }, roots)).toMatchObject({
+      refused: `${wt} is held by pid 4242 (bun run kit replay) working in ${join(wt, "src")}`,
+    })
+    expect(removeReplay(wt, { folders: [], procs: null }, roots)).toMatchObject({
+      refused: expect.stringContaining("cannot be listed"),
+    })
+    expect(existsSync(wt) || existsSync(`${wt}.diff`)).toBe(true)
+    expect(existsSync(`${wt}.diff`)).toBe(false)
+  })
+
+  test("a recorded folder outside kit/runs with no tracked edit goes too", () => {
+    const { roots } = replay()
+    const recorded = join(roots.home, "trials")
+    mkdirSync(recorded, { recursive: true })
+    git(roots.main, "worktree", "add", "-q", "--detach", join(recorded, "pr0004"), "HEAD")
+    file(join(recorded, "pr0004", "out.log"), "graded\n")
+    expect(
+      removeReplay(join(recorded, "pr0004"), { folders: [recorded], procs: [] }, roots),
+    ).toEqual({
+      diff: join(recorded, "pr0004.diff"),
+    })
+  })
 })

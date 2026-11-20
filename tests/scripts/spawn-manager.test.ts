@@ -13,6 +13,7 @@ import {
 } from "node:fs"
 import { dirname, join } from "node:path"
 
+import { scratchEnv } from "../scratch-env"
 import { OLD } from "../session-names"
 import {
   bin,
@@ -27,8 +28,6 @@ import {
   spawn,
   TOKEN,
   typed,
-  usage,
-  zai,
 } from "./spawn-fake"
 
 // Every case runs spawn.sh, which starts fake processes and waits on them; one took 19.9s on the loaded runner box, so each gets twice that.
@@ -111,6 +110,7 @@ describe("a manager starts in a workspace of its own, in the leads worktree", ()
   test.each([
     { label: "no --backend and no --account", extra: [] as string[] },
     { label: "--backend claude and no --account", extra: ["--backend", "claude"] },
+    { label: "--backend local", extra: ["--backend", "local"] },
   ])(`${OLD.dispatcher}-2 with $label is refused before herdr runs`, async ({ extra }) => {
     const r = await spawn(
       ["manager", `${OLD.dispatcher}-2`, `brief-${OLD.dispatcher}-2.md`, ...extra],
@@ -119,7 +119,7 @@ describe("a manager starts in a workspace of its own, in the leads worktree", ()
     expect(r.code).toBe(1)
     expect(placing(r)).toEqual([])
     expect(r.err).toContain(
-      `${OLD.dispatcher}-2, the second dispatcher, runs on --backend glm, or on Claude with --account <email>, a second account`,
+      `${OLD.dispatcher}-2, the second dispatcher, runs on --backend glm, or on Claude with --account <email>, a second account: on this machine's own login it would run out with the first, and --backend local takes no dispatcher, since a dispatcher plans`,
     )
   })
 
@@ -617,7 +617,7 @@ describe("a launch file removes itself once its launch starts", () => {
     const file = join(r.home, ".playground", "launch", "worker-brave-otter.sh")
     // The harness PATH, so the launch's claude is the fake and nothing real starts.
     const run = Bun.spawn(["bash", file], {
-      env: { ...process.env, HOME: r.home, PATH: `${bin}:${process.env.PATH}` },
+      env: scratchEnv(r.home, { PATH: `${bin}:${process.env.PATH}` }),
       stderr: "ignore",
       stdout: "ignore",
     })
@@ -673,12 +673,10 @@ describe("a launch names the main checkout in PLAYGROUND_REPO", () => {
     chmodSync(join(shim, "claude"), 0o755)
     const file = join(r.home, ".playground", "launch", "worker-brave-otter.sh")
     const run = Bun.spawn(["bash", file], {
-      env: {
-        ...process.env,
-        HOME: r.home,
+      env: scratchEnv(r.home, {
         PLAYGROUND_REPO: "",
         PATH: `${shim}:${bin}:${process.env.PATH}`,
-      },
+      }),
       stderr: "ignore",
       stdout: "ignore",
     })

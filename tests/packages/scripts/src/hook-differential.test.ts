@@ -19,10 +19,13 @@ import { dirname, join, relative, resolve } from "node:path"
 import {
   calls,
   canaryTree,
+  checkOf,
   cwdsOf,
   envOf,
+  GLM_BASE_URL,
   keyOf,
   linesOf,
+  loadedTree,
   parse,
   replay,
   resultPath,
@@ -35,9 +38,12 @@ import {
   sweep,
   TAKES_MAIN,
   type Check,
+  unloaded,
 } from "../../../../packages/scripts/src/hook-differential"
+import { scratchEnv } from "../../../scratch-env"
 
 const SCRIPT = join(import.meta.dir, "../../../../packages/scripts/src/hook-differential.ts")
+const SETTING = join(import.meta.dir, "../../../../packages/scripts/src/playground/setting.ts")
 const DIR = mkdtempSync(join(tmpdir(), "hook-differential-"))
 
 afterAll(() => rmSync(DIR, { force: true, recursive: true }))
@@ -56,10 +62,9 @@ const home = (name: string) => {
 }
 
 const start = (at: string, env: Record<string, string> = {}) => {
-  const { RUN_SLOT_NICE: _, ...rest } = process.env
   return Bun.spawnSync(["bun", SCRIPT, "replay", "--canary", "HEAD", "--hook", "no-such-hook"], {
     cwd: join(import.meta.dir, "../../../.."),
-    env: { ...rest, HOME: at, ...env },
+    env: scratchEnv(at, env),
     stderr: "pipe",
     stdout: "pipe",
   })
@@ -144,6 +149,63 @@ describe("canaryTree", () => {
     ).toThrow("could not install abc")
     canaryTree({ base, root: "/repo", run: recorder(steps), sha: "abc" })
     expect(steps).toHaveLength(6)
+  })
+})
+
+describe("a canary tree the temp cleaner emptied", () => {
+  // a tree as canaryTree leaves it: guards loads no-extensions-write, whose settings import zod, and the hook starts its worker module; emptied, zod keeps its folders and loses every file, as macOS's temp cleaner leaves an installed package by its age
+  const tree = (name: string, emptied: boolean) => {
+    const at = join(DIR, name)
+    const hooks = join(at, "scripts", "hooks")
+    const zod = join(at, "packages", "settings", "node_modules", "zod")
+    mkdirSync(hooks, { recursive: true })
+    mkdirSync(join(at, "packages", "settings", "src"), { recursive: true })
+    mkdirSync(join(zod, "v4"), { recursive: true })
+    writeFileSync(join(at, ".installed"), "")
+    writeFileSync(
+      join(at, "packages", "settings", "src", "settings.ts"),
+      'import { z } from "zod"\nexport const field = z.string()\n',
+    )
+    writeFileSync(
+      join(hooks, "no-extensions-write.ts"),
+      'import "../../packages/settings/src/settings"\nexport const check = () => undefined\n',
+    )
+    writeFileSync(
+      join(hooks, "no-extensions-write-worker.ts"),
+      'import "./no-extensions-write"\nself.onmessage = () => {}\n',
+    )
+    writeFileSync(
+      join(hooks, "guards.ts"),
+      'import "./no-extensions-write"\nexport const check = () => undefined\n',
+    )
+    if (!emptied) {
+      writeFileSync(join(zod, "package.json"), '{ "name": "zod", "main": "index.js" }')
+      writeFileSync(join(zod, "index.js"), "module.exports = { z: { string: () => ({}) } }\n")
+    }
+    return at
+  }
+
+  test("guards and its Worker module load in a whole tree, and an emptied one names the package they cannot find", async () => {
+    expect(await unloaded(tree("whole", false), ["guards"])).toBeUndefined()
+    expect(await unloaded(tree("emptied", true), ["guards"])).toContain("Cannot find package 'zod'")
+    expect(await unloaded(tree("emptied", true), [])).toContain("no-extensions-write-worker.ts")
+  })
+
+  test("an emptied tree is moved aside and built again, and one that stays emptied fails the run", async () => {
+    const emptied = tree("rebuilt", true)
+    const builds: string[] = []
+    const built = await loadedTree(() => {
+      builds.push(emptied)
+      if (builds.length === 2) tree("rebuilt", false)
+      return emptied
+    }, ["guards"])
+    expect(built).toBe(emptied)
+    expect(builds).toHaveLength(2)
+    expect(readdirSync(DIR).filter((n) => n.startsWith("rebuilt.pruned-"))).toHaveLength(1)
+    const stays = tree("stays", true)
+    await expect(
+      loadedTree(() => (existsSync(stays) ? stays : tree("stays", true)), ["guards"]),
+    ).rejects.toThrow("Cannot find package 'zod'")
   })
 })
 
@@ -328,14 +390,18 @@ describe("a run under a role", () => {
     return real
   }
 
-  test("the scratch data folder copies the roster and the writing-first marks, and links every other entry of the real one", () => {
+  test("the scratch data folder copies the roster, starts writing-first's marks empty, and links every other entry of the real one", () => {
     const real = realData("real-data")
     const data = scratchData(real, DIR)
     expect(data).not.toBe(real)
-    for (const copied of ["roster.json", "writing-first"])
-      expect(lstatSync(join(data, copied)).isSymbolicLink()).toBe(false)
+    for (const own of ["roster.json", "writing-first"])
+      expect(lstatSync(join(data, own)).isSymbolicLink()).toBe(false)
     expect(readFileSync(join(data, "roster.json"), "utf8")).toBe("{}")
-    expect(existsSync(join(data, "writing-first", "s1"))).toBe(true)
+    expect(readdirSync(join(data, "writing-first"))).toEqual([])
+    expect(existsSync(join(data, "writing-first", "s1"))).toBe(false)
+    expect(existsSync(join(scratchData(join(DIR, "no-such-data"), DIR), "writing-first"))).toBe(
+      true,
+    )
     for (const linked of ["extensions", "ops", "session-state", "ticket-approvals"]) {
       expect(lstatSync(join(data, linked)).isSymbolicLink()).toBe(true)
       expect(realpathSync(join(data, linked))).toBe(realpathSync(join(real, linked)))
@@ -486,13 +552,213 @@ describe("a run under a role", () => {
     expect(await calls(projects, Date.now() - 3600_000)).toEqual([{ command: "ls", cwd: "/h" }])
     const list = await calls(projects, Date.now() - 3600_000, true)
     expect(list.toSorted((x, y) => x.session!.localeCompare(y.session!))).toEqual([
-      { command: "ls", cwd: "/h", name: "abc-worker", session: "s1" },
-      { command: "ls", cwd: "/h", session: "s2" },
+      { command: "ls", cwd: "/h", loaded: false, name: "abc-worker", session: "s1" },
+      { command: "ls", cwd: "/h", loaded: false, session: "s2" },
     ])
   })
 })
 
-// A hook whose check() takes the main checkout reads it from its own folder when none is given, and canary's unpacked tree is no git checkout, so the differential hands both sides the head's (PG-996)
+// A transcript's lines as Claude Code writes them: a Bash or Skill call, a typed prompt and a compaction
+const bashLine = (
+  command: string,
+  session: string,
+  cwd = "/h",
+  timestamp = new Date().toISOString(),
+) =>
+  JSON.stringify({
+    cwd,
+    message: { content: [{ input: { command }, name: "Bash", type: "tool_use" }] },
+    sessionId: session,
+    timestamp,
+    type: "assistant",
+  })
+const skillLine = (skill: string, session: string, timestamp = new Date().toISOString()) =>
+  JSON.stringify({
+    cwd: "/h",
+    message: { content: [{ input: { skill }, name: "Skill", type: "tool_use" }] },
+    sessionId: session,
+    timestamp,
+    type: "assistant",
+  })
+const typedLine = (content: unknown, session: string) =>
+  JSON.stringify({ message: { content, role: "user" }, sessionId: session, type: "user" })
+const compactLine = (session: string) =>
+  JSON.stringify({ sessionId: session, subtype: "compact_boundary", type: "system" })
+
+describe("a replay of a mark-reading hook", () => {
+  test("by session each call says whether its transcript loaded writing-for-agents since its last compaction, a load before the window included", async () => {
+    const projects = join(DIR, "loaded-projects")
+    mkdirSync(join(projects, "p", "s1", "subagents"), { recursive: true })
+    const old = "2000-01-01T00:00:00Z"
+    writeFileSync(
+      join(projects, "p", "s1.jsonl"),
+      [
+        bashLine("echo a", "s1", "/h", old),
+        skillLine("writing-for-agents", "s1", old),
+        bashLine("echo b", "s1"),
+        compactLine("s1"),
+        bashLine("echo b", "s1"),
+        bashLine("echo c", "s1"),
+        typedLine("<command-name>/ws-home:writing-for-agents</command-name>", "s1"),
+        bashLine("echo d", "s1"),
+        compactLine("s1"),
+        typedLine([{ text: "/writing-for-agents", type: "text" }], "s1"),
+        bashLine("echo e", "s1"),
+        compactLine("s1"),
+        skillLine("writing-for-agents-draft", "s1"),
+        typedLine(
+          [{ content: "/writing-for-agents", tool_use_id: "t", type: "tool_result" }],
+          "s1",
+        ),
+        bashLine("echo f", "s1"),
+      ].join("\n"),
+    )
+    writeFileSync(join(projects, "p", "s1", "subagents", "a.jsonl"), bashLine("echo g", "s1"))
+    const since = Date.now() - 3600_000
+    const list = await calls(projects, since, true)
+    expect(list.map(({ command, loaded }) => [command, loaded]).toSorted()).toEqual([
+      ["echo b", false],
+      ["echo b", true],
+      ["echo c", false],
+      ["echo d", true],
+      ["echo e", true],
+      ["echo f", false],
+      ["echo g", false],
+    ])
+    for (const call of await calls(projects, since)) expect(call).not.toHaveProperty("loaded")
+  })
+
+  test("a compaction's summary that quotes a typed load is no load, since writing-first clears the mark at the compaction", async () => {
+    const projects = join(DIR, "summary-projects")
+    mkdirSync(join(projects, "p"), { recursive: true })
+    const summary = JSON.stringify({
+      isCompactSummary: true,
+      message: {
+        content:
+          "Summary: earlier the session ran <command-name>/writing-for-agents</command-name>.",
+        role: "user",
+      },
+      sessionId: "s1",
+      type: "user",
+    })
+    writeFileSync(
+      join(projects, "p", "s1.jsonl"),
+      [
+        typedLine("<command-name>/writing-for-agents</command-name>", "s1"),
+        bashLine("echo a", "s1"),
+        compactLine("s1"),
+        summary,
+        bashLine("echo b", "s1"),
+      ].join("\n"),
+    )
+    const list = await calls(projects, Date.now() - 3600_000, true)
+    expect(list.map(({ command, loaded }) => [command, loaded]).toSorted()).toEqual([
+      ["echo a", true],
+      ["echo b", false],
+    ])
+  })
+
+  // a factory checkout (its .git and core's playbook), a config with writing-for-agents installed, and one transcript that writes AGENTS.md before a load, after it and after a compaction
+  const writingFixture = (name: string) => {
+    const own = join(DIR, `${name}-config`)
+    mkdirSync(join(own, "skills", "writing-for-agents"), { recursive: true })
+    writeFileSync(join(own, "skills", "writing-for-agents", "SKILL.md"), "x")
+    const repo = join(DIR, `${name}-repo`)
+    mkdirSync(join(repo, ".git"), { recursive: true })
+    mkdirSync(join(repo, "extensions", "core", "skills", "playbook"), { recursive: true })
+    writeFileSync(join(repo, "extensions", "core", "skills", "playbook", "SKILL.md"), "x")
+    const projects = join(DIR, `${name}-projects`)
+    mkdirSync(join(projects, "p"), { recursive: true })
+    writeFileSync(
+      join(projects, "p", "s1.jsonl"),
+      [
+        bashLine("echo a > AGENTS.md", "s1", repo),
+        skillLine("ws-home:writing-for-agents", "s1"),
+        bashLine("echo b > AGENTS.md", "s1", repo),
+        compactLine("s1"),
+        bashLine("echo c > AGENTS.md", "s1", repo),
+      ].join("\n"),
+    )
+    return { own, projects }
+  }
+
+  test("writing-first refuses the call before a load and the one after a compaction and lets the one after a load pass, whatever marks the real data folder holds", async () => {
+    const { own, projects } = writingFixture("rebuilt")
+    const list = await calls(projects, Date.now() - 3600_000, true)
+    const writing = (await import("../../../../scripts/hooks/writing-first")).check as Check
+    const allowAll: Check = () => undefined
+    for (const marked of [true, false]) {
+      const real = join(DIR, `rebuilt-data-${marked}`)
+      mkdirSync(join(real, "writing-first"), { recursive: true })
+      if (marked) writeFileSync(join(real, "writing-first", "s1"), "")
+      const realEnv = { CLAUDE_CONFIG_DIR: own, HOME: DIR, PLAYGROUND_DATA_DIR: real }
+      const { config, roles } = await sessionRoles(list, realEnv, DIR)
+      const env = envOf({ config, data: scratchData(real, DIR), home: DIR, role: "session", roles })
+      const { changed, counts } = await replay(
+        allowAll,
+        writing,
+        list,
+        DIR,
+        undefined,
+        undefined,
+        env,
+      )
+      expect(counts).toEqual({ calls: 3, "newly allowed": 0, "newly refused": 2, same: 1 })
+      expect(changed.map((line) => line.split(" :: ")[1]).toSorted()).toEqual([
+        "echo a > AGENTS.md",
+        "echo c > AGENTS.md",
+      ])
+      expect(readdirSync(join(real, "writing-first"))).toEqual(marked ? ["s1"] : [])
+    }
+  })
+})
+
+describe("a GLM replay", () => {
+  test("--glm takes a replay alone, and its env points ANTHROPIC_BASE_URL where no-glm-heavy-path reads a GLM session", async () => {
+    const base = ["--canary", "HEAD", "--hook", "x"]
+    expect(parse(["replay", ...base, "--glm"])?.glm).toBe(true)
+    expect(parse(["replay", ...base])?.glm).toBe(false)
+    expect(parse(["sweep", "--forms", "f.ts", ...base, "--glm"])).toBeUndefined()
+    const call = { command: "ls", cwd: "/h" }
+    const glm = envOf({ data: "/d", glm: true, home: "/h" })(call)
+    expect(glm).toEqual({
+      ANTHROPIC_BASE_URL: GLM_BASE_URL,
+      HOME: "/h",
+      PATH: process.env.PATH,
+      PLAYGROUND_DATA_DIR: "/d",
+    })
+    const { onGlm } = await import("../../../../scripts/hooks/no-glm-heavy-path")
+    const raw = JSON.stringify({ session_id: "s1" })
+    expect(await onGlm(raw, glm)).toBe(true)
+    expect(await onGlm(raw, envOf({ data: "/d", home: "/h" })(call))).toBe(false)
+  })
+
+  test("--glm keeps each Bash call a GLM model made, by the call's own model, from every transcript on disk whatever its age", async () => {
+    const projects = join(DIR, "glm-projects")
+    mkdirSync(join(projects, "p"), { recursive: true })
+    const modelLine = (command: string, model: string, timestamp = new Date().toISOString()) =>
+      JSON.stringify({
+        cwd: "/h",
+        message: { content: [{ input: { command }, name: "Bash", type: "tool_use" }], model },
+        timestamp,
+        type: "assistant",
+      })
+    writeFileSync(join(projects, "p", "claude.jsonl"), modelLine("echo a", "claude-opus-5-5"))
+    const old = join(projects, "p", "old-glm.jsonl")
+    writeFileSync(old, modelLine("echo b", "glm-5.3", "2000-01-01T00:00:00Z"))
+    utimesSync(old, 1_000, 1_000)
+    writeFileSync(
+      join(projects, "p", "mixed.jsonl"),
+      [modelLine("echo c", "glm-5.3-flash"), modelLine("echo d", "claude-sonnet-5-5")].join("\n"),
+    )
+    const since = Date.now() - 3600_000
+    const commands = (list: { command: string }[]) => list.map((c) => c.command).toSorted()
+    expect(commands(await calls(projects, since, false, true))).toEqual(["echo b", "echo c"])
+    expect(commands(await calls(projects, since))).toEqual(["echo a", "echo c", "echo d"])
+  })
+})
+
+// A hook whose check() takes the main checkout reads it from its own folder when none is given, and canary's unpacked tree is no checkout of the repository, so the differential hands both sides the head's (PG-996)
 describe("a hook that takes the main checkout", () => {
   // refuses a command that names its main checkout; with none given, main is the folder it would read from its own tree
   const guard =
@@ -517,6 +783,30 @@ describe("a hook that takes the main checkout", () => {
       "newly refused": 0,
       same: 1,
     })
+  })
+
+  test("guards gives its main-checkout guards the head's main checkout on both sides, so a form naming it reads the same", async () => {
+    // a side's guards runs its GUARDS, whose no-main-checkout reads its own tree as main unless given one, as the real hook's default does
+    const side = (name: string) => {
+      const hooks = join(DIR, "guards-main", name, "scripts", "hooks")
+      mkdirSync(hooks, { recursive: true })
+      writeFileSync(
+        join(hooks, "no-main-checkout.ts"),
+        'export const check = (raw: string, _env: unknown, main = import.meta.dir) => JSON.parse(raw).tool_input.command.includes(`${main}/`) ? "refused" : undefined\n',
+      )
+      writeFileSync(
+        join(hooks, "guards.ts"),
+        'import { check as mainCheckout } from "./no-main-checkout"\nexport const GUARDS = [{ factory: true, name: "no-main-checkout", run: (raw: string, env: unknown) => mainCheckout(raw, env) }]\nexport const check = async (raw: string, env: unknown, guards = GUARDS) => (await Promise.all(guards.map((g) => g.run(raw, env)))).find(Boolean)\n',
+      )
+      return join(hooks, "guards.ts")
+    }
+    const command = `echo x > ${join(DIR, "guards-main", "head", "scripts", "hooks")}/f`
+    const raw = JSON.stringify({ tool_input: { command } })
+    const main = join(DIR, "guards-main", "head", "scripts", "hooks")
+    const canary = await checkOf(side("canary"), "guards", main)
+    const head = await checkOf(side("head"), "guards", main)
+    expect(await head(raw, {})).toBe("refused")
+    expect(await canary(raw, {})).toBe("refused")
   })
 
   test("TAKES_MAIN names every hook whose check() takes the main checkout, and only those", async () => {
@@ -676,15 +966,9 @@ describe("a stored result", () => {
   ]
 
   const run = (at: string, root: string, argv: string[], env: Record<string, string> = {}) => {
-    const {
-      CLAUDE_CONFIG_DIR: _c,
-      PLAYGROUND_DATA_DIR: _d,
-      RUN_SLOT_NICE: _r,
-      ...rest
-    } = process.env
     return Bun.spawnSync(["bun", SCRIPT, ...argv], {
       cwd: root,
-      env: { ...rest, HOME: at, TMPDIR: DIR, ...env },
+      env: scratchEnv(at, { TMPDIR: DIR, ...env }),
       stderr: "pipe",
       stdout: "pipe",
     })
@@ -932,12 +1216,119 @@ export const check = (raw: string, env: Record<string, string | undefined>) => {
       hook: "z",
       role: "session",
       "default role": 1,
+      marked: 0,
       calls: 2,
       "newly allowed": 0,
       "newly refused": 1,
       same: 1,
     })
     expect(existsSync(join(at, ".playground", "wrote"))).toBe(false)
+  })
+
+  test("each mark-reading hook replays against the marks its transcripts rebuild alone, so neither the real marks nor an earlier hook's run moves its count", () => {
+    const at = home("marks")
+    const { root } = repo("marks-repo")
+    const hooks = join(root, "scripts", "hooks")
+    // refuses a call holding REFUSE while its session has no writing-first mark
+    const reader = `import { existsSync } from "node:fs"
+export const check = (raw: string, env: Record<string, string | undefined>) =>
+  raw.includes("REFUSE") && !existsSync(\`\${env.PLAYGROUND_DATA_DIR}/writing-first/\${JSON.parse(raw).session_id}\`) ? "refused" : undefined
+`
+    for (const hook of ["m1", "m2"]) writeFileSync(join(hooks, `${hook}.ts`), reader)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "head")
+    mkdirSync(join(at, ".claude", "projects", "p"), { recursive: true })
+    writeFileSync(
+      join(at, ".claude", "projects", "p", "s1.jsonl"),
+      [
+        bashLine("cat REFUSE", "s1", join(at, "w")),
+        skillLine("writing-for-agents", "s1"),
+        bashLine("ls REFUSE", "s1", join(at, "w")),
+      ].join("\n"),
+    )
+    // a mark the session holds today, which would let its call from before the load pass
+    mkdirSync(join(at, ".playground", "writing-first"), { recursive: true })
+    writeFileSync(join(at, ".playground", "writing-first", "s1"), "")
+    const done = run(
+      at,
+      root,
+      ["replay", "--canary", "HEAD~1", "--hook", "m1", "--hook", "m2", "--role", "session"],
+      { RUN_SLOT_NICE: "10" },
+    )
+    expect(done.exitCode).toBe(0)
+    const lines = done.stdout
+      .toString()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(lines).toEqual(
+      ["m1", "m2"].map((hook) => ({
+        hook,
+        baseline: "allow-all: canary has no such hook",
+        role: "session",
+        "default role": 2,
+        marked: 1,
+        calls: 2,
+        "newly allowed": 0,
+        "newly refused": 1,
+        same: 1,
+      })),
+    )
+    expect(done.stderr.toString()).toContain("refused")
+    expect(readdirSync(join(at, ".playground", "writing-first"))).toEqual(["s1"])
+  })
+
+  test("a --glm replay reads a GLM session's call from before the window as a GLM session's, and its counts line says so", () => {
+    const at = home("glm")
+    const { root } = repo("glm-repo")
+    // refuses a call holding REFUSE from a session on the GLM endpoint
+    writeFileSync(
+      join(root, "scripts", "hooks", "g.ts"),
+      `export const check = (raw: string, env: Record<string, string | undefined>) =>
+  raw.includes("REFUSE") && /api\\.z\\.ai/.test(env.ANTHROPIC_BASE_URL ?? "") ? "refused" : undefined
+`,
+    )
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "head")
+    mkdirSync(join(at, ".claude", "projects", "p"), { recursive: true })
+    const transcript = join(at, ".claude", "projects", "p", "s1.jsonl")
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        cwd: join(at, "w"),
+        message: {
+          content: [{ input: { command: "ls REFUSE" }, name: "Bash", type: "tool_use" }],
+          model: "glm-5.3",
+        },
+        sessionId: "s1",
+        timestamp: "2000-01-01T00:00:00Z",
+        type: "assistant",
+      }),
+    )
+    utimesSync(transcript, 1_000, 1_000)
+    const counts = (...more: string[]) => {
+      const done = run(at, root, ["replay", "--canary", "HEAD~1", "--hook", "g", ...more], {
+        RUN_SLOT_NICE: "10",
+      })
+      expect(done.exitCode).toBe(0)
+      return JSON.parse(done.stdout.toString().trim())
+    }
+    expect(counts()).toMatchObject({ calls: 0 })
+    expect(counts("--glm")).toEqual({
+      hook: "g",
+      baseline: "allow-all: canary has no such hook",
+      glm: true,
+      calls: 1,
+      "newly allowed": 0,
+      "newly refused": 1,
+      same: 0,
+    })
+  })
+
+  test("--glm moves the key, so a result is never reused for the other read", () => {
+    const { root, sha } = repo("glm-key-repo")
+    const replayArgs = ["replay", "--canary", "HEAD", "--hook", "x"]
+    expect(keyAt(root, [...replayArgs, "--glm"], sha)).not.toBe(keyAt(root, replayArgs, sha))
   })
 
   test("--role moves the key, so a result is never reused for another role", () => {
@@ -975,5 +1366,42 @@ export const check = (raw: string, env: Record<string, string | undefined>) => {
     expect(existsSync(join(at, ".playground", "hook-differential", "results"))).toBe(false)
     expect(run(at, root, sweepAt()).stdout.toString()).not.toContain("reused:")
     expect(readFileSync(join(at, "tickets"), "utf8")).toContain(`-- bun ${SCRIPT} sweep`)
+  })
+
+  // a repo with a made-up GitHub origin whose hook x reads the factory's repository from its own copy's checkout, as no-protected-push's factoryRepo does through setting.ts, and refuses a merge there, or anywhere while it reads none; canary's unpacked tree has no origin of its own (PG-2036)
+  test("a hook that reads its own checkout's origin gives the same verdict on both sides, since canary's tree takes the head main checkout's origin", () => {
+    const at = home("origin")
+    const { root } = repo("origin-repo")
+    git(root, "remote", "add", "origin", "git@github.com:acme/made-up.git")
+    writeFileSync(
+      join(root, "scripts", "hooks", "x.ts"),
+      `import { resolve } from "node:path"
+import { originRepo } from ${JSON.stringify(SETTING)}
+export const check = (raw: string) => {
+  const repo = originRepo(resolve(import.meta.dir, "../.."))
+  return !repo || raw.includes(\`--repo \${repo} \`) ? "refused" : undefined
+}
+`,
+    )
+    git(root, "commit", "-qam", "reads its origin")
+    mkdirSync(join(at, ".claude", "projects", "p"), { recursive: true })
+    writeFileSync(
+      join(at, ".claude", "projects", "p", "s1.jsonl"),
+      [
+        bashLine("gh pr merge 1 --repo acme/made-up --squash", "s1", join(at, "w")),
+        bashLine("gh pr merge 2 --repo other/elsewhere --squash", "s1", join(at, "w")),
+      ].join("\n"),
+    )
+    const done = run(at, root, ["replay", "--canary", "HEAD", "--hook", "x", "--fresh"], {
+      RUN_SLOT_NICE: "10",
+    })
+    expect(done.exitCode).toBe(0)
+    expect(JSON.parse(done.stdout.toString().trim())).toEqual({
+      hook: "x",
+      calls: 2,
+      "newly allowed": 0,
+      "newly refused": 0,
+      same: 2,
+    })
   })
 })

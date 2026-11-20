@@ -1,7 +1,17 @@
 "use client"
 
 import type { InboxAction, InboxItem, InboxPreview, InboxUpdate } from "@api/hono"
-import { type AskQuestion, type Choices, questionsOf } from "@packages/config/inbox"
+import {
+  type AskQuestion,
+  type Choices,
+  INSTALL_TEXT,
+  PEER_INSTALL_TEXT,
+  PEER_POLICY,
+  PEER_RULE,
+  questionsOf,
+  ROOT_DIR,
+  ROOT_STEPS,
+} from "@packages/config/inbox"
 import type { DISPATCHER_SLOT_LABELS } from "@packages/config/kinds"
 import {
   RiAlarmWarningLine,
@@ -20,9 +30,11 @@ import {
   RiEyeOffLine,
   RiFileCopyLine,
   RiGitMergeLine,
+  RiGitRepositoryLine,
   RiInboxLine,
   RiInboxUnarchiveLine,
   RiKey2Line,
+  RiLockPasswordLine,
   RiMoneyDollarCircleLine,
   RiProgress4Line,
   RiPuzzleLine,
@@ -194,11 +206,13 @@ const DECISION_ICONS: Record<InboxPreview["type"], RemixiconComponentType> = {
   apps: RiAppsLine,
   ask: RiQuestionAnswerLine,
   budget: RiMoneyDollarCircleLine,
+  clone: RiGitRepositoryLine,
   delete: RiDeleteBinLine,
   grant: RiShieldKeyholeLine,
   guard: RiShieldCheckLine,
   own: RiUserStarLine,
   reveal: RiKey2Line,
+  root: RiLockPasswordLine,
   schema: RiTableLine,
   secret: RiKey2Line,
   ship: RiShipLine,
@@ -714,7 +728,7 @@ function Preview({ item }: { item: Extract<InboxItem, { kind: "decision" }> }) {
       if (preview.sink.type === "keychain")
         return (
           <p>
-            On Submit, the value is saved in this Mac's Keychain as its{" "}
+            On Submit, the value is saved in this computer's secret store as its{" "}
             <code className="font-mono">{preview.sink.item}</code> item. It is kept nowhere else.
           </p>
         )
@@ -766,13 +780,33 @@ function Preview({ item }: { item: Extract<InboxItem, { kind: "decision" }> }) {
           <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
         </>
       )
+    case "clone":
+      // each repo and the very folder Approve fills, in the order it clones them
+      return (
+        <>
+          <p>
+            On Approve, the dashboard clones these repos into this machine&apos;s extensions, in
+            order, and stops at the first that fails. Then it copies the guards&apos; lists from
+            this checkout into your login&apos;s lists, keeping each one already there. It makes no
+            repo.
+          </p>
+          <ol className="list-decimal pl-5">
+            {preview.repos.map((repo) => (
+              <li key={repo.scope}>
+                <code className="font-mono break-all">{repo.repo}</code> into{" "}
+                <code className="font-mono break-all">{repo.folder}</code>
+              </li>
+            ))}
+          </ol>
+          <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
+        </>
+      )
     case "reveal":
       return (
         <>
           <p>
-            Shows this Mac&apos;s Keychain item{" "}
-            <code className="font-mono break-all">{preview.service}</code> here when you click Show
-            or Copy. It is kept nowhere else.
+            Shows the <code className="font-mono break-all">{preview.service}</code> item from this
+            computer&apos;s secret store here when you click Show or Copy. It is kept nowhere else.
           </p>
           <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
           {item.status === "open" && !isArchived(item) && !config.hosted && (
@@ -789,6 +823,93 @@ function Preview({ item }: { item: Extract<InboxItem, { kind: "decision" }> }) {
             you turn it on for the app that runs {agentLabel(item.from)}, and{" "}
             {agentLabel(item.from)} checks it again.
           </p>
+          <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
+        </>
+      )
+    case "root":
+      // a peer's card names the machine and how its one password is used; an install shows the very program text sudo or pkexec runs and each script's hash it checks, so the owner approves the exact bytes
+      if (preview.machine)
+        return preview.step === "install" ? (
+          <>
+            <p>
+              On Approve, the Dashboard copies each script below to {preview.machine}, then runs
+              this program there as root through sudo, with the admin password from your secret
+              card. The password is used once, then deleted from this computer. It copies each
+              script into <code className="font-mono">{ROOT_DIR}</code> only if its sha256 matches,
+              then lets your user on {preview.machine} run those scripts alone as root with no
+              password, through <code className="font-mono">{PEER_RULE}</code>.
+            </p>
+            <ul className="list-disc pl-5">
+              {preview.scripts?.map((script) => (
+                <li key={script.name}>
+                  <code className="font-mono">{script.name}</code>:{" "}
+                  <code className="font-mono break-all">{script.sha256}</code>
+                </li>
+              ))}
+            </ul>
+            <pre className={`${QUOTE} font-mono text-xs`}>{PEER_INSTALL_TEXT}</pre>
+            <p>
+              To undo it: remove <code className="font-mono">{PEER_RULE}</code> and{" "}
+              <code className="font-mono">{PEER_POLICY}</code> on {preview.machine}.
+            </p>
+            <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
+          </>
+        ) : (
+          <>
+            <p>
+              On Approve, the Dashboard checks{" "}
+              <code className="font-mono break-all">
+                {ROOT_DIR}/{preview.step}
+              </code>{" "}
+              on {preview.machine}, then runs it there as root, with no password, through the rule
+              its install card set up. {ROOT_STEPS[preview.step].what}.
+            </p>
+            <p>
+              To undo it: {ROOT_STEPS[preview.step].undo}, on {preview.machine}.
+            </p>
+            <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
+          </>
+        )
+      return preview.step === "install" ? (
+        <>
+          <p>
+            On Approve, your computer asks for your password in its own window, then runs this
+            program as root. It copies each script below into{" "}
+            <code className="font-mono">{ROOT_DIR}</code> only if its sha256 matches.
+          </p>
+          <ul className="list-disc pl-5">
+            {preview.scripts?.map((script) => (
+              <li key={script.name}>
+                <code className="font-mono">{script.name}</code>:{" "}
+                <code className="font-mono break-all">{script.sha256}</code>
+              </li>
+            ))}
+          </ul>
+          {preview.ca ? (
+            <p>
+              It also keeps the Dashboard&apos;s certificate as root, only if its sha256 is{" "}
+              <code className="font-mono break-all">{preview.ca.sha256}</code>. A new certificate
+              needs a new install card.
+            </p>
+          ) : (
+            <p>
+              The Dashboard has no certificate yet, so chromium-ca refuses until a later install
+              card carries one.
+            </p>
+          )}
+          <pre className={`${QUOTE} font-mono text-xs`}>{INSTALL_TEXT}</pre>
+          <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
+        </>
+      ) : (
+        <>
+          <p>
+            On Approve, your computer asks for your password in its own window, then runs{" "}
+            <code className="font-mono break-all">
+              {ROOT_DIR}/{preview.step}
+            </code>{" "}
+            as root. {ROOT_STEPS[preview.step].what}.
+          </p>
+          <p>To undo it: {ROOT_STEPS[preview.step].undo}.</p>
           <p className="break-words whitespace-pre-wrap">Why: {preview.why}</p>
         </>
       )
@@ -1051,6 +1172,8 @@ export function InboxCard({
   const secretAsk = secretKey !== null
   // a secret ask's or a reveal card's Reply stays in its own box, never the chat's composer, so its value reaches no chat (the API refuses a reveal card's comment that holds its value)
   const keepsReply = secretAsk || (item.kind === "decision" && item.preview.type === "reveal")
+  // set by such a card's empty-box Reply, so a muted line under its box says where the note goes, until the box holds text
+  const [hinted, setHinted] = useState(false)
   const titleId = useId()
   // every write the card makes goes through here, and a card whose answer the relay does not carry sends nothing; a refusal shows in the Mac's own words
   const settle = async (write: () => Promise<unknown>) => {
@@ -1140,6 +1263,7 @@ export function InboxCard({
     if (route !== "send") {
       // only a folded card is opened, so one open by default still folds once answered
       if (folded) flushSync(() => setToggled(true))
+      if (keepsReply && text === "") setHinted(true)
       document.getElementById(commentId)?.focus()
       return
     }
@@ -1435,7 +1559,7 @@ export function InboxCard({
       {buttons.includes("archive") &&
         verb(
           "Archive",
-          "out of your list, unanswered; its poster keeps waiting and is told nothing",
+          "onto the Archive shelf, as it stands; its poster is told nothing, and one that waits keeps waiting",
           <RiArchive2Line />,
           () => void onAnswer("archive"),
         )}
@@ -1613,11 +1737,25 @@ export function InboxCard({
         {/* a box turned disabled drops focus to the page, so words dictated or typed as a card above leaves land nowhere: it stays enabled while the card is paused and turns read-only while its answer is on its way */}
         <NoteBox
           id={commentId}
-          placeholder={noted ? "Add an optional comment" : "Add a comment"}
+          placeholder={
+            keepsReply && !config.hosted
+              ? "Type a note to Playground, then press Reply"
+              : noted
+                ? "Add an optional comment"
+                : "Add a comment"
+          }
           readOnly={pending}
           value={note}
-          onChange={(event) => setNote(event.target.value)}
+          onChange={(event) => {
+            setNote(event.target.value)
+            if (event.target.value.trim() !== "") setHinted(false)
+          }}
         />
+        {hinted && (
+          <p className="text-muted-foreground mt-2 text-xs">
+            Type your note in the box above, then press Reply. The token goes in its own field
+          </p>
+        )}
       </CardContent>
     ) : null
 

@@ -31,7 +31,7 @@ export type TemplateStarted =
 // What a Claude second dispatcher with no account of its own waits on, said as the owner's next step.
 export const NEEDS_ACCOUNT = "Add a second Claude account in Settings > Accounts"
 
-// Pure: the argv each step of a template's start runs, in order: an orchestrator's roster row, then spawn.sh's manager start with the template's backend (--backend glm for a GLM model), account, model and effort; or why it cannot start.
+// Pure: the argv each step of a template's start runs, in order: an orchestrator's roster row, then spawn.sh's manager start with the template's backend (--backend glm for a GLM model, --backend local with its effort for the local one), account, model and effort; or why it cannot start.
 export function templateArgv({
   account,
   dispatcher,
@@ -53,11 +53,13 @@ export function templateArgv({
   const flags =
     backend === "glm"
       ? ["--backend", "glm"]
-      : [
-          ...(account ? ["--account", account] : []),
-          ...(model ? ["--model", model] : []),
-          ...(effort ? ["--effort", effort] : []),
-        ]
+      : backend === "local"
+        ? ["--backend", "local", ...(effort ? ["--effort", effort] : [])]
+        : [
+            ...(account ? ["--account", account] : []),
+            ...(model ? ["--model", model] : []),
+            ...(effort ? ["--effort", effort] : []),
+          ]
   const start = [join(root, "scripts/spawn.sh"), "manager", name, briefOf(name), ...flags]
   if (kind === "dispatcher") return { steps: [start] }
   const row = [

@@ -16,7 +16,7 @@ After each fix, run `playground` again: it starts what is down.
 ## Docker is not running
 
 The Dashboard keeps its data in a Postgres container on your Mac, so it starts only while Docker (or OrbStack) runs.
-On a first run, **Start a local container** on the Database row of **Let's check this Mac** makes that container with pglaunch, and it listens on every interface with pglaunch's own credentials (user, password and database `postgres`), so anyone who can reach this Mac on its port can read and change it ([Install](/docs/install#the-dashboards-database)).
+On a first run, **Start a local container** on the Database row of **Let's check this Mac** makes that container, listening on 127.0.0.1 alone with a random password ([Install](/docs/install#the-dashboards-database)).
 
 - **Docker is not running** on the Database row: start Docker or OrbStack, then click **Start a local container** again, or click **Start without Docker**, which keeps the database as PGlite with no container ([Install](/docs/install#the-dashboards-database)).
 - **PGlite in `<folder>` did not start** on the Database row or from `bun run dev`: the line after it is the server's own words, and the folder's `server.log` holds the rest.
@@ -26,8 +26,12 @@ On a first run, **Start a local container** on the Database row of **Let's check
 - **PGlite databases `<a>` and `<b>` both record port `<n>`** from `bun run dev`: one of the two is a stale record from another checkout; delete the folder of the one `POSTGRES_URL` does not use.
 - **`<.env path>` already names a database (POSTGRES_URL)** on the Database row: `.env` already holds a database address, which setup never overwrites.
   Restart `bun run dev` to use it, or empty that line to have setup make a new one.
-- **pglaunch printed no database address** on the Database row: pglaunch could not start the container, and the row shows what it printed.
+- **`docker run <container> failed`** on the Database row: Docker could not start the container, and the row shows what it printed.
   Fix what it names, then click **Start a local container** again.
+- **`<container> publishes port <port> beyond loopback`**: the database was made before it listened on 127.0.0.1 alone, so other devices on your network can reach it, and the Dashboard refuses to write to it.
+  On the Database row, click **Move the database onto this Mac alone**; otherwise `playground update` moves it as the Dashboard rolls.
+  The move keeps its data and leaves the old container stopped as `<container>-old`; once the Dashboard shows your sessions, remove that one with `docker rm -v <container>-old`.
+  A failed move starts the old container again as it was and names why.
 - **Postgres in `<container>` did not start in 30 seconds** on the Database row: the container started, but its database did not answer.
   Click **Start a local container** again, which reuses that container; if it fails again, remove it with `docker rm -f -v <container>`, which deletes its data.
 - **`docker ps failed`** or **`docker inspect failed`**: Docker is not answering.
@@ -47,11 +51,31 @@ Your sessions run in herdr, which `playground` starts, and `playground view` ope
 - **`MISSING herdr`** in `playground doctor`, or **`herdr at <path> cannot be read`** in the log: Playground's own herdr is missing or changed (a `herdr update` changes it). Run `playground herdr pin`, which puts the pinned version back.
 - **`herdr-pin: <asset> <version> has sha256 <got>, not the pinned <want>; nothing was installed`**: the download is not the release Playground pins, so nothing was installed. Run `playground herdr pin` again; when it repeats, the release changed upstream and the pin needs a PR.
 
+## The test browser on Linux
+
+- **`MISSING test browser`** in `playground doctor` on Linux arm64: the browser that agents check pages in is not set up. Chrome for Testing has no build for this machine, so it runs Playwright's Chromium, named in agent-browser's own settings file, `~/.agent-browser/config.json`, without the sandbox Linux blocks. Run the steps the line names, in order, once for the whole machine.
+
+## The browser does not trust the Dashboard on Linux
+
+On Linux, portless's proxy serves the Dashboard under its own certificate, `ca.pem` in portless's folder (`~/.portless/fallback` while the Dashboard runs on port 1355, else `~/.portless`), and no browser trusts it until you add it to that browser's own store. A tab that clicked through the warning shows the page, but the page's calls to the API's address fail in the background, so the Dashboard reads the server as down.
+
+- **The app's server did not answer. It may be restarting, or this browser may not trust the Dashboard's certificate yet** on first run: this browser cannot reach the API's address, so first run cannot show its checks. Run `playground doctor` in a terminal: its `browser certificate` line names the fix, as below.
+- **Certificate** reads `not trusted in 1 Firefox profile` (or more) in first run's checks or Settings' **Things to fix**, or **`MISSING browser certificate`** in `playground doctor`: a Firefox profile does not trust the certificate yet. Click **Trust it in Firefox**, or run `bun packages/scripts/src/playground/ca-trust.ts` in the main folder. Each adds the certificate to every Firefox profile (snap's under `~/snap/firefox/common/.mozilla/firefox`, a deb or tarball Firefox's under `~/.mozilla/firefox`, Firefox 147's and later's under `~/.config/mozilla/firefox`, and flatpak's under `~/.var/app/org.mozilla.firefox`). Then restart Firefox, since a browser that is already open keeps its old store.
+- **Certificate** reads **`certutil not found`**, an optional row that lets first run finish, while doctor's line reads `MISSING`: adding the certificate to Firefox needs your distro's NSS tools, which you can skip when you do not use Firefox. Install them (`libnss3-tools` on Debian and Ubuntu, `nss-tools` on Fedora), then trust it again. Playground installs nothing for you here.
+- **Certificate** reads **`check your browser`**, or doctor's line reads `optional`: a Chromium-family browser (Chrome, Chromium, Brave, Edge, Vivaldi or Helium) is installed. It trusts the certificate through its own certificate manager, and no file shows whether you have added it there, so this row stays optional; Helium can trust it through the `chromium-ca` root step's browser policy instead (below), which the row reads as ok. The shared `~/.pki/nssdb` store is not enough: Chromium 157 and 159 were measured to ignore it. Add the certificate in the browser itself:
+  1. Open `chrome://certificate-manager`.
+  2. Go to **Local certificates**, then **Custom**, **Installed by you**, **Trusted certificates**, and click **Import**.
+  3. Pick the `ca.pem` the row names.
+  4. Restart the browser.
+- **Helium or Chrome for Testing, with no import**: approve the `chromium-ca` root step card in the Inbox with **Run chromium-ca as root**, after an install card that carries the Dashboard's certificate. It writes a browser policy that trusts the certificate for `.localhost` addresses alone, in `/etc/chromium/policies/managed/` (Helium's) and `/etc/opt/chrome_for_testing/policies/managed/` (the test browser's). Restart Helium once; it may then show **Managed by your organization** in its menu. To undo it, remove `portless-ca.json` from both folders.
+  When portless makes a new certificate, every `.localhost` page in those browsers fails with `ERR_CERT_AUTHORITY_INVALID` until you approve a new install card and the step again.
+- **The address still reads `Not secure` after the import**: you clicked through the warning before the import, and the browser keeps that choice. Click **Not secure** left of the address. The panel says "You have chosen to turn off security warnings for this site." Click **Turn on warnings**, then reload.
+
 ## A port is in use
 
 - **`Port <number> is already in use`** in the log: another program holds the port every local Playground address goes through.
   Run `lsof -ti tcp:<number>`, with the number from that line, to see which process holds it.
-  If it is an older Playground proxy, stop it with `bunx portless proxy stop`; that stops every Playground stack on this Mac until it starts again.
+  If it is an older Playground proxy, stop it with `bunx portless proxy stop -p <number>`, the same number; that stops every Playground stack on this Mac until it starts again.
 - **`portless's proxy is not running on port 443, which needs your Mac's password, so it runs on 1355`** when you run `bun run dev`: this Mac has no Playground proxy on 443 yet, so the Dashboard's address carries `:1355` for now.
   In Settings' **Things to fix**, **Set up the web address** sets it up on 443 and asks for your Mac's password in its own window; the Dashboard keeps running on 1355 and moves to 443 the next time it starts.
   When the line goes on to say your browser warns that the certificate is not trusted, the 1355 address uses a certificate your Mac does not trust yet: accept the warning once on the Dashboard's address and once on its API's (`api.` in front), then click **Set up the web address**; the next start on 443 shows no warning.
@@ -60,6 +84,16 @@ Your sessions run in herdr, which `playground` starts, and `playground view` ope
   Or run `PORTLESS=0 bun run dev`, which serves the app on fixed ports instead.
 - **`a stack already runs in this checkout`** when you run `bun run dev` yourself: the Dashboard already runs from this folder.
   Use the one that runs, or stop it with `bun run dev:stop` first.
+
+## Alpha does not start
+
+- **`Claude Code would stop on its folder trust question in <folder>`** when Alpha or another session starts: Claude Code asks once whether you trust Playground's folder, and you have not said yes yet.
+  The install script says yes for the folder it cloned, so this shows for another folder, or when the install could not write Claude Code's config and said why under Left for you.
+  Click **Trust this folder** on Claude Code's card, in first run's Harness step or under Harness in Settings, then start it again.
+- **`it is parked until <time> (usage.accounts parkedUntil). usage.accounts also lists <accounts>`** when a session starts: the one Claude account signed in on this computer is parked, and the accounts named are not signed in here.
+  Sign one in with **Add account** in the Dashboard's Settings, then start it again.
+- **`No database yet: finish first-run setup on the Dashboard, then run this again.`** from `playground ask` or `bun run thread`: first run has not made the Dashboard's database yet.
+  Finish the Database row on the Dashboard, then run the command again.
 
 ## A session paused on its usage limit
 

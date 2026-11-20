@@ -60,6 +60,59 @@ describe("slots 2 to 4 open on the CPU's idle share", () => {
   })
 })
 
+// a machine whose cached reading, `line` after its epoch second, is the one the next look reads: an epoch of 0 is past its 10 s, so the look reads top again with the cached idle as the reading before; the current second keeps it
+const cached = (setup: Setup, line: string, fresh = false) => {
+  const m = machine(setup)
+  writeFileSync(
+    join(m.ops, "run-slot.gauges"),
+    `${fresh ? Math.floor(Date.now() / 1000) : 0} ${line}\n`,
+  )
+  return m
+}
+
+// issue 2405, 16 Nov 07:14 to 17:01Z: the next lanes line reopened all 59 CPU shuts, a median 17 s later, such as 4.41% idle at 16:51:08Z and 86.51% at 16:51:22Z
+describe("one CPU reading under the bar leaves slots 2 to 4 open, and two in a row shut them, as mem_ok reads the swap-ins", () => {
+  test("39.9% after 80% leaves them open", () => {
+    expect(look(cached({ idle: 39.9, load1: 18 }, "80 0 120 3.50 0 -")).slots).toBe("4\n")
+  })
+
+  test("39.9% after 39.9% shuts them, and a run logs why=cpu", async () => {
+    expect(look(cached({ idle: 39.9, load1: 18 }, "39.9 0 120 3.50 0 -")).slots).toBe("1\n")
+    const m = cached({ idle: 39.9, load1: 18 }, "39.9 0 120 3.50 0 -")
+    expect(await m.runs("worker-x")).toBe(true)
+    expect(lanes(m)).toEqual([expect.stringMatching(/ shut why=cpu idle=39\.9% load1=18\.00 /)])
+  })
+
+  test("80% after 39.9% opens them", () => {
+    expect(look(cached({ idle: 80, load1: 18 }, "39.9 0 120 3.50 0 -")).slots).toBe("4\n")
+  })
+
+  // the last idle moves only when a look reads top afresh, so two looks inside one 10 s window read one low sample once, not twice
+  test("two looks on one 39.9% sample taken after 80% leave them open, with one top between them", () => {
+    const m = cached({ idle: 39.9, load1: 18 }, "80 0 120 3.50 0 -")
+    expect(look(m).slots).toBe("4\n")
+    expect(look(m).slots).toBe("4\n")
+    expect(readFileSync(join(m.root, "top.log"), "utf8")).toBe("-l 2 -n 0\n")
+  })
+
+  test("a look within the cache's 10 s reads the last idle from it: 39.9% after 80% open, after 39.9% shut", () => {
+    expect(look(cached({ load1: 18 }, "39.9 0 120 3.50 0 80", true)).slots).toBe("4\n")
+    expect(look(cached({ load1: 18 }, "39.9 0 120 3.50 0 39.9", true)).slots).toBe("1\n")
+  })
+
+  // a cache written before the last idle's field, as the live one is at the roll, has six fields: its last idle reads unread, so the current reading decides alone, as it did
+  test("a six-field cache from before the roll lets the current reading decide alone", () => {
+    expect(look(cached({ load1: 18 }, "39.9 0 120 3.50 0", true)).slots).toBe("1\n")
+    expect(look(cached({ load1: 18 }, "80 0 120 3.50 0", true)).slots).toBe("4\n")
+    expect(look(cached({ load1: 18 }, "80 100 120 3.50 100", true)).slots).toBe("1\n")
+  })
+
+  test("mem_ok reads the last swap-ins from a seven-field cache, past the last idle beside it", () => {
+    expect(look(cached({ load1: 18 }, "80 100 120 3.50 100 80", true)).slots).toBe("1\n")
+    expect(look(cached({ load1: 18 }, "80 100 120 3.50 99 80", true)).slots).toBe("4\n")
+  })
+})
+
 // load1 64 after a burst of starts, 73 after a clone let through at load5 under 30, and 58 at 04:15Z on 3 Nov: a spike shuts the lanes however idle top found the CPU
 describe("load1 at 45, the stop while run-slot.load1-max is absent, is a hard stop", () => {
   test("load1 at 45 shuts slots 2 to 4 at 80% idle", () => {
@@ -140,8 +193,10 @@ describe("memory shuts slots 2 to 4 as mem_ok reads it", () => {
     ])
   })
 
-  test("a free share under 40% shuts them, as does pressure over normal", () => {
+  // issue 2660: macOS keeps its 40% bar, the memorystatus free share, which Linux's MemAvailable does not mirror
+  test("a free share under 40% shuts them, 33% as 39%, as does pressure over normal", () => {
     expect(slots({ free: 39 })).toBe("1\n")
+    expect(slots({ free: 33, swapins: 5 })).toBe("1\n")
     expect(slots({ pressure: 2 })).toBe("1\n")
   })
 })
@@ -231,8 +286,8 @@ describe("the gauges", () => {
       join(m.bin, "top"),
       '#!/bin/bash\necho "CPU usage: 1.00% user, 1.00% sys, 98.00% idle "\necho "CPU usage: 40.00% user, 30.00% sys, 30.00% idle "\n',
     )
-    // a reading taken at the epoch is past its 10 s, so the next look reads top again
-    writeFileSync(join(m.ops, "run-slot.gauges"), "0 52.9 0 120 3.50\n")
+    // a reading taken at the epoch is past its 10 s, so the next look reads top again, and its 35% is the reading before, under the bar too
+    writeFileSync(join(m.ops, "run-slot.gauges"), "0 35 0 120 3.50\n")
     expect(await m.runs("worker-x")).toBe(true)
     expect(lanes(m)).toHaveLength(2)
     expect(lanes(m)[1]).toMatch(

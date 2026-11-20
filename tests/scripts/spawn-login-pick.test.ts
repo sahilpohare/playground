@@ -600,6 +600,352 @@ describe("the capacity gate refuses and spawns nothing", () => {
     },
   )
 
+  // #2863: an --account start on the own login whose stored-login.json reads nothing (stale, missing, or its Claude Code login ended) starts on its seat token, judged by login-flip.json's seen reading of it, as a probed login is
+  const ownStart = ["worker", "worker-brave-otter", "b.md", "--account", "own@example.com"]
+  const usageDir = (home: string) => join(home, ".playground", "ops", "usage")
+  type Seat = { five?: number; limitedFor?: number; readAge?: number; week: number }
+  const ownEnv = (env: object = {}) => ({
+    CLAUDE_JSON: ownLogin,
+    PACE_OFF_UNTIL: offUntilUtc,
+    USAGE_JSON: factoryUsage(10),
+    ...env,
+  })
+  const ownFiles =
+    (
+      opts: {
+        ended?: string
+        expired?: boolean
+        listed?: boolean | "pool"
+        seat?: Seat
+        statusAge?: number
+        stored?: "missing" | number
+        week?: number
+      } = {},
+    ) =>
+    (home: string) => {
+      mkdirSync(usageDir(home), { recursive: true })
+      if (opts.stored !== "missing")
+        storedLogin("own@example.com", opts.week ?? 20, opts.stored ?? 600)(home)
+      writeFileSync(
+        join(usageDir(home), "stored-login-status.json"),
+        JSON.stringify({
+          loginEnded: opts.ended ?? null,
+          tokenExpired: opts.expired ?? false,
+          writtenAt: minutesAgo(opts.statusAge ?? 0),
+        }),
+      )
+      const seat = opts.seat
+      if (seat || opts.listed !== undefined)
+        writeFileSync(
+          join(usageDir(home), "login-flip.json"),
+          JSON.stringify({
+            ...(opts.listed === "pool"
+              ? { rotation: { pool: [{ account: "own@example.com", ending: false }] } }
+              : { accounts: [opts.listed === false ? "factory@example.com" : "own@example.com"] }),
+            seen: seat && {
+              "own@example.com": {
+                at: Date.now() / 1000 - (seat.readAge ?? 5) * 60,
+                ...(seat.five !== undefined && {
+                  five: seat.five,
+                  fiveReset: Date.now() / 1000 + 3600,
+                }),
+                ...(seat.limitedFor && { limitedUntil: Date.now() / 1000 + seat.limitedFor * 60 }),
+                via: "token",
+                week: seat.week,
+                weekReset: Date.now() / 1000 + 5 * 86_400,
+              },
+            },
+          }),
+        )
+    }
+  const expiredLine =
+    "its Claude Code access token has expired (stored-login-status.json tokenExpired), and Claude Code refreshes it only while it runs: opening Claude Code refreshes it, the owner's /login brings it back, and `playground accounts add` keeps a seat token for it"
+  const seatLine =
+    "--account own@example.com is this machine's own login, whose stored reading reads nothing, so it starts on its seat token, the split skipped: its week is at 76% (login-flip.json seen)"
+
+  test.each<[string, Parameters<typeof ownFiles>[0]]>([
+    ["its stored reading is stale", {}],
+    ["it has no stored reading", { stored: "missing" }],
+    ["its Claude Code login has ended", { ended: "time_limit", stored: 600 }],
+  ])(
+    "--account naming the own login starts on its seat token while %s, judged by login-flip.json's seen reading",
+    async (_, files) => {
+      const r = await spawn(
+        ownStart,
+        [],
+        ownEnv(),
+        script,
+        undefined,
+        ownFiles({ seat: { five: 30, week: 76 }, ...files }),
+      )
+      expect(r.code).toBe(0)
+      expect(r.out).toContain(seatLine)
+      expect(r.security).toContain(
+        "find-generic-password -s playground-claude-oauth -a own@example.com",
+      )
+      expect(launchOf(r)).toContain("-a own@example.com -w")
+      expect(launchOf(r)).toContain("CLAUDE_CODE_OAUTH_TOKEN")
+      expect(execLine(r, "worker-brave-otter")).toContain("--account own@example.com")
+      expect(capacityLog(r)).toEqual([
+        expect.objectContaining({
+          readings: expect.objectContaining({ account: "own@example.com", week: 76 }),
+          verdict: "pass",
+        }),
+      ])
+    },
+  )
+
+  test.each<[string, Seat | undefined, string]>([
+    [
+      "its seen reading is over the 98% backstop",
+      { week: 99 },
+      "the week is at 99% (login-flip.json seen seven_day.used_percentage)",
+    ],
+    [
+      "its 5-hour window is at 95%",
+      { five: 95, week: 20 },
+      "the 5-hour window is at 95% (login-flip.json seen five_hour.used_percentage), 90 is its cap",
+    ],
+    ["its account is limited", { limitedFor: 30, week: 20 }, "its account is limited until "],
+    [
+      "its seen reading is over an hour old",
+      { readAge: 61, week: 20 },
+      "login-flip.json seen was written 61 minutes ago (writtenAt), 60 is its limit",
+    ],
+    [
+      "login-flip.json holds no seen reading of it",
+      undefined,
+      "login-flip.json holds no seen reading of own@example.com to judge its seat token by",
+    ],
+  ])(
+    "--account naming the own login is refused on its seat token when %s",
+    async (_, seat, reason) => {
+      const r = await spawn(ownStart, [], ownEnv(), script, undefined, ownFiles({ seat }))
+      expect(r.code).not.toBe(0)
+      expect(placing(r)).toEqual([])
+      expect(r.err).toContain("--account own@example.com, this machine's own login: ")
+      expect(r.err).toContain(reason)
+    },
+  )
+
+  test("the seat item is looked up under usage.keychainService, the service the launch reads it from", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv({
+        SETTINGS_JSON: JSON.stringify({ "usage.keychainService": "made-up-seat-service" }),
+      }),
+      script,
+      undefined,
+      ownFiles({ seat: { week: 76 } }),
+    )
+    expect(r.code).toBe(0)
+    expect(r.security).toContain("find-generic-password -s made-up-seat-service -a own@example.com")
+    expect(r.security?.join("\n")).not.toContain("playground-claude-oauth")
+    expect(launchOf(r)).toContain(
+      "find-generic-password -s made-up-seat-service -a own@example.com -w",
+    )
+  })
+
+  test("inside the sandbox, whose Keychain is closed to the gate, the seat start goes on and the new pane reads the item, as keychain_has rules", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv({ FAKE_NO_ITEM: "1", SANDBOX_RUNTIME: "1" }),
+      script,
+      undefined,
+      ownFiles({ seat: { week: 76 } }),
+    )
+    expect(r.code).toBe(0)
+    expect(r.out).toContain(seatLine)
+    expect(launchOf(r)).toContain("-a own@example.com -w")
+    expect(r.err).toContain(
+      "spawn.sh: the sandbox closes the Keychain to this shell, so the new pane checks the playground-claude-oauth item for own@example.com",
+    )
+  })
+
+  test("a stale stored reading under the gate cannot pass a start its seat's fresh reading refuses", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv(),
+      script,
+      undefined,
+      ownFiles({ seat: { week: 99 }, week: 20 }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain("the week is at 99% (login-flip.json seen seven_day.used_percentage)")
+  })
+
+  test("with no seat item, an ended Claude Code login refuses its --account start, naming the owner's /login and playground accounts add", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv({ FAKE_NO_ITEM: "1" }),
+      script,
+      undefined,
+      ownFiles({ ended: "time_limit", seat: { week: 20 } }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain(
+      "--account own@example.com, this machine's own login: its Claude Code login has ended (loginEnded: time_limit), and the Keychain holds no playground-claude-oauth item for it to start on. The owner's /login in Claude Code brings the login back, and `playground accounts add` keeps a seat token for it",
+    )
+  })
+
+  test.each<[string, Parameters<typeof ownFiles>[0]]>([
+    ["a live login's stale reading", {}],
+    ["an ended login whose status is over 15 minutes old", { ended: "time_limit", statusAge: 20 }],
+  ])("with no seat item, %s is refused as stale, as before", async (_, files) => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv({ FAKE_NO_ITEM: "1" }),
+      script,
+      undefined,
+      ownFiles({ seat: { week: 20 }, ...files }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      "ops/usage/stored-login.json was written 600 minutes ago (writtenAt), 15 is its limit",
+    )
+  })
+
+  test("a fresh stored reading over the gate stays the judge, with no seat start, though login-flip.json's seen reading shows room", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      { CLAUDE_JSON: ownLogin, USAGE_JSON: factoryUsage(10) },
+      script,
+      undefined,
+      ownFiles({ seat: { week: 10 }, stored: 0, week: 40 }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      "the week is at 40% (ops/usage/stored-login.json seven_day.used_percentage)",
+    )
+    expect(r.security).toBeUndefined()
+  })
+
+  // #2863: the refusal names the expired access token, which run.py writes to stored-login-status.json as tokenExpired
+  test("with no seat item, an expired access token refuses the own login's --account start, naming the cause and the fix", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv({ FAKE_NO_ITEM: "1" }),
+      script,
+      undefined,
+      ownFiles({ expired: true, seat: { week: 20 } }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain("--account own@example.com, this machine's own login: ")
+    expect(r.err).toContain(expiredLine)
+  })
+
+  test("an expired access token with no seen reading of the seat names the cause before the missing reading", async () => {
+    const r = await spawn(ownStart, [], ownEnv(), script, undefined, ownFiles({ expired: true }))
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(expiredLine)
+    expect(r.err).toContain(
+      "login-flip.json holds no seen reading of own@example.com to judge its seat token by",
+    )
+  })
+
+  test("a bare start's stale own login names its expired access token in the usage gate's line", async () => {
+    const r = await spawn(
+      ["worker", "worker-brave-otter", "b.md"],
+      [],
+      { CLAUDE_JSON: ownLogin, PACE_OFF_UNTIL: offUntilUtc, USAGE_JSON: factoryUsage(99) },
+      script,
+      undefined,
+      ownFiles({ expired: true }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain("the usage gate holds it: every login is over it:")
+    expect(r.err).toContain(
+      "ops/usage/stored-login.json was written 600 minutes ago (writtenAt), 15 is its limit. ",
+    )
+    expect(r.err).toContain(expiredLine)
+  })
+
+  test("a tokenExpired status over 15 minutes old names no cause, as a live login's stale reading", async () => {
+    const r = await spawn(
+      ownStart,
+      [],
+      ownEnv({ FAKE_NO_ITEM: "1" }),
+      script,
+      undefined,
+      ownFiles({ expired: true, statusAge: 20 }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.err).not.toContain("tokenExpired")
+    expect(r.err).toContain("The ops-usage job writes it every 5 minutes; wait for its next run")
+  })
+
+  test("a seat ops-usage never probes, being in neither login-flip.json's accounts nor its pool, names usage.accounts, not a run to wait for", async () => {
+    const r = await spawn(ownStart, [], ownEnv(), script, undefined, ownFiles({ listed: false }))
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      "ops-usage probes only the accounts login-flip.json lists, and it does not list own@example.com: add it to usage.accounts, or to login-flip.json's accounts while that list is set",
+    )
+    expect(r.err).not.toContain("ops-usage probes it every 14 minutes")
+  })
+
+  test("a seat login-flip.json's rotation pool lists, with no accounts list, is one ops-usage probes", async () => {
+    const r = await spawn(ownStart, [], ownEnv(), script, undefined, ownFiles({ listed: "pool" }))
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain("ops-usage probes it every 14 minutes; wait for its next run")
+    expect(r.err).not.toContain("ops-usage probes only the accounts login-flip.json lists")
+  })
+
+  // a machine whose one login is Claude Code's own: usage.json is that login's reading, so its stale-file refusal names the expired token too
+  test.each([
+    ["a bare start", ["worker", "worker-brave-otter", "b.md"]],
+    ["an --account start on the own login", ownStart],
+  ])(
+    "on a one-login machine, %s refused on a stale usage.json names the expired access token",
+    async (_, args) => {
+      const r = await spawn(
+        args,
+        [],
+        {
+          CLAUDE_JSON: ownLogin,
+          PACE_OFF_UNTIL: offUntilUtc,
+          USAGE_JSON: login("own@example.com", 20, minutesAgo(30)),
+        },
+        script,
+        undefined,
+        ownFiles({ expired: true, stored: "missing" }),
+      )
+      expect(r.code).not.toBe(0)
+      expect(placing(r)).toEqual([])
+      expect(r.err).toContain(
+        `usage.json was written 30 minutes ago (writtenAt), 15 is its limit. It reads nothing because ${expiredLine}`,
+      )
+      expect(r.err).not.toContain("wait for its next run")
+    },
+  )
+
+  test("on a one-login machine with no expired token, a stale usage.json keeps the wait line", async () => {
+    const r = await spawn(
+      ["worker", "worker-brave-otter", "b.md"],
+      [],
+      {
+        CLAUDE_JSON: ownLogin,
+        PACE_OFF_UNTIL: offUntilUtc,
+        USAGE_JSON: login("own@example.com", 20, minutesAgo(30)),
+      },
+      script,
+      undefined,
+      ownFiles({ stored: "missing" }),
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      "usage.json was written 30 minutes ago (writtenAt), 15 is its limit. The ops-usage job writes it every 5 minutes; wait for its next run",
+    )
+  })
+
   test("a usage.json without five_hour is an account with no 5-hour limit, read as none rather than 0%, and passes (#85)", async () => {
     const raw = JSON.stringify(usage({ rate_limits: { seven_day: usage().rate_limits.seven_day } }))
     const r = await spawn(["worker", "worker-brave-otter", "b.md"], [], { USAGE_JSON: raw })
@@ -632,7 +978,7 @@ describe("the capacity gate refuses and spawns nothing", () => {
 
   test("a parked login is passed over for the next one in the split, though it has the larger share and the most room", async () => {
     const r = await spawn(
-      ["worker", "worker-brave-otter", "b.md"],
+      ["runner", "runner-calm-heron", "b.md"],
       [],
       { PACE_OFF_UNTIL: offUntilUtc, SETTINGS_JSON: parkedRows(), USAGE_JSON: weekAt(98) },
       script,
@@ -648,7 +994,7 @@ describe("the capacity gate refuses and spawns nothing", () => {
 
   test("a parked login that is the only one under its pace is never picked: the start refuses with the usage gate's line", async () => {
     const r = await spawn(
-      ["worker", "worker-brave-otter", "b.md"],
+      ["runner", "runner-calm-heron", "b.md"],
       [],
       { SETTINGS_JSON: parkedRows(), USAGE_JSON: weekAt(98) },
       script,
@@ -665,9 +1011,44 @@ describe("the capacity gate refuses and spawns nothing", () => {
       expect(r.err).toContain(fragment)
   })
 
+  // #2321: on a machine whose one login is parked, the refusal names the way out, each usage.accounts Claude row that is neither parked nor read here.
+  const onlyParked = (...rows: object[]) =>
+    JSON.stringify({
+      "usage.accounts": [
+        { email: "quilla@example.org", parkedUntil: until },
+        ...rows,
+        { label: "zai", provider: "glm" },
+      ],
+    })
+  test("a machine whose only login is parked names each other account it could sign in", async () => {
+    const r = await spawn(["runner", "runner-calm-heron", "b.md"], [], {
+      SETTINGS_JSON: onlyParked(
+        { email: "spare@example.com" },
+        { email: "held@example.com", parkedUntil: until },
+        { email: "blue@example.com" },
+      ),
+    })
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain(
+      `the usage gate holds it: it is parked until ${until} (usage.accounts parkedUntil). usage.accounts also lists spare@example.com, blue@example.com, not parked and not signed in on this machine: sign one in with Add account in the Dashboard's Settings, then start it again`,
+    )
+  })
+
+  test("with no other account to sign in, the parked login's refusal stays as it was", async () => {
+    const r = await spawn(["runner", "runner-calm-heron", "b.md"], [], {
+      SETTINGS_JSON: onlyParked({ email: "held@example.com", parkedUntil: until }),
+    })
+    expect(r.code).not.toBe(0)
+    expect(r.err).toContain(
+      `the usage gate holds it: it is parked until ${until} (usage.accounts parkedUntil)`,
+    )
+    expect(r.err).not.toContain("also lists")
+  })
+
   test("a login whose parkedUntil has passed is picked as before", async () => {
     const r = await spawn(
-      ["worker", "worker-brave-otter", "b.md"],
+      ["runner", "runner-calm-heron", "b.md"],
       [],
       { SETTINGS_JSON: parkedRows(iso(-60_000)), USAGE_JSON: weekAt(98) },
       script,

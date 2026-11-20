@@ -21,3 +21,7 @@ export const dataDirOf = (env: Env, home = env.HOME || homedir()): string => {
 
 // The data folder the env names, PLAYGROUND_DATA_DIR included: the factory's scripts read it so, as the dashboard does on a stack that reads this machine.
 export const dataDir = (env: Env = process.env): string => dataDirOf(env)
+
+// The herdr folder, which holds each server's socket and restore log: PLAYGROUND_HERDR_DIR when set, else herdr under the home folder's data folder. It follows HOME, as herdr's own state folder does, never CLAUDE_CONFIG_DIR or PLAYGROUND_DATA_DIR, so a session on another Claude login reaches the same servers rather than starting a second factory on one state. It lives here, not in ops-herdr, so a reader of the folder alone (the idle-session backstop) loads no herdr code.
+export const herdrDir = (env: Env): string =>
+  env.PLAYGROUND_HERDR_DIR || join(dataDirOf({}, env.HOME || homedir()), "herdr")

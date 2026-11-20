@@ -1,5 +1,6 @@
 import { sValidator } from "@hono/standard-validator"
 import type { Session } from "@packages/auth"
+import { db } from "@packages/db"
 import { HARNESS_IDS } from "@packages/settings"
 import { Hono } from "hono"
 import { describeRoute, resolver } from "hono-openapi"
@@ -7,15 +8,19 @@ import { z } from "zod"
 
 import { startDispatcher } from "@/lib/dashboard/dispatcher-start"
 import { dispatcherSwitch, switchDeps } from "@/lib/dashboard/dispatcher-switch"
+import { DISPATCHER, listLive } from "@/lib/dashboard/workers"
 import {
   ApiError,
   authErrorResponses,
   conflictErrorResponses,
   errorResponse,
   forbiddenErrorResponses,
+  notFoundErrorResponses,
   validationErrorResponses,
 } from "@/lib/error"
+import { readEntriesAfter } from "@/lib/sessions/read"
 import { authMiddleware, guardWrites, requireConsoleRole } from "@/middlewares"
+import { refuseAgentOffFixture } from "@/middlewares/agent"
 import { invalid } from "@/routers/store"
 
 // The home's Start <dispatcher>, for a dashboard with an account and no dispatcher, and Settings' Switch Alpha, which moves it to the other harness: dashboard writes, behind the write guards and the owner rung.
@@ -34,10 +39,14 @@ const switchAnswer = (status: 200 | 202) => ({
     description: status === 200 ? "OK" : "Started",
   },
 })
+// The lines a page of the dispatcher's log holds, the page a bot reads through the relay.
+export const LOG_PAGE = 100
+
 export const dispatcherRouter = new Hono<{ Variables: Session }>()
   .use("/*", guardWrites)
   .use("/*", authMiddleware)
   .use("/*", requireConsoleRole("owner"))
+  .use("/*", refuseAgentOffFixture)
   .post(
     "/start",
     describeRoute({
@@ -83,6 +92,35 @@ export const dispatcherRouter = new Hono<{ Variables: Session }>()
       responses: { ...switchAnswer(200), ...authErrorResponses, ...forbiddenErrorResponses },
     }),
     (c) => c.json({ data: dispatcherSwitch.read() }),
+  )
+  // the one route BOT_GETS names (`api/hono/src/lib/relay/protocol.ts`): the Mac answers a bot's read here as its owner, then redacts it before it leaves
+  .get(
+    "/log",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "A page of the live dispatcher's own log after a seq (0 for its first line), in file order: the lines a bot the owner lets read the log reads through the relay, with hasMore while more wait and the session the seqs belong to, which a new dispatcher changes",
+      responses: {
+        200: { description: "OK" },
+        ...validationErrorResponses,
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        ...notFoundErrorResponses,
+      },
+    }),
+    sValidator("query", z.object({ after: z.coerce.number().int().min(0).default(0) }), invalid),
+    async (c) => {
+      const { workers } = await listLive()
+      const session = workers.find(
+        (w) => w.role === "dispatcher" && w.name === DISPATCHER,
+      )?.sessionId
+      if (!session) throw new ApiError(404, "NOT_FOUND", "No dispatcher runs now")
+      const page = await readEntriesAfter(db, session, {
+        after: c.req.valid("query").after,
+        limit: LOG_PAGE,
+      })
+      return c.json({ data: { ...page, session } })
+    },
   )
   .post(
     "/switch",

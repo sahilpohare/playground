@@ -193,7 +193,7 @@ export const onboardRoutes = (deps: OnboardDeps) => {
       describeRoute({
         tags: ["Onboarding"],
         description:
-          "Each harness Alpha can start on, as a card: Installed at the version tested, Signed in and its Plan, each a row in the checks' shape with the fix a failed row offers, whether it is ready to start, and a refusal in plain words while its start would be refused (Codex on the live data folder).",
+          "Each harness Alpha can start on, as a card: Installed at the version tested, Signed in, for Claude Code Trusted (its yes for the main checkout's folder), and its Plan, each a row in the checks' shape with the fix a failed row offers, whether it is ready to start, and a refusal in plain words while its start would be refused (Codex on the live data folder).",
         responses: {
           200: {
             content: {

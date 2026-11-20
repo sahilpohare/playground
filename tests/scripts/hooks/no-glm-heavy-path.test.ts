@@ -14,6 +14,8 @@ const DIR = mkdtempSync(join(tmpdir(), "glm-heavy-"))
 const REPO = join(DIR, "repo")
 const REMOTE = join(DIR, "remote.git")
 const GLM = { ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic" }
+// spawn.sh's local launch, on this machine's model server, which the glm rule fences as it fences GLM
+const LOCAL = { ANTHROPIC_BASE_URL: "http://127.0.0.1:8000" }
 
 // nothing from this machine's git settings: git exports GIT_DIR into hooks, and a global hooksPath or signing would reach outside the scratch repo
 const GIT_ENV: Record<string, string> = {
@@ -528,7 +530,7 @@ describe("a chained commit or push", () => {
     )
   })
 
-  test("a push to a remote not fetched yet reads against every remote, so a docs commit passes", async () => {
+  test("a push to a fork reads what the fork lacks, so a docs commit on the base it holds passes", async () => {
     const dir = join(DIR, "push-fork")
     git(DIR, "init", "-q", "--bare", "-b", "canary", `${dir}.git`)
     git(DIR, "init", "-q", "--bare", "-b", "canary", `${dir}-fork.git`)
@@ -538,6 +540,8 @@ describe("a chained commit or push", () => {
     git(dir, "commit", "-q", "-m", "base")
     git(dir, "push", "-q", "origin", "HEAD:canary")
     git(dir, "remote", "add", "fork", `${dir}-fork.git`)
+    // a fork holds the branches it was made from
+    git(dir, "push", "-q", "fork", "HEAD:canary")
     await Bun.write(join(dir, "docs/a.md"), "x\n")
     git(dir, "add", ".")
     git(dir, "commit", "-q", "-m", "doc")
@@ -546,6 +550,49 @@ describe("a chained commit or push", () => {
     git(dir, "add", ".")
     git(dir, "commit", "-q", "-m", "web")
     expect(await bash("git push fork HEAD", dir)).toContain("web/next/b.ts")
+  })
+
+  // the remote it pushes to is read live; each test builds on the one before
+  describe("a push reads the live branches of the remote it pushes to, not the tracking refs", () => {
+    const dir = join(DIR, "push-live")
+
+    beforeAll(async () => {
+      git(DIR, "init", "-q", "--bare", "-b", "canary", `${dir}.git`)
+      git(DIR, "init", "-q", "--bare", "-b", "canary", `${dir}-other.git`)
+      git(DIR, "clone", "-q", `${dir}.git`, dir)
+      await Bun.write(join(dir, "docs/a.md"), "x\n")
+      git(dir, "add", ".")
+      git(dir, "commit", "-q", "-m", "base")
+      git(dir, "push", "-q", "origin", "HEAD:canary")
+      git(dir, "checkout", "-q", "-b", "gone")
+      await Bun.write(join(dir, "scripts/spawn.sh"), "x\n")
+      git(dir, "add", ".")
+      git(dir, "commit", "-q", "-m", "spawn")
+      git(dir, "push", "-q", "origin", "gone")
+      git(`${dir}.git`, "branch", "-D", "gone")
+    })
+
+    test("a commit only a stale tracking ref holds, its branch deleted on the remote, is read", async () => {
+      expect(await bash("git push origin HEAD:fresh", dir)).toContain("scripts/spawn.sh")
+      expect(await bash("git push", dir)).toContain("scripts/spawn.sh")
+    })
+
+    test("a commit another remote holds and the one it pushes to does not is read", async () => {
+      git(dir, "update-ref", "-d", "refs/remotes/origin/gone")
+      git(dir, "remote", "add", "other", `${dir}-other.git`)
+      git(dir, "push", "-q", "other", "gone")
+      expect(await bash("git push", dir)).toContain("scripts/spawn.sh")
+    })
+
+    test("a commit the live remote holds stays out", async () => {
+      git(dir, "push", "-q", "origin", "gone")
+      expect(await bash("git push origin HEAD:fresh", dir)).toBeUndefined()
+    })
+
+    test("a remote it cannot read leaves every commit in", async () => {
+      git(dir, "remote", "add", "dead", join(DIR, "nowhere.git"))
+      expect(await bash("git push dead gone", dir)).toContain("scripts/spawn.sh")
+    })
   })
 
   test("a pushed commit's path holding a non-ASCII byte is read as it is", async () => {
@@ -587,6 +634,14 @@ describe("a chained commit or push", () => {
     expect(await bash(`${slot} git status`, dir)).toBeUndefined()
     expect(await bash(`bash ${slot} git status`, dir)).toBeUndefined()
     expect(await bash("bash scripts/other.sh worker-x -- git commit -a -m x", dir)).toBeUndefined()
+  })
+
+  test("a commit after a run-slot call whose words cd away is read in the shell's own folder", async () => {
+    const dir = await fresh("chain-slot-cd")
+    const slot = "~/.playground/ops/run-slot.sh worker-x --"
+    await Bun.write(join(dir, "web/next/a.ts"), "y\n")
+    expect(await bash(`${slot} cd ${DIR}; git commit -a -m x`, dir)).toContain("web/next/a.ts")
+    expect(await bash(`${slot} pushd ${DIR}; git commit -a -m x`, dir)).toContain("web/next/a.ts")
   })
 })
 
@@ -764,10 +819,15 @@ describe("which sessions it acts for", () => {
       join(CONFIG, "sessions", "104.json"),
       JSON.stringify({ name: "worker-harness-claude-pin", sessionId: "s-harness-claude" }),
     )
+    await Bun.write(
+      join(CONFIG, "sessions", "105.json"),
+      JSON.stringify({ name: "worker-local-pin", sessionId: "s-local" }),
+    )
     await pin("worker-glm-pin", "glm")
     await pin("worker-claude-pin", "claude")
     await pin("worker-harness-glm-pin", "claude-code glm")
     await pin("worker-harness-claude-pin", "claude-code claude")
+    await pin("worker-local-pin", "claude-code local")
   })
 
   test.each([
@@ -777,6 +837,25 @@ describe("which sessions it acts for", () => {
     { label: "a claude-code glm pin", env, session: "s-harness-glm", want: true },
     { label: "a claude-code claude pin", env, session: "s-harness-claude", want: false },
     { label: "no pin and no base URL", env, session: "s-none", want: false },
+    { label: "a claude-code local pin", env, session: "s-local", want: true },
+    {
+      label: "the local model's base URL",
+      env: { ...env, ...LOCAL },
+      session: "s-none",
+      want: true,
+    },
+    {
+      label: "the local model's base URL by localhost",
+      env: { ...env, ANTHROPIC_BASE_URL: "http://localhost:8000/" },
+      session: "s-none",
+      want: true,
+    },
+    {
+      label: "a base URL on another local port",
+      env: { ...env, ANTHROPIC_BASE_URL: "http://127.0.0.1:8001" },
+      session: "s-none",
+      want: false,
+    },
     {
       label: "a base URL that only holds z.ai in its path",
       env: { ...env, ANTHROPIC_BASE_URL: "https://example.com/api.z.ai" },
@@ -814,6 +893,8 @@ describe("which sessions it acts for", () => {
     expect(refused.code).toBe(2)
     expect(refused.err).toContain("web/next/src/y.ts")
     expect(hook(GLM, "s-none").code).toBe(2)
+    expect(hook(env_, "s-local").code).toBe(2)
+    expect(hook(LOCAL, "s-none").code).toBe(2)
     // a session outside the factory (no role, a name the registry does not hold) passes, as the owner's own do
     expect(hook({ ...GLM, PLAYGROUND_ROLE: "" }, "s-none")).toEqual({ code: 0, err: "" })
     git(REPO, "reset", "-q", "HEAD", "web/next/src/y.ts")
@@ -829,6 +910,7 @@ describe("a GLM session's org tools", () => {
   )
   const ORG = join(DIR, "org-repo")
   const ON_GLM = { ...GLM, PLAYGROUND_DATA_DIR: DATA }
+  const ON_LOCAL = { ...LOCAL, PLAYGROUND_DATA_DIR: DATA }
   const ON_CLAUDE = { PLAYGROUND_DATA_DIR: DATA }
   beforeAll(() => {
     git(DIR, "init", "-q", ORG)
@@ -842,10 +924,12 @@ describe("a GLM session's org tools", () => {
       tool_input: toolInput,
       tool_name: name,
     })
-  const both = async (raw: string) => ({
-    claude: await refusal(raw, ON_CLAUDE, CALM),
-    glm: await refusal(raw, ON_GLM, CALM),
-  })
+  // every call takes the same verdict on the local model as on GLM
+  const both = async (raw: string) => {
+    const glm = await refusal(raw, ON_GLM, CALM)
+    expect(await refusal(raw, ON_LOCAL, CALM)).toBe(glm)
+    return { claude: await refusal(raw, ON_CLAUDE, CALM), glm }
+  }
 
   test.each([
     { $label: "a headless claude run", command: "claude -p hi", names: "headless Claude run" },
@@ -900,6 +984,11 @@ describe("a GLM session's org tools", () => {
       $label: "gh graphql mutation",
       command: `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "PRRT_x"}) { thread { isResolved } } }'`,
       names: "REST",
+    },
+    {
+      $label: "an org gh call held in a variable that resolves (PG-2127)",
+      command: `C="gh pr list -R acme-blue/demo"; $C`,
+      names: "acme-blue/demo",
     },
   ])(
     "$label is refused on GLM, naming it and the glm rule, and passes on Claude",
@@ -958,6 +1047,26 @@ describe("a GLM session's org tools", () => {
       expect(await refusal(input(command, scripts), ON_GLM, CALM)).toBeUndefined()
   })
 
+  test("a program path through the session's PLAYGROUND_REPO gets its literal path's verdict on GLM, and stays refused without it", async () => {
+    const repo = join(DIR, "pg")
+    const env = { ...ON_GLM, PLAYGROUND_REPO: repo }
+    const forms = ["$PLAYGROUND_REPO", "${PLAYGROUND_REPO}", "${PLAYGROUND_REPO:?}"]
+    for (const [program, rest, refused] of [
+      ["scripts/spawn.sh", "column reviewer reviewer-x worker-x p1 brief-reviewer.md", undefined],
+      ["packages/scripts/src/dm/cli.ts", "send x.md", "DM sender"],
+    ]) {
+      const verdict = (at: string, on: Record<string, string> = env) =>
+        refusal(input(`"${at}/${program}" ${rest}`), on, CALM)
+      const literal = await verdict(repo)
+      if (refused) expect(literal).toContain(refused)
+      else expect(literal).toBeUndefined()
+      for (const form of forms) {
+        expect(await verdict(form)).toBe(literal)
+        expect(await verdict(form, ON_GLM)).toContain("names its program")
+      }
+    }
+  })
+
   test("a policy it cannot read refuses gh, git and a fetcher on GLM, naming the fix, and passes on Claude", async () => {
     const broken = join(DIR, "broken-data")
     writeRoot(extensionsDir(broken), new Map([["policy.json", "{not json"]]))
@@ -979,6 +1088,17 @@ describe("a GLM session's org tools", () => {
       "git --git-dir=../org-repo/.git log -1",
       "GIT_DIR=../org-repo/.git git log -1",
       "git --work-tree=../org-repo status",
+    ]) {
+      const { claude, glm } = await both(input(command))
+      expect(claude).toBeUndefined()
+      expect(glm).toContain("acme-blue/demo")
+    }
+  })
+
+  test("git named through a variable the line sets, reaching an org's checkout, is refused on GLM (PG-2127)", async () => {
+    for (const command of [
+      'G="git -C ../org-repo"; $G log -1',
+      "G=git; $G --git-dir=../org-repo/.git log -1",
     ]) {
       const { claude, glm } = await both(input(command))
       expect(claude).toBeUndefined()
@@ -1076,6 +1196,14 @@ describe("a GLM session's org tools", () => {
       command: "gh api https://api.github.com/repos/qzx-labs/playground/pulls",
     },
     { $label: "gh api's markdown render", command: "gh api markdown -f text=hi" },
+    {
+      $label: "a gh pr view over a loop variable (PG-2127)",
+      command: "for n in 2086 2078; do gh pr view $n --json state; done",
+    },
+    {
+      $label: "a read over a loop variable the line's assignments never set (PG-2127)",
+      command: "for f in a.md b.md; do cat $f; done",
+    },
   ])("$label passes on GLM", async ({ command }) => {
     expect(await refusal(input(command), ON_GLM, CALM)).toBeUndefined()
   })
@@ -1092,6 +1220,7 @@ describe("a GLM session's reads of an org's checkout and its database calls", ()
   const BROKEN = join(DIR, "read-broken-repo")
   const LOOSE = join(DIR, "read-loose")
   const ON_GLM = { ...GLM, PLAYGROUND_DATA_DIR: DATA }
+  const ON_LOCAL = { ...LOCAL, PLAYGROUND_DATA_DIR: DATA }
   const ON_CLAUDE = { PLAYGROUND_DATA_DIR: DATA }
   beforeAll(() => {
     git(DIR, "init", "-q", ORG)
@@ -1107,10 +1236,12 @@ describe("a GLM session's reads of an org's checkout and its database calls", ()
       tool_input: toolInput,
       tool_name: name,
     })
-  const both = async (raw: string) => ({
-    claude: await refusal(raw, ON_CLAUDE, CALM),
-    glm: await refusal(raw, ON_GLM, CALM),
-  })
+  // every call takes the same verdict on the local model as on GLM
+  const both = async (raw: string) => {
+    const glm = await refusal(raw, ON_GLM, CALM)
+    expect(await refusal(raw, ON_LOCAL, CALM)).toBe(glm)
+    return { claude: await refusal(raw, ON_CLAUDE, CALM), glm }
+  }
 
   test("each read tool and a shell read of an org's checkout are refused on GLM, naming the org and the glm rule, and pass on Claude", async () => {
     for (const raw of [
@@ -1256,6 +1387,7 @@ describe("a GLM session's reads of an org's checkout and its database calls", ()
   })
 
   test("a database client on this machine passes on GLM", async () => {
+    await write("scripts/seed.js", "db.items.insertOne({ a: 1 })\n")
     for (const command of [
       "psql -h 127.0.0.1 -U postgres app",
       "psql -h localhost app",
@@ -1278,6 +1410,246 @@ describe("a GLM session's reads of an org's checkout and its database calls", ()
     ])
       expect(await refusal(input(command), ON_GLM, CALM)).toBeUndefined()
   })
+
+  // issue 1448: a read path the hook cannot read, a variable, an unreadable substitution, xargs's -I word, ~- and a cd it cannot follow, fails closed on GLM
+  test("a read through a path the hook cannot read is refused on GLM, naming the glm rule, and passes on Claude", async () => {
+    for (const command of [
+      "cat $ORG_DIR/README.md",
+      `cat "$(git -C ${ORG} rev-parse --show-toplevel)/README.md"`,
+      'cat "${ORG_DIR:?}/README.md"',
+      `cat \${UNSET_DIR:-${ORG}}/README.md`,
+      "awk '{ print }' $ORG_DIR/README.md",
+      "sed -n p $ORG_DIR/README.md",
+      'sed -e p "$ORG_DIR/README.md"',
+      "sed -f $ORG_DIR/x.sed README.md",
+      "cat $(cat paths.txt)",
+      "ls .. | xargs -I{} cat ../{}/README.md",
+      "cat ~-/README.md",
+      'cd "$X" && cat README.md',
+      `for d in docs ${ORG}; do cat "$d/README.md"; done`,
+    ]) {
+      const { claude, glm } = await both(input(command))
+      expect({ command, claude }).toEqual({ command, claude: undefined })
+      expect({ command, glm }).toEqual({ command, glm: expect.stringContaining("glm rule") })
+      expect(glm).toContain("report to your lead")
+    }
+  })
+
+  // PG-2104: a cd or env -C through a variable the line sets to a literal absolute path lands there, so an org's checkout it names is judged as a cd typed to it is
+  test.each([
+    "C=$ORG; cd $C; sed -n 1,5p README.md",
+    "C=$ORG; cd $C && cat README.md",
+    "S=$DIR; D=$S/read-org-repo; cd $D; sed -n 1,5p README.md",
+    "C=$ORG/src; cd $C; grep -n x a.py",
+    "C=$DIR; cd $C; rg -n x",
+    "C=$ORG; env -C $C sed -n 1,5p README.md",
+  ])(
+    "a read after a cd through a variable the line sets to an org's checkout, its subfolder or a folder above it is refused on GLM: %s",
+    async (form) => {
+      mkdirSync(join(ORG, "src"), { recursive: true })
+      const command = form.replace("$ORG", ORG).replace("$DIR", DIR)
+      expect(await refusal(input(command), ON_GLM, CALM)).toContain("guarded")
+    },
+  )
+
+  // PG-2104: zsh applies a modifier on an unbraced name (`$C:t`, `$C:h`) that the lexer reads as text, so such a cd stays unread
+  test.each([
+    "C=/elsewhere/read-org-repo; cd ..; cd $C:t; sed -n 1,5p README.md",
+    'C=/elsewhere/read-org-repo; cd .. && cd "$C:t" && cat README.md',
+    "C=$ORG/src; cd $C:h && cat README.md",
+    "C=$ORG/src; env -C $C:h cat README.md",
+    "C=$ORG/src; T=$C:h; cd $T && cat README.md",
+    "C=/elsewhere/read-org-repo; cd .. && pushd $C:t && cat README.md",
+  ])(
+    "a read after a cd through a modifier of a variable the line sets is refused on GLM: %s",
+    async (form) => {
+      mkdirSync(join(ORG, "src"), { recursive: true })
+      expect(await refusal(input(form.replace("$ORG", ORG)), ON_GLM, CALM)).toBeDefined()
+    },
+  )
+
+  test.each(["C=$REPO; cd $C; sed -n 1,5p README.md", "C=$REPO; cd $C && cat README.md"])(
+    "a read after a cd through a variable the line sets to its own checkout runs on GLM: %s",
+    async (form) => {
+      expect(await refusal(input(form.replace("$REPO", REPO)), ON_GLM, CALM)).toBeUndefined()
+    },
+  )
+
+  test("a read of its own checkout through the line's own variable, a pure substitution or a ~- the line sets runs on GLM", async () => {
+    for (const command of [
+      "D=.; cat $D/README.md",
+      'D="$PWD"; cat "$D/README.md"',
+      'cat "$(pwd)/README.md"',
+      'cat "$(echo docs)/a.md"',
+      "cd docs && cat ~-/README.md",
+      'echo "$X"',
+      'for f in README.md docs/a.md; do cat "$f"; done',
+      "ls | xargs -I{} echo {}",
+      "for i in $(seq 1 3); do echo $i; done",
+      '[ -n "$(git status --porcelain)" ] && echo dirty',
+      'dirname "$(git rev-parse --git-common-dir)"',
+      'cat "$(git rev-parse --show-toplevel)/README.md"',
+      'git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/x" -b x origin/canary',
+      "ls -dt ${TMPDIR:-/tmp}run-slot-*",
+      "cat ${UNSET_DIR:-docs}/a.md",
+      "until awk -v l=\"$(sysctl -n vm.loadavg | awk '{print $2}')\" 'BEGIN{exit !(l <= 15)}'; do sleep 5; done",
+      'L=$(sysctl -n vm.loadavg); python3 -c "print(1 if $L <= 15 else 0)"',
+      `sed -n "$(grep -n '^x()' README.md | cut -d: -f1),+12p" README.md`,
+      `sed -i '' "s/^K=.*/K=$(openssl rand -hex 32)/" README.md`,
+      'sed -e "s/x/$V/" README.md',
+    ])
+      expect({ command, glm: await refusal(input(command), ON_GLM, CALM) }).toEqual({
+        command,
+        glm: undefined,
+      })
+  })
+
+  // issue 1449: a recursive read that starts above an org's checkout reaches it, by the shell, a Grep or Glob, or a ** glob
+  test("a recursive read of a folder holding an org's checkout is refused on GLM, naming the org, and passes on Claude", async () => {
+    const nest = join(DIR, "read-nest", "acme", "demo")
+    mkdirSync(join(DIR, "read-nest", "acme"), { recursive: true })
+    git(DIR, "init", "-q", nest)
+    git(nest, "remote", "add", "origin", "https://github.com/acme-blue/nested.git")
+    writeFileSync(join(DIR, "token"), "x\n")
+    mkdirSync(join(DIR, "notes"), { recursive: true })
+    for (const raw of [
+      input("rg token .."),
+      input("rg token", DIR),
+      input("rg notes", DIR),
+      input("grep -r token", DIR),
+      input("grep -rn notes", DIR),
+      input("rg -g '*.md' notes", DIR),
+      input("rg --hidden token notes", DIR),
+      input("find -name notes", DIR),
+      input("grep -r token .."),
+      input("grep -Rn token .."),
+      input("find .. -name README.md"),
+      input("cat ../read-nest/**/README.md"),
+      call("Grep", { path: DIR, pattern: "token" }),
+      call("Grep", { pattern: "token" }, DIR),
+      call("Glob", { path: join(DIR, "read-nest"), pattern: "**/*.md" }),
+      call("Glob", { pattern: join(DIR, "read-nest", "**", "*.md") }),
+    ]) {
+      const { claude, glm } = await both(raw)
+      expect({ raw, claude }).toEqual({ raw, claude: undefined })
+      expect({ raw, glm }).toEqual({ raw, glm: expect.stringContaining("acme-blue/") })
+      expect(glm).toContain("glm rule")
+    }
+  })
+
+  // the session's repo holds org-link.md, a link into the org's checkout, which a recursive read reaches, so these read a folder with none
+  test("a recursive read of a folder holding no guarded checkout runs on GLM", async () => {
+    mkdirSync(join(LOOSE, "deep", "er"), { recursive: true })
+    for (const raw of [
+      input("rg token .", LOOSE),
+      input("grep -rn token .", LOOSE),
+      input("find . -name '*.ts'", LOOSE),
+      input("rg token ../read-loose"),
+      input("rg -g '*.md' -e token ../read-loose"),
+      input("grep -rn -m 1 token ../read-loose"),
+      input("cat docs/**/*.md"),
+      call("Grep", { path: LOOSE, pattern: "token" }),
+      call("Glob", { path: LOOSE, pattern: "**/*" }),
+      call("Glob", { pattern: join(LOOSE, "**", "*.md") }),
+    ])
+      expect({ raw, glm: await refusal(raw, ON_GLM, CALM) }).toEqual({ raw, glm: undefined })
+  })
+
+  // issue 1450: a connection named inside the input a client reads, a heredoc, a here-string or a script file, is read for its host
+  test("a database client whose own input connects off this machine is refused on GLM, naming the host, and passes on Claude", async () => {
+    await write("remote.sql", "select 1;\n\\c host=db.example.com dbname=app\n")
+    await write("remote.js", "db = connect('mongodb://app@db.example.com:27017/app')\n")
+    for (const [command, names] of [
+      ["psql <<'EOF'\n\\connect postgres://app@db.example.com/app\nEOF", "db.example.com"],
+      ["psql <<< '\\c host=db.example.com dbname=app'", "db.example.com"],
+      ["psql <<'EOF'\n\\c app app db.example.com 5432\nEOF", "db.example.com"],
+      ["psql -f remote.sql", "db.example.com"],
+      ["psql --file=remote.sql app", "db.example.com"],
+      ["psql app < remote.sql", "db.example.com"],
+      ["mysql <<'EOF'\nconnect app db.example.com\nEOF", "db.example.com"],
+      ["mongosh remote.js", "db.example.com"],
+      ["psql -f missing.sql", "cannot tell"],
+      ["psql <<EOF\n\\c host=$DB_HOST\nEOF", "cannot tell"],
+    ]) {
+      const { claude, glm } = await both(input(command))
+      expect({ command, claude }).toEqual({ command, claude: undefined })
+      expect({ command, glm }).toEqual({ command, glm: expect.stringContaining(names) })
+      expect(glm).toContain("glm rule")
+    }
+  })
+
+  test("a database client fed input that connects on this machine, or names no connection, runs on GLM", async () => {
+    await write("local.sql", "\\c postgres://postgres@127.0.0.1:5432/app\nselect 1;\n")
+    await write("local.js", "db = connect('mongodb://localhost:27017/app')\n")
+    for (const command of [
+      "psql -f local.sql",
+      "psql < local.sql",
+      "psql <<'EOF'\n\\c app postgres 127.0.0.1\nEOF",
+      "psql <<'EOF'\nselect 1;\nEOF",
+      "psql <<< 'select 1'",
+      "mongosh local.js",
+      "cat remote.sql",
+    ])
+      expect({ command, glm: await refusal(input(command), ON_GLM, CALM) }).toEqual({
+        command,
+        glm: undefined,
+      })
+  })
+})
+
+// issue 1969: a GLM worker wrote a whole fix in a fenced file before its commit was refused, so the edit itself is refused at the first touch
+describe("a GLM session's edit", () => {
+  const CLAUDE = {
+    CLAUDE_CONFIG_DIR: join(DIR, "edit-config"),
+    PLAYGROUND_DATA_DIR: join(DIR, "edit-config", "playground"),
+  }
+  const edit = (tool: string, toolInput: Record<string, unknown>) =>
+    JSON.stringify({
+      cwd: REPO,
+      hook_event_name: "PreToolUse",
+      session_id: "s-none",
+      tool_input: toolInput,
+      tool_name: tool,
+    })
+  const FENCED: [string, Record<string, unknown>, string][] = [
+    [
+      "Edit",
+      { file_path: join(REPO, "web/next/src/a.ts"), new_string: "b", old_string: "a" },
+      "web/next/src/a.ts",
+    ],
+    [
+      "Write",
+      { content: "x", file_path: join(REPO, "scripts/hooks/new.ts") },
+      "scripts/hooks/new.ts",
+    ],
+    [
+      "NotebookEdit",
+      { new_source: "x", notebook_path: join(REPO, "web/next/n.ipynb") },
+      "web/next/n.ipynb",
+    ],
+  ]
+
+  test.each(FENCED)(
+    "an edit by %s to a fenced path is refused on GLM with the commit refusal's fix, and passes on Claude",
+    async (tool, toolInput, path) => {
+      const raw = edit(tool, toolInput)
+      const glm = await refusal(raw, GLM, CALM)
+      expect(glm).toContain(`refuses this ${tool} call: it touches ${path}, which is Opus work`)
+      expect(glm).toContain(
+        "Stop, report to your lead with this file list, and the lead moves the change to a Claude worker.",
+      )
+      expect(await refusal(raw, CLAUDE, CALM)).toBeUndefined()
+    },
+  )
+
+  test("a GLM edit outside the fenced paths passes", async () => {
+    for (const [tool, toolInput] of [
+      ["Edit", { file_path: join(REPO, "docs/a.md"), new_string: "b", old_string: "a" }],
+      ["Write", { content: "x", file_path: join(REPO, "web/nextx/a.ts") }],
+      ["NotebookEdit", { new_source: "x", notebook_path: join(REPO, "docs/n.ipynb") }],
+    ] as const)
+      expect(await refusal(edit(tool, toolInput), GLM, CALM)).toBeUndefined()
+  })
 })
 
 describe("its registration", () => {
@@ -1296,9 +1668,13 @@ describe("its registration", () => {
     )
 
   // Bash reaches it through guards (tests/scripts/hooks/guards.test.ts).
-  test("both settings files send it every MCP tool and Claude Code's three MCP resource tools, and no other tool", async () => {
+  test("both settings files send it every MCP tool, Claude Code's three MCP resource tools and its four edit tools, and no other tool", async () => {
     for (const { file, matcher } of await matchers()) {
       for (const tool of [
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "Write",
         "ListMcpResourcesTool",
         "ReadMcpResourceDirTool",
         "ReadMcpResourceTool",
@@ -1308,8 +1684,8 @@ describe("its registration", () => {
         expect({ file, tool, sent: matcher.test(tool) }).toEqual({ file, tool, sent: true })
       for (const tool of [
         "Bash",
-        "Edit",
-        "Write",
+        "Read",
+        "Editx",
         "WebFetch",
         "Agent",
         "xBash",

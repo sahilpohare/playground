@@ -6,7 +6,7 @@ import { type Check, checksOf, refusalOf } from "@/lib/onboard"
 
 export type HarnessId = "claude-code" | "codex"
 
-// One harness's card as the API answers it: Installed, Signed in and Plan as check rows, whether it is ready to start, and the refusal while its start would be refused.
+// One harness's card as the API answers it: Installed, Signed in and Plan as check rows (Claude Code's with Trusted before Plan), whether it is ready to start, and the refusal while its start would be refused.
 export type HarnessCard = {
   checks: Check[]
   id: HarnessId
@@ -56,7 +56,7 @@ export const harnessesOf = (body: unknown): HarnessCard[] | undefined => {
   return read.every(Boolean) ? (read as HarnessCard[]) : undefined
 }
 
-// Pure: whether Start Alpha turns on for the pick: its card reads Installed and Signed in, and nothing refuses its start.
+// Pure: whether Start Alpha turns on for the pick: its card reads Installed and Signed in (and Trusted, for Claude Code), and nothing refuses its start.
 export const canStart = (cards: HarnessCard[], pick: HarnessId): boolean => {
   const card = cards.find((c) => c.id === pick)
   return Boolean(card?.ready && !card.refusal)

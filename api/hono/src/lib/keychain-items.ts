@@ -5,6 +5,7 @@ export const KEYCHAIN_ITEMS = {
     service: "playground-slack",
     valid: /^xoxp-[A-Za-z0-9-]+$/,
   },
+  // the Mac's one Yard token, relay-on (yard_relay_) or read-only
   yard: {
     invalid: "a Yard token starts yard_",
     service: "playground-yard",

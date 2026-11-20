@@ -14,11 +14,12 @@ import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader } from "@/components/ui/empty"
 import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import { toast } from "@/components/ui/toast"
 import { inviteRequests } from "@/lib/yard"
-import { INVITES_KEY, TOKENS_KEY, yardApi } from "@/lib/yard-api"
+import { BOTS_KEY, INVITES_KEY, TOKENS_KEY, yardApi } from "@/lib/yard-api"
 
-// Account and tokens: each token is a device's way to post without a browser, named for that device (never "web"), its secret shown once. A member asks the owner to let someone in here, and the owner sees those requests.
+// Account and tokens: each token is a device's way to post without a browser, named for that device (never "web"), its secret shown once: with its Relay switch on it reads and posts, and the owner's holds the Mac's relay; with it off it reads alone. A member asks the owner to let someone in here, and the owner sees those requests and the bots `playground yard bot add` made.
 export function Account({ role }: { role: string | null | undefined }) {
   const client = useQueryClient()
   const { data: tokens } = useQuery({
@@ -27,10 +28,10 @@ export function Account({ role }: { role: string | null | undefined }) {
   })
   const [secret, setSecret] = useState<string | null>(null)
   const form = useForm({
-    defaultValues: { name: "" },
+    defaultValues: { name: "", relay: false },
     onSubmit: async ({ value }) => {
       try {
-        const { token } = await yardApi.createToken(value.name.trim())
+        const { token } = await yardApi.createToken(value.name.trim(), value.relay)
         setSecret(token.secret)
         form.reset()
         await client.invalidateQueries({ queryKey: TOKENS_KEY })
@@ -38,7 +39,7 @@ export function Account({ role }: { role: string | null | undefined }) {
         toast.add({ title: (error as Error).message, type: "error" })
       }
     },
-    validators: { onSubmit: z.object({ name: tokenNameSchema }) },
+    validators: { onSubmit: z.object({ name: tokenNameSchema, relay: z.boolean() }) },
   })
   const revoke = async (id: string) => {
     try {
@@ -87,6 +88,20 @@ export function Account({ role }: { role: string | null | undefined }) {
                 )
               }}
             </form.Field>
+            <form.Field name="relay">
+              {(field) => (
+                <label className="flex items-center gap-2 text-xs">
+                  <Switch
+                    checked={field.state.value}
+                    onCheckedChange={(checked) => field.handleChange(checked)}
+                    size="sm"
+                  />
+                  {roleAtLeast(role, "owner")
+                    ? "Relay: posts and connects your Mac. Off: read-only"
+                    : "Relay: posts. Off: read-only"}
+                </label>
+              )}
+            </form.Field>
           </FieldGroup>
         </form>
         {secret && (
@@ -123,7 +138,14 @@ export function Account({ role }: { role: string | null | undefined }) {
             ))}
           </ul>
         )}
-        {roleAtLeast(role, "owner") ? <InviteRequests /> : <RequestInvite />}
+        {roleAtLeast(role, "owner") ? (
+          <>
+            <Bots />
+            <InviteRequests />
+          </>
+        ) : (
+          <RequestInvite />
+        )}
       </div>
     </PageShell>
   )
@@ -137,6 +159,63 @@ const None = ({ children }: { children: string }) => (
     </EmptyHeader>
   </Empty>
 )
+
+// The bots the owner made from the Mac, each with its log switch, which lets it read the dispatcher's log through the Mac (off until the switch turns it on, and read only while the Mac lists it too), and Revoke, which cuts its token and its DM at once.
+function Bots() {
+  const client = useQueryClient()
+  const { data: bots } = useQuery({
+    queryFn: async () => (await yardApi.bots()).bots,
+    queryKey: BOTS_KEY,
+  })
+  const revoke = async (name: string) => {
+    try {
+      await yardApi.revokeBot(name)
+      await client.invalidateQueries({ queryKey: BOTS_KEY })
+    } catch (error) {
+      toast.add({ title: (error as Error).message, type: "error" })
+    }
+  }
+  const setReadsLog = async (name: string, readsLog: boolean) => {
+    try {
+      await yardApi.setReadsLog(name, readsLog)
+      await client.invalidateQueries({ queryKey: BOTS_KEY })
+    } catch (error) {
+      toast.add({ title: (error as Error).message, type: "error" })
+    }
+  }
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-sm font-medium">Bots</h2>
+      {bots?.length === 0 ? (
+        <None>No bots yet. playground yard bot add makes one from your Mac.</None>
+      ) : (
+        <ul className="divide-y rounded-md border text-sm">
+          {bots?.map((bot) => (
+            <li key={bot.name} className="flex items-center gap-3 px-3 py-2">
+              <div className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:gap-3">
+                <span className="font-medium">{bot.login}</span>
+                <span className="text-muted-foreground text-xs text-balance">
+                  Made {new Date(bot.createdAt).toLocaleString()}
+                </span>
+              </div>
+              <label className="ml-auto flex shrink-0 items-center gap-2 text-xs whitespace-nowrap">
+                <Switch
+                  checked={bot.readsLog}
+                  onCheckedChange={(checked) => void setReadsLog(bot.name, checked)}
+                  size="sm"
+                />
+                Reads the log
+              </label>
+              <Button onClick={() => void revoke(bot.name)} size="sm" variant="outline">
+                Revoke
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
 
 // Each member's request to let someone in, opening its own page to approve or deny it.
 function InviteRequests() {

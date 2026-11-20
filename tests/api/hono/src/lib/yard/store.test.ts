@@ -208,6 +208,28 @@ describe.skipIf(!dockerUp())("Yard's store", () => {
       ).toEqual([])
     })
 
+    test("waiting lists every message a bot sends in its DM to the bot's maker, with no mention, and not to a member outside the DM", async () => {
+      const since = new Date(Date.now() - 1000).toISOString()
+      const { bot } = await store.createBot(db, web("ada", true), "waiter")
+      const [row] = await sql`select id from "user" where login = ${bot.login}`
+      const asBot: Caller = {
+        bot: { madeBy: "ada" },
+        device: store.BOT_DEVICE,
+        id: row!.id,
+        login: bot.login,
+        owner: false,
+        via: "token",
+      }
+      const said = await send(asBot, bot.dm, { kind: "question", text: "is the build green?" })
+      await send(web("ada", true), bot.dm, { kind: "answer", text: "yes, all green" })
+      const inDm = async (caller: Caller) =>
+        (await store.waiting(db, caller, { since }))
+          .filter((item) => item.message.channel === bot.dm)
+          .map((item) => [item.held, item.message.id, item.message.from.login])
+      expect(await inDm(web("ada", true))).toEqual([[false, said.id, "waiter[bot]"]])
+      expect(await inDm(web("bo"))).toEqual([])
+    })
+
     test("a mention held, then approved after a later mark, still waits, from when it was sent", async () => {
       const { id } = await both("approved-later")
       const asked = await send(token("ada", true), id, { kind: "question", text: "@bo approve me" })
@@ -343,6 +365,22 @@ describe.skipIf(!dockerUp())("Yard's store", () => {
       const next = await send(token("ada", true), id, { kind: "text", text: "hello" })
       await store.decide(db, web("ada", true), next.id, "sent")
       expect([await status("now plain"), await status("@di see")]).toEqual(["sent", "pending"])
+    })
+
+    test("the maker's token sends its first plain post into the DM bot add made at once, while a mention and each held kind there still wait", async () => {
+      const { bot } = await store.createBot(db, web("ada", true), "greeter")
+      const status = async (kind: Parameters<typeof send>[2]["kind"], text: string) =>
+        (await send(token("ada", true), bot.dm, { kind, text })).status
+      expect(await status("text", `@${bot.login} see`)).toBe("pending")
+      for (const kind of ["bug", "fix", "log", "steps"] as const)
+        expect(await status(kind, "run the suite")).toBe("pending")
+      expect(await status("text", "hi")).toBe("sent")
+    })
+
+    test("another member's first post into a DM with that bot still waits", async () => {
+      const { bot } = await store.createBot(db, web("ada", true), "porter")
+      const { id } = await store.openDm(db, web("bo"), bot.login)
+      expect((await send(token("bo"), id, { kind: "text", text: "hi" })).status).toBe("pending")
     })
 
     test("an owner-only channel takes the owner alone, and holds the owner's token post", async () => {
@@ -509,6 +547,64 @@ describe.skipIf(!dockerUp())("Yard's store", () => {
         status: 429,
       })
     })
+
+    // waits out an hour's last 30 s, so every call of a budget lands in one hourly window
+    const inOneHour = async () => {
+      const left = 3_600_000 - (Date.now() % 3_600_000)
+      if (left < 30_000) await Bun.sleep(left + 10)
+    }
+
+    // a member of its own for one budget's test, so its counts reach no other test's caller
+    const member = async (id: string): Promise<Caller> => {
+      await sql`insert into "user" (id, name, email, login, role) values (${id}, ${id}, ${`${id}@example.com`}, ${id}, 'member')`
+      return web(id)
+    }
+
+    test("joining a channel stops at 30 an hour for one caller", async () => {
+      const caller = await member("joiner")
+      const channel = await store.createChannel(db, caller, { name: "join-budget" })
+      await inOneHour()
+      for (let i = 0; i < 30; i++) await store.joinChannel(db, caller, channel.id)
+      await expect(store.joinChannel(db, caller, channel.id)).rejects.toMatchObject({
+        status: 429,
+      })
+    }, 60_000)
+
+    test("opening a DM stops at 30 an hour for one caller", async () => {
+      const caller = await member("dm-opener")
+      await inOneHour()
+      for (let i = 0; i < 30; i++) await store.openDm(db, caller, "di")
+      await expect(store.openDm(db, caller, "di")).rejects.toMatchObject({ status: 429 })
+    }, 60_000)
+
+    test("redeeming an invite stops at 10 tries an hour for one caller, a wrong code included", async () => {
+      const caller = await member("redeemer")
+      await inOneHour()
+      for (let i = 0; i < 10; i++)
+        await expect(store.redeemInvite(db, caller, "NOPE-NOPE-NOPE")).rejects.toMatchObject({
+          status: 404,
+        })
+      await expect(store.redeemInvite(db, caller, "NOPE-NOPE-NOPE")).rejects.toMatchObject({
+        status: 429,
+      })
+    }, 60_000)
+
+    test("a bot's reads of the log stop at 120 an hour, before the read reaches the Mac", async () => {
+      const maker = await member("bot-maker")
+      const { secret } = await store.createBot(db, maker, "log-budget", { log: true })
+      const owner = (await store.tokenOwner(db, secret))!
+      const bot = {
+        bot: { madeBy: owner.bot!.madeBy, readsLog: true },
+        device: owner.device,
+        id: owner.user.id,
+        login: owner.user.login!,
+        owner: false,
+        via: "token" as const,
+      }
+      await inOneHour()
+      for (let i = 0; i < 120; i++) await store.logReadOf(db, bot)
+      await expect(store.logReadOf(db, bot)).rejects.toMatchObject({ status: 429 })
+    }, 60_000)
   })
 
   describe("tokens", () => {
@@ -523,6 +619,65 @@ describe.skipIf(!dockerUp())("Yard's store", () => {
       await store.revokeToken(db, web("bo"), made.id)
       expect(await store.tokenOwner(db, made.secret)).toBeNull()
       await expect(store.revokeToken(db, web("di"), made.id)).rejects.toMatchObject({ status: 404 })
+    })
+
+    test("any member makes a relay-on token, yard_relay_ and 32 characters, which names itself relay-on where a read-only one does not", async () => {
+      // a fixed hour of its own, so these writes leave the owner's other tests under the hour's cap
+      const now = Date.UTC(2026, 9, 31, 14, 0, 0)
+      const member = await store.createRelayToken(db, web("bo"), "mac", now)
+      expect(await store.tokenOwner(db, member.secret)).toMatchObject({
+        device: "mac",
+        relay: true,
+      })
+      const relay = await store.createRelayToken(db, web("ada", true), "mac-relay", now)
+      expect(relay.secret).toMatch(/^yard_relay_[A-Za-z0-9_-]{32}$/)
+      expect(await store.tokenOwner(db, relay.secret)).toMatchObject({
+        device: "mac-relay",
+        relay: true,
+      })
+      const person = await store.createToken(db, web("ada", true), "phone", now)
+      expect(person.secret).toMatch(/^yard_[A-Za-z0-9_-]{32}$/)
+      expect(await store.tokenOwner(db, person.secret)).toMatchObject({ relay: false })
+      await store.revokeToken(db, web("ada", true), relay.id)
+      expect(await store.tokenOwner(db, relay.secret)).toBeNull()
+    })
+
+    test("a token swaps itself in place for a fresh secret of its own kind, the old one reading as none after, and a revoked or other member's token swaps nothing", async () => {
+      // a fixed hour of its own, so these writes leave the other tests under the hour's cap
+      const now = Date.UTC(2026, 10, 13, 9, 0, 0)
+      const fresh = (prefix: string, fill: string) => `${prefix}${fill.repeat(32)}`
+      const relay = await store.createRelayToken(db, web("bo"), "swap-mac", now)
+      const next = fresh("yard_relay_", "n")
+      for (const [secret, status] of [
+        [fresh("yard_", "r"), 400],
+        [relay.secret, 400],
+        ["yard_relay_short", 400],
+      ] as const)
+        await expect(
+          store.swapToken(db, token("bo"), relay.secret, secret, now),
+        ).rejects.toMatchObject({ status })
+      await expect(store.swapToken(db, token("di"), relay.secret, next, now)).rejects.toMatchObject(
+        { status: 401 },
+      )
+      expect(await store.swapToken(db, token("bo"), relay.secret, next, now)).toMatchObject({
+        id: relay.id,
+        name: "swap-mac",
+        revokedAt: null,
+      })
+      expect(await store.tokenOwner(db, relay.secret)).toBeNull()
+      expect(await store.tokenOwner(db, next)).toMatchObject({ device: "swap-mac", relay: true })
+      const readOnly = await store.createToken(db, web("bo"), "swap-phone", now)
+      await expect(
+        store.swapToken(db, token("bo"), readOnly.secret, fresh("yard_relay_", "x"), now),
+      ).rejects.toMatchObject({ status: 400 })
+      expect(await store.tokenOwner(db, readOnly.secret)).toMatchObject({ relay: false })
+      const nextReadOnly = fresh("yard_", "p")
+      await store.swapToken(db, token("bo"), readOnly.secret, nextReadOnly, now)
+      expect(await store.tokenOwner(db, nextReadOnly)).toMatchObject({ relay: false })
+      await store.revokeToken(db, web("bo"), readOnly.id)
+      await expect(
+        store.swapToken(db, token("bo"), nextReadOnly, fresh("yard_", "q"), now),
+      ).rejects.toMatchObject({ status: 401 })
     })
   })
 

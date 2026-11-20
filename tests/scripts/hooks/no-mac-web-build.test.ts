@@ -169,7 +169,7 @@ describe("with no runner host set, the dashboard's container decides, and a refu
     expect(reason).toContain("no-mac-web-build hook refuses docker compose build of the web image")
     expect(reason).toContain(why)
     expect(reason).toContain(
-      "No runner host is set (RUNNER_HOST, or the data folder's ops/runner-host/ip), so there is no box to build it on, and the live dashboard's Postgres stays up: set one up (scripts/ops/runner-host/host.sh setup <ip>, then write its address to that ip file), or build the web image on a machine with no live dashboard running.",
+      "No runner host is set (RUNNER_HOST, or the data folder's ops/runner-host/ip), so there is no box to build it on, and the live dashboard's Postgres stays up: set one up (a peer machine of your own user, by scripts/ops/README.md's runner-host section, then write its address to that ip file), or build the web image on a machine with no live dashboard running.",
     )
     expect(reason).toContain("The api image still builds here (docker compose build api).")
     expect(reason).not.toContain("ci.sh")

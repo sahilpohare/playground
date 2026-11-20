@@ -28,7 +28,7 @@ describe("the dashboard's heartbeat result", () => {
     ).toBe("ok")
   })
 
-  test("reads ok while the dashboard is already on canary's head", async () => {
+  test("reads ok while the dashboard is already on its branch's head", async () => {
     expect(await resultOf("2026-10-19T05:05:41Z CURRENT 4ef3c13a")).toBe("ok")
   })
 

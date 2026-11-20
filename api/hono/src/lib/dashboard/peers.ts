@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { folderName } from "@packages/config/console"
 
 import { claudeDir } from "@/lib/sessions/paths"
+import { inRecordedForm, TICKS } from "@/lib/sessions/proc-start"
 import { probe } from "@/lib/system/probe"
 
 // Claude Code keeps one registry file per live session at <config>/sessions/<pid>.json, naming the session and the socket its peers message it on. Only those .json files are read: the .key files beside them hold secrets and are never opened.
@@ -73,7 +74,7 @@ export type Registered = {
   status?: string
 }
 
-// Pure: one registry file's text as the session's process, id, name and status, and when its process started (procStart) where the file gives it in the shape `ps -o lstart=` prints under C, which is the only shape a start is compared in: a procStart in any other shape is dropped, so a change to how Claude writes it leaves the session id to decide rather than reading every session as ended. null when it lacks a pid or an id.
+// Pure: one registry file's text as the session's process, id, name and status, and when its process started (procStart) where the file gives it in one of the two shapes a start is compared in (sessions/proc-start.ts): `ps -o lstart=` under C, as macOS writes it, or clock ticks since boot, as Linux writes it. A procStart in any other shape is dropped, so a change to how Claude writes it leaves the session id to decide rather than reading every session as ended. null when it lacks a pid or an id.
 export function registeredOf(text: string): Registered | null {
   let record: unknown
   try {
@@ -92,7 +93,7 @@ export function registeredOf(text: string): Registered | null {
     name:
       str(fields.name).trim() || folderName(str(fields.cwd)) || `session ${sessionId.slice(0, 8)}`,
     pid,
-    ...(LSTART.test(procStart) ? { procStart } : {}),
+    ...(LSTART.test(procStart) || TICKS.test(procStart) ? { procStart } : {}),
     sessionId,
     ...(status ? { status } : {}),
   }
@@ -149,4 +150,12 @@ export function startsOf(out: string): Map<number, string> {
 export async function processStarts(pids: number[]): Promise<Map<number, string> | null> {
   if (pids.length === 0) return new Map()
   return probe("starts", pids).then(startsOf, () => null)
+}
+
+// When each registered pid's process started, in the form its file records it (inRecordedForm in sessions/proc-start.ts); null when ps could not be run.
+export async function registeredStarts(
+  sessions: { pid: number; procStart?: string | null }[],
+): Promise<Map<number, string> | null> {
+  const starts = await processStarts(sessions.map((session) => session.pid))
+  return starts && inRecordedForm(starts, sessions)
 }

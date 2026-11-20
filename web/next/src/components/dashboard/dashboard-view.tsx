@@ -1,6 +1,6 @@
 "use client"
 
-import { RiRobot2Line } from "@remixicon/react"
+import { RiTerminalBoxLine } from "@remixicon/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -93,7 +93,7 @@ export const homeOf = ({
 export const CHECKLIST_STEPS = ["github", "settings", "harness", "account"] as const
 export type ChecklistStep = (typeof CHECKLIST_STEPS)[number] | "start"
 
-// Pure: the onboarding checklist while no dispatcher runs: which rows are ticked, the one row whose button is active (the first undone one, Start once all are done), and whether Start shows. The harness row is done once the picked harness's card reads Installed and Signed in with nothing refusing its start. Until every fact is read (none undefined, the pick included) it is not known: nothing is ticked or live, and the home draws a neutral frame in its place, so no step shows on a guess.
+// Pure: the onboarding checklist while no dispatcher runs: which rows are ticked, the one row whose button is active (the first undone one, Start once all are done), and whether Start shows. The harness row is done once the picked harness's card reads Installed and Signed in (and Trusted, for Claude Code) with nothing refusing its start. Until every fact is read (none undefined, the pick included) it is not known: nothing is ticked or live, and the home draws a neutral frame in its place, so no step shows on a guess.
 export const checklistOf = (facts: {
   claude?: boolean
   github?: boolean
@@ -171,7 +171,7 @@ function Checklist({ name }: { name: string }) {
       ),
       done: "Added.",
       title: "Claude account",
-      todo: `${name} runs on a Claude account, kept in this Mac's Keychain.`,
+      todo: `${name} runs on a Claude account, kept in this computer's secret store.`,
     },
     github: { done: "Signed in.", title: "GitHub" },
     harness: {
@@ -187,10 +187,10 @@ function Checklist({ name }: { name: string }) {
             {pick.error && <p className="text-destructive text-xs">{pick.error.message}</p>}
           </div>
         ) : undefined,
-      done: `${label ?? "It"} is installed and signed in.`,
+      done: `${label ?? "It"} is ready.`,
       kept: true,
       title: "Harness",
-      todo: `Pick what ${name} runs on. Start turns on once it is installed and signed in.`,
+      todo: `Pick what ${name} runs on. Start turns on once each of its checks passes.`,
     },
     settings: {
       action:
@@ -272,7 +272,7 @@ function NoChat({
     <Empty>
       <EmptyHeader>
         <EmptyMedia variant="icon">
-          <RiRobot2Line />
+          <RiTerminalBoxLine />
         </EmptyMedia>
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{why}</EmptyDescription>

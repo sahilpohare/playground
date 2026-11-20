@@ -1,6 +1,102 @@
 // @bun
 const __CHECKOUT = import.meta.dir.slice(0, import.meta.dir.lastIndexOf("/scripts/hooks/bundled"));
 
+// packages/safe-delete/src/live-refs.ts
+import { AsyncLocalStorage } from "async_hooks";
+var budget = new AsyncLocalStorage;
+function withLiveBudget(body, ms = 6000) {
+  return budget.getStore() ? body() : budget.run({ reads: new Map, until: performance.now() + ms }, body);
+}
+var run = (at, args, env, timeout) => {
+  const proc = Bun.spawnSync(["git", "-C", at, ...args], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...env },
+    stderr: "ignore",
+    stdin: "ignore",
+    stdout: "pipe",
+    timeout
+  });
+  return { ok: proc.exitCode === 0, out: proc.stdout.toString() };
+};
+function liveHeads(at, remote, timeout) {
+  const command = process.env.GIT_SSH_COMMAND || run(at, ["config", "--get", "core.sshCommand"]).out.trim() || (process.env.GIT_SSH ? "" : "ssh");
+  const env = { GIT_TERMINAL_PROMPT: "0" };
+  if (command)
+    env.GIT_SSH_COMMAND = `${command} -o BatchMode=yes -o ConnectTimeout=10`;
+  const live = run(at, ["ls-remote", "--heads", "--", remote], env, timeout);
+  if (!live.ok)
+    return null;
+  const tips = [];
+  for (const line of live.out.split(`
+`)) {
+    const [sha, name] = line.split("\t");
+    if (/^[0-9a-f]{40,64}$/.test(sha ?? "") && name?.startsWith("refs/heads/"))
+      tips.push({ ref: `${remote}/${name.slice("refs/heads/".length)}`, sha });
+  }
+  return tips;
+}
+function present(at, tips) {
+  if (!tips.length)
+    return [];
+  const had = run(at, ["rev-list", "--no-walk", "--ignore-missing", ...tips.map((t) => t.sha)]);
+  if (!had.ok)
+    return null;
+  const here = new Set(had.out.split(`
+`).filter(Boolean));
+  return tips.filter((t) => here.has(t.sha));
+}
+function pushRemote(at, branch = run(at, ["symbolic-ref", "-q", "--short", "HEAD"]).out.trim()) {
+  const config = (key) => run(at, ["config", "--get", key]).out.trim() || undefined;
+  return branch && config(`branch.${branch}.pushRemote`) || config("remote.pushDefault") || branch && config(`branch.${branch}.remote`) || "origin";
+}
+function heldBy(at, remote, timeout = 5000) {
+  const call = budget.getStore();
+  const key = `${at}\x00${remote}`;
+  let live = call?.reads.get(key);
+  if (live === undefined) {
+    const left = call ? Math.floor(call.until - performance.now()) : timeout;
+    live = left > 0 ? liveHeads(at, remote, Math.min(timeout, left)) : null;
+    call?.reads.set(key, live);
+  }
+  if (!live?.length)
+    return [];
+  const here = present(at, live) ?? [];
+  const had = new Set(here.map((t) => t.ref));
+  const tracked = new Map;
+  if (live.length > here.length && !/[:/\\]/.test(remote))
+    for (const line of run(at, [
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      `refs/remotes/${remote}/`
+    ]).out.split(`
+`)) {
+      const [sha, ref] = line.split(" ");
+      if (sha && ref)
+        tracked.set(ref.slice("refs/remotes/".length), sha);
+    }
+  return [
+    ...here.map((t) => t.sha),
+    ...live.flatMap((t) => had.has(t.ref) || !tracked.has(t.ref) ? [] : [tracked.get(t.ref)])
+  ];
+}
+
+// scripts/hooks/input.ts
+var DEADLINE = 13000;
+async function input(name, kind, deadline = DEADLINE) {
+  let timer;
+  const raw = await Promise.race([
+    Bun.stdin.text(),
+    new Promise((done) => {
+      timer = setTimeout(() => done(undefined), deadline - performance.now());
+    })
+  ]).finally(() => clearTimeout(timer));
+  if (raw !== undefined)
+    return raw;
+  if (kind === "recorder")
+    process.exit(0);
+  console.error(`${name} hook: the call's input did not arrive by its deadline, about ${deadline / 1000} s, inside the runner's 15 s timeout, so the call is refused; report it to your lead.`);
+  process.exit(2);
+}
+
 // scripts/hooks/no-desktop-owner-app.ts
 import { realpathSync as realpathSync2 } from "fs";
 import { join as join5, resolve as resolve3 } from "path";
@@ -139,6 +235,10 @@ var readPolicySync = (data, org) => {
     }
   };
 };
+var readPolicyOrDefaults = (data, org) => {
+  const read = readPolicySync(data, org);
+  return read.refusal !== undefined && !existsSync2(join3(extensionsDir(data), "policy.json")) ? { settings: { schemaVersion: 1, values: {} } } : read;
+};
 
 // scripts/hooks/lists.ts
 var storeMarker = (environment = process.env) => markerPath(dataDir(environment));
@@ -167,8 +267,8 @@ var isStrings = (value) => Array.isArray(value) && value.every((item) => typeof 
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
 // scripts/hooks/shell.ts
-import { AsyncLocalStorage } from "async_hooks";
-import { realpathSync, statSync } from "fs";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
+import { lstatSync, readdirSync, readFileSync as readFileSync2, realpathSync, statSync } from "fs";
 import { homedir as homedir2 } from "os";
 import { basename, dirname as dirname2, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 var UNKNOWN = "\x00";
@@ -177,7 +277,7 @@ var NOT_RUN = "The refusal stopped this whole Bash call, so none of its commands
 var MAX_BYTES = 1048576;
 var MAX_SCRIPT = 131072;
 var LARGE = "a text too large to read";
-var deadlines = new AsyncLocalStorage;
+var deadlines = new AsyncLocalStorage2;
 async function withDeadline(budget, body) {
   return await deadlines.run(performance.now() + budget, body);
 }
@@ -205,7 +305,8 @@ function filled(script, mark, value) {
 var held = (text) => text.value.length > MAX_BYTES ? unknown(LARGE) : text;
 var BREAK = new Set([" ", "\t", `
 `, ";", "&", "|", "<", ">", "(", ")"]);
-var REDIRECT = /^(\d*|&)(<<<|<<-|<<|<>|<&|>&!?|>>[!|]?|>[!|]|<|>)/;
+var REDIRECT_OP = "(<<<|<<-|<<|<>|<&|>&!?|>>[!|]?|>[!|]|<|>)";
+var REDIRECT = new RegExp(`^(\\d*|&)${REDIRECT_OP}`);
 var RESERVED = new Set([
   "!",
   "{",
@@ -230,6 +331,7 @@ var FREES = new Set([`
 var tokens = 0;
 var freshToken = () => ++tokens;
 var BODIES = new Set(["do", "elif", "else", "then"]);
+var REPEAT_BODY = new Set(["do", "{"]);
 var MARKERS = new Set([...RESERVED, ...OPENS, ...CLOSES, ...BODIES]);
 function markers(words) {
   const out = [];
@@ -243,6 +345,8 @@ function markers(words) {
     } else if (MARKERS.has(w.value)) {
       out.push(w.value);
       k++;
+    } else if (w.value === "repeat" && REPEAT_BODY.has(words[k + 2]?.value ?? "") && !words[k + 2].quoted) {
+      k += 2;
     } else if (ASSIGN.test(w.value))
       k++;
     else
@@ -251,40 +355,138 @@ function markers(words) {
   return out;
 }
 var ownFirst = (cmd, first) => !!first && first === cmd.words.find((w) => w.quoted || !RESERVED.has(w.value));
+var onlyReserved = (cmd) => cmd.words.length > 0 && cmd.words.every((w) => !w.quoted && RESERVED.has(w.value));
 var GROUPING = new Set(["}", "done", "esac", "fi"]);
 var ASSIGN = /^[A-Za-z_]\w*=/;
 var WRAPPERS = new Map(Object.entries({
+  "-": ["", ""],
   builtin: ["", ""],
   busybox: ["", ""],
   caffeinate: ["-d -i -m -s -u", "-t -w"],
+  chrt: [
+    "-a -b -d -e -f -i -m -o -p -R -r -v --all-tasks --batch --deadline --ext --fifo --idle --max --other --pid --reset-on-fork --rr --verbose",
+    "-D -P -T --sched-deadline --sched-period --sched-runtime"
+  ],
   command: ["-p -V -v", ""],
   doas: ["-L -n -s", "-a -C -u"],
   env: ["-0 -i -v --debug --ignore-environment --null", "-P -S -u --unset"],
   exec: ["-c -l", "-a"],
+  flock: [
+    "-F -n -o -s -u -x --close --exclusive --fcntl --nb --no-fork --nonblocking --shared --unlock --verbose",
+    "-E -w --conflict-exit-code --length --start --timeout --wait"
+  ],
+  ionice: ["-t --ignore", "-c -n -P -p -u --class --classdata --pgid --pid --uid"],
   nice: ["", "-n --adjustment"],
   nocorrect: ["", ""],
   noglob: ["", ""],
   nohup: ["", ""],
   pkexec: ["--disable-internal-agent --help --keep-cwd --version", "--user"],
   repeat: ["", ""],
+  setsid: ["-c -f -w --ctty --fork --wait", ""],
   stdbuf: ["", "-e -i -o --error --input --output"],
   sudo: [
     "-A -B -b -E -e -H -i -K -k -l -N -n -P -S -s -V -v --askpass --background --bell --edit --help --list --login --non-interactive --preserve-env --preserve-groups --remove-timestamp --reset-timestamp --set-home --shell --stdin --validate --version",
     "-C -D -g -h -p -R -r -T -t -U -u --chdir --chroot --close-from --command-timeout --group --host --other-user --prompt --role --type --user"
   ],
+  taskset: ["-a -c -p --all-tasks --cpu-list --pid", ""],
   time: [
     "-a -h -l -p -q -V -v --append --portability --quiet --verbose",
     "-f -o --format --output"
   ],
   timeout: ["-f -p -v --foreground --preserve-status --verbose", "-k -s --kill-after --signal"],
   xargs: [
-    "-0 -o -p -r -t -x --exit --interactive --no-run-if-empty --null --open-tty --show-limits --verbose",
-    "-a -d -E -L -n -P -R -S -s --arg-file --delimiter --max-args --max-chars --max-lines --max-procs --process-slot-var"
+    "-0 -o -p -r -t -x --exit --interactive --max-lines --no-run-if-empty --null --open-tty --show-limits --verbose",
+    "-a -d -E -L -n -P -R -S -s --arg-file --delimiter --max-args --max-chars --max-procs --process-slot-var"
   ]
 }).map(([name, [flags, values]]) => [
   name,
   { flags: new Set(flags.split(" ")), values: new Set(values.split(" ")) }
 ]));
+var runner = (flags, values, more = {}) => ({
+  flags: new Set(flags.split(" ")),
+  folder: new Set(more.folder?.split(" ")),
+  joined: more.always ?? new Set(more.joined?.split(" ")),
+  script: new Set(more.script?.split(" ")),
+  spec: !!more.spec,
+  tools: !!more.tools,
+  values: new Set(values.split(" "))
+});
+var NPM = runner("-y --dangerously-allow-all-scripts --include-workspace-root --no --strict-allow-scripts --workspaces --yes", "-c -w --allow-scripts --call --package --workspace", { script: "-c --call", spec: true });
+var BUNX = runner("--bun --ignore-scripts --no-install --silent --trust --verbose", "-p --ca --cafile --cwd --env-file --minimum-release-age --package --registry", { folder: "--cwd", spec: true });
+var PNPM_FLAGS = "-c -r -w -y --aggregate-output --color --fail-if-no-match --ignore-workspace --include-workspace-root --no-fail-if-no-match --no-include-workspace-root --no-progress --no-sort --parallel --recursive --reverse --shell-mode --sort --stream --use-stderr --workspace-root --yes";
+var PNPM_VALUES = "-C -F --changed-files-ignore-pattern --dir --env-file --filter --filter-prod --http-proxy --https-proxy --loglevel --no-proxy --npmrc-auth-file --registry --reporter --state-dir --store-dir --test-pattern --userconfig --workspace-concurrency --workspace-packages";
+var PNPM_DLX = runner(`${PNPM_FLAGS} -v --version`, `${PNPM_VALUES} --allow-build --cpu --libc --os --package`, { folder: "-C --dir", joined: "-c --shell-mode", spec: true });
+var MISE = runner("--deny-all --deny-env --deny-net --deny-read --deny-unix --deny-write --fresh-env --no-deps --raw --secrets-all", "-c -j --allow-env --allow-net --allow-read --allow-unix --allow-write --command --jobs --secrets", { script: "-c --command", tools: true });
+var BUN_FLAGS = "-b -i --bun --check --hot --if-present --no-clear-screen --no-exit-on-error --no-install --no-orphans --parallel --sequential --silent --smol --watch --workspaces";
+var BUN_VALUES = "-e -F -p -r --cwd --elide-lines --env-file --eval --filter --import --preload --print --require --shell";
+var DENO = runner("-A -q -r --allow-all --allow-env --allow-ffi --allow-import --allow-net --allow-read --allow-run --allow-scripts --allow-sys --allow-write --cached-only --check --coverage --deny-env --deny-ffi --deny-import --deny-net --deny-read --deny-run --deny-sys --deny-write --env-file --frozen --hmr --inspect --inspect-brk --inspect-wait --lock --no-check --no-clear-screen --no-code-cache --no-config --no-lock --no-npm --no-remote --node-modules-dir --quiet --reload --unsafely-ignore-certificate-errors --unstable --use-env-proxy --v8-flags --vendor --watch", "-c --cert --conditions --config --ext --import-map --location --min-dep-age --node-modules-linker --preload --require --seed --watch-exclude", { spec: true });
+var RUNNERS = new Map([
+  ["bun exec", runner(BUN_FLAGS, BUN_VALUES, { always: true, folder: "--cwd" })],
+  ["bun run", runner(BUN_FLAGS, BUN_VALUES, { folder: "--cwd" })],
+  ["bun x", BUNX],
+  ["bunx", BUNX],
+  ["corepack", runner("", "", { spec: true })],
+  ["deno run", DENO],
+  ["deno x", DENO],
+  ["mise exec", MISE],
+  ["mise x", MISE],
+  ["npm exec", NPM],
+  ["npm x", NPM],
+  ["npx", NPM],
+  ["pnpm dlx", PNPM_DLX],
+  ["pnpm exec", runner(PNPM_FLAGS, PNPM_VALUES, { folder: "-C --dir", joined: "-c --shell-mode" })],
+  ["pnpx", PNPM_DLX],
+  ["volta run", runner("--bundled-npm --no-yarn --quiet --verbose", "--env --node --npm --yarn")],
+  ["yarn dlx", runner("-q --quiet", "-p --package", { spec: true })],
+  ["yarn exec", runner("", "", { always: true })]
+]);
+var MANAGERS = new Map([
+  ["bun", "bun run"],
+  ["deno", "deno run"],
+  ["mise", "mise exec"],
+  ["npm", "npm exec"],
+  ["pnpm", "pnpm exec"],
+  ["volta", "volta run"],
+  ["yarn", "yarn dlx"]
+]);
+var SCOPES = new Map([
+  ["yarn workspace", { names: 1, options: { flags: new Set, values: new Set } }],
+  [
+    "yarn workspaces foreach",
+    {
+      names: 0,
+      options: {
+        flags: new Set("-A -i -n -p -R -t -v -W --all --dry-run --interlaced --no-private --parallel --recursive --topological --topological-dev --verbose --worktree".split(" ")),
+        values: new Set("-j --exclude --from --include --jobs".split(" "))
+      }
+    }
+  ]
+]);
+var PNPM_COMMANDS = new Set("access add adduser approve approve-builds audit bin bugs c cache cat-file cat-index change ci clean clean-install completion config create dedupe deploy deprecate dislink dist-tag dist-tags dlx docs doctor edit env exec fetch find find-hash fund get help home i ic ignored-builds import info init install install-clean install-test issues it la lane licences licenses link list ll ln login logout ls m multi outdated owner owners pack pack-app patch patch-commit patch-remove peers permissions ping pipeline pkg prefix profile prune publish purge rb rebuild recursive remove repo restart rm root rt run run-script runtime s sbom se search self-update set set-script setup shim show ss stage star stars start stop store t tasks team test token tst un undeprecate uni uninstall unlink unpublish unstar up update upgrade v version view whoami why with xmas".split(" "));
+function caseOpener(cmd) {
+  const at = cmd.words.findIndex((w) => w.value === "case" && !w.quoted);
+  const before = cmd.words.slice(0, Math.max(at, 0));
+  const word = cmd.words[at + 2];
+  return at !== -1 && (before.length === 0 || onlyReserved({ ...cmd, words: before })) && word?.value === "in" && !word.quoted;
+}
+function casePatterns(all, scoped = false) {
+  const out = new Set;
+  for (let k = 0;k < all.length; k++) {
+    if (!caseOpener(all[k]) && all[k].follows !== ";;")
+      continue;
+    const commands = scoped ? all.slice(k).filter((c) => c.scope === all[k].scope) : all.slice(k);
+    let end = 0;
+    while (commands[end + 1]?.follows === "|")
+      end++;
+    const body = commands[end + 1];
+    const run = commands.slice(0, end + 1);
+    if (body?.follows !== ")" || run.some((c) => c.redirects.length > 0 || c.scope !== body.scope))
+      continue;
+    for (const c of run)
+      out.add(c);
+  }
+  return out;
+}
 function optionValue(word, { flags, values }) {
   if (word.startsWith("--")) {
     const eq = word.indexOf("=");
@@ -385,9 +587,168 @@ function envLong(v) {
   const name = hits.includes(m[1]) ? m[1] : hits.length === 1 ? hits[0] : undefined;
   return name ? { name, value: m[2] } : undefined;
 }
+var SSH_FLAGS = "46AaCfGgKkMNnqsTtVvXxYy";
+var SSH_VALUES = "BbcDEeFIiJLlmOoPpQRSWw";
+var SSH_LOCAL = new Set(["knownhostscommand", "localcommand", "proxycommand"]);
+function sshCall({ args, first }) {
+  if (program(first?.value ?? "") !== "ssh")
+    return;
+  const call = { env: [], local: [], noStdin: false, remote: [], unread: false };
+  let remoteCommand;
+  const option = (word) => {
+    const m = /^\s*([A-Za-z]+)\s*(?:=\s*|\s+)([\s\S]*)$/.exec(word.value);
+    const key = m?.[1]?.toLowerCase() ?? "";
+    if (marked(word.value.split(/[=\s]/)[0] ?? ""))
+      call.local.push(word);
+    else if (SSH_LOCAL.has(key))
+      call.local.push({ ...word, value: m?.[2] ?? "" });
+    else if (key === "remotecommand")
+      remoteCommand = { ...word, value: m?.[2] ?? "" };
+    else if (key === "sendenv" || key === "setenv")
+      call.env.push({ ...word, value: m?.[2] ?? "" });
+  };
+  for (let k = 0;k < args.length; k++) {
+    const { value } = args[k];
+    if (value === "--" || !value.startsWith("-") || value === "-") {
+      const at = value === "--" ? k + 1 : k;
+      if (call.host || value === "--") {
+        call.host ??= args[at];
+        call.remote = args.slice(call.host === args[at] ? at + 1 : at);
+        break;
+      }
+      call.host = args[k];
+      call.unread ||= marked(value);
+      continue;
+    }
+    for (let c = 1;c < value.length; c++) {
+      if (value[c] === "n")
+        call.noStdin = true;
+      if (SSH_VALUES.includes(value[c])) {
+        const attached = value.slice(c + 1);
+        const given = attached ? { ...args[k], value: attached } : args[++k];
+        if (value[c] === "o" && given)
+          option(given);
+        break;
+      }
+      if (!SSH_FLAGS.includes(value[c]))
+        return { ...call, unread: true };
+    }
+  }
+  if (call.remote.length === 0 && remoteCommand)
+    call.remote = [remoteCommand];
+  return call;
+}
+function sshStdin(cmd, call) {
+  if (call.noStdin)
+    return;
+  if (call.unread || call.remote.length === 0)
+    return "shell";
+  const kinds = lex(call.remote.map((w) => w.value).join(" ")).commands.map((c) => stdinShell({ ...c, stdin: c.stdin ?? cmd }));
+  return kinds.includes("root") ? "root" : kinds.includes("shell") ? "shell" : kinds.find(Boolean);
+}
+var DYNAMIC = /^(?:\.|bash|bun|busybox|dash|deno|env|eval|exec|expect|fish|g?awk|ksh|lua|mawk|mksh|node|perl|php|python[\d.]*|ruby|script|sh|source|su|sudo|tclsh|watch|zsh)$/;
+function staticLine(line) {
+  const joined = line.replace(/\\\n/g, "");
+  if (marked(joined) || /[$`]/.test(joined))
+    return false;
+  const words = (cmds) => cmds.flatMap((c) => [...c.words, ...c.inner ? words(c.inner()) : []]);
+  return !words(lex(joined).commands).some((w) => marked(w.value) || DYNAMIC.test(basename(w.value).toLowerCase()));
+}
+var GLOB_SWITCHES = [
+  /\b(?:emulate|setopt|shopt|unsetopt)\b|\boptions\[/i,
+  /bashopts|dotglob|fignore|globdot|globignore/i,
+  /(?:[?[]|\*(?!\d))[^\s;&|()]*\([^()\s|]*\)/
+];
+var DIGIT_QUALIFIER = /\*\d[^\s;&|()]*\([^()\s|]*\)/;
+var bareText = (text) => text.replace(/\\\n/g, "").replace(/['"\\_]/g, "");
+var NO_GLOB = new Set([
+  "errexit",
+  "errtrace",
+  "functrace",
+  "login",
+  "noclobber",
+  "noprofile",
+  "norc",
+  "nounset",
+  "pipefail",
+  "verbose",
+  "xtrace"
+]);
+var OPTION_REDIRECT = `(?:\\d*|&|\\{[A-Za-z_]\\w*\\})${REDIRECT_OP}`;
+var SHELL_HEAD = new RegExp(`(?<=^|[\\s;&|(/])(r?(?:bash|ksh|zsh)|dash|ksh93|mksh|set|sh|yash)(?:-?[\\d.]*\\d)?(?=[\\s<>;&|)]|$)(?=((?:${OPTION_REDIRECT}|[^;&|\\n])*))`, "gi");
+var LEADING_REDIRECT = new RegExp(`^${OPTION_REDIRECT}`);
+function optionSwitch(bare) {
+  for (const [, head, rest] of bare.matchAll(SHELL_HEAD)) {
+    const words = rest.split(/\s+/).filter(Boolean);
+    for (let i = 0;i < words.length; i++) {
+      const word = words[i];
+      const redirect = LEADING_REDIRECT.exec(word);
+      if (redirect) {
+        if (redirect[0] === word)
+          i++;
+        continue;
+      }
+      if (word === "--" || !/^[-+]/.test(word))
+        break;
+      const long = /^--([a-zA-Z][a-zA-Z0-9-]*)$/.exec(word);
+      if (long) {
+        if (!NO_GLOB.has(long[1].replace(/-/g, "").toLowerCase()))
+          return `${head} ${word}`;
+        continue;
+      }
+      if (!/^[-+][a-zA-Z0-9]+$/.test(word) || /[O4]/.test(word))
+        return `${head} ${word}`;
+      const o = word.indexOf("o");
+      if (o >= 0) {
+        const names = [word.slice(o + 1), words[i + 1] ?? ""].filter(Boolean);
+        if (names.length === 0 || names.some((name) => !NO_GLOB.has(name.toLowerCase())))
+          return `${head} ${word}${words[i + 1] ? ` ${words[i + 1]}` : ""}`;
+        i++;
+      }
+    }
+  }
+}
+function globSwitch(text) {
+  const bare = bareText(text);
+  for (const pattern of GLOB_SWITCHES) {
+    const found = pattern.exec(bare);
+    if (found)
+      return found[0].trim();
+  }
+  return optionSwitch(bare);
+}
+function remoteEnv(env, line, fed = false, text = line) {
+  const home = env.process.HOME || undefined;
+  const { PWD: _pwd, ...known } = env.known;
+  return {
+    ...env,
+    cwd: home,
+    cwdAnywhere: undefined,
+    cwdBack: [],
+    cwdChain: undefined,
+    cwdChainToken: undefined,
+    cwdChainUnread: undefined,
+    cwdHeld: [],
+    cwdMaybe: [],
+    cwdOr: undefined,
+    cwdSure: home,
+    cwdUnread: home === undefined,
+    known: home && !/\b(?:cd|popd|pushd)\b/.test(line) ? { ...known, PWD: home } : known,
+    old: { dir: home },
+    oldFrom: undefined,
+    remote: true,
+    remoteDots: fed || !staticLine(line) || DIGIT_QUALIFIER.test(bareText(text)),
+    remoteSwitch: env.remoteSwitch ?? globSwitch(text),
+    vars: new Map
+  };
+}
 function stdinShellOf(cmd, { args, first, name, xargs }) {
   const fed = !!cmd.stdin || !!xargs;
   if (first && !marked(first.value)) {
+    if (name === "ssh") {
+      const call = sshCall({ args, first });
+      return call && (fed || stdinFed(cmd)) ? sshStdin(cmd, call) : undefined;
+    }
     if (name === "." || name === "source" || name === "eval")
       return fed || name !== "eval" && STDIN_PATHS.has(args[0]?.value ?? "") ? "shell" : undefined;
     const family = familyOf(name);
@@ -395,7 +756,7 @@ function stdinShellOf(cmd, { args, first, name, xargs }) {
       return fed && interpreted(family, args, xargs) ? "code" : undefined;
     if (name === "su")
       return suCommand(args) ? undefined : "root";
-    if (!SHELLS.has(name))
+    if (!SHELLS.has(name) || noExec(args, name))
       return;
     if (fed)
       return "shell";
@@ -413,6 +774,8 @@ function stdinShellOf(cmd, { args, first, name, xargs }) {
   }
   const end = first ? cmd.words.indexOf(first) : -1;
   const before = cmd.words.slice(at, end === -1 ? undefined : end);
+  if (before.some((w, k) => !w.quoted && program(w.value) === "command" && /^-p?[vV]/.test(before[k + 1]?.value ?? "")))
+    return;
   const firstWrapper = before.find((w) => !w.quoted && ROOT_SHELLS.has(program(w.value)));
   const wrappers = [];
   for (const w of before) {
@@ -584,7 +947,8 @@ function bodyOf(commands, k) {
   }
   return [];
 }
-var COUNTED = new Set(["repeat", "timeout"]);
+var COUNTED = new Set(["flock", "repeat", "taskset", "timeout"]);
+var REPEATS = new Set(["repeat", "timeout"]);
 var SHELLS = new Set(["bash", "csh", "dash", "fish", "ksh", "sh", "tcsh", "zsh"]);
 var QUOTED_ONE_WORD = /^(?:\$(?:[A-Za-z_]\w*|\d|\{(?:[A-Za-z_]\w*|\d+)(?::?[-+=?][^}@]*|(?:[#%]{1,2}|\/{1,2})[^}]*)?\}|\([\s\S]*\))|`[\s\S]*`)$/;
 var STDIN_PATHS = new Set(["-", "/dev/fd/0", "/dev/stdin", "/proc/self/fd/0"]);
@@ -639,6 +1003,7 @@ var CURL_TAKES = new Set([
   "--cookie",
   "-c",
   "--cookie-jar",
+  "--cacert",
   "-D",
   "--dump-header",
   "-e",
@@ -820,7 +1185,12 @@ function lex(src, known = {}) {
   const lx = { commands: [], i: 0, known, scope: 0, scopes: [-1], src, token: freshToken() };
   list(lx, 0, false);
   calledAgain(lx.commands, src);
+  if (lx.commands.some((c) => c.words.some((w) => /^chpwd/.test(w.value))))
+    for (const c of lx.commands)
+      c.cdRedefined = true;
   braced(lx.commands);
+  for (const c of casePatterns(lx.commands, true))
+    c.casePattern = true;
   return { commands: lx.commands, scopes: lx.scopes };
 }
 var BRACED = new Set([
@@ -864,6 +1234,9 @@ function calledAgain(commands, src) {
     }
     const body = commands.slice(k, end + 1);
     const name = word.value.replace(/\(\)$/, "");
+    if (name === "cd" || name === "chpwd")
+      for (const c of commands)
+        c.cdRedefined = true;
     if (word.quoted || !/^[\w.:-]+$/.test(name)) {
       for (const c of body)
         c.repeated = true;
@@ -900,20 +1273,32 @@ function list(lx, scope, nested, inherit) {
 function walk(lx, scope, nested, inherit) {
   const { src } = lx;
   const pending = [];
-  const fresh = () => ({ redirects: [], scope, stdin: inherit, words: [] });
+  const fedOpens = [];
+  const fresh = () => {
+    const braceFed = fedOpens.at(-1);
+    return { ...braceFed && { braceFed }, redirects: [], scope, stdin: inherit, words: [] };
+  };
   let cmd = fresh();
+  const twins = new Map;
+  const past = (from) => {
+    const twin = twins.get(cmd);
+    return twin && from >= twin.from ? twin : undefined;
+  };
   const opens = [];
   let depth = 0;
   let loops = 0;
+  const counted = [];
   let after = "";
   const bodies = [];
   const heads = [];
   const end = (op) => {
     const done = cmd;
+    const twin = twins.get(done);
     const pipe = op === "|" || op === "|&";
     const brace = (c, value) => c.words[0]?.value === value && !c.words[0].quoted;
     if (brace(done, "}")) {
       const open = opens.pop();
+      fedOpens.pop();
       if (open !== undefined) {
         const { commands } = lx;
         const close = commands.length;
@@ -961,25 +1346,48 @@ function walk(lx, scope, nested, inherit) {
         heads.push(false);
       else if (each === "end" && heads.length > 0 && !loop)
         heads.pop();
-      if (loops > 0 || loop || head || each === "foreach")
+      const counting = each === "repeat" && reserved.includes("{");
+      if (loops > 0 || loop || head || each === "foreach" || counting)
         done.repeated = true;
       if (outer && !loop && reserved.some((w) => w === "while" || w === "until"))
         done.atLeastOnce = true;
       depth = Math.max(0, depth + opened - closed);
       loops = Math.max(0, loops + (loop ? 1 : 0) - (reserved.includes("done") ? 1 : 0));
+      if (counting) {
+        counted.push(depth);
+        loops++;
+      }
+      while (counted.length > 0 && depth < counted[counted.length - 1]) {
+        counted.pop();
+        loops = Math.max(0, loops - 1);
+      }
       if (depth === 0 && FREES.has(op)) {
         lx.token = freshToken();
         lx.orRun = op === "||";
       }
       after = op;
+      if (counting) {
+        opens.push(lx.commands.length);
+        fedOpens.push(fedOpens.at(-1));
+      }
       for (const w of done.words) {
         if (w.value !== "{" || w.quoted)
           break;
         opens.push(lx.commands.length);
+        fedOpens.push(done.stdin ?? done.braceFed);
       }
+      const called = done.words.find((w) => w.value !== "{" || w.quoted);
+      if (fedOpens.length > 0 && called?.value === "exec" && !called.quoted && done.redirects.length > 0)
+        fedOpens[fedOpens.length - 1] = undefined;
       lx.commands.push(done);
+      if (twin && lx.i >= twin.from) {
+        const { of, redirects, words } = twin;
+        of.glob = { detached: of.detached || done.detached, redirects, words };
+      }
     }
     cmd = fresh();
+    if (twin && lx.i < twin.from)
+      twins.set(cmd, twin);
     cmd.follows = op;
     if (pipe) {
       cmd.stdin = done;
@@ -1010,6 +1418,7 @@ function walk(lx, scope, nested, inherit) {
       if (nested)
         return;
     } else if (c === "(") {
+      const twin = globOpens(cmd, src, lx.i) ? globTwin(lx, cmd) : undefined;
       lx.i++;
       const piped = cmd.words.length === 0 && cmd.redirects.length === 0 ? cmd.stdin : undefined;
       end(";");
@@ -1019,15 +1428,20 @@ function walk(lx, scope, nested, inherit) {
       cmd.group = true;
       const members = topLevel(lx.commands.slice(from), scope);
       cmd.inner = () => members;
-    } else if ((c === "<" || c === ">") && src[lx.i + 1] === "(") {
+      if (twin)
+        twins.set(cmd, twin);
+    } else if ((c === "<" || c === ">" || c === "=") && src[lx.i + 1] === "(") {
+      const from = lx.i;
       cmd.words.push(procSub(lx));
+      past(from)?.words.push(cmd.words[cmd.words.length - 1]);
     } else if (redirect) {
+      const from = lx.i;
       lx.i += redirect[0].length;
       while (src[lx.i] === " " || src[lx.i] === "\t")
         lx.i++;
       const [, fd] = redirect;
       const op = redirect[2].replace(/!$/, "|").replace(/^(>[>&])\|$/, "$1");
-      const target = src.startsWith("<(", lx.i) ? procSub(lx) : word(lx);
+      const target = src.startsWith("<(", lx.i) || src.startsWith("=(", lx.i) ? procSub(lx) : word(lx);
       const entry = { fd, op, target };
       if (op === "<<" || op === "<<-") {
         pending.push({
@@ -1040,6 +1454,7 @@ function walk(lx, scope, nested, inherit) {
         entry.body = { ...target, value: `${target.value}
 ` };
       cmd.redirects.push(entry);
+      past(from)?.redirects.push(entry);
     } else if (c === ";" || c === "&" || c === "|") {
       const two = src.slice(lx.i, lx.i + 2);
       const op = ["&&", ";;", "|&", "||"].includes(two) ? two : c;
@@ -1050,6 +1465,8 @@ function walk(lx, scope, nested, inherit) {
       cmd.words.push(word(lx));
       if (lx.i === from)
         lx.i++;
+      else
+        past(from)?.words.push(cmd.words[cmd.words.length - 1]);
     }
   }
   heredocs(lx, pending, nested);
@@ -1117,17 +1534,97 @@ function expandHeredoc(body) {
   const value = joined.replace(/\\([\\$`])/g, "$1");
   return /\$[\w{(@*#?!$-]|`/.test(joined.replace(/\\[\\$`]/g, "")) ? { unknown: "an expansion in an unquoted heredoc", value } : { value };
 }
-function word(lx) {
+function globOpens(cmd, src, at) {
+  const program = cmd.words.findIndex((w) => w.quoted || !MARKERS.has(w.value));
+  if (program < 0)
+    return false;
+  const lead = cmd.words.slice(program);
+  const next = { quoted: false, value: "(" };
+  let words = [...cmd.words, next];
+  let { first } = parse({ ...cmd, words });
+  while (first && first !== next && words.includes(first) && maySkip(first)) {
+    const dropped = first;
+    words = words.filter((w) => w !== dropped);
+    ({ first } = parse({ ...cmd, words }));
+  }
+  const close = balanced(src, at, "(", ")", false, true);
+  const group = src.slice(at, close);
+  return first === next && src[at + 1] !== ")" && !group.includes("/") && plainAlternative(group, close < src.length && !/[\s;&|<>)]/.test(src[close])) && !subshellPrefix(lead) && !HEADERS.has(cmd.words[0]?.value ?? "");
+}
+function plainAlternative(group, glued) {
+  let depth = 0;
+  let plain = true;
+  let empty = true;
+  for (let i = 1;i < group.length - 1; i++) {
+    const c = group[i];
+    if (c === "|" && depth === 0) {
+      if (plain && (glued || !empty))
+        return true;
+      plain = true;
+      empty = true;
+      continue;
+    }
+    empty = false;
+    if (c === "\\")
+      i++;
+    else if (c === "'") {
+      const end = group.indexOf("'", i + 1);
+      i = end === -1 ? group.length : end;
+    } else if (c === '"') {
+      i++;
+      while (i < group.length && group[i] !== '"')
+        i += group[i] === "\\" ? 2 : 1;
+    } else if (c === "(")
+      depth++;
+    else if (c === ")")
+      depth--;
+    else if (/[\s;&]/.test(c))
+      plain = false;
+  }
+  return plain && (glued || !empty);
+}
+function subshellPrefix(lead) {
+  let at = 0;
+  while (at < lead.length && !lead[at].quoted)
+    if (lead[at].value === "time" && lead[at - 1]?.value === "time")
+      break;
+    else if (lead[at].value === "time" || lead[at].value === "nocorrect")
+      at++;
+    else if (lead[at].value === "repeat" && at + 1 < lead.length)
+      at += 2;
+    else
+      break;
+  return at > 0 && at === lead.length;
+}
+var maySkip = (w) => !!w.source && /^\u0000+$/.test(w.value) && (/^\u0000+$/.test(w.source) || vanishingParts(w.source));
+var HEADERS = new Set(["case", "for", "foreach", "function", "select"]);
+function globTwin(lx, of) {
+  const copy = { ...lx, commands: [], scopes: [...lx.scopes] };
+  const glob = word(copy, true);
+  const program = of.words.findIndex((w) => w.quoted || !MARKERS.has(w.value));
+  return {
+    from: copy.i,
+    of,
+    redirects: [...of.redirects],
+    words: [...of.words.slice(program), glob]
+  };
+}
+function word(lx, opening = false) {
   const { src } = lx;
   const start = lx.i;
   const out = { quoted: false, value: "" };
   let bare = "";
-  while (lx.i < src.length && (!BREAK.has(src[lx.i]) || src[lx.i] === "(" && lx.i > start && src[lx.i + 1] !== ")")) {
+  while (lx.i < src.length && (!BREAK.has(src[lx.i]) || src[lx.i] === "(" && (lx.i > start || opening) && src[lx.i + 1] !== ")")) {
     tick();
     const c = src[lx.i];
     const next = src[lx.i + 1] ?? "";
-    if (c === "(") {
-      const end = balanced(src, lx.i, "(", ")");
+    if (c === "(" && /^(?:[A-Za-z_]\w*(?:\[[^\]]*\])?|\[[^\]]*\])\+?==$/.test(src.slice(start, lx.i))) {
+      out.value = out.value.slice(0, -1);
+      bare = bare.slice(0, -1);
+      lx.i--;
+      merge(out, procSub(lx));
+    } else if (c === "(") {
+      const end = balanced(src, lx.i, "(", ")", false, opening);
       out.value += src.slice(lx.i, end);
       bare += src.slice(lx.i, end);
       inner(lx, src.slice(lx.i + 1, end - 1));
@@ -1171,8 +1668,8 @@ function word(lx) {
       lx.i++;
     }
   }
-  if (/\{(?=[^{}]*\})[^{}]*(?:,|\.\.)/.test(bare))
-    out.unknown ??= "a brace expansion";
+  if (BRACE_LIST.test(bare))
+    out.unknown ??= BRACE;
   if (GLOB_CHARS.test(bare))
     out.glob = true;
   out.source = src.slice(start, lx.i);
@@ -1183,6 +1680,8 @@ function word(lx) {
   return out;
 }
 var GLOB_CHARS = /[*?[{(]/;
+var BRACE_LIST = /\{(?=[^{}]*\})[^{}]*(?:,|\.\.)/;
+var BRACE = "a brace expansion";
 var TILDE = /^~[-+](?=\/|$|\u0000)/;
 var ends = (c = "") => c === "" || c === "/" || BREAK.has(c);
 function double(lx) {
@@ -1239,7 +1738,7 @@ function dollar(lx, plain = false) {
   }
   if (next === "{") {
     const end = balanced(src, lx.i + 1, "{", "}", plain);
-    const name = /^\$\{([A-Za-z_]\w*)\}$/.exec(src.slice(lx.i, end))?.[1];
+    const name = /^\$\{([A-Za-z_]\w*)(?::?\?[^}]*)?\}$/.exec(src.slice(lx.i, end))?.[1];
     readText(lx, src.slice(lx.i + 2, end - 1));
     lx.i = end;
     return variable(name);
@@ -1250,6 +1749,8 @@ function dollar(lx, plain = false) {
     const from = lx.i;
     while (/\w/.test(src[lx.i] ?? ""))
       lx.i++;
+    if (/^:[A-Za-z&]/.test(src.slice(lx.i, lx.i + 2)))
+      return unknown("a zsh modifier");
     return variable(src.slice(from, lx.i));
   }
   if (next === "$") {
@@ -1268,7 +1769,7 @@ function inner(lx, src) {
   while (sub.i < src.length) {
     tick();
     const from = sub.i;
-    if ((src[sub.i] === "<" || src[sub.i] === ">") && src[sub.i + 1] === "(")
+    if ((src[sub.i] === "<" || src[sub.i] === ">" || src[sub.i] === "=") && src[sub.i + 1] === "(")
       procSub(sub);
     else
       word(sub);
@@ -1276,7 +1777,7 @@ function inner(lx, src) {
       sub.i++;
   }
 }
-function balanced(src, from, open, close, plain = false) {
+function balanced(src, from, open, close, plain = false, doubles = false) {
   let depth = 0;
   for (let i = from;i < src.length; i++) {
     tick();
@@ -1286,6 +1787,10 @@ function balanced(src, from, open, close, plain = false) {
     else if (c === "'" && !plain) {
       const end = src.indexOf("'", i + 1);
       i = end === -1 ? src.length : end;
+    } else if (c === '"' && doubles) {
+      i++;
+      while (i < src.length && src[i] !== '"')
+        i += src[i] === "\\" ? 2 : 1;
     } else if (c === open)
       depth++;
     else if (c === close && --depth === 0)
@@ -1351,6 +1856,79 @@ function mktempPath(cmd, known) {
   return template ? template.value : `${known.TMPDIR.replace(/\/$/, "")}/tmp.mktemp`;
 }
 var SPLIT = /^(?:-[0iv]*S|--split-string(?:=|$))(.*)$/;
+var XARGS_LONG = [
+  "arg-file",
+  "delimiter",
+  "eof",
+  "exit",
+  "help",
+  "interactive",
+  "max-args",
+  "max-chars",
+  "max-lines",
+  "max-procs",
+  "no-run-if-empty",
+  "null",
+  "open-tty",
+  "process-slot-var",
+  "replace",
+  "show-limits",
+  "verbose",
+  "version"
+];
+var XARGS_FLAGS = "0oprtx";
+function delimiterOf(word) {
+  if (!word || word.unknown)
+    return;
+  if (word.value.length === 1)
+    return word.value;
+  const [, hex, octal, letter] = /^\\(?:x([\da-f]+)|([0-7]+)|(.))$/i.exec(word.value) ?? [];
+  const code = hex ? parseInt(hex, 16) : octal ? parseInt(octal, 8) : undefined;
+  if (code !== undefined)
+    return code < 256 ? String.fromCharCode(code) : undefined;
+  return letter ? ESCAPES[letter] : undefined;
+}
+var XARGS_REPLACE = /^(?:-[IiJ]|--replace)/;
+function xargsOption(xargs, w, next, state) {
+  const split = (delimiter) => {
+    xargs.delimiters = [...xargs.delimiters ?? [], delimiter];
+  };
+  if (XARGS_REPLACE.test(w.value))
+    return;
+  const long = /^--([^=]+)(=?)/.exec(w.value);
+  let name;
+  let value;
+  if (long) {
+    const names = XARGS_LONG.filter((n) => n.startsWith(long[1]));
+    name = names.includes(long[1]) ? long[1] : names.length === 1 ? names[0] : undefined;
+    if (long[2])
+      value = slice(w, long[0].length);
+  } else if (w.value.startsWith("-")) {
+    let k = 1;
+    while (XARGS_FLAGS.includes(w.value[k] ?? "-"))
+      k++;
+    if (w.value.slice(1, k).includes("0"))
+      split("\x00");
+    name = w.value[k];
+    if (k + 1 < w.value.length)
+      value = slice(w, k + 1);
+  }
+  if (name === "i" || name === "replace")
+    xargs.replace = value?.value || "{}";
+  else if (name === "null")
+    split("\x00");
+  else if (name === "I" || name === "J")
+    xargs.replace = (value ?? next)?.value;
+  else if (name === "a" || name === "arg-file")
+    xargs.files = [
+      ...xargs.files ?? [],
+      ...[value ?? next].filter((file) => file !== undefined).map((file) => ({ chdir: state.chdir, file, moved: state.moved }))
+    ];
+  else if (name === "d" || name === "delimiter")
+    split(delimiterOf(value ?? next));
+}
+var splitFrom = new WeakMap;
+var chdirOf = (state, word) => state.chdir && word ? { ...word, ...unknown("a second env -C") } : word;
 var READINGS = 16;
 function parse(cmd) {
   const state = { local: new Map, rest: cmd.words.toReversed(), xargs: undefined };
@@ -1377,6 +1955,7 @@ var assign = (local, w) => {
 function unwrap(state, inside, budget) {
   const { local, rest } = state;
   const peek = () => rest[rest.length - 1];
+  const next = () => rest[rest.length - 2];
   const take = () => rest.pop();
   const also = [];
   const fork = (wrapper, drop) => {
@@ -1388,42 +1967,82 @@ function unwrap(state, inside, budget) {
     also.push(unwrap({
       chdir: state.chdir,
       local: new Map(local),
+      moved: state.moved,
       rest: rest.slice(0, Math.max(0, rest.length - drop)),
       xargs: state.xargs && { ...state.xargs }
     }, wrapper, budget));
   };
+  let spec = false;
   for (let wrapper = inside;; wrapper = undefined) {
     if (!wrapper) {
-      wrapper = program(peek()?.value ?? "");
+      const word = peek();
+      const held = [state.xargs?.replace ?? "", ...state.xargs?.outer ?? []];
+      for (const replace of held.filter((r) => r && word?.value.includes(r)))
+        if (word) {
+          const typed = splitFrom.get(word) ?? word;
+          state.xargs = {
+            ...state.xargs,
+            filled: [...state.xargs?.filled ?? [], [typed, replace]]
+          };
+        }
+      wrapper = program(word?.value ?? "");
       if (!WRAPPERS.has(wrapper))
         break;
+      if (ROOT_SHELLS.has(wrapper))
+        state.moved = true;
+      if (wrapper === "xargs" && state.xargs?.replace)
+        state.xargs = { ...state.xargs, outer: [...state.xargs.outer ?? [], state.xargs.replace] };
       if (wrapper === "xargs")
         state.xargs ??= {};
       take();
     }
-    const options = WRAPPERS.get(wrapper);
+    const runs = RUNNERS.get(wrapper);
+    const options = WRAPPERS.get(wrapper) ?? runs;
+    spec = !!runs?.spec;
+    let joined = runs?.joined === true;
     for (let w = peek();w; w = peek()) {
       const v = w.value;
+      const script = runs && namedOption(v, runs, runs.script);
+      const folder = runs && namedOption(v, runs, runs.folder);
+      if (wrapper === "xargs")
+        xargsOption(state.xargs ??= {}, w, next(), state);
+      if (runs && runs.joined !== true && joinsWords(v, runs.joined))
+        joined = true;
       if (ASSIGN.test(v))
         assign(local, take());
       else if (wrapper === "env" && SPLIT.test(v)) {
         const attached = SPLIT.exec(v)?.[1] ?? "";
         take();
-        const split = (attached || take()?.value || "").split(/\s+/).filter(Boolean);
-        for (let j = split.length - 1;j >= 0; j--)
-          rest.push({ quoted: false, value: split[j] });
+        const from = attached ? w : take();
+        const split = (attached || from?.value || "").split(/\s+/).filter(Boolean);
+        for (let j = split.length - 1;j >= 0; j--) {
+          const word = { quoted: false, value: split[j] };
+          if (from)
+            splitFrom.set(word, splitFrom.get(from) ?? from);
+          rest.push(word);
+        }
       } else if (wrapper === "env" && (v === "-C" || v === "--chdir")) {
         take();
-        state.chdir = take();
+        state.chdir = chdirOf(state, take());
       } else if (wrapper === "env" && /^(?:-C|--chdir=)./.test(v)) {
-        state.chdir = slice(w, v.startsWith("-C") ? 2 : "--chdir=".length);
+        state.chdir = chdirOf(state, slice(w, v.startsWith("-C") ? 2 : "--chdir=".length));
         take();
-      } else if (state.xargs && /^(?:-[IiJ]|--replace)/.test(v)) {
+      } else if (wrapper === "xargs" && XARGS_REPLACE.test(v)) {
         const attached = /^(?:-[IiJ]|--replace=?)(.*)$/.exec(v)?.[1] ?? "";
         take();
+        state.xargs ??= {};
         state.xargs.replace = v === "-I" || v === "-J" ? take()?.value : attached || "{}";
       } else if (wrapper === "env" && v === "-") {
         take();
+      } else if (folder !== undefined) {
+        take();
+        state.chdir = chdirOf(state, folder === -1 ? take() : slice(w, folder));
+      } else if (script !== undefined) {
+        take();
+        const text = script === -1 ? take() : slice(w, script);
+        if (text)
+          rest.push(text, ...SH_C);
+        break;
       } else if (v === "--") {
         take();
         while (ASSIGN.test(peek()?.value ?? ""))
@@ -1433,19 +2052,37 @@ function unwrap(state, inside, budget) {
         const end = wrapper === "nice" && /^-\d+$/.test(v) ? "own" : marked(v) ? undefined : optionValue(v, options);
         if (!end)
           fork(wrapper, 2);
-        else if (end === "next" && marked(rest[rest.length - 2]?.value ?? "")) {
+        else if (end === "next" && marked(next()?.value ?? "")) {
           fork(wrapper, 1);
           fork(wrapper, 3);
         }
         rest.length = Math.max(0, rest.length - (end === "next" ? 2 : 1));
-      } else
+      } else if (runs?.tools && rest.some((r) => !r.quoted && r.value === "--"))
+        take();
+      else
         break;
+    }
+    if (joined && rest.length > 0) {
+      const text = rest.toReversed().map((r) => r.value).join(" ");
+      rest.length = 0;
+      rest.push({ quoted: true, value: text }, ...SH_C);
     }
     if (COUNTED.has(wrapper))
       take();
+    if (wrapper === "chrt" && /^\d+$/.test(peek()?.value ?? ""))
+      take();
+    if (wrapper === "flock" && !peek()?.quoted && FLOCK_SCRIPT.has(peek()?.value ?? "")) {
+      take();
+      const text = take();
+      if (text)
+        rest.push(text, ...SH_C);
+    }
+    if (wrapper === "repeat" && REPEAT_BODY.has(peek()?.value ?? "") && !peek()?.quoted)
+      take();
   }
-  const first = take();
-  return {
+  const typed = take();
+  const first = spec && typed ? packageName(typed) : typed;
+  const parsed = {
     also,
     args: rest.reverse(),
     chdir: state.chdir,
@@ -1454,11 +2091,145 @@ function unwrap(state, inside, budget) {
     name: first ? program(first.value) : "",
     xargs: state.xargs
   };
+  const via = viaRunner(parsed, state, budget);
+  if (via)
+    also.push(via);
+  return parsed;
+}
+var SH_C = [
+  { quoted: false, value: "-c" },
+  { quoted: false, value: "sh" }
+];
+var FLOCK_SCRIPT = new Set(["-c", "--command"]);
+function namedOption(v, { values }, names) {
+  if (!v.startsWith("-") || v === "-" || v === "--")
+    return;
+  if (v.startsWith("--")) {
+    const eq = v.indexOf("=");
+    if (!names.has(eq === -1 ? v : v.slice(0, eq)))
+      return;
+    return eq === -1 ? -1 : eq + 1;
+  }
+  for (let k = 1;k < v.length; k++) {
+    const option = `-${v[k]}`;
+    if (values.has(option))
+      return names.has(option) ? k === v.length - 1 ? -1 : k + 1 : undefined;
+  }
+}
+function joinsWords(v, joined) {
+  if (v.startsWith("--"))
+    return joined.has(v.split("=")[0]);
+  return v.startsWith("-") && [...v.slice(1)].some((letter) => joined.has(`-${letter}`));
+}
+function packageName(word) {
+  const from = word.value.startsWith("npm:") ? 4 : 0;
+  const name = word.value.slice(from).replace(/(?<=.)@[^@/]*$/, "");
+  if (from === 0 && name === word.value)
+    return word;
+  const cut = slice(word, from);
+  return { ...cut, source: word.source === word.value ? name : word.source, value: name };
+}
+function subcommandAt(manager, args, options) {
+  for (let k = 0;k < args.length; k++) {
+    const v = args[k].value;
+    if (!v.startsWith("-") || v === "-" || v === "--")
+      return k;
+    const end = optionValue(v, options);
+    if (end === "next")
+      k++;
+    else if (end === undefined && !RUNNERS.has(`${manager} ${args[k + 1]?.value}`) && RUNNERS.has(`${manager} ${args[k + 2]?.value}`))
+      k++;
+  }
+  return args.length;
+}
+function viaRunner(parsed, state, budget) {
+  const { args, name } = parsed;
+  let key = RUNNERS.has(name) ? name : undefined;
+  let words = args;
+  let implicit = false;
+  const manager = MANAGERS.get(name);
+  if (!key && manager) {
+    let at = subcommandAt(name, args, RUNNERS.get(manager));
+    const from = at;
+    for (let scope = scopeAt(name, args, at);scope; scope = scopeAt(name, args, at)) {
+      const after = at + scope.words + scope.names;
+      at = after + subcommandAt(name, args.slice(after), scope.options);
+    }
+    const sub = args[at]?.value;
+    if (sub === undefined)
+      return;
+    if (RUNNERS.has(`${name} ${sub}`)) {
+      key = `${name} ${sub}`;
+      words = args.toSpliced(from, at + 1 - from);
+    } else if (name === "pnpm" && !PNPM_COMMANDS.has(sub) || name === "deno" && sub.startsWith("npm:")) {
+      key = manager;
+      implicit = true;
+    }
+  }
+  if (!key)
+    return;
+  tick();
+  if (budget.left-- <= 0) {
+    budget.capped = true;
+    return;
+  }
+  const reading = unwrap({
+    chdir: parsed.chdir,
+    local: new Map(parsed.local),
+    moved: state.moved,
+    rest: words.toReversed(),
+    xargs: parsed.xargs && { ...parsed.xargs }
+  }, key, budget);
+  if (!reading.first)
+    return;
+  const file = reading.first.value;
+  if (key === "bun run" && (file.includes("/") || SCRIPT_FILE.test(file)))
+    return;
+  if (key === "deno run" && words.includes(reading.first))
+    return;
+  return { ...reading, via: implicit ? name : key };
+}
+var SCRIPT_FILE = /\.[cm]?[jt]sx?$/;
+function scopeAt(name, args, at) {
+  const two = `${name} ${args[at]?.value} ${args[at + 1]?.value}`;
+  const one = `${name} ${args[at]?.value}`;
+  const scope = SCOPES.get(two) ?? SCOPES.get(one);
+  return scope && { ...scope, words: SCOPES.has(two) ? 2 : 1 };
+}
+function runsScript({ first, via }, env) {
+  if (via !== "bun run" && via !== "pnpm")
+    return false;
+  const name = first?.value;
+  const unsure = env.cwdUnread || env.cwdAnywhere || (env.cwdMaybe?.length ?? 0) > 0;
+  const start = env.cwdSure ?? (unsure ? undefined : env.cwd);
+  if (!name || marked(name) || !start)
+    return false;
+  for (let dir = start;; dir = dirname2(dir)) {
+    const scripts = packageScripts(`${dir}/package.json`);
+    if (scripts)
+      return Object.hasOwn(scripts, name);
+    if (dirname2(dir) === dir)
+      return false;
+  }
+}
+function packageScripts(path) {
+  let text;
+  try {
+    text = readFileSync2(path, "utf8");
+  } catch {
+    return;
+  }
+  try {
+    const scripts = JSON.parse(text).scripts;
+    return scripts && typeof scripts === "object" ? scripts : {};
+  } catch {
+    return {};
+  }
 }
 function slotWords({ args, name }) {
   if (name !== "run-slot.sh")
     return;
-  const at = args.findIndex((a) => a.value === "--");
+  const at = args.findIndex((a, i) => i > 0 && a.value === "--");
   return at === -1 ? [] : args.slice(at + 1);
 }
 function shellSlot(args, shell) {
@@ -1467,7 +2238,7 @@ function shellSlot(args, shell) {
     return;
   return args.slice(args.indexOf(operand));
 }
-async function run(lexed, env, visit, builtins = false) {
+async function run2(lexed, env, visit, builtins = false) {
   if (running >= MAX_RUNS)
     throw new RangeError("scripts nested too deep");
   running++;
@@ -1495,13 +2266,526 @@ async function runAll(lexed, env, visit, builtins) {
     producer.feedsShell = true;
     consumer.runsStdin = kind !== "code";
   }
-  for (const cmd of lexed.commands) {
-    const verdict = await examine(cmd, envOf(cmd.scope), visit, builtins);
+  env.namings ??= namings(lexed.commands);
+  const unbind = new Map;
+  for (const [k, cmd] of lexed.commands.entries()) {
+    const at = envOf(cmd.scope);
+    if (cmd.repeated && !lexed.commands[k - 1]?.repeated)
+      repass(lexed.commands.slice(k), envs);
+    const verdict = await examine(cmd, at, visit, builtins) ?? (cmd.glob && await examine({ ...cmd, ...cmd.glob, glob: undefined }, at, visit, builtins));
     if (verdict)
       return verdict;
+    unbind.get(cmd)?.();
+    bind(lexed.commands, k, at, unbind);
+    change(cmd, at);
   }
 }
+var NAME_SETTERS = new Set([
+  "compgen",
+  "declare",
+  "export",
+  "float",
+  "getln",
+  "getopts",
+  "integer",
+  "let",
+  "local",
+  "mapfile",
+  "nameref",
+  "pcre_match",
+  "print",
+  "printf",
+  "private",
+  "read",
+  "readarray",
+  "readonly",
+  "set",
+  "shift",
+  "stat",
+  "strftime",
+  "syserror",
+  "sysopen",
+  "sysread",
+  "syswrite",
+  "typeset",
+  "unset",
+  "vared",
+  "wait",
+  "zcurses",
+  "zformat",
+  "zgdbmpath",
+  "zgetattr",
+  "zlistattr",
+  "zmodload",
+  "zparseopts",
+  "zpty",
+  "zregexparse",
+  "zselect",
+  "zsocket",
+  "zstat",
+  "zstyle",
+  "zsystem",
+  "ztcp",
+  "ztie",
+  "zuntie"
+]);
+var PRINTS = new Set(["print", "printf"]);
+var RUNS_TEXT = new Set([
+  ".",
+  "alias",
+  "autoload",
+  "emulate",
+  "enable",
+  "eval",
+  "fc",
+  "mapfile",
+  "r",
+  "readarray",
+  "sched",
+  "source",
+  "trap",
+  "zmodload",
+  "zregexparse",
+  "zstyle"
+]);
+var CHANGED = { ...unknown("a value a builtin may change"), vanishes: true };
+var DECLARES = new Set([...EXPORTS, "float", "integer", "private"]);
+function change(cmd, env) {
+  const { args, first, name } = parse(cmd);
+  const words = args.map((a) => a.value);
+  if (marked(name)) {
+    const array = arrayRun(cmd, first, env);
+    if (array === null || array && RUNS_TEXT.has(parse(array).name)) {
+      for (const key of env.vars.keys())
+        setVar(env.vars, key, CHANGED);
+      return;
+    }
+    const variants = array ? [array] : [...splitHeld(cmd, name, env), ...splitHeld(cmd, name, env, true)].filter((variant) => !marked(parse(variant).name));
+    for (const variant of variants)
+      change(variant, env);
+    if (variants.length > 0)
+      return;
+    const known = heldKnown(env);
+    const unread = args.some((a) => {
+      const value = marked(a.value) && a.raw ? relexedValue(a.raw, known) : a.value;
+      return value === undefined || marked(value);
+    });
+    const names = unread ? [...env.vars.keys()] : words.filter((w) => NAME.test(w));
+    for (const key of names)
+      if (env.vars.has(key))
+        setVar(env.vars, key, CHANGED);
+    return;
+  }
+  const element = (first?.source ?? first?.value ?? "").match(SUBSCRIPTED)?.[1];
+  if (element) {
+    if (env.vars.has(element))
+      setVar(env.vars, element, CHANGED);
+    return;
+  }
+  const options = words.filter((w) => /^[-+]./.test(w) && w !== "--");
+  const prints = PRINTS.has(name);
+  const vNames = prints ? words.flatMap((w, k) => /^-[^-\s]*v/.test(w) ? [w.slice(w.indexOf("v") + 1), words[k + 1] ?? ""] : []) : [];
+  const nameWords = prints ? vNames : words.map((w) => w.split("=")[0]);
+  const all = RUNS_TEXT.has(name) && (name !== "eval" || args.some(unreadWord)) || NAME_SETTERS.has(name) && nameWords.some(marked) || name === "unset" && options.some((w) => w.includes("m"));
+  const read = name === "read" ? binds(cmd) : [];
+  const names = all ? [...env.vars.keys()] : name === "unset" ? options.some((w) => w.includes("f")) ? [] : words : name === "read" ? read.length > 0 ? read : ["REPLY"] : prints ? printsText(words) ? [] : vNames : DECLARES.has(name) ? words.filter((w) => options.some((o) => o !== "-a") || !ASSIGN.test(w) && (options.length > 0 || name !== "export" && name !== "readonly")) : name === "set" ? words.flatMap((w, k) => /^[-+]\w*A$/.test(w) && words[k + 1] ? [words[k + 1]] : []) : NAME_SETTERS.has(name) && name !== "getopts" ? words.flatMap((w) => w.match(/[A-Za-z_]\w*/g) ?? []) : [];
+  for (const key of names.map((w) => w.split("=")[0].replace(/\[[\s\S]*$/, ""))) {
+    if (!NAME.test(key))
+      continue;
+    if (env.vars.has(key) || name === "read" || prints)
+      setVar(env.vars, key, CHANGED);
+  }
+}
+function namings(commands) {
+  const counts = new Map;
+  const add = (name) => void counts.set(name, (counts.get(name) ?? 0) + 1);
+  const count = (source, value) => {
+    for (const [, name] of (source ?? "").matchAll(/\$\{?[#!+^=~]?([A-Za-z_]\w*)/g))
+      add(name);
+    const text = value ?? "";
+    for (const [, name] of text.matchAll(/(?<=^|=)([A-Za-z_]\w*)(?=\[|\+?=|$)/g))
+      add(name);
+    const cluster = text.match(/^-(\w+)/)?.[1] ?? "";
+    for (let k = 1;k < cluster.length; k++) {
+      const name = cluster.slice(k).match(/^[A-Za-z_]\w*/)?.[0];
+      if (name && /^(?:\[|\+?=|$)/.test(text.slice(k + 1 + name.length)))
+        add(name);
+    }
+  };
+  for (const cmd of commands) {
+    const { args, first, name } = parse(cmd);
+    if (name === "eval")
+      for (const a of args)
+        for (const [key] of a.value.matchAll(/[A-Za-z_]\w*/g))
+          add(key);
+    for (const w of cmd.words)
+      if (w !== first || !WHOLE_RUN.test(w.raw ?? w.source ?? ""))
+        count(w.source ?? w.raw, w.value);
+    for (const r of cmd.redirects) {
+      count(r.target?.source, r.target?.value);
+      count(r.body?.value, undefined);
+    }
+  }
+  return counts;
+}
+function arrayRun(cmd, first, env) {
+  const run = (first?.raw ?? first?.source)?.match(WHOLE_RUN);
+  const key = run?.[1] ?? run?.[2];
+  const set = key ? env.vars.get(key) : undefined;
+  if (!key || !set)
+    return;
+  if ((env.namings?.get(key) ?? 0) > 1)
+    return null;
+  if (set.unknown !== undefined || set.vanishes)
+    return null;
+  const inner = set.source?.match(/^[A-Za-z_]\w*=\(([\s\S]*)\)$/)?.[1];
+  if (inner === undefined)
+    return;
+  const { commands } = lex(inner);
+  const elements = commands.length === 1 ? commands[0].words : [];
+  const asWritten = (w) => !unreadWord({ ...w, source: w.source?.replace(/^~(?=\/|$)/, "") });
+  if (elements.length === 0 || commands[0].redirects.length > 0 || !elements.every(asWritten))
+    return null;
+  const seps = ifsSplit(env);
+  const words = run?.[2] ? elements.flatMap((w) => splitValue(w.value, seps)) : elements;
+  if (words.length === 0)
+    return null;
+  return { ...cmd, words: cmd.words.flatMap((w) => w === first ? words : [w]) };
+}
+function globRun(cmd, first, env, glob = !!first?.glob) {
+  const pattern = first?.value ?? "";
+  if (!first || !glob || marked(pattern) || SUBSCRIPTED.test(first.source ?? ""))
+    return;
+  const seen = (first.source ?? "").replace(/\\\n/g, "").replace(QUOTED, maskQuoted);
+  const grouped = seen.includes("(");
+  const qualifiers = grouped ? /\(([^()|]*)\)$/.exec(seen) : null;
+  const joined = pattern.replace(/\\\n/g, "");
+  const groups = grouped ? groupWords(qualifiers ? joined.slice(0, joined.length - qualifiers[0].length) : joined) : [pattern];
+  if (groups === null || qualifiers?.[1].includes("N"))
+    return null;
+  const patterns = groups ?? [pattern];
+  if ((!grouped || !groups) && !GLOB_PATTERN.test(pattern))
+    return;
+  const [only, ...more] = patterns;
+  const unsure = !env.cwd || env.cwdUnread || env.cwdAnywhere;
+  if (more.length === 0 && !GLOB_PATTERN.test(only) && !isAbsolute2(only) && unsure)
+    return [
+      { ...cmd, words: cmd.words.map((w) => w === first ? { quoted: true, value: only } : w) }
+    ];
+  const found = [];
+  for (const each of patterns) {
+    const matched = globMatches(each, env);
+    if (matched === null)
+      return null;
+    found.push(...matched);
+  }
+  if (found.length > READINGS || qualifiers && found.length > 0)
+    return null;
+  if (found.length === 0)
+    return;
+  return found.map((value) => ({
+    ...cmd,
+    words: cmd.words.map((w) => w === first ? { quoted: true, value } : w)
+  }));
+}
+function globMatches(pattern, env) {
+  const absolute = isAbsolute2(pattern);
+  if (!absolute && (!env.cwd || env.cwdUnread || env.cwdAnywhere))
+    return null;
+  const base = absolute ? "/" : env.cwd;
+  let paths = [""];
+  for (const [k, part] of pattern.split("/").entries()) {
+    const join = (path, name) => k === 0 ? name : `${path}/${name}`;
+    if (!GLOB_PATTERN.test(part)) {
+      paths = paths.map((path) => join(path, part));
+      continue;
+    }
+    const glob = shellGlob(part);
+    const next = [];
+    for (const path of paths) {
+      let names;
+      try {
+        names = readdirSync(resolve2(base, path || "."));
+      } catch (error) {
+        if (/^(?:ENOENT|ENOTDIR)$/.test(error.code ?? ""))
+          continue;
+        return null;
+      }
+      for (const name of names)
+        if ((part.startsWith(".") || !name.startsWith(".")) && glob.match(name))
+          next.push(join(path, name));
+    }
+    if (next.length > READINGS)
+      return null;
+    paths = next;
+  }
+  const found = [];
+  for (const path of paths) {
+    try {
+      lstatSync(resolve2(base, path));
+      found.push(path);
+    } catch (error) {
+      if (!/^(?:ENOENT|ENOTDIR)$/.test(error.code ?? ""))
+        return null;
+    }
+  }
+  return found;
+}
+function groupWords(pattern, spelling = false) {
+  const seen = pattern.replace(QUOTED, maskQuoted);
+  const open = seen.indexOf("(");
+  if (open < 0)
+    return seen.includes(")") ? undefined : [pattern.replace(QUOTED, unquote)];
+  const cuts = [open];
+  let close = -1;
+  for (let k = open, depth = 0;k < seen.length && close < 0; k++) {
+    if (seen[k] === "(")
+      depth++;
+    else if (seen[k] === "|" && depth === 1)
+      cuts.push(k);
+    else if (seen[k] === ")" && --depth === 0)
+      close = k;
+  }
+  if (close < 0 || pattern.slice(open, close).includes("/"))
+    return;
+  if (!spelling && /[#^~]/.test(seen.slice(open, close)))
+    return null;
+  const out = [];
+  for (const [n, from] of cuts.entries()) {
+    const alternative = pattern.slice(from + 1, cuts[n + 1] ?? close);
+    const extended = spelling && /[#^~]/.test(seen.slice(from + 1, cuts[n + 1] ?? close));
+    for (const each of extended ? [alternative, "*"] : [alternative]) {
+      const words = groupWords(pattern.slice(0, open) + each + pattern.slice(close + 1), spelling);
+      if (!words || out.push(...words) > (spelling ? BRACE_WORDS : READINGS))
+        return words === undefined ? undefined : null;
+    }
+  }
+  return out;
+}
+var unquote = (part) => part.startsWith("\\") ? part.slice(1) : part.slice(1, part.endsWith(part[0]) && part.length > 1 ? -1 : undefined);
+function braceRun(cmd, first) {
+  if (first?.unknown !== BRACE)
+    return;
+  const source = (first.source ?? "").replace(/\\\n/g, "");
+  if (/[$`]/.test(source))
+    return null;
+  const masked = source.replace(QUOTED, (part) => part.replace(/[{,}()]/g, hide));
+  const grouped = masked.includes("(");
+  const expanded = braceWords(masked);
+  if (!expanded || expanded.some((w) => BRACE_LIST.test(w)))
+    return null;
+  const words = [];
+  for (const each of expanded) {
+    const { commands } = lex(unhide(each));
+    if (commands.length > 1 || commands[0]?.redirects.length)
+      return grouped ? undefined : null;
+    words.push(...commands[0]?.words ?? []);
+  }
+  if (words.length === 0)
+    return null;
+  return { ...cmd, words: cmd.words.flatMap((w) => w === first ? words : [w]) };
+}
+var QUOTED = /'[^']*'?|"(?:[^"\\]|\\[\s\S])*"?|\\[\s\S]/g;
+var HIDDEN = "{,}()";
+var maskQuoted = (part) => "\uE005".repeat(part.length);
+var hide = (c) => String.fromCharCode(57344 + HIDDEN.indexOf(c));
+var HIDDEN_CHARS = new RegExp(`[${[...HIDDEN].map(hide).join("")}]`, "g");
+var unhide = (text) => text.replace(HIDDEN_CHARS, (c) => HIDDEN[c.charCodeAt(0) - 57344]);
+function heldGlob(cmd, first, env) {
+  if (!first?.glob || !first.raw || !marked(first.value))
+    return;
+  const value = relexedValue(first.raw, heldKnown(env));
+  if (value === undefined || marked(value))
+    return;
+  const word = { ...first, value };
+  return globRun({ ...cmd, words: cmd.words.map((w) => w === first ? word : w) }, word, env, true);
+}
+var GLOB_PATTERN = /[*?]|\[[^\]]*\]/;
+var shellGlob = (part) => new Bun.Glob(part.replace(/^!/, "\\!").replace(BRACKET, (bracket) => bracket.slice(1, -1).replace(/\[:([a-z]+):\]/g, (_, name) => POSIX_CLASSES[name] ?? " -~").replace(/\[([=.])(.)\1\]/g, "$2").replace(/^/, "[").concat("]")));
+var BRACKET = /\[[!^]?\]?(?:\[:[a-z]+:\]|\[([=.]).\1\]|[^\]])*\]/g;
+var POSIX_CLASSES = {
+  alnum: "0-9A-Za-z",
+  alpha: "A-Za-z",
+  blank: " \t",
+  digit: "0-9",
+  lower: "a-z",
+  space: ` 	
+\r\f\v`,
+  upper: "A-Z",
+  xdigit: "0-9A-Fa-f"
+};
+function globSpells(text, names) {
+  for (const token of text.split(/[\s;&|<>()`"'\\]+/)) {
+    const part = token.slice(token.lastIndexOf("/") + 1);
+    if (!GLOB_PATTERN.test(part) || /^[*?]+$/.test(part))
+      continue;
+    const glob = shellGlob(part);
+    if (names.some((name) => glob.match(name)))
+      return true;
+  }
+  return false;
+}
+function spelledText(text) {
+  const plain = text.replace(/\\\n/g, "").replace(/\\/g, "");
+  const spelled = [...plain.split(/[\s;&<>`]+/), ...blankGroups(plain)].flatMap((token) => {
+    const parts = token.split(/(?=[$=]\()|\|+(?=\()/).map((part) => part.replace(/^(?:[$=]?\(|['"])+/, ""));
+    return [token, ...parts.filter((part) => part !== token)];
+  }).filter((token) => /[{(]/.test(token)).flatMap((token) => (braceWords(token) ?? anyText(token, /\{[^{}]*\}/g)).flatMap((word) => {
+    const sequenced = word.replace(SEQUENCE, sequenceSpelling);
+    const unqualified = sequenced.replace(/\([^()|]*\)$/, "");
+    const words = groupWords(unqualified, true);
+    const out = words === null ? anyText(unqualified, /\([^()]*\)/g) : words ?? [word];
+    return sequenced === word ? out : [word, ...out];
+  })).map((word) => word.replace(/["']/g, "")).flatMap((word) => /^[*?]+$/.test(word.slice(word.lastIndexOf("/") + 1)) ? [word, ANY_NAME] : [word]);
+  return spelled.length > 0 ? `${text} ${spelled.join(" ")}` : text;
+}
+function blankGroups(text) {
+  const out = [];
+  for (const { 0: group, index } of text.matchAll(/\([^()\s]*\s[^()]*\)/g)) {
+    let from = index;
+    while (from > 0 && !BETWEEN.test(text[from - 1]))
+      from--;
+    let to = index + group.length;
+    while (to < text.length && !BETWEEN.test(text[to]))
+      to++;
+    out.push(text.slice(from, to));
+  }
+  return out;
+}
+var BETWEEN = /[\s;&<>`]/;
+var SEQUENCE = /\{(-?\d+|[^{},.\s])\.\.(-?\d+|[^{},.\s])(?:\.\.-?\d+)?\}/g;
+var sequenceSpelling = (_, from, to) => /^[A-Za-z]$/.test(from) && /^[A-Za-z]$/.test(to) ? `[${from < to ? from : to}-${from < to ? to : from}]` : /^-?\d+$/.test(from) && /^-?\d+$/.test(to) ? "[0-9-]*" : "*";
+function anyText(word, part) {
+  const spelled = word.replace(part, "*");
+  return spelled === word ? [word] : anyText(spelled, part);
+}
+var ANY_NAME = "[!.]*";
+function repass(commands, envs) {
+  for (const cmd of commands) {
+    if (!cmd.repeated)
+      return;
+    const env = envs.get(cmd.scope);
+    if (!env)
+      continue;
+    change(cmd, env);
+    const { local, name } = parse(cmd);
+    if (name !== "")
+      continue;
+    for (const key of local.keys())
+      if (env.vars.has(key))
+        setVar(env.vars, key, CHANGED);
+  }
+}
+function printsText(words) {
+  const v = words.findIndex((w) => w === "-v" || /^-v\w/.test(w));
+  const format = words[v + (words[v] === "-v" ? 2 : 1)];
+  return v >= 0 && format !== undefined && !marked(format) && /^[^%\\]*\S[^%\\]*$/.test(format);
+}
+function bind(commands, k, env, unbind) {
+  const cmd = commands[k];
+  const names = binds(cmd);
+  if (names.length === 0 || cmd.detached)
+    return;
+  const close = loopHeader(cmd) ? loopClose(commands, k) : undefined;
+  if (!close && (loopHeader(cmd) || cmd.unsure || cmd.chained || cmd.kept))
+    return;
+  const value = close ? loopWord(cmd) : undefined;
+  const held = close ? heldKnown(env) : {};
+  const prior = names.flatMap((name) => (name in held) ? [[name, held[name]]] : []);
+  for (const name of names)
+    setVar(env.vars, name, value ?? unknown("a value a builtin gives"));
+  if (!close)
+    return;
+  for (const name of names)
+    capture(env, name, value);
+  unbind.set(close, () => {
+    for (const name of names)
+      setVar(env.vars, name, CHANGED);
+    if (prior.length === 0)
+      return;
+    let record = loopBefore.get(env.vars);
+    if (!record)
+      loopBefore.set(env.vars, record = {});
+    for (const [name, was] of prior)
+      record[name] = was;
+  });
+}
+function capture(env, key, value) {
+  if (value)
+    recordHeld(env, key, value);
+  else
+    delete heldResolved.get(env.vars)?.[key];
+}
+function loopWord({ words }) {
+  const at = words.findIndex((w) => w.value === "in" && !w.quoted);
+  const list = at < 0 ? [] : words.slice(at + 1);
+  return list.length === 1 && !unreadWord(list[0]) ? list[0] : undefined;
+}
+function heads({ words }) {
+  const out = [];
+  for (const w of words) {
+    if (w.quoted || !(RESERVED.has(w.value) || OPENS.has(w.value) || CLOSES.has(w.value)))
+      break;
+    out.push(w.value);
+  }
+  return out;
+}
+var loopHeader = (cmd) => {
+  const last = heads(cmd).at(-1);
+  return last === "for" || last === "select";
+};
+function loopClose(commands, k) {
+  let depth = 1;
+  for (const cmd of commands.slice(k + 1))
+    for (const word of heads(cmd)) {
+      if (CLOSES.has(word) && --depth === 0)
+        return cmd;
+      if (OPENS.has(word))
+        depth++;
+    }
+}
 var subshell = (env) => ({ ...env, vars: new Map(env.vars) });
+function plainProgram(first, env, changed = new Set) {
+  const source = first.source ?? first.value;
+  if (marked(first.value) && !/[$`]/.test(source))
+    return false;
+  let bare = "";
+  let quote = "";
+  for (let i = 0;i < source.length; i++) {
+    const c = source[i];
+    if (quote === "'") {
+      if (c === "'")
+        quote = "";
+    } else if (c === "\\")
+      i++;
+    else if (quote === "" && c === "'")
+      quote = "'";
+    else if (quote === "" && c === "$" && source[i + 1] === "'") {
+      const close = source.indexOf("'", i + 2);
+      if (close < 0 || source.slice(i + 2, close).includes("\\"))
+        return false;
+      i = close;
+    } else if (c === '"')
+      quote = quote === '"' ? "" : '"';
+    else if (c === "`")
+      return false;
+    else if (c === "$") {
+      const named = /^\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)(?::[?-][^}$`]*)?\})/.exec(source.slice(i));
+      const name = named?.[1] ?? named?.[2];
+      if (!named || !name || !PLAIN_PREFIXES.has(name) || env.vars.has(name) || changed.has(name))
+        return false;
+      i += named[0].length - 1;
+      if (!source.slice(i + 1).replace(/^"/, "").startsWith("/"))
+        return false;
+    } else if (quote === "") {
+      if (c === "=" && i === 0 || c === "~" && i > 0)
+        return false;
+      bare += c;
+    }
+  }
+  return !/[*?(#^]|\[[^\]]*\]|\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(bare);
+}
+var PLAIN_PREFIXES = new Set(["HOME", "PLAYGROUND_REPO"]);
 async function examine(cmd, env, visit, builtins) {
   tick();
   orElse(cmd, env);
@@ -1512,12 +2796,43 @@ async function examine(cmd, env, visit, builtins) {
     env.cwdUnread = true;
   }
   const [primary, ...others] = readings(parse(cmd));
-  const expanded = expandTilde(cmd, primary.name, env);
+  const vanished = emptyProgram(cmd, env);
+  const array = arrayRun(cmd, primary.first, env);
+  const prior = splitHeld(cmd, primary.name, env, true);
+  const split = splitHeld(cmd, primary.name, env);
+  const brace = braceRun(cmd, primary.first);
+  const globs = [
+    brace === null ? null : undefined,
+    globRun(cmd, primary.first, env),
+    heldGlob(cmd, primary.first, env),
+    ...[...split, ...prior].map((v) => globRun(v, parse(v).first, env, true)),
+    ...brace ? [globRun(brace, parse(brace).first, env)] : [],
+    ...vanished.map((v) => globRun(v, parse(v).first, env))
+  ];
+  const resolving = [
+    ...split,
+    ...array ? [array] : [],
+    ...brace ? [brace] : [],
+    ...heldScripts(cmd, primary, env),
+    ...globs.flatMap((globbed) => globbed ?? [])
+  ];
+  if (globs.includes(null) || unreadCommand(cmd, primary, resolving))
+    for (const parsed of [primary, ...others])
+      parsed.unread = true;
+  const expanded = [
+    ...expandTilde(cmd, primary.name, env),
+    ...resolving,
+    ...prior,
+    ...vanished,
+    ...await xargsFilled(cmd, [primary, ...others], env)
+  ];
   const before = others.length > 0 || expanded.length > 0 ? apart(env) : env;
   const verdict = await examineReading(cmd, primary, env, visit, builtins);
   if (verdict)
     return verdict;
   for (const parsed of others) {
+    if (runsScript(parsed, readingEnv(cmd, parsed, before)))
+      continue;
     const verdict = await examineReading(cmd, parsed, apart(before), visit, builtins);
     if (verdict)
       return verdict;
@@ -1527,14 +2842,56 @@ async function examine(cmd, env, visit, builtins) {
     if (verdict)
       return verdict;
   }
-  if (!cmd.runsStdin || stdinScript(primary))
+  for (const variant of vanished) {
+    const parsed = parse(variant);
+    if (MOVES.has(parsed.name))
+      await chdirTo(parsed.name, { ...variant, unsure: true }, parsed, env);
+  }
+  const remote = primary.name === "ssh" && ["root", "shell"].includes(stdinShellOf(cmd, primary) ?? "");
+  if (!remote && (!cmd.runsStdin || stdinScript(primary)))
     return;
   for (const script of await scriptStdin(cmd, env)) {
-    const verdict = await nested(cmd, env, () => run(lexScript(known(script), env), subshell(env), visit, builtins));
+    const at = remote ? remoteEnv(env, known(script), true) : subshell(env);
+    const verdict = await nested(cmd, env, () => run2(lexScript(known(script), at), at, visit, builtins));
     if (verdict)
       return verdict;
   }
 }
+function heldScripts(cmd, parsed, env) {
+  const scripts = scriptWords(parsed).filter((w) => w.raw && marked(w.value));
+  if (scripts.length === 0)
+    return [];
+  const known = heldKnown(env);
+  let resolved = false;
+  const words = cmd.words.map((w) => {
+    if (!scripts.includes(w) || !w.raw)
+      return w;
+    const value = relexedValue(w.raw, known);
+    if (value === undefined || value === w.value)
+      return w;
+    resolved = true;
+    return { quoted: true, value };
+  });
+  return resolved ? [{ ...cmd, words }] : [];
+}
+function scriptWords({ args, name }) {
+  if (name === "eval")
+    return args[0]?.value === "--" ? args.slice(1) : args;
+  if (!SHELLS.has(name))
+    return [];
+  const { inline, operand } = shellOperand(args, name);
+  return inline && operand ? [operand] : [];
+}
+function unreadCommand(cmd, parsed, resolving) {
+  const others = resolving.map(parse);
+  if (marked(parsed.name))
+    return /[$`]/.test(parsed.first?.source ?? "") && others.every((p) => marked(p.name));
+  if (!scriptWords(parsed).some((w) => marked(w.value)))
+    return false;
+  return others.every((p) => scriptWords(p).some((w) => marked(w.value)));
+}
+var decodedText = (command) => command.includes("$'") ? `${command} ${command.replace(/\$'(?:[^'\\]|\\[\s\S])*'/g, (ansiC) => lex(ansiC).commands.flatMap((c) => c.words.map((w) => w.value)).join(" "))}` : command;
+var unreadRun = ({ first, unread }) => !!unread && (!!first?.glob || WHOLE_RUN.test(first?.raw ?? first?.source ?? ""));
 function stdinScript({ args, name }) {
   if (name === "." || name === "source")
     return STDIN_PATHS.has(args[0]?.value ?? "");
@@ -1542,6 +2899,59 @@ function stdinScript({ args, name }) {
     return false;
   const { inline, operand } = shellOperand(args, name);
   return !operand || !inline && STDIN_PATHS.has(operand.value);
+}
+async function argFile({ chdir, file, moved }, cmd, env) {
+  if (file.procs)
+    return held(await outputs(file.procs, env));
+  if (moved)
+    return unknown(`${file.value}, which a privilege wrapper before xargs may read from another folder or root`);
+  const cwd = chdir && pathOf(landsHeld(chdir, cmd, env) ?? chdir, env);
+  return held(await readPath(file, chdir && !isAbsolute2(file.value) ? { ...env, cwd } : env));
+}
+var itemsOf = (fed, split) => {
+  if (fed.unknown || split === undefined)
+    return;
+  if (split === null)
+    return [fed.value, ...fed.value.split(`
+`), ...fed.value.split(/\s+/)];
+  return [fed.value, ...fed.value.split(split)];
+};
+async function xargsFilled(cmd, parsed, env) {
+  const filled = new Map;
+  for (const [word, replace] of parsed.flatMap((p) => p.xargs?.filled ?? []))
+    filled.set(word, [...new Set([...filled.get(word) ?? [], replace])]);
+  if (filled.size === 0)
+    return [];
+  const xargs = parsed.map((p) => p.xargs);
+  const files = xargs.flatMap((x) => x?.files ?? []).filter((f) => !STDIN_PATHS.has(f.file.value));
+  const splits = [null, ...new Set(xargs.flatMap((x) => x?.delimiters ?? []))];
+  const inputs = [
+    await stdinOf(cmd, env),
+    ...await Promise.all(files.map((f) => argFile(f, cmd, env)))
+  ];
+  const texts = new Set;
+  for (const raw of inputs.flatMap((fed) => splits.map((split) => itemsOf(fed, split)))) {
+    const items = [...new Set(raw?.map((text) => text.replace(/["'\\]/g, "").trim()))].filter(Boolean);
+    if (!raw || items.length > READINGS)
+      texts.add(undefined);
+    else
+      for (const text of items)
+        texts.add(text);
+    if (raw?.some((text) => /["'\\]/.test(text)))
+      texts.add(undefined);
+  }
+  const fill = (text) => ({
+    ...cmd,
+    words: cmd.words.flatMap((w) => {
+      const held = filled.get(w);
+      if (!held)
+        return [w];
+      if (text === undefined)
+        return [{ ...w, ...unknown(`the program xargs puts in place of ${held.join(" or ")}`) }];
+      return held.reduce((value, replace) => value.replaceAll(replace, text), w.value).split(/\s+/).filter(Boolean).map((value) => ({ quoted: false, value }));
+    })
+  });
+  return [...texts].map(fill);
 }
 var BLIND = "zsh's ~-, the folder the shell last left, which the hook cannot name on this line";
 function expandTilde(cmd, name, env) {
@@ -1571,6 +2981,142 @@ function expandTilde(cmd, name, env) {
     };
   });
 }
+var holdsCommand = (w) => !!w.source && /^(?:\$\{\w+\}|\$\w+)+$/.test(w.source.replace(/["']/g, "").replace(/\$\{[=~^]+/g, "${").replace(/\$[=~^](?=\w)/g, "$"));
+function splitHeld(cmd, name, env, prior = false) {
+  if (name === "cd" || name === "popd" || name === "pushd")
+    return [];
+  const first = cmd.words.some((w) => w.splits && w.raw && !holdsCommand(w)) ? parse(cmd).first : undefined;
+  const holds = (w) => !!w.splits && !!w.raw && (holdsCommand(w) || w === first);
+  if (!cmd.words.some(holds))
+    return [];
+  const known = heldKnown(env);
+  const seps = ifsSplit(env);
+  const splitWith = (known) => {
+    let split = false;
+    const words = cmd.words.flatMap((w) => {
+      if (!holds(w) || !w.raw)
+        return [w];
+      const value = relexedValue(w.raw, known);
+      if (value === undefined)
+        return [w];
+      const parts = splitValue(value, seps);
+      if (!parts.some((part) => !part.unknown))
+        return [w];
+      split = true;
+      return parts;
+    });
+    return split ? [{ ...cmd, words }] : [];
+  };
+  if (!prior)
+    return splitWith(known);
+  const before = loopBefore.get(env.vars);
+  return before && Object.keys(before).length > 0 ? splitWith({ ...known, ...before }) : [];
+}
+function relexedValue(raw, known) {
+  const words = lex(raw.replace(/\$\{[=~^]+/g, "${"), known).commands.at(-1)?.words;
+  return words?.length === 1 ? words[0].value : undefined;
+}
+var tildeHome = (value, quoted = false) => quoted || marked(value) ? value : value.replace(/^~(?=\/|$)/, homedir2());
+function heldKnown(env) {
+  const known = { ...env.known };
+  for (const [key, text] of env.vars) {
+    if (!text.unknown && !marked(text.value))
+      known[key] = tildeHome(text.value, "quoted" in text && text.quoted === true);
+    else if ("raw" in text && typeof text.raw === "string") {
+      const value = relexedValue(text.raw, known);
+      const eq = value?.indexOf("=") ?? -1;
+      if (value !== undefined && eq >= 0)
+        known[key] = tildeHome(value.slice(eq + 1));
+    }
+  }
+  return Object.assign(known, heldResolved.get(env.vars));
+}
+var loopBefore = new WeakMap;
+var heldResolved = new WeakMap;
+function recordHeld(env, key, value) {
+  delete loopBefore.get(env.vars)?.[key];
+  let record = heldResolved.get(env.vars);
+  if (!record)
+    heldResolved.set(env.vars, record = {});
+  if (!value.unknown && !marked(value.value))
+    record[key] = tildeHome(value.value, "quoted" in value && value.quoted === true);
+  else if ("raw" in value && typeof value.raw === "string") {
+    const built = relexedValue(value.raw, { ...env.known, ...record });
+    const eq = built?.indexOf("=") ?? -1;
+    if (built !== undefined && eq >= 0)
+      record[key] = tildeHome(built.slice(eq + 1));
+  }
+}
+function ifsSplit(env) {
+  const ifs = env.vars.get("IFS");
+  if (!ifs || ifs.unknown || marked(ifs.value) || !ifs.value)
+    return /\s+/;
+  return new RegExp(`[\\s${ifs.value.replace(/[\]\\^-]/g, "\\$&")}]+`);
+}
+function splitValue(value, seps) {
+  return value.split(seps).filter(Boolean).map((part) => marked(part) ? { quoted: false, unknown: "a shell variable", value: part } : { quoted: false, value: tildeHome(part) });
+}
+var VANISHING_PART = /\$[=~^]*(?:\w+|[@*])|\$\{[=~^]*!?(?:\w+|[@*])(?:\[[@*]\])?(?::?[-=]|:?\+[^{}]*|(?:#|%|\/|:(?![-=?+]))[^{}]*)?\}|"\$(?:@|\{@\}|\{\w+\[@\]\})"/y;
+var MOVES = new Set(["cd", "popd", "pushd"]);
+var vanishingParts = (source) => {
+  VANISHING_PART.lastIndex = 0;
+  while (VANISHING_PART.lastIndex < source.length)
+    if (!VANISHING_PART.exec(source))
+      return false;
+  return true;
+};
+var READ_VALUES = new Set(["d", "i", "n", "N", "p", "t", "u"]);
+var NAME = /^[A-Za-z_]\w*$/;
+var SUBSCRIPTED = /^([A-Za-z_]\w*)(?:\[[^\]]*\]\+?|\+)=/;
+var WHOLE_RUN = /^(?:"\$\{([A-Za-z_]\w*)\[@\]\}"|\$\{([A-Za-z_]\w*)\[[@*]\]\})$/;
+function binds({ words }) {
+  let at = 0;
+  while (at < words.length && (!words[at].quoted && RESERVED.has(words[at].value) || ASSIGN.test(words[at].value)))
+    at++;
+  const [head, ...rest] = words.slice(at).map((w) => w.value);
+  if (head === "for" || head === "select")
+    return rest[0] && NAME.test(rest[0]) ? [rest[0]] : [];
+  if (head === "getopts")
+    return rest[1] && NAME.test(rest[1]) ? [rest[1]] : [];
+  if (head === "printf") {
+    const v = rest.findIndex((w) => w === "-v" || /^-v\w/.test(w));
+    const name = v < 0 ? undefined : rest[v] === "-v" ? rest[v + 1] : rest[v].slice(2);
+    return name && NAME.test(name) ? [name] : [];
+  }
+  if (head !== "read")
+    return [];
+  const names = [];
+  for (let i = 0;i < rest.length; i++) {
+    const w = rest[i];
+    if (w === "--" || !w.startsWith("-") || w.length < 2) {
+      names.push(...rest.slice(w === "--" ? i + 1 : i));
+      break;
+    }
+    const letters = w.slice(1);
+    const taker = [...letters].findIndex((c) => c === "a" || READ_VALUES.has(c));
+    if (taker < 0)
+      continue;
+    const value = letters.slice(taker + 1) || rest[++i];
+    if (letters[taker] === "a" && value)
+      names.push(value);
+  }
+  return names.filter((w) => NAME.test(w));
+}
+var mayVanish = (w, env) => maySkip(w) && [...(w.source ?? "").matchAll(/\$\{?[=~^]*!?(\w+)/g)].every(([, name]) => {
+  const set = env.vars.get(name);
+  return !set || !!set.vanishes || !set.unknown && /^[ \t\n]*$/.test(set.value);
+});
+function emptyProgram(cmd, env) {
+  if (!cmd.words.some((w) => mayVanish(w, env)))
+    return [];
+  let words = cmd.words;
+  for (let { first } = parse(cmd);first && words.includes(first) && mayVanish(first, env); ) {
+    const dropped = first;
+    words = words.filter((w) => w !== dropped);
+    ({ first } = parse({ ...cmd, words }));
+  }
+  return words === cmd.words ? [] : [{ ...cmd, words }];
+}
 async function examineExpanded(cmd, expanded, before, visit, builtins) {
   const { redirects, words } = cmd;
   cmd.redirects = expanded.redirects;
@@ -1597,17 +3143,22 @@ var apart = (env) => ({
   process: { ...env.process },
   vars: new Map(env.vars)
 });
-async function examineReading(cmd, parsed, env, visit, builtins) {
-  const { args, chdir, local, name } = parsed;
-  const into = chdir && pathOf(chdir, env);
-  const here = chdir ? {
+function readingEnv(cmd, { chdir, via }, env) {
+  const into = chdir && pathOf(landsHeld(chdir, cmd, env) ?? chdir, env);
+  if (!chdir || via && into === undefined)
+    return env;
+  return {
     ...env,
     cwd: into,
     cwdHeld: [],
     cwdMaybe: [],
     cwdSure: into,
     cwdUnread: into === undefined
-  } : env;
+  };
+}
+async function examineReading(cmd, parsed, env, visit, builtins) {
+  const { args, local, name } = parsed;
+  const here = readingEnv(cmd, parsed, env);
   let verdict;
   const followed = SHELLS.has(name) || [".", "cd", "eval", "popd", "pushd", "source"].includes(name);
   if (followed && builtins && cmd.redirects.length > 0) {
@@ -1617,8 +3168,10 @@ async function examineReading(cmd, parsed, env, visit, builtins) {
       return verdict;
   }
   if (name === "") {
-    for (const [key, value] of local)
+    for (const [key, value] of local) {
       setVar(env.vars, key, value);
+      recordHeld(env, key, value);
+    }
     if (builtins || cmd.feedsShell || rootFed(cmd))
       verdict = await visit(cmd, parsed, here);
   } else if (name === "cd" || name === "popd" || name === "pushd") {
@@ -1628,7 +3181,9 @@ async function examineReading(cmd, parsed, env, visit, builtins) {
   } else if (EXPORTS.has(name)) {
     for (const w of args.filter((a) => ASSIGN.test(a.value))) {
       const eq = w.value.indexOf("=");
-      setVar(env.vars, w.value.slice(0, eq), slice(w, eq + 1));
+      const value = slice(w, eq + 1);
+      setVar(env.vars, w.value.slice(0, eq), value);
+      recordHeld(env, w.value.slice(0, eq), value);
     }
     if (builtins)
       verdict = await visit(cmd, parsed, here);
@@ -1638,17 +3193,18 @@ async function examineReading(cmd, parsed, env, visit, builtins) {
     const scripts = await scriptOf(args[0], cmd, here);
     verdict = scripts[0].unknown ? await visit(cmd, parsed, here) : undefined;
     for (const script of verdict ? [] : scripts) {
-      verdict = await nested(cmd, env, () => run(again(lexScript(known(script), env), cmd, parsed), here, visit, builtins));
+      verdict = await nested(cmd, env, () => run2(again(lexScript(known(script), env), cmd, parsed), here, visit, builtins));
       if (verdict)
         break;
     }
   } else if (name === "eval") {
-    verdict = (args.some(unreadWord) ? await visit(cmd, parsed, here) : undefined) ?? await nested(cmd, env, () => run(again(lexScript(args.map((a) => a.value).join(" "), env), cmd, parsed), here, visit, builtins));
+    verdict = (args.some(unreadWord) ? await visit(cmd, parsed, here) : undefined) ?? await nested(cmd, env, () => run2(again(lexScript(evalText(args), env), cmd, parsed), here, visit, builtins));
   } else
     verdict = await visit(cmd, parsed, here);
   await record(cmd, name, args, here);
   return verdict;
 }
+var evalText = (args) => (args[0]?.value === "--" ? args.slice(1) : args).map((a) => a.value).join(" ");
 function again(lexed, cmd, parsed) {
   if (!manyTimes(cmd, parsed))
     return lexed;
@@ -1686,7 +3242,7 @@ var throughBuiltin = (cmd, { first }) => {
   const before = cmd.words.slice(0, cmd.words.indexOf(first));
   return before.some((w) => !w.quoted && BUILTIN.has(w.value)) && before.every((w) => !w.quoted && (BUILTIN.has(w.value) || w.value.startsWith("-") || MARKERS.has(w.value) || ASSIGN.test(w.value)));
 };
-var manyTimes = (cmd, { first }) => !!cmd.repeated || cmd.words.slice(0, first ? cmd.words.indexOf(first) : 0).some((w) => !w.quoted && COUNTED.has(program(w.value)));
+var manyTimes = (cmd, { first }) => !!cmd.repeated || cmd.words.slice(0, first ? cmd.words.indexOf(first) : 0).some((w) => !w.quoted && REPEATS.has(program(w.value)));
 var startFolders = (env) => [
   ...env.cwdSure === undefined ? [] : [env.cwdSure],
   ...env.cwdMaybe ?? []
@@ -1718,10 +3274,11 @@ function ancestors(path) {
   }
 }
 var tildeSign = (name, dir, env) => (name === "cd" || name === "pushd") && env.old && dir?.tilde && !dir.unknown && !dir.reads?.length ? dir.value[1] : undefined;
-async function cdTarget(name, args, env) {
-  const dir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
-  if (!dir)
+async function cdTarget(name, cmd, args, env) {
+  const typedDir = args.find((a) => !(a.value.startsWith("-") && a.value.length > 1));
+  if (!typedDir)
     return homedir2();
+  const dir = landsHeld(typedDir, cmd, env) ?? typedDir;
   const lexical = dir.value === "-" ? undefined : pathOf(dir, env);
   const typed = await folder(lexical && physicalCd(args) ? kernelPath(dir, env.cwd, lexical) : lexical);
   const sign = typed ? undefined : tildeSign(name, dir, env);
@@ -1733,6 +3290,10 @@ async function folder(path) {
     return;
   return isFolder(path) ? path : undefined;
 }
+var landsHeld = (word, cmd, env) => {
+  const held = env.hold?.(word, cmd, env);
+  return held && isAbsolute2(held.value) && !held.glob && !/[:\s]/.test(held.value) ? held : undefined;
+};
 function cdTargets(name, cmd, parsed, env, from) {
   const dirs = parsed.args.filter((a) => !(a.value.startsWith("-") && a.value.length > 1));
   const [dir] = dirs;
@@ -1747,7 +3308,9 @@ function cdTargets(name, cmd, parsed, env, from) {
   let unread = dirs.length > 1;
   for (const typed of dirs.length > 1 ? dirs : [dir]) {
     const word = env.hold?.(typed, cmd, env) ?? typed;
-    if (word !== typed)
+    if (word !== typed && !landsHeld(typed, cmd, env))
+      unread = true;
+    if (env.cwdUnread && pathOf(word, { ...env, cwd: undefined }) === undefined)
       unread = true;
     for (const base of from.length > 0 ? from : [undefined]) {
       tick();
@@ -1793,7 +3356,7 @@ function tildeMove(move, name, parsed, env, from, back) {
 }
 async function chdirTo(name, cmd, parsed, env) {
   const left = env.cwd;
-  env.cwd = name === "popd" || cmd.detached ? undefined : await cdTarget(name, parsed.args, env);
+  env.cwd = name === "popd" || cmd.detached ? undefined : await cdTarget(name, cmd, parsed.args, env);
   if (env.old)
     env.old = name === "popd" ? {} : { dir: env.cwd === undefined ? undefined : left };
   if (env.old)
@@ -1802,7 +3365,8 @@ async function chdirTo(name, cmd, parsed, env) {
   const back = [...new Set([...env.cwdBack ?? [], ...from])];
   const bases = [...new Set([...from, ...env.cwdHeld ?? []])];
   const move = name === "popd" ? { back: true, paths: [], unread: true } : tildeMove(cdTargets(name, cmd, parsed, env, bases), name, parsed, env, from, back);
-  const { paths, unread } = move;
+  const { paths } = move;
+  const unread = move.unread || !!cmd.cdRedefined;
   const named = [left, env.cwd].filter((dir) => dir !== undefined);
   env.cwdBack = keep([...new Set([...back, ...paths, ...named])], env);
   if (cmd.held) {
@@ -1814,6 +3378,8 @@ async function chdirTo(name, cmd, parsed, env) {
   if (sureToRun(cmd, parsed) && !unread && paths.length === 1 && (chained || isFolder(paths[0]))) {
     env.cwdSure = paths[0];
     env.cwdMaybe = [];
+    if (chained)
+      env.cwdChainUnread ||= env.cwdUnread;
     env.cwdUnread = false;
     env.cwdOr = chained ? undefined : { before: from, cdChain: cmd.chain, scope: cmd.scope };
     if (env.old)
@@ -1864,9 +3430,18 @@ function orElse(cmd, env) {
   env.cwdOr = undefined;
 }
 function unchain(cmd, env) {
-  if (!env.cwdChain?.length || cmd.chain === env.cwdChainToken)
+  if (!env.cwdChain?.length && !env.cwdChainUnread || cmd.chain === env.cwdChainToken)
     return;
-  env.cwdMaybe = keep([...new Set([...env.cwdMaybe ?? [], ...env.cwdSure ? [env.cwdSure] : [], ...env.cwdChain])], env);
+  if (env.cwdChainUnread)
+    env.cwdUnread = true;
+  env.cwdChainUnread = undefined;
+  env.cwdMaybe = keep([
+    ...new Set([
+      ...env.cwdMaybe ?? [],
+      ...env.cwdSure ? [env.cwdSure] : [],
+      ...env.cwdChain ?? []
+    ])
+  ], env);
   env.cwdSure = undefined;
   if (env.old)
     env.oldFrom = [];
@@ -1891,6 +3466,19 @@ function isFolder(path) {
 }
 var SHELL_TAKES = new Set(["-o", "+o", "--init-file", "--rcfile"]);
 var BASH_TAKES = new Set([...SHELL_TAKES, "-O", "+O"]);
+function noExec(args, shell) {
+  const takes = shell === "bash" || shell === "sh" ? BASH_TAKES : SHELL_TAKES;
+  let set = false;
+  for (const { value } of args) {
+    if (/^[-+][A-Za-z]*[oO]/.test(value) || value.startsWith("--") && value !== "--")
+      return false;
+    if (takes.has(value) || !/^[-+][A-Za-z]+$/.test(value))
+      break;
+    if (value.includes("n"))
+      set = value.startsWith("-");
+  }
+  return set;
+}
 function shellOperand(args, shell) {
   const takes = shell === "bash" || shell === "sh" ? BASH_TAKES : SHELL_TAKES;
   let inline = false;
@@ -1898,7 +3486,7 @@ function shellOperand(args, shell) {
     const v = args[k].value;
     if (takes.has(v))
       k++;
-    else if (/^[-+][A-Za-z]+$/.test(v))
+    else if (/^[-+][A-Za-z0-9]+$/.test(v))
       inline ||= v.startsWith("-") && v.includes("c");
     else if (!v.startsWith("--"))
       return { inline, operand: args[k] };
@@ -1909,6 +3497,8 @@ async function shell(name, args, cmd, env, visit, builtins, xargs) {
   const slot = shellSlot(args, name);
   if (slot)
     return examine({ ...cmd, words: slot }, env, visit, builtins);
+  if (noExec(args, name))
+    return;
   const { inline, operand } = shellOperand(args, name);
   if (operand && inline) {
     let script = operand.value;
@@ -1916,11 +3506,11 @@ async function shell(name, args, cmd, env, visit, builtins, xargs) {
       const fed = await stdinOf(cmd, env);
       script = filled(script, xargs.replace, fed.unknown ? UNKNOWN : fed.value.trim());
     }
-    return run(lexScript(script, env), subshell(env), visit, builtins);
+    return run2(lexScript(script, env), subshell(env), visit, builtins);
   }
   for (const script of await scriptOf(operand, cmd, env)) {
     const text = known(script);
-    const verdict = await run(lexScript(text, env), subshell(env), visit, builtins);
+    const verdict = await run2(lexScript(text, env), subshell(env), visit, builtins);
     if (verdict)
       return verdict;
   }
@@ -1962,7 +3552,9 @@ async function existing(path, env) {
 }
 async function outputOf(cmd, env) {
   tick();
-  const { args, name } = parse(cmd);
+  const { args, name, xargs } = parse(cmd);
+  if (xargs)
+    return unknown(`the output of ${name || "echo"} under xargs`);
   if (name === "") {
     if (cmd.inner)
       return outputs(cmd.inner(), env);
@@ -1994,7 +3586,7 @@ async function outputOf(cmd, env) {
   if (hidden)
     return hidden;
   if (name === "printf")
-    return { value: printf(values.map((v) => v.value)) };
+    return { value: printf(values.slice(values[0]?.value === "--" ? 1 : 0).map((v) => v.value)) };
   let k = 0;
   while (k < values.length && /^-[neE]+$/.test(values[k].value))
     k++;
@@ -2258,6 +3850,37 @@ function knownVariables(command, environment, cwd) {
   }
   return known;
 }
+var BRACE_WORDS = 64;
+function braceWords(word) {
+  const done = [];
+  const todo = [word];
+  while (todo.length > 0) {
+    if (done.length + todo.length > BRACE_WORDS)
+      return;
+    const next = todo.pop();
+    let split;
+    for (let open = next.indexOf("{");open >= 0 && !split; open = next.indexOf("{", open + 1)) {
+      const cuts = [open];
+      let depth = 0;
+      for (let k = open;k < next.length; k++) {
+        if (next[k] === "{")
+          depth++;
+        else if (next[k] === "," && depth === 1)
+          cuts.push(k);
+        else if (next[k] === "}" && --depth === 0) {
+          if (cuts.length > 1)
+            split = [...cuts, k].slice(1).map((end, n) => next.slice(0, open) + next.slice(cuts[n] + 1, end) + next.slice(k + 1));
+          break;
+        }
+      }
+    }
+    if (split)
+      todo.push(...split.reverse());
+    else
+      done.push(next);
+  }
+  return done;
+}
 
 // scripts/hooks/no-desktop-owner-app.ts
 var GUARD = "no-desktop-owner-app";
@@ -2431,12 +4054,12 @@ function quotedParts(code) {
   }
   return { outside, strings };
 }
-var RUNNERS = new Set([...LAUNCHERS, ...SHELLS, "command", "exec", "time", "xargs"]);
+var RUNNERS2 = new Set([...LAUNCHERS, ...SHELLS, "command", "exec", "time", "xargs"]);
 async function runsTool(line) {
   try {
     const env = { cwd: undefined, files: new Map, known: {}, process: {}, vars: new Map };
     const visit = async (_, { args, first, name }) => TOOL.test(name) || first !== undefined && unreadable(first) || LAUNCHERS.has(name) && args.some((a) => TOOL.test(program(a.value))) || (INTERPRETERS.has(name) || LINES.has(name)) && args.some((a) => MENTION.test(a.value)) || name === "source" || name === "." || first?.value.includes("/") ? "runs" : undefined;
-    return await run(lex(line), env, visit) !== undefined;
+    return await run2(lex(line), env, visit) !== undefined;
   } catch {
     return true;
   }
@@ -2450,7 +4073,7 @@ async function prose(text) {
     if (!/\s$/.test(before) || !/[\p{L}\p{N},:.]$/u.test(word) || word.startsWith("-"))
       return false;
     const last = word.replace(/[,:.]+$/, "").split(/[^\w.-]/).pop() ?? "";
-    if (RUNNERS.has(last.toLowerCase()))
+    if (RUNNERS2.has(last.toLowerCase()))
       return false;
   }
   return !await runsTool(text);
@@ -2536,7 +4159,7 @@ async function judgeText(text, cwd, apps, depth) {
     if (name === "source" || name === "." || first?.value.includes("/"))
       return unread(SCRIPT_IN_CALL);
   };
-  return run(lexed, env, visit);
+  return run2(lexed, env, visit);
 }
 async function script(path, env, mention, apps, depth) {
   if (mention)
@@ -2659,6 +4282,20 @@ async function registryName(sessionId, environment = process.env) {
     } catch {}
   }
 }
+async function leadOf(raw, kind, environment) {
+  try {
+    const session = sessionOf(raw);
+    if (typeof session !== "string" || await sessionRole(environment, session) !== "lead")
+      return false;
+    const name = await registryName(session, environment);
+    return name !== undefined && await rosterKind(name, environment) === kind;
+  } catch {
+    return false;
+  }
+}
+var namesRole = (command) => /PLAYGROUND_ROLE/.test(command) || /(?:^|[\s;&|({`])(?:source|\.)\s/.test(command);
+var opsLead = (raw, environment = process.env) => leadOf(raw, "ops", environment);
+var builderLead = (raw, environment = process.env) => leadOf(raw, "builder", environment);
 async function codexName(sessionId, environment = process.env) {
   if (!environment.CODEX_HOME)
     return;
@@ -2718,7 +4355,7 @@ function sessionOf(raw) {
 }
 
 // scripts/hooks/no-env-dump.ts
-var DECLARES = new Set(["declare", "export", "typeset"]);
+var DECLARES2 = new Set(["declare", "export", "typeset"]);
 var refuse = (what) => `no-env-dump hook refuses ${what}: it prints environment variables, tokens included, into the transcript. To check that a variable is set, run [ -n "\${VAR:-}" ] && echo set; to run a command with a variable, run env VAR=x <command>.`;
 var visit = async (cmd, { args, name }) => {
   if (name === "") {
@@ -2730,7 +4367,7 @@ var visit = async (cmd, { args, name }) => {
     return refuse("printenv");
   if (name === "set" && args.length === 0)
     return refuse("a bare set");
-  if (!DECLARES.has(name))
+  if (!DECLARES2.has(name))
     return;
   const operands = args.filter((a) => !/^[-+]/.test(a.value));
   if (operands.length === 0 && !args.some((a) => /^[-+]\w*[fF]/.test(a.value)))
@@ -2743,7 +4380,7 @@ async function inspect(raw) {
   if (!/\b(?:declare|env|export|printenv|set|typeset)\b/.test(toolInput.command.replace(/["'\\]/g, "")))
     return;
   const env = { files: new Map, known: {}, process: {}, vars: new Map };
-  return run(lex(toolInput.command), env, visit, true);
+  return run2(lex(toolInput.command), env, visit, true);
 }
 async function check2(raw) {
   try {
@@ -2756,14 +4393,16 @@ if (false) {}
 
 // scripts/hooks/no-extension-repo-write.ts
 import { existsSync as existsSync6 } from "fs";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 
 // packages/settings/src/folder.ts
 import {
+  appendFileSync,
+  chmodSync,
   existsSync as existsSync4,
   mkdirSync,
-  readdirSync,
-  readFileSync as readFileSync2,
+  readdirSync as readdirSync2,
+  readFileSync as readFileSync3,
   renameSync,
   rmdirSync,
   rmSync,
@@ -2776,6 +4415,7 @@ import { basename as basename2, dirname as dirname3, join as join7, relative } f
 // packages/safe-delete/src/index.ts
 var LIMITS = { bytes: 2 * 1024 ** 3, files: 5000, perMinute: 3 };
 var PLAYGROUND_AGENT = /^com\.playground\.[\w.-]+\.plist$/;
+var PLAYGROUND_UNIT = /^com\.playground\.[\w.-]+\.service$/;
 var CARVE_OUTS = {
   "dashboard-supervisor": {
     bytes: 256 * 1024 ** 2,
@@ -2789,6 +4429,19 @@ var CARVE_OUTS = {
     folder: "Library/LaunchAgents",
     home: true,
     name: PLAYGROUND_AGENT
+  },
+  "jobs-units": {
+    bytes: 64 * 1024,
+    files: 1,
+    folder: ".config/systemd/user",
+    home: true,
+    name: PLAYGROUND_UNIT
+  },
+  page: {
+    bytes: 20 * 1024 ** 2,
+    files: 1,
+    folder: "previews",
+    name: /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.(?:html|pdf|txt)$/
   }
 };
 
@@ -2796,7 +4449,7 @@ var CARVE_OUTS = {
 var STALE_MS = 5 * 60000;
 var scopesIn = (data) => {
   const root = extensionsDir(data);
-  return existsSync4(root) ? readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync4(join7(root, entry.name, ".git"))).map((entry) => entry.name).sort() : [];
+  return existsSync4(root) ? readdirSync2(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync4(join7(root, entry.name, ".git"))).map((entry) => entry.name).sort() : [];
 };
 
 // scripts/hooks/github.ts
@@ -2835,9 +4488,9 @@ function remotes(cwd) {
 }
 
 // scripts/hooks/no-playground-leak.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
-import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync3, statSync as statSync3 } from "fs";
-import { basename as basename3, join as join8 } from "path";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "async_hooks";
+import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync4, statSync as statSync3 } from "fs";
+import { basename as basename3, join as join9 } from "path";
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
@@ -3294,7 +4947,7 @@ function own(inst, key, value, enumerable = true) {
   Object.defineProperty(inst, key, { configurable: true, writable: true, enumerable, value });
   return value;
 }
-function hide(inst, key, value) {
+function hide2(inst, key, value) {
   return own(inst, key, value, false);
 }
 function derived(computes, table) {
@@ -4300,7 +5953,7 @@ var $ZodType = /* @__PURE__ */ $constructor("$ZodType", (inst, def) => {
   }
 }, {
   get "~standard"() {
-    return hide(this, "~standard", standardProps(this));
+    return hide2(this, "~standard", standardProps(this));
   },
   set "~standard"(value) {
     own(this, "~standard", value);
@@ -7854,7 +9507,7 @@ var ZodType = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
     return args.length === 0 ? fn(this) : fn(this, ...args);
   },
   get "~standard"() {
-    return hide(this, "~standard", {
+    return hide2(this, "~standard", {
       ...standardProps(this),
       jsonSchema: {
         input: createStandardJSONSchemaMethod(this, "input"),
@@ -8729,6 +10382,1479 @@ var slackSettings = defineSettings({
   }
 });
 
+// scripts/hooks/no-prepare-write.ts
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2 } from "fs";
+import { join as join8 } from "path";
+
+// scripts/hooks/no-stash.ts
+var FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+var READS = new Set(["list", "show"]);
+var WRITES = new Set(["create", "store"]);
+var INSTEAD = `Every worktree shares one stash list, so a stash taken by position or without a name can be another session's work. Commit a WIP commit on your own branch instead (git commit -m 'chore: wip <what>'), or take before-shots from a separate worktree on origin/canary, made by absolute path under the main checkout so it nests in no other worktree (git worktree add --detach "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" origin/canary). git stash list, git stash show, git stash push -m <message> and git stash apply <full sha> stay allowed.`;
+var refuse2 = (what, why) => `no-stash hook refuses ${what}: ${why}. ${INSTEAD}`;
+var UNREAD = refuse2("a command built from a value it cannot read, in a call that names git stash", "it may be a stash by position. Write the program and its words out in the call, or write the script to a file and run it");
+var BROWSER_CLOSE = new Set(["close", "exit", "quit"]);
+var BROWSER_INSTEAD = "Close only the browser you opened; pass --session <name>: agent-browser --session <name> close.";
+function judgeBrowser(args, session, named) {
+  const batch = args.findIndex((a) => a.value === "batch");
+  const words = args.flatMap((a, k) => batch !== -1 && k > batch ? a.value.split(/\s+/) : [a.value]).filter(Boolean);
+  if (words.some((w) => w === "-h" || w === "--help"))
+    return;
+  const closes = words.some((w, k) => BROWSER_CLOSE.has(w) && words[k - 1] !== "tab");
+  const all = words.some((w) => w === "--all" || w.startsWith("--all="));
+  const hidden = words.find((w) => marked(w));
+  if (all && (closes || named && hidden))
+    return `no-stash hook refuses agent-browser ${hidden && !closes ? "with an action it cannot read and" : "close"} --all: it closes every session's browser, other sessions' included. ${BROWSER_INSTEAD}`;
+  const hasSession = session || words.some((w) => w === "--session" || w.startsWith("--session="));
+  if (named && closes && !hasSession)
+    return `no-stash hook refuses a bare agent-browser close: with no --session it closes the shared default session, which another session may be using. ${BROWSER_INSTEAD}`;
+}
+var sessionIn = (local, env) => ["AGENT_BROWSER_SESSION", "AGENT_BROWSER_SESSION_NAME"].some((key) => local.has(key) || env.vars.has(key) || Boolean(env.process[key]));
+function message(args) {
+  for (let k = 0;k < args.length; k++) {
+    const v = args[k].value;
+    if (v === "--")
+      break;
+    if (v === "-m" || v === "--message")
+      return args[k + 1]?.value || undefined;
+    const attached = /^(?:-m|--message=)(.+)$/.exec(v)?.[1];
+    if (attached)
+      return attached;
+  }
+}
+function judgeStash(args, xargs) {
+  if (xargs)
+    return refuse2("git stash under xargs", "the hook cannot read the arguments xargs adds");
+  const action = args[0];
+  if (!action)
+    return refuse2("a bare git stash", "it saves your changes with no name to find them by");
+  if (marked(action.value))
+    return refuse2("this git stash", `the hook cannot read its action (${visible(action.value)})`);
+  const name = action.value;
+  if (args.some((a) => a.value === "-h" || a.value === "--help"))
+    return;
+  if (READS.has(name) || WRITES.has(name))
+    return;
+  if (name === "push" || name === "save" || name.startsWith("-")) {
+    const implied = name.startsWith("-");
+    if (message(implied ? args : args.slice(1)))
+      return;
+    return refuse2(`${implied ? "git stash" : `git stash ${name}`} without -m <message>`, "an unnamed stash is found again only by its position, which another session's stash moves");
+  }
+  if (name === "apply") {
+    const target = args.slice(1).find((a) => !a.value.startsWith("-"));
+    if (target && !marked(target.value) && FULL_SHA.test(target.value))
+      return;
+    return refuse2("git stash apply without a full commit SHA", "stash@{n} and the default name whatever entry is newest, which can be another session's");
+  }
+  if (name === "pop" || name === "drop" || name === "clear" || name === "branch")
+    return refuse2(`git stash ${name}`, "it removes an entry by position from the list every worktree shares");
+  return refuse2(`git stash ${name}`, "it is not a stash action the hook knows to be safe");
+}
+function gitCommand(args) {
+  const aliases = [];
+  let k = 0;
+  while (k < args.length && args[k].value.startsWith("-")) {
+    const v = args[k].value;
+    if (v === "-c")
+      aliases.push(args[k + 1]?.value ?? "");
+    else if (v.startsWith("-c"))
+      aliases.push(v.slice(2));
+    k += GIT_TAKES.has(v) ? 2 : 1;
+  }
+  return { aliases, rest: args.slice(k + 1), sub: args[k] };
+}
+var stashes = (args) => gitCommand(args).sub?.value === "stash";
+var visit2 = async (_cmd, { args, first, local, name, xargs }, env) => {
+  const session = sessionIn(local, env);
+  if (name === "agent-browser")
+    return judgeBrowser(args, session, true);
+  if (name === "git")
+    return judgeGit(args, xargs);
+  if (first && (first.unknown || marked(first.value))) {
+    if (stashes(args))
+      return judgeGit(args, xargs);
+    const verdict = judgeBrowser(args, session, false);
+    if (verdict)
+      return verdict;
+  }
+  if (PRINTERS.has(name))
+    return;
+  const browser = args.findIndex((a) => program(a.value) === "agent-browser");
+  if (browser !== -1) {
+    const verdict = judgeBrowser(args.slice(browser + 1), session, true);
+    if (verdict)
+      return verdict;
+  }
+  const nested = args.findIndex((a, j) => program(a.value) === "git" && stashes(args.slice(j + 1)));
+  if (nested !== -1)
+    return judgeGit(args.slice(nested + 1), xargs);
+};
+function judgeGit(args, xargs) {
+  const { aliases, rest, sub } = gitCommand(args);
+  if (!sub)
+    return;
+  if (marked(sub.value))
+    return refuse2("this git call", `the hook cannot read which git command it runs (${visible(sub.value)})`);
+  if (sub.value === "stash")
+    return judgeStash(rest, xargs !== undefined);
+  const alias = aliases.find((a) => a.startsWith(`alias.${sub.value}=`));
+  if (alias && /\bstash\b/.test(alias))
+    return refuse2(`git ${sub.value}`, "it is an alias for git stash");
+}
+var BARE = (command) => command.replace(/[\\'"]/g, "");
+var teardown = (command) => /agent-browser/i.test(BARE(command)) && /\b(?:close|exit|quit)\b/.test(BARE(command));
+var candidate = (command) => command.includes("$'") || /stash|--all\b/.test(BARE(command)) || teardown(command);
+var stashCall = (command) => /\bgit\b/i.test(BARE(command)) && /\bstash\b/.test(BARE(command)) || teardown(command);
+function commandOf(raw) {
+  try {
+    const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
+    return tool === "Bash" && typeof toolInput?.command === "string" ? toolInput.command : undefined;
+  } catch {
+    return;
+  }
+}
+async function inspect2(raw, environment) {
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    payload = undefined;
+  }
+  if (typeof payload !== "object" || payload === null)
+    return stashCall(raw) ? "no-stash hook could not parse its input, which reads as a git stash, so it refuses the call." : undefined;
+  const { cwd, tool_input: toolInput, tool_name: tool } = payload;
+  if (tool !== "Bash")
+    return;
+  const command = toolInput?.command;
+  if (typeof command !== "string" || !candidate(command))
+    return;
+  const directory = typeof cwd === "string" ? cwd : undefined;
+  const env = {
+    cwd: directory,
+    files: new Map,
+    known: knownVariables(command, environment, directory),
+    process: environment,
+    vars: new Map
+  };
+  const text = BARE(spelledText(decodedText(command)));
+  const named = /\bstash\b/.test(text) && (/\bgit\b/i.test(text) || globSpells(text, ["git"]));
+  return run2(lex(command, env.known), env, (cmd, parsed, at) => named && unreadRun(parsed) ? Promise.resolve(UNREAD) : visit2(cmd, parsed, at));
+}
+async function check3(raw, environment = process.env) {
+  try {
+    return await inspect2(raw, environment);
+  } catch (error) {
+    if (!stashCall(commandOf(raw) ?? raw))
+      return;
+    return `no-stash hook could not read this call (${error}), which reads as a git stash, so it refuses it. Split it into plain commands and run them again.`;
+  }
+}
+if (false) {}
+
+// scripts/hooks/no-prepare-write.ts
+var MCP_TOOL = /^mcp__(.+?)__(.+)$/;
+var WRITES2 = [
+  [
+    /github/i,
+    new Set([
+      "create_branch",
+      "create_or_update_file",
+      "create_pull_request",
+      "delete_file",
+      "merge_pull_request",
+      "push_files",
+      "update_pull_request_branch"
+    ])
+  ],
+  [/linear/i, new Set(["save_comment", "save_issue"])],
+  [/slack/i, new Set(["chat_post_message"])]
+];
+var refuse3 = (what) => `no-prepare-write hook refused ${what}: this session is preparing a ticket it has not claimed (its roster row reads mode=prepare), so nothing reaches the org yet: no tracker write, no chat post, no push, no file write, no pull request and no merge. Work on the local branch alone. Its waiter clears the mode the moment it prints its Claim line, and this call then runs.`;
+var log = (environment, entry) => {
+  try {
+    const dir = join8(dataDirOf(environment), "ops");
+    mkdirSync2(dir, { recursive: true });
+    appendFileSync2(join8(dir, "no-prepare-write.log"), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}
+`);
+  } catch {}
+};
+var mcpWrite = (tool) => {
+  const [, server, name] = MCP_TOOL.exec(tool) ?? [];
+  return !!server && !!name && WRITES2.some(([word, tools]) => word.test(server) && tools.has(name));
+};
+var prCreate = (args) => {
+  const { head } = ghCommand(args);
+  return head[0] === "pr" && head[1] === "create";
+};
+var pushes = (args) => gitCommand(args).sub?.value === "push";
+var REF_MOVE = /\b(?:createCommitOnBranch|createRef|deleteRef|mergeBranch|mergePullRequest|updatePullRequestBranch|updateRef|updateRefs)\b/;
+var REF_MUTATION = new RegExp(`${REF_MOVE.source}|\\bcreatePullRequest\\b`);
+var REF_ENDPOINT = /^repos\/[^/]+\/[^/]+\/(?:contents\/.+|git\/refs(?:\/.+)?|merges|pulls|pulls\/\d+\/(?:merge|update-branch))$/;
+async function apiWrite(rest, cmd, env, xargs) {
+  const request = await ghApi(rest, cmd, env, xargs);
+  if (!request)
+    return false;
+  const { endpoint, fields, inputs, method } = request;
+  const path = endpoint.value.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, "").replace(/^api\/v3\//, "").split("?")[0];
+  if (path === "graphql" || path === "api/graphql")
+    return [...fields.filter((f) => f.key === "query").map((f) => f.text), ...inputs].some((d) => unreadable(d) || REF_MUTATION.test(d.value));
+  if (method === "GET" || method === "HEAD")
+    return false;
+  if (unreadable(endpoint))
+    return true;
+  return REF_ENDPOINT.test(path);
+}
+var ghWrite = async (args, cmd, env, xargs) => {
+  if (prCreate(args))
+    return "gh pr create";
+  const { head, rest } = ghCommand(args);
+  return head[0] === "api" && await apiWrite(rest, cmd, env, xargs) ? "gh api" : undefined;
+};
+var visit3 = async (cmd, { args, name, xargs }, env) => {
+  if (name === "gh")
+    return ghWrite(args, cmd, env, xargs);
+  if (name === "git")
+    return pushes(args) ? "git push" : undefined;
+  if (PRINTERS.has(name) || name === "man")
+    return;
+  const nested = args.findIndex((a) => program(a.value) === "gh" || program(a.value) === "git");
+  if (nested === -1)
+    return;
+  const rest = args.slice(nested + 1);
+  if (program(args[nested].value) === "git")
+    return pushes(rest) ? "git push" : undefined;
+  return ghWrite(rest, cmd, env, xargs);
+};
+async function writeOf(tool, input, cwd, environment) {
+  if (mcpWrite(tool))
+    return `the tool ${tool}`;
+  const command = input?.command;
+  if (tool !== "Bash" || typeof command !== "string" || !/gh|git/.test(command))
+    return;
+  const directory = typeof cwd === "string" ? cwd : undefined;
+  const env = {
+    cwd: directory,
+    files: new Map,
+    known: knownVariables(command, environment, directory),
+    process: environment,
+    vars: new Map
+  };
+  return run2(lex(command, env.known), env, visit3);
+}
+async function marked2(sessionId, environment) {
+  if (typeof sessionId !== "string")
+    return false;
+  const name = await registryName(sessionId, environment);
+  if (!name)
+    return false;
+  const roster = await Bun.file(join8(dataDirOf(environment), "roster.json")).json();
+  return roster.agents?.find((agent) => agent?.name === name)?.mode === "prepare";
+}
+async function check4(raw, environment = process.env) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  const { cwd, session_id: session, tool_input: toolInput, tool_name: tool } = input;
+  if (typeof tool !== "string")
+    return;
+  let write;
+  try {
+    write = await writeOf(tool, toolInput, cwd, environment);
+    if (!write)
+      return;
+    return await marked2(session, environment) ? refuse3(write) : undefined;
+  } catch (error) {
+    log(environment, { error: String(error), session, tool, write });
+    return;
+  }
+}
+
+// packages/scripts/src/playground/setting.ts
+import { resolve as resolve4 } from "path";
+
+// packages/settings/src/accounts.ts
+var email2 = string2().email();
+var label = string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a label of lowercase letters, digits, dots, dashes and underscores");
+var claudeAccount = strictObject({
+  email: email2,
+  ends: string2().datetime({ offset: true }).nullable().optional(),
+  endsFirst: boolean2().optional(),
+  label: label.optional(),
+  nearLimit: boolean2().optional(),
+  own: boolean2().optional(),
+  parkedUntil: string2().datetime({ offset: true }).optional(),
+  provider: literal("claude").optional(),
+  renews: number2().int().min(1).max(31).nullable().optional(),
+  weekReset: strictObject({ hour: number2().min(0).lt(24), weekday: number2().int().min(0).max(6) }).optional()
+});
+var glmAccount = strictObject({ label, provider: literal("glm") });
+var account = union([claudeAccount, glmAccount]);
+var providerOf = (row) => row.provider === "glm" ? "glm" : "claude";
+var accountKey = (row) => (providerOf(row) === "glm" ? row.label : row.email) ?? "";
+var accountsOf = (rows, provider) => rows.filter((row) => providerOf(row) === provider);
+var accountSettings = defineSettings({
+  "models.probe": {
+    default: "claude-haiku-4-5",
+    description: "The model the usage scripts send one 1-token call to, as an account's own token, to read its 5-hour and week use from the reply's rate-limit headers.",
+    schema: string2().min(1)
+  },
+  "usage.accounts": {
+    default: [],
+    description: "The accounts the factory spends, any number of each provider: a Claude row by its email, in the order the login flip reads them, with its plan's end or billing day, whether the near-limit marks count it, whether it is the owner's own (own, spent at a fifth of its share unless it resets within a day), the time until which no new session starts on it (parkedUntil), and its week's reset; a GLM row (provider glm) by its label, the Keychain item its key is kept under.",
+    schema: array(account).refine((rows) => new Set(rows.map((row) => `${providerOf(row)}:${accountKey(row)}`)).size === rows.length, "each account is listed once")
+  },
+  "usage.keychainService": {
+    default: "playground-claude-oauth",
+    description: "The macOS Keychain service each account's long-lived token is kept under, one item an account by its email: spawn.sh's --account and the usage probes read it.",
+    schema: string2().regex(/^[A-Za-z0-9._-]+$/, "a Keychain service name")
+  },
+  "usage.switchAccount": {
+    default: "",
+    description: "The account whose full week the ops tick tells the dispatchers and leads about, so the factory moves off it; empty for none.",
+    schema: union([email2, literal("")])
+  }
+});
+// packages/settings/src/channel.ts
+var channelSettings = defineSettings({
+  "channel.skipUser": {
+    default: "",
+    description: "The Slack member id whose own posts the channel watch skips, the account it posts as; none until set.",
+    schema: string2().regex(/^(?:[UW][A-Z0-9]+)?$/, "a Slack member id")
+  },
+  "channel.slackId": {
+    default: "",
+    description: "The Slack channel id of the shared channel the channel watch relays to the dispatcher; the watch reads nothing until it is set.",
+    schema: string2().regex(/^(?:[CG][A-Z0-9]+)?$/, "a Slack channel id")
+  }
+});
+// packages/settings/src/content.ts
+var contentFields = {
+  body: string2().nullable(),
+  files: record2(string2(), string2()).nullable(),
+  meta: record2(string2(), unknown2()).nullable(),
+  value: union([array(unknown2()), record2(string2(), unknown2())]).nullable()
+};
+// packages/settings/src/items.ts
+var ATTACHMENT_LIMIT = 50 * 1024 * 1024;
+
+// packages/settings/src/jobs.ts
+var jobSchema = strictObject({
+  callsModel: boolean2(),
+  command: string2().min(1).optional(),
+  config: record2(string2(), unknown2()).optional(),
+  cwd: string2().min(1).optional(),
+  description: string2().min(1),
+  disabledWhy: string2().optional(),
+  enabled: boolean2(),
+  heartbeat: string2().min(1),
+  launchd: string2().min(1).optional(),
+  model: string2().min(1).optional(),
+  neverPause: boolean2().optional(),
+  pausedFor: string2().optional(),
+  program: array(string2().min(1)).min(1).optional(),
+  runtime: _enum(["herdr"]).optional(),
+  schedule: union([
+    strictObject({ always: literal(true) }),
+    strictObject({ every: number2().int().positive() })
+  ]),
+  stop: string2().min(1).optional()
+});
+var fromStored = (row) => {
+  if (!row || typeof row !== "object" || Array.isArray(row))
+    return row;
+  const kept = Object.fromEntries(Object.entries(row).filter(([key]) => Object.hasOwn(jobSchema.shape, key)));
+  return kept.runtime === undefined ? kept : { ...kept, runtime: "herdr" };
+};
+var jobRowSchema = jobSchema.partial();
+var jobKey = (name) => `jobs.${name.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase())}`;
+var terminal = (name, command, job) => ({
+  callsModel: false,
+  command,
+  cwd: "{checkout}",
+  enabled: false,
+  heartbeat: name,
+  runtime: "herdr",
+  ...job
+});
+var launchd = (name, job) => ({
+  callsModel: false,
+  cwd: "{checkout}",
+  enabled: false,
+  heartbeat: name,
+  launchd: `com.playground.${name}`,
+  program: ["{bun}", "--no-env-file", `{checkout}/packages/scripts/src/${name}/cli.ts`],
+  ...job
+});
+var bunJob = (name, root = "{checkout}") => `{bun} --no-env-file ${root}/packages/scripts/src/${name}/cli.ts`;
+var JOBS = {
+  "ops-changelog": terminal("ops-changelog", bunJob("ops-changelog", "{dashboard}"), {
+    cwd: "{dashboard}",
+    description: "Syncs new canary merges and main versions into the Changelog every 5 minutes.",
+    schedule: { every: 300 }
+  }),
+  "ops-dashboard": terminal("ops-dashboard", "{dashboard}/scripts/ops/dashboard/run.sh", {
+    cwd: "{dashboard}",
+    description: "Keeps the live dashboard running on its branch's latest head.",
+    enabled: true,
+    schedule: { every: 60 },
+    stop: "dashboard"
+  }),
+  "ops-dm-watch": terminal("ops-dm-watch", bunJob("ops-dm-watch"), {
+    description: "In Slack mode, hands each message in the owner's DM to the dispatcher, the session in the assistant seat too when no reply lands in 3 minutes.",
+    schedule: { every: 60 }
+  }),
+  "ops-ext-sync": terminal("ops-ext-sync", bunJob("ops-ext-sync"), {
+    description: "Syncs each extension with its private repository at 02:30, pushed only after a clean secrets scan.",
+    schedule: { every: 86400 }
+  }),
+  "ops-flow": launchd("ops-flow", {
+    description: "Tells the leads when a session holds a run slot over 15 minutes, or a model slot over 120.",
+    schedule: { every: 60 }
+  }),
+  "ops-herdr": launchd("ops-herdr", {
+    description: "Starts each herdr server that is down, on the pinned binary and the repo's config.",
+    schedule: { every: 60 }
+  }),
+  "ops-keep-awake": terminal("ops-keep-awake", `${bunJob("ops-keep-awake")} --data {data}`, {
+    description: "Keeps an idle Mac from sleeping, so the ops jobs and the WhatsApp link run on, with caffeinate as its one child; macOS alone.",
+    enabled: true,
+    schedule: { always: true }
+  }),
+  "ops-machine": terminal("ops-machine", `${bunJob("ops-machine")} --data {data}`, {
+    description: "Writes one line a minute of the machine's load, memory and live sessions to machine.jsonl.",
+    schedule: { every: 60 }
+  }),
+  "ops-merge-train": terminal("ops-merge-train", "python3 -I {checkout}/scripts/ops/merge-train/run.py", {
+    description: "Runs the merge train: builds a train of ready PRs and checks each step.",
+    neverPause: true,
+    schedule: { every: 60 }
+  }),
+  "ops-model-tunnel": terminal("ops-model-tunnel", `${bunJob("ops-model-tunnel")} --data {data}`, {
+    description: "Holds an ssh tunnel from this machine's loopback ports 18000 and 18001 to the model servers on the peer's 8000 and 8001, loopback at both ends.",
+    schedule: { always: true }
+  }),
+  "ops-peer-relay": terminal("ops-peer-relay", `${bunJob("ops-peer-relay", "{dashboard}")} --data {data}`, {
+    cwd: "{dashboard}",
+    description: "Copies playground send's lines between this machine and each peer PLAYGROUND_PEERS names, over ssh, so a session on one machine reads a message from the other.",
+    schedule: { always: true }
+  }),
+  "ops-restore": {
+    ...launchd("ops-restore", {
+      description: "Restores a lost main checkout by the playbook's steps once a guard is gone on two looks 5 minutes apart.",
+      schedule: { every: 60 }
+    }),
+    cwd: "{dashboard}",
+    program: [
+      "{bun}",
+      "--no-env-file",
+      "{dashboard}/packages/scripts/src/ops-restore/cli.ts",
+      "--main",
+      "{checkout}"
+    ]
+  },
+  "ops-session-resume": launchd("ops-session-resume", {
+    description: "Queues a carry-on line for each factory session once its usage limit resets.",
+    schedule: { every: 60 }
+  }),
+  "ops-sweep": terminal("ops-sweep", bunJob("ops-sweep"), {
+    description: "The Ops lead's sweep: runners, probes, asks, heartbeats and the forecast.",
+    schedule: { every: 300 }
+  }),
+  "ops-tick": launchd("ops-tick", {
+    description: "The factory's timed beats: the roll gate, the tick, the usage-limit watch and the sweeps.",
+    schedule: { every: 60 }
+  }),
+  "ops-tunnel": terminal("ops-tunnel", `${bunJob("ops-tunnel")} --data {data}`, {
+    config: { host: "", port: 1355 },
+    description: "Holds an ssh tunnel from this Mac's loopback to the Dashboard on the machine config.host names, and posts its link to the Inbox.",
+    schedule: { always: true }
+  }),
+  "ops-unstick": terminal("ops-unstick", "python3 -I {checkout}/scripts/ops/unstick/run.py", {
+    description: "Reads every live session's screen and clears a factory session stuck on a prompt.",
+    neverPause: true,
+    schedule: { every: 120 }
+  }),
+  "ops-usage": terminal("ops-usage", "python3 -I {checkout}/scripts/ops/usage/run.py", {
+    description: "Reads the account's usage windows into usage.json every 5 minutes.",
+    enabled: true,
+    neverPause: true,
+    schedule: { every: 300 }
+  }),
+  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
+    description: "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
+    schedule: { always: true }
+  }),
+  "ops-zai-usage": launchd("ops-zai-usage", {
+    description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
+    schedule: { every: 300 }
+  })
+};
+var RETIRED = ["ops-awake"];
+var OLD_KEYS = { "ops-dashboard": ["jobs.opsDesk"] };
+var jobSettings = defineSettings(Object.fromEntries(Object.entries(JOBS).map(([name, job]) => [
+  jobKey(name),
+  {
+    aliases: OLD_KEYS[name],
+    default: job,
+    description: `The ${name} ops job: ${job.description}`,
+    merge: true,
+    schema: jobRowSchema,
+    stored: fromStored
+  }
+])));
+var RETIRED_KEYS = new Set(RETIRED.map(jobKey));
+var REGISTRY_KEYS = new Set([
+  ...Object.keys(JOBS).map(jobKey),
+  ...Object.values(OLD_KEYS).flat(),
+  ...RETIRED_KEYS
+]);
+// packages/settings/src/factory.ts
+var repo = string2().regex(/^(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?$/, "a repository as owner/name, or empty for unset");
+var factorySettings = defineSettings({
+  "factory.archiveRepo": {
+    default: "",
+    description: "The archive repository: a link to it is private history, so the trace ratchet counts it and no-public-leak refuses it in a public write.",
+    schema: repo
+  },
+  "factory.publicRepo": {
+    default: "",
+    description: "The public repository, or a list of them, the checkout's origin when unset: no-public-leak refuses a write to one that holds private text, and the trace ratchet reads past each one's own name.",
+    schema: union([repo, array(repo)])
+  },
+  "factory.repo": {
+    default: "",
+    description: "The repository the factory's pull requests land in, the checkout's origin when unset: pr:merge needs GitGuardian's check there, Checks reads its PRs, and the roster links a bare PR number into it.",
+    schema: repo
+  }
+});
+// packages/settings/src/gates.ts
+var gateSettings = defineSettings({
+  "gates.glmLoad5Max": {
+    default: 30,
+    description: "The load5 a GLM session starts under.",
+    schema: number2().positive()
+  },
+  "gates.glmSwapinsMax": {
+    default: 100,
+    description: "The swap-ins a second a GLM session, and a fresh Claude worker, starts under.",
+    schema: number2().int().positive()
+  },
+  "gates.memoryFreeMin": {
+    default: 8,
+    description: "The free memory share, in percent, a Claude session starts at or over.",
+    schema: number2().int().min(0).max(100)
+  },
+  "gates.reviewReserve": {
+    default: 0.125,
+    description: "The share of the load gate's line a small worker keeps back for reviewers and testers, so a held review starts first; set it under gates.smallReserve, or a small worker's line falls below a medium one's.",
+    schema: number2().min(0).lt(1)
+  },
+  "gates.sessionCap": {
+    default: 0,
+    description: "The live workers, reviewers and testers in the roster a new one starts under, so the floor keeps to the cap the factory runs to; 0 caps nothing.",
+    schema: number2().int().min(0)
+  },
+  "gates.smallReserve": {
+    default: 0.25,
+    description: "The share of the load gate's line kept for small items, so a big plan never blocks a small one.",
+    schema: number2().min(0).lt(1)
+  },
+  "gates.startsWindow": {
+    default: 300,
+    description: "The seconds a start counts toward the load gate, since the load average lags a session's start.",
+    schema: number2().int().positive()
+  }
+});
+// packages/settings/src/harnesses.ts
+var HARNESSES = [
+  { backends: ["claude", "glm", "local"], id: "claude-code" },
+  { backends: ["openai"], id: "codex" }
+];
+var GLM_MODEL = "glm";
+var LOCAL_MODEL = "local";
+var readPin = (text) => {
+  const words = text.trim().split(/\s+/);
+  const [harnessId, backend] = words.length === 1 ? ["claude-code", words[0]] : words;
+  if (words.length > 2)
+    return null;
+  const harness = HARNESSES.find((h) => h.id === harnessId);
+  const found = harness?.backends.find((b) => b === backend);
+  return harness && found ? { backend: found, harness: harness.id } : null;
+};
+
+// packages/settings/src/harness-alpha.ts
+var HARNESS_IDS = HARNESSES.map((harness) => harness.id);
+var harnessSettings = defineSettings({
+  "harness.alpha": {
+    default: "claude-code",
+    description: "The harness the first dispatcher starts on: claude-code or codex. First run's pick and Settings' Switch write it, and the Dashboard's Start runs spawn.sh --harness with it.",
+    schema: _enum(HARNESS_IDS)
+  }
+});
+// packages/settings/src/models.ts
+var id = string2().regex(/^[a-z0-9][a-z0-9.-]*$/, "a model id, such as claude-opus-5-5");
+var modelSettings = defineSettings({
+  "models.checker": {
+    default: "claude-opus-5-5",
+    description: "The Claude model a reviewer or a tester runs on, and the one --model it takes, since its verdict gates a merge.",
+    schema: id
+  },
+  "models.claude": {
+    default: ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"],
+    description: "The Claude models spawn.sh and playground add take with --model.",
+    schema: array(id).min(1)
+  },
+  "models.default": {
+    default: "claude-opus-5-5",
+    description: "The Claude model a session runs on when its start names no --model.",
+    schema: id
+  },
+  "models.glm": {
+    default: "glm-5.3-flash",
+    description: "The GLM model a --backend glm session runs on, every model Claude Code asks for mapped to it.",
+    schema: id
+  },
+  "models.glmKeychainService": {
+    default: "playground-glm",
+    description: "The Keychain service a --backend glm session's Z.ai key is kept under, one item a usage.accounts GLM row by its label.",
+    schema: string2().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "a Keychain service name, such as playground-glm")
+  }
+});
+// packages/settings/src/live.ts
+var liveSettings = defineSettings({
+  "live.branch": {
+    default: "live/dashboard",
+    description: "The branch the live dashboard's checkout stays on: a stack on it reads the live machine, and ops-dashboard's roll resets it to the head of the branch the main checkout sits on.",
+    schema: string2().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/, "a git branch name")
+  },
+  "live.container": {
+    default: "playground-dashboard-db",
+    description: "The Docker container holding the live dashboard's database, which every stack off the live checkout refuses.",
+    schema: string2().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, "a Docker container name")
+  }
+});
+// packages/settings/src/local-models.ts
+var folder2 = string2().regex(/^[a-z0-9][a-z0-9.-]*$/, "a model folder under ~/models, such as ornith-1.5-35b-a3b-nvfp4");
+var figures = strictObject({
+  cap: number2().gt(0).max(0.95),
+  kvKiBPerToken: number2().positive(),
+  overheadGiB: number2().min(0),
+  weightsGiB: number2().positive()
+});
+var localModelSettings = defineSettings({
+  "localModels.boxLanes": {
+    default: 2,
+    description: "How many box test runs the peer runs at once beside its model servers (the box suite's SLOTS); a peer server's share leaves room for this many runs of localModels.boxRunGiB.",
+    schema: number2().int().min(0).max(16)
+  },
+  "localModels.boxRunGiB": {
+    default: 2.25,
+    description: "Estimated: the memory one box test run takes, half the 4.5 GiB peak of a suite across both lanes, measured on the old runner box on 24 Oct, not on the peer.",
+    schema: number2().min(0).max(64)
+  },
+  "localModels.hereModel": {
+    default: "",
+    description: "The model this machine keeps up, such as K for the local workers; empty, the default, keeps none. Another model loads here on request, and this one comes back after localModels.idleMinutes.",
+    schema: union([literal(""), folder2])
+  },
+  "localModels.hereReserveGiB": {
+    default: 40,
+    description: "Estimated: the memory a server on this machine leaves free for the factory's own sessions, stacks and test runs; its share is what is free above this.",
+    schema: number2().min(0).max(512)
+  },
+  "localModels.idleMinutes": {
+    default: 30,
+    description: "How long a model other than its machine's kept one (localModels.hereModel, localModels.peerModel) may sit with no request before it is stopped and the kept one comes back; 0 keeps whichever model was loaded last.",
+    schema: number2().int().min(0).max(1440)
+  },
+  "localModels.machine": {
+    default: "",
+    description: "The PLAYGROUND_PEERS machine that runs the model servers; empty means the only machine PLAYGROUND_PEERS names.",
+    schema: union([
+      literal(""),
+      string2().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "a peer's name")
+    ])
+  },
+  "localModels.maxFirstTokenSeconds": {
+    default: 10,
+    description: "The first-token floor: a local worker starts only while its server's mean wait for a first token, over the last keep beat's window, stays under this many seconds.",
+    schema: number2().positive().max(600)
+  },
+  "localModels.minTps": {
+    default: 15,
+    description: "The speed floor: a local worker starts only while each session on its server would still decode at least this many tokens a second with one more beside it, the last keep beat's speed times n/(n+1).",
+    schema: number2().min(0).max(1000)
+  },
+  "localModels.models": {
+    default: {
+      "ornith-1.5-122b-nvfp4": {
+        cap: 0.75,
+        kvKiBPerToken: 18.45,
+        overheadGiB: 2.38,
+        weightsGiB: 72.38
+      },
+      "ornith-1.5-35b-a3b-nvfp4": {
+        cap: 0.7,
+        kvKiBPerToken: 12.77,
+        overheadGiB: 6.65,
+        weightsGiB: 21.86
+      }
+    },
+    description: "Each model folder's sizing figures: cap (its measured working share), weightsGiB, overheadGiB and kvKiBPerToken; a model with no row here is refused.",
+    schema: record2(folder2, figures)
+  },
+  "localModels.peerModel": {
+    default: "",
+    description: "The model the peer keeps up, such as M for the Dashboard's chat; empty, the default, keeps none. Another model loads there on request, and this one comes back after localModels.idleMinutes.",
+    schema: union([literal(""), folder2])
+  }
+});
+// packages/settings/src/owner.ts
+var ownerSettings = defineSettings({
+  "owner.names": {
+    default: [],
+    description: "The owner's first name and handles as chat writes them, lowercase: the inbox gate refuses a manager's stop on a line that addresses one of them and asks for an action, and never reads @<handle> as an agent.",
+    schema: array(string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a name or handle, lowercase"))
+  },
+  "owner.voice": {
+    default: "",
+    description: "The voice a draft or a slack decision speaks in as the owner: singular has bun run ask refuse one that says we, us, our, ours or ourselves; empty checks none.",
+    schema: _enum(["", "singular"])
+  }
+});
+// packages/settings/src/paths.ts
+var pathsSettings = defineSettings({
+  "paths.codeRoot": {
+    default: "",
+    description: "The folder that holds your code, the folder that holds the checkout when unset: spawn.sh answers Claude's folder trust prompt there and moves a session off the Desktop into it.",
+    schema: string2().regex(/^(?:\/.*)?$/, "an absolute path, or empty for unset")
+  },
+  "paths.factoryHomes": {
+    default: ["{data}", "{checkout}", "~/models"],
+    description: "The folders the factory may put things in, each an absolute path, a ~/ path, {data} (the data folder) or {checkout} (the Playground clone): the machine record's daily check names a new path outside them as misplaced.",
+    schema: array(string2().regex(/^(?:\/.+|~\/.+|\{data\}|\{checkout\})$/, "a path, {data} or {checkout}")).min(1)
+  }
+});
+// packages/settings/src/rules.ts
+var ruleSettings = defineSettings({
+  "clock.ownerZone": {
+    default: "UTC",
+    description: "The time zone, by its IANA name, a time shown to the owner reads in.",
+    schema: string2().refine((zone) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: zone });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "an IANA time zone, such as UTC or America/New_York")
+  },
+  "context.window": {
+    default: 400000,
+    description: "The context window, in tokens, every session compacts itself in.",
+    schema: number2().int().positive()
+  },
+  "github.pollMinutes": {
+    default: 5,
+    description: "The fewest minutes between two polls of one pull request by a session.",
+    schema: number2().int().positive()
+  },
+  "glm.readOnlyLoad5": {
+    default: 15,
+    description: "The 5-minute load average above which a GLM session may not install, commit or push.",
+    schema: number2().positive()
+  },
+  "release.hours": {
+    default: 4,
+    description: "The hours of merging after which Ops ships canary to main, whatever the count.",
+    schema: number2().positive()
+  },
+  "release.merges": {
+    default: 3,
+    description: "The user-facing merges since the last ship at which Ops ships canary to main.",
+    schema: number2().int().positive()
+  },
+  "tickets.tracker": {
+    default: "the tracker",
+    description: "The issue tracker the tickets rule names, read inside its sentence, such as Linear.",
+    schema: string2().min(1)
+  },
+  "unstick.escalateMinutes": {
+    default: 5,
+    description: "The minutes a session stays stuck with no turn before ops-session-resume tells the primary dispatcher.",
+    schema: number2().int().positive()
+  }
+});
+// packages/settings/src/sessions.ts
+var name = string2().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, "a session name, lowercase words joined by hyphens");
+var manager = _enum(["builder", "dispatcher", "ops", "planner"]);
+var TEMPLATE_KINDS = [
+  "assistant",
+  "builder",
+  "dispatcher",
+  "ops",
+  "optimizer",
+  "orchestrator",
+  "planner"
+];
+var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var BRIEF_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var sessionTemplate = strictObject({
+  account: string2().email().optional(),
+  brief: string2().regex(BRIEF_NAME, "a brief is a file name, with no /").refine((brief) => !brief.includes(".."), "a brief is a file name, with no .."),
+  effort: _enum(EFFORTS).optional(),
+  harness: literal("claude-code"),
+  id: name,
+  kind: _enum(TEMPLATE_KINDS),
+  label: string2().min(1).max(40),
+  model: string2().regex(/^[a-z0-9][a-z0-9.-]*$/, "a model id").optional()
+}).refine((t) => t.model !== GLM_MODEL || t.account === undefined && t.effort === undefined, {
+  message: "a GLM template runs on models.glm and its first GLM row, so it takes no account or effort"
+}).refine((t) => t.model !== LOCAL_MODEL || t.account === undefined, {
+  message: "a local template runs on this machine's local model, so it takes no account",
+  path: ["account"]
+}).refine((t) => t.model !== LOCAL_MODEL || t.kind !== "dispatcher" && t.kind !== "planner", {
+  message: "a dispatcher or a planner plans on Claude, so it takes no local model",
+  path: ["kind"]
+});
+var storedTemplates = (value) => Array.isArray(value) ? value.map((row) => {
+  if (typeof row !== "object" || row === null || !("backend" in row) || "harness" in row)
+    return row;
+  const { backend, ...rest } = row;
+  const { model, ...modelless } = rest;
+  if (backend === "glm")
+    return { ...rest, harness: "claude-code", model: GLM_MODEL };
+  if (backend !== "claude")
+    return { ...rest, backend, harness: "claude-code" };
+  return { ...model === GLM_MODEL ? modelless : rest, harness: "claude-code" };
+}) : value;
+var sessionTemplates = array(sessionTemplate).refine((rows) => new Set(rows.map((row) => row.id)).size === rows.length, "each id is listed once");
+var unknownAccounts = (templates, accounts) => {
+  const known = new Set(accountsOf(accounts, "claude").map(accountKey));
+  return templates.flatMap((template, at) => template.account && !known.has(template.account) ? [
+    {
+      message: `${template.account} is not in usage.accounts: add it in Settings > Accounts`,
+      path: [at, "account"]
+    }
+  ] : []);
+};
+var sessionSettings = defineSettings({
+  "sessions.aliases": {
+    default: {},
+    description: "Old names of the managers' sessions, each mapped to its kind, so a session or a stored row under one still reads as that kind.",
+    schema: record2(name, manager)
+  },
+  "sessions.names": {
+    default: { builder: "builder", dispatcher: "dispatcher", ops: "ops", planner: "planner" },
+    description: "The session name each manager kind starts under; the second dispatcher takes the dispatcher's with -2.",
+    schema: strictObject({ builder: name, dispatcher: name, ops: name, planner: name })
+  },
+  "sessions.templates": {
+    against: (templates, read) => unknownAccounts(templates, read("usage.accounts")),
+    default: [
+      {
+        brief: "assistant.md",
+        harness: "claude-code",
+        id: "assistant",
+        kind: "assistant",
+        label: "Assistant"
+      },
+      {
+        brief: "orchestrator.md",
+        harness: "claude-code",
+        id: "orchestrator",
+        kind: "orchestrator",
+        label: "Orchestrator"
+      },
+      {
+        brief: "dispatcher-2.md",
+        harness: "claude-code",
+        id: "second-dispatcher-claude",
+        kind: "dispatcher",
+        label: "Second dispatcher on Claude"
+      },
+      {
+        brief: "dispatcher-2.md",
+        harness: "claude-code",
+        id: "second-dispatcher-glm",
+        kind: "dispatcher",
+        label: "Second dispatcher on GLM",
+        model: GLM_MODEL
+      }
+    ],
+    description: "The templates the sidebar's plus starts a dispatcher or an orchestrator from, A to Z by label: each one's kind, harness, model (a Claude id, or glm), effort, account (a Claude row of usage.accounts) and brief. A dispatcher template starts the second dispatcher; any other kind starts a new <id>-<kind> lead reporting to the dispatcher.",
+    schema: sessionTemplates,
+    stored: storedTemplates
+  }
+});
+// packages/settings/src/slots.ts
+var slotSettings = defineSettings({
+  "slots.modelBound": {
+    default: 2,
+    description: "How many runs that mostly wait on a model (run-slot.sh <who> --model-bound -- <command>, such as a parity replay) hold a slot at once, counted apart from the CPU slots, so one never holds a CPU slot while its CPU idles.",
+    schema: number2().int().min(1).max(16)
+  },
+  "slots.peers": {
+    default: [],
+    description: "The ops folders of other factories on this machine, each an absolute path: run-slot counts each live holder of their run slots against this factory's load units, and spawn.sh's load gate counts their starts beside its own, both reading only.",
+    schema: array(string2().regex(/^\/.+/, "an absolute path"))
+  }
+});
+// packages/settings/src/whatsapp.ts
+var DEFAULT_POLICY = "factory status; no secrets or customer personal data";
+var policy = string2().trim().min(1).max(400);
+var hour = number2().int().min(0).max(23);
+var e1642 = string2().regex(/^(?:\+[1-9]\d{7,14})?$/, "a phone number is + and 8 to 15 digits, as +15550100001");
+var whatsappSettings = defineSettings({
+  "wa.alert": {
+    default: "",
+    description: "A second WhatsApp number in E.164, a guest: each playground wa alert goes to it once the owner has not handled it within wa.alertDelayMinutes, or at once with --now-both, the dispatcher replies to it with playground wa send --to alert, and its messages reach the dispatcher as data, never an order or an Inbox answer. Empty sends alerts to the owner alone.",
+    masked: true,
+    schema: e1642
+  },
+  "wa.alertCheck": {
+    default: "",
+    description: "The checker ops-wa runs when an urgent alert's delay ends, a file in the extensions (such as scripts/<key>/check.ts) run with bun and given the alert's --source and its send time: exit 0 means handled, so the alert stays with the owner; any other exit, a crash or 20 s with no exit sends it on to wa.alert. Empty: only the owner's WhatsApp reaction on the alert handles it. A guard key, set by the owner alone.",
+    schema: string2().trim().max(300)
+  },
+  "wa.alertDelayMinutes": {
+    default: 3,
+    description: "The minutes an urgent alert waits with the owner before it goes on to wa.alert, unless the owner's reaction or wa.alertCheck says it was handled; read for each alert.",
+    schema: number2().int().positive()
+  },
+  "wa.device": {
+    default: "",
+    description: "The spare number ops-wa links to as a device, in E.164: its pairing code is for this number. Never the owner's own number; ops-wa does not run until it is set. A guard key, set by the owner alone.",
+    masked: true,
+    schema: e1642
+  },
+  "wa.guestPolicy": {
+    default: DEFAULT_POLICY,
+    description: "What the dispatcher may answer the wa.alert number, a guest, with: the policy line ops-wa adds to each of its messages. A guard key, set by the owner alone.",
+    schema: policy
+  },
+  "wa.owner": {
+    default: "",
+    description: "The owner's WhatsApp number in E.164, the allowlist of one: ops-wa hands on only this number's 1:1 messages as the owner's and sends replies only to it; ops-wa does not run until it is set. A guard key, set by the owner alone.",
+    masked: true,
+    schema: e1642
+  },
+  "wa.quietEndHour": {
+    default: 6,
+    description: "The hour, 0 to 23 in clock.ownerZone, the quiet window ends at: ops-wa then sends the texts it held as one catch-up. Equal to wa.quietStartHour, there is no window.",
+    schema: hour
+  },
+  "wa.quietStartHour": {
+    default: 0,
+    description: "The hour, 0 to 23 in clock.ownerZone, the quiet window starts at: inside it, a reply to the owner goes out only within an hour of the owner's last read or message, and ops-wa holds it otherwise; an urgent alert goes at any hour.",
+    schema: hour
+  },
+  "wa.replyPolicy": {
+    default: DEFAULT_POLICY,
+    description: "What the dispatcher may answer the owner's WhatsApp with: the policy line ops-wa adds to each message it hands on and to each update it asks for. A guard key, set by the owner alone.",
+    schema: policy
+  }
+});
+// packages/settings/src/yard.ts
+var yardSettings = defineSettings({
+  "yard.logReaders": {
+    default: {},
+    description: "The bots whose read of the dispatcher's log this Mac answers through the relay, each Yard login to the DM it was made with; a bot Yard lets read the log reads nothing until its login and its DM are here.",
+    schema: record2(string2().regex(/^[a-z\d][a-z\d-]{0,29}\[bot\]$/, "a bot's login, <name>[bot]"), string2().min(1).max(64))
+  }
+});
+// packages/scripts/src/playground/setting.ts
+var CHECKOUT = resolve4(__CHECKOUT + "/packages/scripts/src/playground", "../../../..");
+var origins = new Map;
+var originRepo = (checkout = CHECKOUT) => {
+  if (!origins.has(checkout)) {
+    const run = Bun.spawnSync(["git", "-C", checkout, "remote", "get-url", "origin"], {
+      stderr: "ignore"
+    });
+    const url = run.stdout.toString().trim();
+    const slug = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(url)?.[1] ?? "";
+    origins.set(checkout, slug.toLowerCase());
+  }
+  return origins.get(checkout);
+};
+var factoryRepo = (settings, checkout = CHECKOUT) => factorySettings.get(settings, "factory.repo").toLowerCase() || originRepo(checkout);
+if (false)
+  ;
+
+// scripts/hooks/no-protected-push.ts
+var PROTECTED = new Set(["canary", "main"]);
+var PUSH_TAKES = new Set([
+  "--exec",
+  "-o",
+  "--push-option",
+  "--receive-pack",
+  "--recurse-submodules",
+  "--repo"
+]);
+var PLAIN2 = new Set([
+  "--atomic",
+  "--dry-run",
+  "--exec",
+  "--follow-tags",
+  "--force",
+  "--force-if-includes",
+  "--force-with-lease",
+  "--ipv4",
+  "--ipv6",
+  "--no-atomic",
+  "--no-follow-tags",
+  "--no-force-if-includes",
+  "--no-force-with-lease",
+  "--no-progress",
+  "--no-signed",
+  "--no-thin",
+  "--no-verify",
+  "--porcelain",
+  "--progress",
+  "--push-option",
+  "--quiet",
+  "--receive-pack",
+  "--recurse-submodules",
+  "--repo",
+  "--set-upstream",
+  "--signed",
+  "--thin",
+  "--verbose",
+  "--verify",
+  "-4",
+  "-6",
+  "-f",
+  "-n",
+  "-o",
+  "-q",
+  "-u",
+  "-v"
+]);
+var KEEPS_HEAD = new Set(["cat", "date", "echo", "printf", "pwd", "true"]);
+var GIT_KEEPS_HEAD = new Set([
+  "add",
+  "commit",
+  "diff",
+  "fetch",
+  "log",
+  "ls-remote",
+  "push",
+  "rev-parse",
+  "show",
+  "status"
+]);
+var ROUTE = "canary takes a pull request only through bun run pr:merge <n> or merge-on-ready, and main moves only through the release skill's ship:merge.";
+var FIX = "Push your work branch as a call of its own, a bare git push from it or git push origin HEAD:<branch>, then land it through its pull request.";
+var git = (dir, args) => {
+  const out = Bun.spawnSync(["git", "-C", dir, ...args], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stderr: "ignore"
+  });
+  return out.exitCode === 0 ? out.stdout.toString() : undefined;
+};
+var lines = (text) => (text ?? "").split(`
+`).filter(Boolean);
+var builtins;
+var builtin = (sub) => (builtins ??= new Set(lines(Bun.spawnSync(["git", "--list-cmds=builtins"], { stderr: "ignore" }).stdout.toString()))).has(sub);
+function branchOf(name) {
+  const bare = name.replace(/^(?:refs\/)?heads\//, "");
+  return bare.startsWith("refs/") ? undefined : bare.toLowerCase();
+}
+function writes(rest, dir, settled) {
+  const { flags, positionals } = parseFlags(rest, PUSH_TAKES);
+  const odd = flags.find((f) => !PLAIN2.has(f.name) && !["--tags", "--delete", "-d"].includes(f.name));
+  if (odd)
+    return {
+      names: [],
+      unread: `it carries ${odd.name}, which may push more branches than it names`
+    };
+  const [, ...specs] = positionals;
+  const head = () => {
+    if (!dir || !settled)
+      return {
+        names: [],
+        unread: "it pushes the checked-out branch, which this call may switch before the push runs"
+      };
+    const branch = lines(git(dir, ["symbolic-ref", "--short", "-q", "HEAD"]))[0];
+    return { branch, names: branch ? [branch.toLowerCase()] : [] };
+  };
+  if (specs.length === 0) {
+    if (flags.some((f) => f.name === "--tags"))
+      return { names: [] };
+    const base = head();
+    if (base.unread || !dir)
+      return base;
+    const config = lines(git(dir, ["config", "--list"]));
+    if (config.some((l) => /^remote\..*\.push=/.test(l)))
+      return {
+        names: [],
+        unread: "a push refspec in the checkout's config picks the branches it writes"
+      };
+    if (config.findLast((l) => l.startsWith("push.default=")) === "push.default=matching")
+      return {
+        names: [],
+        unread: "push.default is matching, which pushes every branch the remote holds"
+      };
+    const upstream = base.branch && config.findLast((l) => l.startsWith(`branch.${base.branch}.merge=`));
+    const tracked = upstream ? branchOf(upstream.slice(upstream.indexOf("=") + 1)) : undefined;
+    return { names: tracked ? [...base.names, tracked] : base.names };
+  }
+  const names = [];
+  for (const spec of specs) {
+    if (unreadable(spec))
+      return { names: [], unread: "it names a ref built at run time" };
+    const text = spec.value.replace(/^\+/, "");
+    if (/[*?[\\\s]/.test(text) || text === ":" || text === "")
+      return { names: [], unread: `its refspec ${spec.value} may match many branches` };
+    const parts = text.split(":");
+    if (parts.length > 2)
+      return { names: [], unread: `its refspec ${spec.value} does not read` };
+    const destination = parts.length === 2 ? parts[1] : parts[0];
+    if (/^(?:@|head)$/i.test(destination)) {
+      if (parts.length === 2)
+        return { names: [], unread: `its refspec ${spec.value} writes the remote's HEAD` };
+      const current = head();
+      if (current.unread)
+        return current;
+      names.push(...current.names);
+      continue;
+    }
+    const branch = branchOf(destination);
+    if (branch !== undefined)
+      names.push(branch);
+  }
+  return { names };
+}
+function lands(remote, dir, factory, carried) {
+  if (!factory)
+    return "the factory's repository does not read (factory.repo is unset and the checkout has no GitHub origin)";
+  if (carried)
+    return "it carries -c, --config-env, --git-dir, --work-tree or a GIT_ variable, which can change where it pushes";
+  if (remote && unreadable(remote))
+    return "its remote is built at run time";
+  const named = (url) => {
+    const repo = remoteRepo(url);
+    return !!repo && `${repo.owner}/${repo.repo}`.toLowerCase() === factory;
+  };
+  if (!dir)
+    return remote && /[:/]/.test(remote.value) && !remote.value.startsWith(".") ? named(remote.value) : "the folder it runs in does not read";
+  const listed = lines(git(dir, ["remote", "-v"])).filter((l) => l.endsWith(" (push)"));
+  const configured = new Set(listed.map((l) => l.split("\t")[0]));
+  if (!remote || configured.has(remote.value))
+    return listed.some((l) => (!remote || l.startsWith(`${remote.value}	`)) && named(l.slice(l.indexOf("\t") + 1, -" (push)".length)));
+  const rules = lines(git(dir, ["config", "--get-regexp", "^url\\..*\\.pushinsteadof$"]));
+  if (rules.some((l) => remote.value.startsWith(l.slice(l.indexOf(" ") + 1))))
+    return "a pushInsteadOf rule in the checkout's config rewrites its remote";
+  return named(lines(git(dir, ["ls-remote", "--get-url", remote.value]))[0] ?? remote.value);
+}
+function globals(args, env) {
+  let dir = env.cwd;
+  let carried = false;
+  for (let k = 0;k < args.length && args[k].value.startsWith("-"); k++) {
+    const v = args[k].value;
+    if (v === "-C")
+      dir = dir === undefined ? undefined : pathOf(args[++k] ?? { value: "" }, { ...env, cwd: dir });
+    else if (/^(?:-c|--config-env|--git-dir|--work-tree|--namespace)(?:=|$)/.test(v) || /^-c./.test(v)) {
+      carried = true;
+      if (GIT_TAKES.has(v))
+        k++;
+    } else if (GIT_TAKES.has(v))
+      k++;
+  }
+  return { carried, dir };
+}
+var gitVariable = (key) => /^GIT_(?:COMMON_DIR|CONFIG(?:_\w+)?|DIR|NAMESPACE|WORK_TREE)$/.test(key);
+function signingOff(environment) {
+  const count = environment.GIT_CONFIG_COUNT;
+  if (count === undefined || !/^[1-9]\d*$/.test(count))
+    return false;
+  const expected = new Set(["GIT_CONFIG_COUNT"]);
+  for (let n = 0;n < Number(count); n++) {
+    const key = `GIT_CONFIG_KEY_${n}`;
+    const value = `GIT_CONFIG_VALUE_${n}`;
+    if (environment[key] !== "commit.gpgsign" || environment[value] !== "false")
+      return false;
+    expected.add(key).add(value);
+  }
+  return Object.keys(environment).filter(gitVariable).every((name) => expected.has(name));
+}
+function aliasOf(sub, args, dir) {
+  if (builtin(sub))
+    return false;
+  const inline = gitCommand(args).aliases.findLast((a) => a.startsWith(`alias.${sub}=`));
+  const body = inline === undefined ? dir && git(dir, ["config", "--get", `alias.${sub}`]) : inline.slice(inline.indexOf("=") + 1);
+  if (body === undefined)
+    return dir === undefined;
+  return /push/i.test(body);
+}
+function judge2(args, parsed, env, factory, settled) {
+  const { sub, rest } = gitCommand(args);
+  if (!sub)
+    return;
+  const { carried: optioned, dir } = globals(args, env);
+  const carried = optioned || [...parsed.local.keys(), ...env.vars.keys()].some(gitVariable) || !signingOff(env.process) && Object.keys(env.process).some(gitVariable);
+  if (sub.value !== "push") {
+    const other = sub.value === "send-pack" || sub.value === "subtree" && rest[0]?.value === "push";
+    const alias = other || marked(sub.value) ? undefined : aliasOf(sub.value, args, dir);
+    if (alias === false)
+      return;
+    const where = lands(undefined, dir, factory, carried);
+    if (where === false)
+      return;
+    return refuse4(other ? `it runs git ${sub.value}, a push the hook does not read` : alias ? `it runs git ${sub.value}, an alias that may push` : "it runs a git command the hook cannot read", where);
+  }
+  const { positionals, flags } = parseFlags(rest, PUSH_TAKES);
+  const remote = positionals[0] ?? flags.findLast((f) => f.name === "--repo")?.value;
+  const written = parsed.xargs ? { names: [], unread: "xargs adds refs it reads at run time" } : writes(rest, carried ? undefined : dir, settled && !carried);
+  const hit = written.names.find((n) => PROTECTED.has(n));
+  if (!written.unread && !hit)
+    return;
+  const where = lands(remote, dir, factory, carried);
+  if (where === false)
+    return;
+  if (hit && where === true)
+    return `no-protected-push hook refuses this git push: it writes ${hit} of ${factory}. ${ROUTE} ${FIX}`;
+  return refuse4(written.unread ?? `it writes ${hit}`, where);
+}
+var refuse4 = (what, where) => `no-protected-push hook refuses this git push: ${what}, ${where === true ? "in the factory's repository" : `and ${where}`}, so it may write main or canary there. ${ROUTE} ${FIX}`;
+var MCP_TOOL2 = /^mcp__(.+?)__(.+)$/;
+var FILE_TOOLS = new Set(["create_or_update_file", "delete_file", "push_files"]);
+var MERGE_TAKES = new Set([
+  "-A",
+  "--author-email",
+  "-b",
+  "--body",
+  "-F",
+  "--body-file",
+  "--match-head-commit",
+  "-R",
+  "--repo",
+  "-t",
+  "--subject"
+]);
+var MERGE_FIX = "Land it with bun run pr:merge <n>, or let merge-on-ready land it.";
+var BUILDER_FORM = "The Builder alone merges by hand, as gh pr merge <n> --squash --body-file <file> --match-head-commit <head> in a call that names no role variable and sources no file, the body passed by file since its text counts as the call's.";
+var UNREAD_FIX = "Spell the query file's path or the endpoint out literally, with no shell variable or substitution, or put the query inline in single quotes, and a read, a thread reply or a resolve runs.";
+var named = (repo, factory) => !!repo && `${repo.owner}/${repo.repo}`.toLowerCase() === factory;
+var mayBe = (repos, factory) => !factory || repos.some((repo) => repo === undefined || named(repo, factory));
+var GH_DEFAULT = (env, local) => env.cwd || local.has("GH_REPO") || env.vars.has("GH_REPO") || env.process.GH_REPO ? implicitRepos(env, local) : [undefined];
+function judgeTool(tool, input, factory) {
+  const [, server, name] = MCP_TOOL2.exec(tool) ?? [];
+  if (!server || !name || !/github/i.test(server))
+    return;
+  if (name !== "merge_pull_request" && !FILE_TOOLS.has(name))
+    return;
+  const { branch, owner, repo } = input;
+  const repos = [
+    typeof owner === "string" && typeof repo === "string" ? { owner, repo } : undefined
+  ];
+  if (!mayBe(repos, factory))
+    return;
+  const place = factory || "the factory's repository";
+  if (name === "merge_pull_request")
+    return `no-protected-push hook refuses ${tool}: it merges a pull request of ${place}, whose base is main or canary. ${ROUTE} ${MERGE_FIX}`;
+  if (typeof branch === "string" && branch !== "") {
+    const target = branchOf(branch);
+    if (target === undefined || !PROTECTED.has(target))
+      return;
+  }
+  const what = typeof branch === "string" && branch !== "" ? branch : "the default branch, canary";
+  return `no-protected-push hook refuses ${tool}: it writes ${what} of ${place}. ${ROUTE} ${FIX}`;
+}
+async function judgeMerge(rest, repos, parsed, env, factory, builder, command) {
+  const { flags, positionals } = parseFlags(rest, MERGE_TAKES);
+  if (flags.some((f) => f.name === "--help" || f.name === "-h"))
+    return;
+  const given = [
+    ...repos,
+    ...flags.filter((f) => (f.name === "-R" || f.name === "--repo") && f.value).map((f) => f.value)
+  ];
+  const [target] = positionals;
+  const url = target && !unreadable(target) ? /github\.com\/([^/\s]+)\/([^/\s]+)\/pull\//i.exec(target.value) : null;
+  const candidates = url ? [{ owner: url[1], repo: url[2] }] : given.length > 0 ? [repoOf(given.at(-1))] : GH_DEFAULT(env, parsed.local);
+  if (target && unreadable(target))
+    candidates.push(undefined);
+  if (!mayBe(candidates, factory))
+    return;
+  const head = flags.findLast((f) => f.name === "--match-head-commit")?.value;
+  const squash = flags.some((f) => f.name === "--squash" || f.name === "-s");
+  const pinned = !!head && !unreadable(head) && /^[0-9a-f]{7,40}$/i.test(head.value);
+  if (squash && pinned && !namesRole(command) && await builder())
+    return;
+  return `no-protected-push hook refuses this gh pr merge: it merges a pull request of ${factory || "the factory's repository"}, whose base is main or canary. ${ROUTE} ${MERGE_FIX} ${BUILDER_FORM}`;
+}
+function fieldOf(request, key) {
+  const field = request.fields.findLast((f) => f.key === key);
+  if (field)
+    return field.text;
+  for (const input of request.inputs) {
+    if (unreadable(input))
+      return { unknown: "an --input the hook cannot read", value: "" };
+    try {
+      const value = JSON.parse(input.value)[key];
+      if (typeof value === "string")
+        return { value };
+      if (value !== undefined)
+        return { unknown: `a ${key} that is no string`, value: "" };
+    } catch {
+      return { unknown: "an --input that is no JSON object", value: "" };
+    }
+  }
+}
+function restWrite(tail, request) {
+  if (/^pulls\/[^/]+\/merge$/.test(tail))
+    return "it merges a pull request, whose base is main or canary";
+  const protectedBy = (key, absent) => {
+    const text = fieldOf(request, key);
+    if (!text)
+      return absent;
+    if (unreadable(text))
+      return `its ${key} is built at run time`;
+    const target = branchOf(text.value);
+    return target !== undefined && PROTECTED.has(target) ? `it writes ${target}` : undefined;
+  };
+  if (tail === "git/refs")
+    return protectedBy("ref");
+  const ref = /^git\/refs\/(.+)$/.exec(tail)?.[1];
+  if (ref !== undefined) {
+    const target = branchOf(ref);
+    return target !== undefined && PROTECTED.has(target) ? `it writes ${target}` : undefined;
+  }
+  if (/^contents\/./.test(tail))
+    return protectedBy("branch", "it names no branch, so it writes the default branch, canary");
+  if (tail === "merges")
+    return protectedBy("base");
+}
+async function judgeApi(rest, cmd, parsed, env, factory) {
+  const request = await ghApi(rest, cmd, env, parsed.xargs);
+  if (!request)
+    return;
+  const { endpoint, method } = request;
+  const path = decodeURIComponent(endpoint.value.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, "").replace(/^api\/v3\//, "").split("?")[0]).replace(/\/+$/, "");
+  if (path === "graphql" || path === "api/graphql") {
+    const texts = [
+      ...request.fields.filter((f) => f.key === "query" || f.key === "body").map((f) => f.text),
+      ...request.inputs
+    ];
+    const blind = texts.some(unreadable);
+    const mutation = texts.map((t) => REF_MOVE.exec(t.value)?.[0]).find(Boolean);
+    if (mutation)
+      return `no-protected-push hook refuses this gh api graphql call: it runs ${mutation}, which merges a pull request or moves a branch, and a node id names no repository, so the hook cannot tell it from a write to main or canary. Merge through gh pr merge's own route, bun run pr:merge <n>, and move a branch with git push.`;
+    if (!blind)
+      return;
+    return `no-protected-push hook refuses this gh api graphql call: it sends a query the hook cannot read, which may merge a pull request or move a branch. ${UNREAD_FIX}`;
+  }
+  if (method === "GET" || method === "HEAD")
+    return;
+  const place = factory || "the factory's repository";
+  if (unreadable(endpoint))
+    return `no-protected-push hook refuses this gh api ${method} call: its endpoint is built at run time, so it may write main or canary of ${place}. ${UNREAD_FIX}`;
+  const m = /^repos\/([^/]+)\/([^/]+)\/(.+)$/.exec(path);
+  if (!m)
+    return;
+  const repos = m[1] === "{owner}" || m[2] === "{repo}" ? GH_DEFAULT(env, parsed.local) : [{ owner: m[1], repo: m[2] }];
+  if (!mayBe(repos, factory))
+    return;
+  const what = restWrite(m[3], request);
+  if (!what)
+    return;
+  const fix = /^pulls\/[^/]+\/merge$/.test(m[3]) ? MERGE_FIX : FIX;
+  return `no-protected-push hook refuses this gh api ${method} call: ${what} of ${place}. ${ROUTE} ${fix}`;
+}
+var isPush = (args) => gitCommand(args).sub?.value === "push";
+async function inspect3(raw, environment, checkout) {
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof payload !== "object" || payload === null)
+    return;
+  const { cwd, tool_input: input, tool_name: tool } = payload;
+  const factoryOf = () => {
+    const read = readPolicyOrDefaults(dataDir(environment));
+    return read.refusal === undefined ? factoryRepo(read.settings, checkout) : "";
+  };
+  if (typeof tool === "string" && MCP_TOOL2.test(tool))
+    return judgeTool(tool, input ?? {}, factoryOf());
+  if (tool !== "Bash")
+    return;
+  const command = input?.command;
+  if (typeof command !== "string" || !/git|push|\bgh\b|\$|`/i.test(command.replace(/[\\'"]/g, "")))
+    return;
+  const factory = factoryOf();
+  const builder = () => builderLead(raw, environment);
+  const directory = typeof cwd === "string" ? cwd : undefined;
+  const env = {
+    cwd: directory,
+    cwdSure: directory,
+    files: new Map,
+    known: knownVariables(command, environment, directory),
+    process: environment,
+    vars: new Map
+  };
+  let settled = true;
+  const visit = async (cmd, parsed, at) => {
+    const { args, first, name } = parsed;
+    let ghArgs;
+    if (name === "gh")
+      ghArgs = args;
+    else if (!PRINTERS.has(name)) {
+      const nested = args.findIndex((a) => program(a.value) === "gh");
+      if (nested !== -1)
+        ghArgs = args.slice(nested + 1);
+    }
+    if (ghArgs) {
+      const { head, repos, rest } = ghCommand(ghArgs);
+      const folders = places(at);
+      if (at.cwdUnread || at.cwdAnywhere)
+        folders.push({ ...at, cwd: undefined, cwdSure: undefined });
+      for (const place of folders) {
+        const verdict = head[0] === "pr" && head[1] === "merge" ? await judgeMerge(rest, repos, parsed, place, factory, builder, command) : head[0] === "api" ? await judgeApi(rest, cmd, parsed, place, factory) : undefined;
+        if (verdict)
+          return verdict;
+      }
+    }
+    let gitArgs;
+    if (name === "git")
+      gitArgs = args;
+    else if (first && (first.unknown || marked(first.value)) && isPush(args))
+      gitArgs = args;
+    else if (!PRINTERS.has(name)) {
+      const nested = args.findIndex((a, j) => program(a.value) === "git" && isPush(args.slice(j + 1)));
+      if (nested !== -1)
+        gitArgs = args.slice(nested + 1);
+    }
+    let verdict;
+    if (gitArgs) {
+      const folders = places(at);
+      if (at.cwdUnread || at.cwdAnywhere)
+        folders.push({ ...at, cwd: undefined, cwdSure: undefined });
+      for (const place of folders)
+        verdict ??= judge2(gitArgs, parsed, place, factory, settled);
+    }
+    const sub = gitArgs && gitCommand(gitArgs).sub?.value;
+    if (!(name === "git" && sub && GIT_KEEPS_HEAD.has(sub)) && !KEEPS_HEAD.has(name))
+      settled = false;
+    return verdict;
+  };
+  return run2(lex(command, env.known), env, visit);
+}
+async function check5(raw, environment = process.env, checkout) {
+  try {
+    return await inspect3(raw, environment, checkout);
+  } catch (error) {
+    if (!/push|merge|refs|contents|graphql|_file/i.test(raw))
+      return;
+    return `no-protected-push hook could not read this call (${error}), which names a route onto main or canary, so it refuses it. ${FIX}`;
+  }
+}
+
 // scripts/hooks/read-only.ts
 var READ_FILE = { count: true, operands: true, values: ["-c", "-n"] };
 var GH_VIEW = {
@@ -8892,1525 +12018,6 @@ function readOnly(raw) {
   }
 }
 
-// scripts/hooks/no-playground-leak.ts
-var EMPTY_TERMS = {
-  aliases: [],
-  everyday: [],
-  names: [],
-  paths: [],
-  probe: "probe",
-  sessions: { roles: [], sins: [] }
-};
-var isTerms = (value) => isRecord(value) && ["aliases", "everyday", "names", "paths"].every((key) => isStrings(value[key])) && typeof value.probe === "string" && isRecord(value.sessions) && isStrings(value.sessions.roles) && isStrings(value.sessions.sins);
-var terms = EMPTY_TERMS;
-var isCleared = (value) => isRecord(value) && Object.values(value).every((entry) => isRecord(entry) && typeof entry.name === "string" && (entry.signature === undefined || typeof entry.signature === "string"));
-var CHAT_TOOL = /^chat_(?:me_message|post_ephemeral|post_message|schedule_message|update)$/;
-var POST_KEYS = { channel: "channel", text: "text" };
-var CONNECTOR_TOOL = "slack_send_message";
-var CONNECTOR_KEYS = { channel: "channel_id", text: "message" };
-var signed = () => {
-  const { cleared } = state();
-  return Object.keys(cleared).filter((c) => cleared[c].signature);
-};
-var OTHER_DESTINATION = /channel|conversation/i;
-var RICH = ["attachments", "blocks", "markdown_text"];
-var isJson = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-function chipsSigned(blocks, signature) {
-  let parsed = blocks;
-  if (typeof blocks === "string") {
-    try {
-      parsed = JSON.parse(blocks);
-    } catch {
-      return false;
-    }
-  }
-  if (!Array.isArray(parsed) || !parsed.length)
-    return false;
-  const children = [];
-  const starts = new Set;
-  for (const block of parsed) {
-    if (!isJson(block) || block.type !== "rich_text" || !Array.isArray(block.elements))
-      return false;
-    if (!block.elements.length)
-      return false;
-    for (const section of block.elements) {
-      if (!isJson(section) || section.type !== "rich_text_section")
-        return false;
-      if (!Array.isArray(section.elements))
-        return false;
-      if (isJson(section.elements[0]))
-        starts.add(section.elements[0]);
-      for (const child of section.elements) {
-        if (!isJson(child))
-          return false;
-        const text = child.type === "text" && typeof child.text === "string";
-        const link = child.type === "link" && typeof child.url === "string" && (child.text === undefined || typeof child.text === "string");
-        if (!text && !link)
-          return false;
-        children.push(child);
-      }
-    }
-  }
-  const last = children.findLast((c) => c.type !== "text" || String(c.text).trim());
-  const style = last?.style;
-  if (last?.type !== "text" || !isJson(style) || style.italic !== true)
-    return false;
-  const text = String(last.text).trimEnd();
-  const before = children[children.indexOf(last) - 1];
-  const opensLine = text.includes(`
-`) || starts.has(last) || String(before?.text ?? "").endsWith(`
-`);
-  return opensLine && text.split(`
-`).at(-1)?.trim() === signature.replace(/^_(.*)_$/, "$1");
-}
-var escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-var HANDLE = /^[a-z\d][\w.-]{1,63}$/i;
-var MAX_ROSTER_BYTES = 1048576;
-var CHECKOUT = join8(__CHECKOUT + "/scripts/hooks", "..", "..");
-function rosterNames(environment) {
-  const path = join8(dataDirOf(environment), "roster.json");
-  try {
-    if (statSync3(path).size > MAX_ROSTER_BYTES)
-      return [];
-    const agents = JSON.parse(readFileSync3(path, "utf8"))?.agents;
-    if (!Array.isArray(agents))
-      return [];
-    return agents.flatMap((a) => {
-      const name = a?.name;
-      return typeof name === "string" && notEveryday(name) ? [name] : [];
-    });
-  } catch {
-    return [];
-  }
-}
-var notEveryday = (name) => HANDLE.test(name) && !terms.everyday.some((w) => w.toLowerCase() === name.toLowerCase());
-function skillNames(checkout = CHECKOUT) {
-  const ours = join8(checkout, "skills", "playground");
-  try {
-    return readdirSync2(ours, { withFileTypes: true }).filter((d) => d.isDirectory() && existsSync5(join8(ours, d.name, "SKILL.md"))).map((d) => d.name).filter(notEveryday);
-  } catch {
-    return [];
-  }
-}
-function pattern(environment, checkout = CHECKOUT) {
-  const sources = [
-    ...[...terms.names, ...terms.aliases, ...rosterNames(environment), ...skillNames(checkout)].map((n) => escape(n).replace(/ /g, "[\\s_-]+") + (n.endsWith("_") ? "[a-z\\d_]*" : "")),
-    ...terms.paths.map(escape),
-    ...terms.sessions.sins.length ? [
-      `${escape(terms.probe)}-(?:(?:${terms.sessions.roles.join("|")})-)?(?:${terms.sessions.sins.join("|")})`,
-      `(?:${terms.sessions.roles.join("|")})-(?:${terms.sessions.sins.join("|")})`
-    ] : []
-  ];
-  if (!sources.length)
-    return /(?!)/;
-  return new RegExp(`(?<![a-z\\d])(?:${sources.join("|")})(?![a-z\\d])`, "i");
-}
-var REPHRASE = "Say it without the term: name the work, not who did it or how it is run.";
-var READABLE = `Put the text in the command itself, or write the text to a file with the Write tool first, then run the command again in a call of its own that names that file by its literal absolute path (--body-file /abs/body.md, or -F /abs/msg.md for a commit). ${NOT_RUN}`;
-var MCP_READABLE = "Pass the input as an object whose fields are strings.";
-var spec = (texts, files, others = []) => ({
-  files,
-  takes: new Set([...files, ...others, ...texts, "-R", "--repo"]),
-  texts
-});
-var BODY = ["-b", "--body"];
-var BODY_FILE = ["-F", "--body-file"];
-var CLOSING = spec(["-c", "--comment"], [], ["-r", "--reason", "--duplicate-of"]);
-var EDIT = [
-  "--add-assignee",
-  "--add-label",
-  "--add-project",
-  "--add-reviewer",
-  "-B",
-  "--base",
-  "-m",
-  "--milestone",
-  "--remove-assignee",
-  "--remove-label",
-  "--remove-project",
-  "--remove-reviewer"
-];
-var NEW = [
-  "-a",
-  "--assignee",
-  "-B",
-  "--base",
-  "-l",
-  "--label",
-  "-m",
-  "--milestone",
-  "-p",
-  "--project",
-  "-r",
-  "--reviewer",
-  "--recover",
-  "-T",
-  "--template"
-];
-var GH_WRITES = new Map([
-  ["issue close", CLOSING],
-  ["issue comment", spec([...BODY, "--attach"], BODY_FILE)],
-  ["issue create", spec([...BODY, "-t", "--title"], BODY_FILE, NEW)],
-  ["issue edit", spec([...BODY, "-t", "--title"], BODY_FILE, EDIT)],
-  ["issue reopen", CLOSING],
-  ["label create", spec(["-d", "--description"], [], ["-c", "--color"])],
-  ["label edit", spec(["-d", "--description", "-n", "--name"], [], ["-c", "--color"])],
-  ["pr close", CLOSING],
-  ["pr comment", spec([...BODY, "--attach"], BODY_FILE)],
-  ["pr create", spec([...BODY, "--attach", "-H", "--head", "-t", "--title"], BODY_FILE, NEW)],
-  ["pr edit", spec([...BODY, "-t", "--title"], BODY_FILE, EDIT)],
-  [
-    "pr merge",
-    spec([...BODY, "-t", "--subject"], BODY_FILE, ["-A", "--author-email", "--match-head-commit"])
-  ],
-  ["pr reopen", CLOSING],
-  ["pr review", spec(BODY, BODY_FILE)],
-  [
-    "release create",
-    spec(["-n", "--notes", "-t", "--title"], ["-F", "--notes-file"], ["--discussion-category", "--notes-start-tag", "--target"])
-  ],
-  [
-    "release edit",
-    spec(["-n", "--notes", "-t", "--title", "--tag"], ["-F", "--notes-file"], ["--discussion-category", "--target"])
-  ]
-]);
-var GH_GROUPS = new Set(["api", "issue", "label", "pr", "release"]);
-var PR_URL = /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/(?:issues|pull)\/\d+/i;
-var COMMIT_TAKES = new Set([
-  "--author",
-  "-c",
-  "-C",
-  "--cleanup",
-  "--date",
-  "-F",
-  "--file",
-  "--fixup",
-  "-m",
-  "--message",
-  "--pathspec-from-file",
-  "--reedit-message",
-  "--reuse-message",
-  "--squash",
-  "-t",
-  "--template",
-  "--trailer"
-]);
-var PUSH_TAKES = new Set(["--exec", "-o", "--push-option", "--receive-pack", "--repo"]);
-var REPO_WRITES = new Map([
-  ["repo archive", []],
-  ["repo delete", []],
-  [
-    "repo edit",
-    [
-      "--add-topic",
-      "-d",
-      "--default-branch",
-      "--description",
-      "-h",
-      "--homepage",
-      "--remove-topic",
-      "--visibility"
-    ]
-  ],
-  ["repo rename", []],
-  ["repo sync", ["-b", "--branch", "-s", "--source"]],
-  ["repo unarchive", []]
-]);
-var CONVERSATION = new Set([
-  "pr close",
-  "pr comment",
-  "pr create",
-  "pr edit",
-  "pr reopen",
-  "pr review"
-]);
-var CONVERSATION_TOOL = /^(?:add_comment_to_pending_review|add_issue_comment|add_reply_to_pull_request_comment|create_pull_request|issue_write|pull_request_review_write|request_copilot_review|sub_issue_write|update_issue_comment|update_pull_request)$/;
-var CREATE_TAKES = [
-  "-d",
-  "--description",
-  "-g",
-  "--gitignore",
-  "-h",
-  "--homepage",
-  "-l",
-  "--license",
-  "-p",
-  "--template",
-  "-r",
-  "--remote",
-  "-s",
-  "--source",
-  "-t",
-  "--team"
-];
-var SUBTREE_TAKES = new Set(["-b", "--branch", "-m", "--message", "--onto", "-P", "--prefix"]);
-var PLACE_FIX = `Run any setup (a git config or remote change, a clone, gh repo set-default) in a call of its own first, then name where the write goes by its literal value in a call of its own: a git push run plainly, with no -c, --config-env, --git-dir or GIT_ variable, to a remote or URL the hook can read (a remote whose URL is a local path cannot be placed, so push from a clone of its GitHub URL), gh -R <owner>/<repo>, or repos/<owner>/<name>/... for gh api. ${NOT_RUN}`;
-var ANY_GH_WRITES = new Map([
-  ["pr update-branch", spec([], [])],
-  ["release delete", spec([], [])],
-  ["release upload", spec([], [])]
-]);
-var PLACEHOLDER = /^(?::owner|:repo|\{owner\}|\{repo\})$/;
-var GH_STATE = new Set(["config set", "repo clone", "repo fork", "repo set-default"]);
-var GIT_CONFIG_PATH = /(?:^|\/)\.git(?:\/|$)|\.gitconfig|(?:^|\/)git\/config$/;
-var CONFIG_WRITE = /^--(?:add|edit|remove-section|rename-section|replace-all|unset|unset-all)$|^-e$/;
-var CONFIG_READ = /^--(?:get|get-all|get-color|get-colorbool|get-regexp|get-urlmatch|list)$|^-l$/;
-var CONFIG_TAKES = new Set(["--blob", "--default", "-f", "--file", "--type"]);
-var builtins;
-var MCP_TOOL = /^mcp__(.+?)__(.+)$/;
-var READ_TOOL = /^(?:download|extract|fetch|get|list|read|search)_|_(?:history|info|list|read|replies|search|unreads)$/;
-var INNER = new Set(["curl", "gh", "git"]);
-var MAYBE = /curl|gh|git/i;
-var MAYBE_ANY = /alias|curl|gh|git|repo|send-pack|subtree/i;
-var WRITE_CALL = /\b(?:curl|gh|git)\b|github|linear|slack/i;
-var leakPolicy = (orgs, term = /(?!)/) => ({
-  find: (text) => {
-    const found = term.exec(visible(text))?.[0];
-    return found ? { detail: `"${found}", a factory term`, fix: REPHRASE } : undefined;
-  },
-  git: true,
-  guard: "no-playground-leak",
-  guarded: (repo) => orgs.has(repo.owner.toLowerCase()),
-  hosts: true,
-  place: "a guarded org",
-  what: "a factory term",
-  why: "the factory is private, so nothing about it, its skills or its sessions goes into anything a guarded org sees, in any shape."
-});
-var calls = new AsyncLocalStorage2;
-var IDLE = {
-  changed: false,
-  cleared: {},
-  moved: false,
-  movedBefore: false,
-  policy: leakPolicy(new Set)
-};
-var state = () => calls.getStore() ?? IDLE;
-var lower = (text) => text[0].toLowerCase() + text.slice(1);
-function refuse2(what, target, detail, fix) {
-  return `${state().policy.guard} hook refused ${what} to ${target.label}: ${detail}. ${state().policy.why} ${fix}`;
-}
-function refuseAny(what, target, fix = NOT_RUN) {
-  return target.where === "guarded" ? refuse2(what, target, `it writes to ${state().policy.place}`, fix) : refuse2(what, target, `the hook cannot tell whether it writes to ${state().policy.place}`, PLACE_FIX);
-}
-async function judge2(what, target, texts, env, extras = []) {
-  if (target.where === "other")
-    return;
-  if (state().policy.anyWrite && !target.byText)
-    return refuseAny(what, target);
-  const resolved = await Promise.all(texts.map((t) => resolveText(t, env)));
-  const seen = (await Promise.all(extras.map((t) => resolveText(t, env)))).filter((t) => !t.unknown);
-  const hit = [...resolved, ...seen].map((t) => state().policy.find(t.value)).find(Boolean);
-  if (target.where === "unknown") {
-    if (!hit)
-      return;
-    return refuse2(what, target, `the hook cannot tell whether it writes to ${state().policy.place}, and its text holds ${hit.detail}`, `Name where it goes by its literal value in a call of its own (gh -R <owner>/<repo>, the pull request number or URL, git -C /abs/checkout, the URL itself, or a REST endpoint naming the repository in place of a GraphQL node id), or ${lower(hit.fix)} ${NOT_RUN}`);
-  }
-  if (hit)
-    return refuse2(what, target, `its text holds ${hit.detail}`, hit.fix);
-  const hidden = resolved.find((t) => t.unknown);
-  if (hidden) {
-    return refuse2(what, target, `the hook cannot read its text before it runs (it comes from ${hidden.unknown}), so it may hold ${state().policy.what}`, READABLE);
-  }
-}
-function decide(candidates) {
-  const ours = candidates.find((c) => c && state().policy.guarded(c));
-  if (ours)
-    return { label: `${ours.owner}/${ours.repo}`, where: "guarded" };
-  if (candidates.length === 0 || candidates.some((c) => !c)) {
-    return { label: "a repository the hook cannot resolve", where: "unknown" };
-  }
-  return { label: "", where: "other" };
-}
-var XARGS_INPUT = { quoted: false, unknown: "xargs's input", value: UNKNOWN };
-var leak = async (cmd, parsed, env) => {
-  const { first, name, xargs } = parsed;
-  if (state().policy.anyWrite)
-    pastDeadline();
-  const appended = state().policy.anyWrite && xargs && xargs.replace === undefined;
-  const args = appended && parsed.args.at(-1) !== XARGS_INPUT ? [...parsed.args, XARGS_INPUT] : parsed.args;
-  if (state().policy.anyWrite && changesState(cmd, parsed))
-    state().changed = true;
-  if (state().policy.anyWrite) {
-    state().movedBefore = state().moved;
-    if (MOVERS.has(name) || first?.unknown)
-      state().moved = true;
-  }
-  const head = args[0]?.value ?? "";
-  const group = GH_GROUPS.has(head) || state().policy.anyWrite && (head === "alias" || head === "repo");
-  if (name === "gh" || first?.unknown && group) {
-    const verdict = await gh(args, cmd, env, parsed.local, xargs);
-    if (verdict || name === "gh" || !state().policy.anyWrite)
-      return verdict;
-  }
-  const pusher = state().policy.anyWrite && (head === "send-pack" || head === "subtree");
-  if (name === "git" || first?.unknown && (head === "commit" || head === "push" || pusher))
-    return state().policy.git ? git(args, cmd, env, parsed.local) : undefined;
-  if (name === "curl")
-    return curl(args, cmd, env, xargs);
-  if (PRINTERS.has(name))
-    return;
-  const at = args.findIndex((a) => INNER.has(program(a.value)));
-  if (at === -1)
-    return;
-  const inner = {
-    ...parsed,
-    args: args.slice(at + 1),
-    first: args[at],
-    name: program(args[at].value)
-  };
-  const verdict = await leak(cmd, inner, env);
-  if (!verdict || args[at].value === inner.name)
-    return verdict;
-  const read = `It read a word whose path ends in /${inner.name} as ${inner.name} run by ${name}, a program it does not know: a folder or file passes under a path that does not end in /${inner.name}, and ${inner.name} run by ${name} is read the same when written by its own name, ${inner.name}.`;
-  return verdict.endsWith(NOT_RUN) ? `${verdict.slice(0, -NOT_RUN.length)}${read} ${NOT_RUN}` : `${verdict} ${read}`;
-};
-function changesState(cmd, { args, name }) {
-  const words = args.map((a) => a.value);
-  if (name === "gh")
-    return GH_STATE.has(ghCommand(args).head.join(" "));
-  if (name === "git") {
-    let k = 0;
-    while (k < words.length && words[k].startsWith("-"))
-      k += GIT_TAKES.has(words[k]) ? 2 : 1;
-    const [sub, ...rest] = words.slice(k);
-    if (sub === "clone" || sub === "init" || sub === "submodule")
-      return true;
-    const verb = rest.find((w) => !w.startsWith("-"));
-    if (sub === "remote")
-      return ["add", "remove", "rename", "rm", "set-url"].includes(verb ?? "");
-    if (sub !== "config")
-      return false;
-    const { flags, positionals } = parseFlags(args.slice(k + 1), CONFIG_TAKES);
-    const first = positionals[0]?.value ?? "";
-    if (flags.some((f) => CONFIG_WRITE.test(f.name)))
-      return true;
-    if (first === "get" || first === "list")
-      return false;
-    if (["edit", "remove-section", "rename-section", "set", "unset"].includes(first))
-      return true;
-    if (flags.some((f) => CONFIG_READ.test(f.name)))
-      return false;
-    return positionals.length > 1;
-  }
-  const targets = cmd.redirects.flatMap((r) => r.target ? [r.target] : []);
-  return [...args, ...targets].some((w) => GIT_CONFIG_PATH.test(w.value));
-}
-var MOVERS = new Set(["gh", "git"]);
-var implicit = (env, local) => state().policy.anyWrite && state().changed ? [undefined] : implicitRepos(env, local);
-async function gh(args, cmd, env, local, xargs) {
-  const { head, repos, rest } = ghCommand(args);
-  if (head[0] === "api")
-    return api2(rest, cmd, env, local, xargs);
-  const key = head.join(" ");
-  if (state().policy.anyWrite) {
-    if (key === "alias import" || key === "alias set") {
-      return refuse2(`gh ${key}`, decide([]), "an alias can run any gh write under a name the hook does not read", `Run the gh command itself, in a call of its own. ${NOT_RUN}`);
-    }
-    if (head[0] === "issue" || head[0] === "label" || CONVERSATION.has(key))
-      return;
-    if (key === "repo create" || key === "repo fork" || key === "repo rename") {
-      const refused = created(key, rest, env, xargs);
-      if (refused || key !== "repo rename")
-        return refused;
-    }
-    const takes = REPO_WRITES.get(key);
-    if (takes)
-      return repoWrite(key, rest, repos, env, local, xargs, takes);
-  }
-  const found = GH_WRITES.get(key) ?? (state().policy.anyWrite ? ANY_GH_WRITES.get(key) : undefined);
-  if (!found)
-    return;
-  const { flags, positionals } = parseFlags(rest, found.takes);
-  const texts = [];
-  for (const { name, value } of flags) {
-    const posts = found.texts.includes(name) || found.files.includes(name);
-    if (!value) {
-      if (posts)
-        texts.push(unknown(`${name} with no value`));
-    } else if (found.texts.includes(name))
-      texts.push(value);
-    else if (found.files.includes(name)) {
-      texts.push(value.value === "-" && !value.unknown ? await stdinOf(cmd, env) : await readPath(value, env));
-    } else if (name === "-R" || name === "--repo")
-      repos.push(value);
-  }
-  if (xargs && !xargs.replace)
-    texts.push(unknown("the arguments xargs appends"));
-  if (rest.some((a) => flagFromXargs(a, xargs))) {
-    texts.push(unknown(`what xargs puts in place of ${xargs?.replace}`));
-  }
-  const flagged = repos.map((r) => fromXargs(r, xargs) ? undefined : repoOf(r));
-  const urls = positionals.flatMap((p) => {
-    if (fromXargs(p, xargs))
-      return [undefined];
-    if (p === XARGS_INPUT || p.unknown || p.reads?.length || p.value.includes(UNKNOWN))
-      return state().policy.anyWrite ? [] : [undefined];
-    return PR_URL.test(p.value) ? [repoOf(p)] : [];
-  });
-  const named = [...flagged, ...urls];
-  const placed = urls.some(Boolean);
-  const fallback = flagged.length > 0 || placed ? [] : implicit(env, local);
-  if (!placed) {
-    const refused = unplaced(`gh ${key}`, flagged.length > 0 ? flagged : fallback, env);
-    if (refused)
-      return refused;
-  }
-  const target = decide(named.length > 0 ? named : fallback);
-  if (key === "pr create" && target.where !== "other")
-    texts.push(...prCreate(rest, env));
-  return judge2(`gh ${key}`, target, texts.map((t) => viaXargs(t, xargs)), env, positionals);
-}
-function destination(what, owner, name, fix) {
-  if (owner === undefined || name === undefined)
-    return refuseAny(what, decide([undefined]));
-  if (!state().policy.guarded({ owner, repo: name }))
-    return;
-  const label = owner === "*" ? `a repository named ${name}` : `${owner}/${name}`;
-  return refuseAny(what, { label, where: "guarded" }, fix);
-}
-function created(key, rest, env, xargs) {
-  const takes = key === "repo create" ? CREATE_TAKES : ["--fork-name", "--org", "--remote-name"];
-  const { flags, positionals } = parseFlags(rest, new Set([...takes, "-R", "--repo"]));
-  const flag = (...names) => flags.findLast((f) => names.includes(f.name));
-  const read = (w) => !w || w.unknown || w.reads?.length || marked(w.value) || fromXargs(w, xargs) ? undefined : w.value;
-  const what = `gh ${key}`;
-  if (key === "repo fork") {
-    const name = flag("--fork-name");
-    if (!name)
-      return;
-    const org = flag("--org");
-    return destination(what, org ? read(org.value) : "*", read(name.value));
-  }
-  const [given] = positionals;
-  if (given || key === "repo rename") {
-    const parts = read(given)?.split("/").filter(Boolean) ?? [];
-    const owner = key === "repo create" && parts.length > 1 ? parts.at(-2) : "*";
-    return destination(what, owner, parts.at(-1));
-  }
-  const source = flag("-s", "--source")?.value;
-  const path = source && read(source) !== undefined ? pathOf(source, env) : undefined;
-  return destination(what, "*", path && basename3(path));
-}
-function repoWrite(key, rest, repos, env, local, xargs, takes) {
-  const { flags, positionals } = parseFlags(rest, new Set([...takes, "-R", "--repo"]));
-  for (const { name, value } of flags)
-    if (value && (name === "-R" || name === "--repo"))
-      repos.push(value);
-  const named = key === "repo rename" ? [] : positionals.slice(0, 1);
-  if (key === "repo sync" && named.length === 0)
-    return Promise.resolve(undefined);
-  const given = (named.length > 0 ? named : repos).map((w) => fromXargs(w, xargs) || marked(w.value) ? undefined : repoOf(w));
-  return judge2(`gh ${key}`, decide(given.length > 0 ? given : implicit(env, local)), [], env);
-}
-function unplaced(what, source, env) {
-  const lost = source.length === 0 && !env.cwd;
-  if (!lost && source.every(Boolean))
-    return;
-  if (state().policy.anyWrite && state().changed)
-    return refuse2(what, decide([]), "an earlier command in the call changes the git or gh state it is placed by", PLACE_FIX);
-  return refuse2(what, decide([]), lost ? "the hook cannot tell which repository it writes to, since it names none and runs in a directory the hook lost (after a cd, popd or env -C it cannot follow)" : "the hook cannot tell which repository it writes to, since it names it through a value the hook cannot read", `Name the repository by its literal value (--repo <owner>/<name>, or repos/<owner>/<name>/... for gh api), or cd to a literal path, in a call of its own. ${NOT_RUN}`);
-}
-function prCreate(rest, env) {
-  const values = rest.map((w) => w.value);
-  const texts = [
-    gitText(env.cwd, ["log", "--format=%B", "-n", "500", "HEAD", "--not", "--remotes"], "the commits it may push")
-  ];
-  if (!values.some((v) => /^(?:-H|--head)(?:=|$)/.test(v)))
-    texts.push(branch(env.cwd));
-  if (values.some((v) => v === "-f" || v.startsWith("--fill"))) {
-    const at = values.findIndex((v) => /^(?:-B|--base)(?:=|$)/.test(v));
-    const base = at === -1 ? "HEAD" : values[at].includes("=") ? values[at].split("=")[1] : values[at + 1];
-    texts.push(base && !base.includes(UNKNOWN) ? gitText(env.cwd, ["log", "--format=%B", "-n", "500", `origin/${base}..HEAD`], "the commits --fill reads") : unknown("the base --fill reads from"));
-  }
-  return texts;
-}
-var branch = (dir) => gitText(dir, ["branch", "--show-current"], "the current branch");
-var TEXT_FIELD = /body|branch|comment|description|head|message|name|notes|query|ref|subject|text|title/i;
-async function api2(args, cmd, env, local, xargs) {
-  const request = await ghApi(args, cmd, env, xargs);
-  if (!request || ["GET", "HEAD"].includes(request.method))
-    return;
-  if (state().policy.anyWrite && xargs && !xargs.replace) {
-    const method = args.some((a) => /^(?:-[A-Za-z]*X|--method)/.test(a.value));
-    if (!method && request.fields.length === 1 && request.inputs.length === 0)
-      return;
-  }
-  if (request.method === "DELETE" && !state().policy.anyWrite)
-    return;
-  const { endpoint, fields, inputs } = request;
-  const posted = (f) => endpoint.value === "graphql" || f.key.includes(UNKNOWN) || TEXT_FIELD.test(f.key);
-  const texts = [...fields.filter(posted).map((f) => f.text), ...inputs];
-  const extras = [endpoint, ...fields.filter((f) => !posted(f)).map((f) => f.text)];
-  if (endpoint.value === "graphql") {
-    const documents = await Promise.all([...fields.filter((f) => f.key === "query").map((f) => f.text), ...inputs].map((d) => resolveText(d, env)));
-    if (!documents.some((d) => d.unknown || /\bmutation\b/.test(d.value)))
-      return;
-    const target = {
-      byText: true,
-      label: "a repository named only by a GraphQL node id",
-      where: "unknown"
-    };
-    return judge2("gh api graphql", target, texts, env, extras);
-  }
-  const value = endpoint.value;
-  const host = hostTarget(value);
-  if (host)
-    return judge2(`gh api ${host.label}`, host, texts, env, extras);
-  const typed = value.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, "").replace(/^api\/v3\//, "");
-  const path = state().policy.anyWrite ? dotless(typed) : typed;
-  const repo = /^repos\/([^/]+)\/([^/]+)/.exec(path);
-  const org = /^orgs\/([^/]+)/.exec(path);
-  const what = `gh api ${path.split("?")[0]}`;
-  if (state().policy.anyWrite) {
-    const refused = await apiDestination(what, request, path, env);
-    if (refused)
-      return refused;
-  }
-  if (state().policy.anyWrite && repo && conversation(path.slice(repo[0].length)))
-    return;
-  if (state().policy.anyWrite && path.startsWith("repositories/"))
-    return judge2(what, { label: "a repository named only by its id", where: "unknown" }, [], env);
-  let candidates;
-  if (fromXargs(endpoint, xargs))
-    candidates = [undefined];
-  else if (state().policy.anyWrite && repo && (PLACEHOLDER.test(repo[1]) || PLACEHOLDER.test(repo[2])))
-    candidates = implicit(env, local).map((r) => r && {
-      owner: PLACEHOLDER.test(repo[1]) ? r.owner : repo[1],
-      repo: PLACEHOLDER.test(repo[2]) ? r.repo : repo[2]
-    });
-  else if (repo?.[1] === "{owner}")
-    candidates = implicit(env, local);
-  else if (repo)
-    candidates = [marked(repo[0]) ? undefined : { owner: repo[1], repo: repo[2] }];
-  else if (org)
-    candidates = [marked(org[0]) ? undefined : { owner: org[1], repo: "*" }];
-  else if (marked(value) && (/^(repos|orgs)\//.test(path) || marked(path.split("/")[0])))
-    candidates = [undefined];
-  else if (marked(value))
-    return judge2(what, decide([undefined]), texts, env, extras);
-  else
-    return;
-  return unplaced(what, candidates, env) ?? judge2(what, decide(candidates), texts, env, extras);
-}
-async function apiDestination(what, request, path, env) {
-  const { fields, inputs, method } = request;
-  const route = path.split(/[?#]/)[0].replace(/\/+$/, "");
-  const has = (key) => fields.some((f) => f.key === key);
-  const repo = /^repos\/([^/]+)\/([^/]+)(?:\/(forks|generate|transfer))?$/.exec(route);
-  const org = /^orgs\/([^/]+)\/repos$/.exec(route);
-  const fixed = (owner) => PLACEHOLDER.test(owner) || marked(owner) ? "*" : owner;
-  const key = (k) => ({ key: k });
-  const lit = (v) => ({ value: v });
-  let dest;
-  if (method === "PATCH" && repo && !repo[3] && has("name"))
-    dest = [lit(fixed(repo[1])), key("name")];
-  else if (method !== "POST")
-    return;
-  else if (repo?.[3] === "generate")
-    dest = [has("owner") ? key("owner") : lit("*"), key("name")];
-  else if (repo?.[3] === "transfer") {
-    if (!has("new_name") && PLACEHOLDER.test(repo[2]))
-      return destination(what);
-    dest = [key("new_owner"), has("new_name") ? key("new_name") : lit(repo[2])];
-  } else if (repo?.[3] === "forks" && has("name"))
-    dest = [has("organization") ? key("organization") : lit("*"), key("name")];
-  else if (route === "user/repos")
-    dest = [lit("*"), key("name")];
-  else if (org)
-    dest = [lit(fixed(org[1])), key("name")];
-  if (!dest)
-    return;
-  if (inputs.length > 0)
-    return destination(what);
-  const value = async (part) => {
-    if ("value" in part)
-      return part.value;
-    const text = fields.findLast((f) => f.key === part.key)?.text;
-    const read = text && await resolveText(text, env);
-    return read && !read.unknown && !marked(read.value) ? read.value : undefined;
-  };
-  return destination(what, await value(dest[0]), await value(dest[1]));
-}
-function dotless(path) {
-  const [route, ...query] = path.split(/(?=[?#])/);
-  const kept = [];
-  for (const segment of route.split("/")) {
-    const plain = segment.toLowerCase().replaceAll("%2e", ".");
-    if (plain === "..")
-      kept.pop();
-    else if (plain !== "." && plain !== "")
-      kept.push(segment);
-  }
-  return [kept.join("/"), ...query].join("");
-}
-function conversation(route) {
-  const segments = route.split(/[?#]/)[0].split("/").filter(Boolean);
-  if (/[%\\]/.test(route) || segments.some((s) => s === "." || s === ".."))
-    return false;
-  if (segments[0] === "issues" || segments[0] === "labels")
-    return true;
-  return segments[0] === "pulls" && !segments.some((s) => s === "merge" || s === "update-branch");
-}
-var hostOf = (url) => /^[a-z][a-z\d+.-]*:\/\/(?:[^/?#@]*@)?([^/?#:]+)/i.exec(url)?.[1]?.toLowerCase().replace(/\.+$/, "");
-var slackHost = (host) => host === "slack.com" || !!host?.endsWith(".slack.com");
-function hostTarget(url) {
-  const host = hostOf(url);
-  if (!host || !state().policy.hosts)
-    return;
-  if (host === "linear.app" || host.endsWith(".linear.app"))
-    return { label: "Linear", where: "guarded" };
-  if (slackHost(host))
-    return { label: "Slack", where: "guarded" };
-}
-async function curl(args, cmd, env, xargs) {
-  const { flags, positionals } = parseFlags(args, CURL_TAKES);
-  const urls = curlUrls(flags, positionals);
-  const globs = state().policy.anyWrite === true && !flags.some((f) => f.name === "-g" || f.name === "--globoff");
-  if (state().policy.anyWrite) {
-    const redirect = args.some((a, i) => /^--(?:connect-to|request-target|resolve)(?:=|$)/.test(a.value) || (a.value === "-H" || a.value === "--header") && /^\s*host\s*:/i.test(args[i + 1]?.value ?? "") || /^(?:-H|--header=)\s*host\s*:/i.test(a.value));
-    if (redirect && args.some((a) => /github/i.test(a.value)))
-      return judge2("curl", { label: "a host the call redirects to", where: "unknown" }, [], env);
-  }
-  const targets = urls.map((u) => {
-    if (u.unknown === XARGS_INPUT.unknown || state().policy.anyWrite && fromXargs(u, xargs))
-      return u.unknown || curlWrites(flags) ? { label: "a URL xargs supplies from its input", where: "unknown" } : { label: "", where: "other" };
-    const value = visible(u.value);
-    if (u.unknown || u.reads?.length || value.includes(UNKNOWN) || fromXargs(u, xargs))
-      return { byText: true, label: "a URL the hook cannot read", where: "unknown" };
-    const url = /^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `http://${value}`;
-    const host = hostTarget(url);
-    if (host)
-      return host;
-    if (state().policy.anyWrite)
-      return curlTarget(url, globs);
-    if (/^https?:\/\/api\.github\.com(?::\d+)?\/graphql(?:[/?#]|$)/i.test(url))
-      return {
-        byText: true,
-        label: "a repository named only by a GraphQL node id",
-        where: "unknown"
-      };
-    const repo = /api\.github\.com\/repos\/([^/\s]+)\/([^/\s?#]+)/i.exec(value);
-    return repo ? decide([{ owner: repo[1], repo: repo[2] }]) : { label: "", where: "other" };
-  });
-  const target = targets.find((t) => t.where === "guarded") ?? targets.find((t) => t.where === "unknown");
-  if (!target)
-    return;
-  if (targets.some((t) => t.label === "Slack")) {
-    const gated = gatedCurl(urls);
-    if (gated)
-      return gated;
-  }
-  const data = await curlData(flags, cmd, env);
-  const get = flags.some((f) => f.name === "-G" || f.name === "--get");
-  const writes = data.length > 0 && !get || urls.some((u) => /\/api\/chat\./i.test(u.value));
-  if (writes && targets.some((t) => t.label === "Slack")) {
-    const read = await Promise.all([...urls, ...data].map((t) => resolveText(t, env)));
-    const id = signed().find((c) => read.some((t) => t.value.includes(c)));
-    if (id) {
-      return `no-playground-leak hook refused curl to ${state().cleared[id].name}: post there through the Slack MCP chat tools, which check that its last line is ${state().cleared[id].signature}.`;
-    }
-  }
-  if (xargs && !xargs.replace)
-    data.push(unknown("the arguments xargs appends"));
-  return judge2("curl", target, data.map((t) => viaXargs(t, xargs)), env, urls);
-}
-function curlWrites(flags) {
-  const method = flags.find((f) => f.name === "-X" || f.name === "--request")?.value;
-  if (method && (unreadable(method) || !/^(?:GET|HEAD)$/i.test(method.value)))
-    return true;
-  if (flags.some((f) => /^(?:-F|--form(?:-string)?|-T|--upload-file)$/.test(f.name)))
-    return true;
-  const get = flags.some((f) => f.name === "-G" || f.name === "--get");
-  return !get && flags.some((f) => /^(?:-d|--data(?:-[a-z]+)?|--json)$/.test(f.name));
-}
-function curlTarget(url, globs) {
-  const cannot = { label: "a URL the hook cannot place", where: "unknown" };
-  const other = { label: "", where: "other" };
-  const host = /^[a-z][a-z\d+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]]*\]|[^/?#:]*)/i.exec(url)?.[1] ?? "";
-  if (globs && /[{[]/.test(host) && !/^\[[\da-f:.]+\]$/i.test(host))
-    return cannot;
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return /github/i.test(url) ? cannot : other;
-  }
-  const name = parsed.hostname.toLowerCase().replace(/\.$/, "");
-  if (!/(?:^|\.)github\.com$/.test(name))
-    return other;
-  if (globs && /[{[]/.test(url))
-    return cannot;
-  const [first, second, third] = parsed.pathname.split("/").filter(Boolean);
-  if (name === "api.github.com" || name === "uploads.github.com") {
-    if (first === "graphql")
-      return {
-        byText: true,
-        label: "a repository named only by a GraphQL node id",
-        where: "unknown"
-      };
-    if (first === "repositories")
-      return { label: "a repository named only by its id", where: "unknown" };
-    return first === "repos" && second && third ? decide([{ owner: second, repo: third }]) : other;
-  }
-  if (name !== "github.com" && name !== "www.github.com")
-    return other;
-  return first && second ? decide([{ owner: first, repo: second.replace(/\.git$/i, "") }]) : other;
-}
-function clearedPost(what, input, at, signedOnly) {
-  const keys = Object.keys(input);
-  if (keys.some((k) => k !== at.channel && OTHER_DESTINATION.test(k)))
-    return;
-  const channel = input[at.channel];
-  const text = input[at.text];
-  if (typeof channel !== "string" || !Object.hasOwn(state().cleared, channel))
-    return;
-  const { name, signature } = state().cleared[channel];
-  if (!signature)
-    return signedOnly ? undefined : "";
-  const signed = typeof text === "string" && text.trimEnd().split(`
-`).at(-1) === signature;
-  const rich = keys.filter((k) => RICH.includes(k));
-  if (signed && rich.every((k) => k === "blocks" && chipsSigned(input.blocks, signature)))
-    return "";
-  return `no-playground-leak hook refused ${what} to ${name}: every post there ends with the line ${signature}, since it goes out through the owner's Slack account and must never read as the owner's own. Put that line last in its text, with no attachments or markdown_text; blocks pass only as rich_text sections of text and links whose last line is that signature as italic text, then run it again.`;
-}
-function gitText(dir, args, what) {
-  if (!dir)
-    return unknown(`${what}, in a checkout the hook cannot resolve`);
-  const proc = Bun.spawnSync(["git", "-C", dir, ...args], {
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-    stderr: "ignore"
-  });
-  return proc.exitCode === 0 ? { value: proc.stdout.toString() } : unknown(what);
-}
-async function git(args, cmd, env, local = new Map, depth = 0) {
-  let dir = env.cwd;
-  let k = 0;
-  let carried = [...local.keys(), ...env.vars.keys()].some((name) => name.startsWith("GIT_"));
-  let aliasSet = false;
-  const aliases = new Map;
-  let anyAlias = false;
-  for (;k < args.length; k++) {
-    const v = args[k].value;
-    if (v === "-C") {
-      const next = args[++k];
-      dir = next ? pathOf(next, { ...env, cwd: dir }) : undefined;
-    } else if (GIT_TAKES.has(v)) {
-      if (v === "-c" || v === "--config-env" || v === "--git-dir")
-        carried = true;
-      const next = args[k + 1]?.value ?? "";
-      if (v !== "--git-dir" && /^alias\./i.test(next)) {
-        aliasSet = true;
-        const eq = next.indexOf("=");
-        const name = next.slice("alias.".length, eq === -1 ? undefined : eq);
-        if (marked(name))
-          anyAlias = true;
-        else if (eq > 0)
-          aliases.set(name.toLowerCase(), v === "-c" && !marked(next) ? next.slice(eq + 1) : undefined);
-      } else if (v === "-c" && marked(next))
-        anyAlias = true;
-      k++;
-    } else if (/^--(?:config-env|git-dir)=/.test(v)) {
-      carried = true;
-      const alias = /^--config-env=alias\.([^=]+)=/i.exec(v);
-      if (alias) {
-        aliasSet = true;
-        if (marked(alias[1]))
-          anyAlias = true;
-        else
-          aliases.set(alias[1].toLowerCase(), undefined);
-      }
-    } else if (!v.startsWith("-"))
-      break;
-  }
-  const sub = args[k]?.value;
-  const rest = args.slice(k + 1);
-  const here = { ...env, cwd: dir };
-  const maybeAlias = anyAlias || aliasSet && !!sub && marked(sub);
-  if (!state().policy.anyWrite && sub && (maybeAlias || aliases.has(sub.toLowerCase())) && !builtin(sub)) {
-    const value = aliases.get(sub.toLowerCase());
-    const words = value === undefined || value.trim().startsWith("!") ? undefined : splitCmdline(value);
-    const head = words?.[0]?.value;
-    if (!words || !head || aliases.has(head.toLowerCase()) || depth > 8)
-      return refuse2("git", decide([]), `its alias ${sub}, set with -c or --config-env, runs a command, holds a value the hook cannot read, or names another alias`, `Write the git command out in full in place of the alias, then run it again. ${NOT_RUN}`);
-    return git([...args.slice(0, k), ...words, ...rest], cmd, env, local, depth + 1);
-  }
-  if (state().policy.anyWrite) {
-    const cannot = (detail) => refuse2("git", decide([]), detail, PLACE_FIX);
-    if (aliasSet)
-      return cannot("it sets a git alias with -c or --config-env, which can run a push under a name the hook does not read");
-    if (sub && marked(sub))
-      return cannot("its subcommand is a value the hook cannot read");
-    if (sub && !["commit", "push", "send-pack", "subtree"].includes(sub) && !builtin(sub)) {
-      if (carried)
-        return cannot(`it runs ${sub}, which -c, --config-env, --git-dir or a GIT_ variable may define as an alias`);
-      if (state().changed)
-        return cannot(`it runs ${sub}, which an earlier command in the call may define as an alias`);
-      const alias = gitText(dir ?? "/", ["config", "--get", `alias.${sub}`], `alias ${sub}`);
-      if (!alias.unknown) {
-        if (alias.value.trim().startsWith("!") || depth > 8)
-          return cannot(`its alias ${sub} runs a command the hook does not read`);
-        const words = splitCmdline(alias.value);
-        if (!words)
-          return cannot(`its alias ${sub} has an unclosed quote or a trailing backslash`);
-        return git([...args.slice(0, k), ...words, ...rest], cmd, env, local, depth + 1);
-      }
-    }
-    const subtree = sub === "subtree" && rest[0]?.value === "push";
-    if (sub === "push" || sub === "send-pack" || subtree) {
-      if (carried)
-        return refuse2("git push", decide([]), "it carries -c, --config-env, --git-dir or a GIT_ variable, which can change where it pushes", PLACE_FIX);
-      return push(subtree ? rest.slice(1) : rest, here, [], subtree ? SUBTREE_TAKES : PUSH_TAKES);
-    }
-  }
-  if (sub !== "commit" && sub !== "push")
-    return;
-  const checkout = dir ? remotes(dir) : [];
-  if (sub === "push")
-    return push(rest, here, checkout);
-  if (dir && checkout.length === 0)
-    return;
-  if (state().policy.anyWrite) {
-    const target = decide(dir ? checkout : [undefined]);
-    return target.where === "guarded" ? judge2("git commit", target, [], env) : undefined;
-  }
-  const { flags } = parseFlags(rest, COMMIT_TAKES);
-  const texts = [branch(dir)];
-  const extras = [];
-  for (const { name, value } of flags) {
-    if (!value)
-      continue;
-    if (name === "-m" || name === "--message")
-      texts.push(value);
-    else if (name === "-F" || name === "--file") {
-      texts.push(value.value === "-" && !value.unknown ? await stdinOf(cmd, here) : await readPath(value, here));
-    } else if (["-C", "-c", "--reedit-message", "--reuse-message"].includes(name)) {
-      texts.push(value.unknown || value.reads?.length ? unknown("the message of a commit the hook cannot name") : gitText(dir, ["log", "-1", "--format=%B", value.value], `the message of ${value.value}`));
-    } else
-      extras.push(value);
-  }
-  return judge2("git commit", decide(dir ? checkout : [undefined]), texts, env, extras);
-}
-function builtin(sub) {
-  builtins ??= new Set(Bun.spawnSync(["git", "--list-cmds=builtins"], { stderr: "ignore" }).stdout.toString().split(`
-`).filter(Boolean));
-  return builtins.has(sub);
-}
-function splitCmdline(body) {
-  const words = [];
-  let word;
-  let quote = "";
-  for (let i = 0;i < body.length; i++) {
-    let c = body[i];
-    if (!quote && /\s/.test(c)) {
-      if (word !== undefined)
-        words.push({ quoted: false, value: word });
-      word = undefined;
-      continue;
-    }
-    word ??= "";
-    if (!quote && (c === "'" || c === '"'))
-      quote = c;
-    else if (c === quote)
-      quote = "";
-    else {
-      if (c === "\\" && quote !== "'") {
-        c = body[++i];
-        if (c === undefined)
-          return;
-      }
-      word += c;
-    }
-  }
-  if (quote)
-    return;
-  if (word !== undefined)
-    words.push({ quoted: false, value: word });
-  return words;
-}
-function placeUrl(url) {
-  if (url.includes("::") || /^file:/i.test(url))
-    return;
-  if (/^[a-z][a-z\d+.-]*:\/\//i.test(url) || /^[^/:]+:/.test(url))
-    return remoteRepo(url);
-}
-function pushTarget(remote, dir) {
-  if (state().changed || !dir || remote && (remote.unknown || remote.reads?.length || marked(remote.value)))
-    return decide([undefined]);
-  const lines = (args) => {
-    const text = gitText(dir, args, "a remote");
-    return text.unknown ? undefined : text.value.split(`
-`).filter(Boolean);
-  };
-  const urls = (name) => lines(["remote", "get-url", "--push", "--all", name])?.map(placeUrl);
-  const rules = () => lines(["config", "--get-regexp", "^url\\..*\\.(push)?insteadof$"]) ?? [];
-  const literal = (url) => {
-    const rewritten = rules().some((line) => {
-      const prefix = line.slice(line.indexOf(" ") + 1);
-      return line.includes(" ") && prefix !== "" && url.startsWith(prefix);
-    });
-    return rewritten ? undefined : placeUrl(url);
-  };
-  if (!remote) {
-    const names = lines(["remote"]);
-    const branch = lines(["symbolic-ref", "--short", "HEAD"])?.[0];
-    const name = state().movedBefore || dir !== state().startCwd ? ".*" : branch?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const current = name ? `|branch\\.${name}\\.(pushremote|remote)` : "";
-    const keys = lines(["config", "--get-regexp", `^(remote\\.pushdefault${current})$`]);
-    const picked = (keys ?? []).map((line) => line.slice(line.indexOf(" ") + 1)).filter((value) => value !== "" && value !== "." && !names?.includes(value));
-    return decide([
-      ...names ? names.flatMap((name) => urls(name) ?? [undefined]) : [undefined],
-      ...picked.map(literal)
-    ]);
-  }
-  return decide(urls(remote.value) ?? [literal(remote.value)]);
-}
-async function push(rest, env, checkout, takes = PUSH_TAKES) {
-  const { flags, positionals } = parseFlags(rest, takes);
-  if (state().policy.anyWrite) {
-    const remote = positionals[0] ?? flags.findLast((f) => f.name === "--repo")?.value;
-    return judge2("git push", pushTarget(remote, env.cwd), [], env);
-  }
-  const names = new Set(flags.map((f) => f.name));
-  const [remote, ...refspecs] = positionals;
-  let target;
-  let remoteName;
-  if (!remote)
-    target = decide(env.cwd ? checkout : [undefined]);
-  else if (remote.unknown || remote.reads?.length || remote.value.includes(UNKNOWN))
-    target = decide([undefined]);
-  else if (/[:/]/.test(remote.value))
-    target = decide([remoteRepo(remote.value)]);
-  else {
-    remoteName = remote.value;
-    const url = gitText(env.cwd, ["remote", "get-url", remote.value], `the URL of remote ${remote.value}`);
-    target = decide([url.unknown ? undefined : remoteRepo(url.value)]);
-  }
-  if (target.where === "other")
-    return;
-  const texts = flags.flatMap((f) => f.value && (f.name === "-o" || f.name === "--push-option") ? [f.value] : []);
-  const sources = [];
-  if (names.has("--all") || names.has("--branches") || names.has("--mirror")) {
-    texts.push(gitText(env.cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"], "the branches it pushes"));
-    sources.push("--branches");
-  }
-  if (names.has("--tags") || names.has("--follow-tags") || names.has("--mirror")) {
-    texts.push(gitText(env.cwd, ["for-each-ref", "--format=%(refname:short)%0a%(contents)", "refs/tags"], "the tags it pushes"));
-  }
-  const deleting = names.has("--delete") || names.has("-d");
-  for (const spec of refspecs) {
-    texts.push(spec);
-    if (spec.unknown || spec.reads?.length || spec.value.includes(UNKNOWN))
-      continue;
-    const [source, destination] = spec.value.replace(/^\+/, "").split(":");
-    if (destination === undefined && (source === "HEAD" || source === "@"))
-      texts.push(branch(env.cwd));
-    if (source !== "" && !deleting)
-      sources.push(source);
-  }
-  if (refspecs.length === 0 && sources.length === 0) {
-    texts.push(branch(env.cwd));
-    sources.push("HEAD");
-  }
-  if (sources.length > 0) {
-    const not = remoteName ? `--remotes=${remoteName}` : "--remotes";
-    texts.push(gitText(env.cwd, ["log", "--format=%B", "-n", "500", ...sources, "--not", not], "the messages of the commits it pushes"));
-  }
-  return judge2("git push", target, texts, env);
-}
-var GATED_READS = new Set(["usergroups_me", "users_conversations"]);
-function gatedPost(tool, server, name, input) {
-  const read = name.replace(/^slack_/, "");
-  if (READ_TOOL.test(read) || GATED_READS.has(read))
-    return;
-  const connector = name === CONNECTOR_TOOL;
-  const posting = CHAT_TOOL.test(name) || connector;
-  const what = tool.replace(/^mcp__/, "");
-  for (const gate of state().policy.gates ?? []) {
-    if ("broken" in gate) {
-      if (/slack/i.test(server))
-        return brokenGate(what, gate);
-      continue;
-    }
-    if (!gate.servers.includes(server))
-      continue;
-    const keys = connector ? CONNECTOR_KEYS : POST_KEYS;
-    const alone = posting && input !== undefined && input[keys.channel] === gate.selfDm && !Object.keys(input).some((k) => k !== keys.channel && OTHER_DESTINATION.test(k));
-    if (!alone)
-      return `no-playground-leak hook refused ${what}: the ${gate.org} extension gates its Slack sends on ${server}, so every write there goes through ${gate.path}; only a post whose one destination is its self-DM (${gate.selfDm}) passes here. Send it through that path.`;
-  }
-}
-var brokenGate = (what, gate) => `no-playground-leak hook refused ${what}: the ${gate.org} extension's slack.gatedSends does not read (${gate.broken}), so the hook cannot tell which Slack writes its gate covers. Tell your lead: it is set in that extension's settings as {"path": "<its send path>", "selfDm": "D\u2026", "servers": ["<MCP server>"]}, or "" for no gate; then run the call again.`;
-var SLACK_READ_METHOD = /^(?:auth\.test|search\.[a-z]+|(?:[a-z]+\.)+(?:history|info|list|replies|unreads|get[A-Za-z]*|lookup[A-Za-z]*))$/;
-function gatedCurl(urls) {
-  const gates = state().policy.gates ?? [];
-  if (!gates.length)
-    return;
-  const writes = urls.some((u) => {
-    const value = visible(u.value);
-    const url = /^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `http://${value}`;
-    if (!slackHost(hostOf(url)))
-      return false;
-    const method = /^[a-z][a-z\d+.-]*:\/\/[^/?#]*\/api\/([^/?#]+)(?:[?#]|$)/i.exec(url)?.[1];
-    return !method || !SLACK_READ_METHOD.test(method);
-  });
-  if (!writes)
-    return;
-  const broken = gates.find((g) => ("broken" in g));
-  if (broken && "broken" in broken)
-    return brokenGate("curl", broken);
-  const paths = gates.flatMap((g) => ("path" in g) ? [`${g.org}'s ${g.path}`] : []);
-  return `no-playground-leak hook refused curl to Slack's API: an org gates its Slack sends (slack.gatedSends), so a Slack write goes through ${paths.join(" or ")}, and curl passes only a read method on /api/. Send it through that path.`;
-}
-function strings(node) {
-  if (typeof node === "string")
-    return [node];
-  if (Array.isArray(node))
-    return node.flatMap(strings);
-  if (typeof node === "object" && node !== null)
-    return Object.values(node).flatMap(strings);
-  return [];
-}
-function mcp(tool, input) {
-  const [, server = "", name = ""] = MCP_TOOL.exec(tool) ?? [];
-  const gated = gatedPost(tool, server, name, input);
-  if (gated)
-    return gated;
-  const surface = /linear/i.test(server) ? "Linear" : /slack/i.test(server) ? "Slack" : /github/i.test(server) ? "GitHub" : undefined;
-  if (!surface || READ_TOOL.test(name) || surface !== "GitHub" && !state().policy.hosts)
-    return;
-  const what = tool.replace(/^mcp__/, "");
-  let target = { label: surface, where: "guarded" };
-  if (!input)
-    return refuse2(what, target, "its input is not an object the hook can read", MCP_READABLE);
-  if (surface === "Slack" && (CHAT_TOOL.test(name) || name === CONNECTOR_TOOL)) {
-    const connector = name === CONNECTOR_TOOL;
-    const verdict = clearedPost(what, input, connector ? CONNECTOR_KEYS : POST_KEYS, connector);
-    if (verdict !== undefined)
-      return verdict || undefined;
-  }
-  if (surface === "GitHub" && state().policy.anyWrite && name === "create_repository") {
-    const owner = input.organization ?? "*";
-    const named = input.name;
-    return destination(what, typeof owner === "string" ? owner : undefined, typeof named === "string" ? named : undefined, "");
-  }
-  if (surface === "GitHub") {
-    const owner = input.owner ?? input.organization;
-    if (owner === undefined)
-      return;
-    if (typeof owner !== "string") {
-      return refuse2(what, { label: "GitHub", where: "unknown" }, "its owner is not text the hook can read", MCP_READABLE);
-    }
-    const repo = { owner, repo: typeof input.repo === "string" ? input.repo : "*" };
-    if (!state().policy.guarded(repo))
-      return;
-    target = { label: `${repo.owner}/${repo.repo}`, where: "guarded" };
-    if (state().policy.anyWrite)
-      return CONVERSATION_TOOL.test(name) ? undefined : refuseAny(what, target, "");
-  }
-  const hit = strings(input).map(state().policy.find).find(Boolean);
-  if (hit)
-    return refuse2(what, target, `its text holds ${hit.detail}`, hit.fix);
-}
-function candidate(command) {
-  const maybe = state().policy.anyWrite ? MAYBE_ANY : MAYBE;
-  return command.includes("$'") || maybe.test(command.replace(/[\\'"]/g, ""));
-}
-async function factoryTerms(environment = process.env, checkout = CHECKOUT, lists = join8(coreDir(), "lists")) {
-  const loaded = await guardList("no-playground-leak", "playground-terms", isTerms, EMPTY_TERMS, environment, join8(lists, "playground-terms.json"));
-  if (loaded.refusal !== undefined)
-    return { refusal: loaded.refusal };
-  terms = loaded.list;
-  return { pattern: pattern(environment, checkout) };
-}
-async function check3(raw, environment = process.env, checkout = CHECKOUT, lists = join8(coreDir(), "lists")) {
-  const loadedTerms = await factoryTerms(environment, checkout, lists);
-  if (loadedTerms.refusal !== undefined)
-    return refusedList(raw, loadedTerms.refusal);
-  const loadedCleared = await guardList("no-playground-leak", "slack-cleared", isCleared, {}, environment, join8(lists, "slack-cleared.json"));
-  if (loadedCleared.refusal !== undefined)
-    return refusedList(raw, loadedCleared.refusal);
-  const read = await readPolicy(dataDir(environment));
-  if (read.refusal !== undefined)
-    return refusedList(raw, `no-playground-leak hook refused this call: ${read.refusal}, then run the call again.`);
-  const orgs = guardedOrgs(read.settings.values);
-  const gates = orgs.flatMap((org) => gateOf(org, readPolicySync(dataDir(environment), org).settings?.values ?? {}));
-  return inspectAs({ ...leakPolicy(new Set(orgs), loadedTerms.pattern), gates }, raw, environment, loadedCleared.list);
-}
-function gateOf(org, values) {
-  const value = values["slack.gatedSends"];
-  if (value === undefined || value === "")
-    return [];
-  const parsed = gatedSendsSchema.safeParse(value);
-  return [
-    parsed.success ? { org, ...parsed.data } : {
-      broken: parsed.error.issues.map((i) => `${i.path.join(".") || "its value"}: ${i.message}`).join("; "),
-      org
-    }
-  ];
-}
-var refusedList = (raw, refusal) => WRITE_CALL.test(subjectOf(raw)) && !readOnly(raw) ? refusal : undefined;
-async function inspectAs(given, raw, environment, cleared = {}) {
-  const call = { changed: false, cleared, moved: false, movedBefore: false, policy: given };
-  return await calls.run(call, async () => {
-    try {
-      return await inspect2(raw, environment);
-    } catch (error) {
-      const subject = subjectOf(raw);
-      const writes = WRITE_CALL.test(subject) || given.anyWrite && candidate(subject);
-      if (!writes || !given.anyWrite && !given.find(subject))
-        return;
-      if (given.anyWrite)
-        return `${given.guard} hook refused this call: it could not read it (${error}), so it cannot tell whether it is ${given.what}. Split it into plain commands and run them again.`;
-      return `${given.guard} hook could not read this call (${error}), which may carry ${given.what} to ${given.place}, so it refuses it. Split it into plain commands and run them again.`;
-    }
-  });
-}
-function subjectOf(raw) {
-  try {
-    const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
-    if (tool === "Bash" && typeof toolInput?.command === "string")
-      return toolInput.command;
-    return `${String(tool)} ${JSON.stringify(toolInput)}`;
-  } catch {
-    return raw;
-  }
-}
-async function inspect2(raw, environment) {
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    payload = undefined;
-  }
-  if (typeof payload !== "object" || payload === null) {
-    return WRITE_CALL.test(raw) && state().policy.find(raw) ? `${state().policy.guard} hook could not parse its input, which may carry ${state().policy.what} to ${state().policy.place}, so it refuses the call.` : undefined;
-  }
-  const { cwd, tool_input: toolInput, tool_name: tool } = payload;
-  state().startCwd = typeof cwd === "string" ? cwd : undefined;
-  const input = typeof toolInput === "object" && toolInput !== null ? toolInput : undefined;
-  if (tool === "Bash") {
-    const command = input?.command;
-    if (typeof command !== "string" || !candidate(command))
-      return;
-    const directory = typeof cwd === "string" ? cwd : undefined;
-    const env = {
-      cwd: directory,
-      files: new Map,
-      known: knownVariables(command, environment, directory),
-      process: environment,
-      vars: new Map
-    };
-    return run(lex(command, env.known), env, leak);
-  }
-  if (typeof tool === "string")
-    return mcp(tool, input);
-}
-if (false) {}
-
-// scripts/hooks/no-extension-repo-write.ts
-var GUARD2 = "no-extension-repo-write";
-var OWNER_ROUTE = "Only the owner changes one, typing the command as a ! command in the dispatcher's terminal window: tell your lead what it should do, and the dispatcher hands the owner the command.";
-var REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
-var decoded = (text) => text.replace(/%([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
-function guardedRepos(data, values, environment) {
-  const given = values["ext.repos"];
-  const named = new Map;
-  if (typeof given === "object" && given !== null) {
-    for (const [scope, repo] of Object.entries(given))
-      if (typeof repo === "string" && REPO.test(repo))
-        named.set(scope, repo.toLowerCase());
-  }
-  const repos = new Set(named.values());
-  const scopes = scopesIn(data);
-  for (const scope of scopes) {
-    const config = join9(extensionsDir(data), scope, ".git", "config");
-    const url = Bun.spawnSync(["git", "config", "--file", config, "--get", "remote.origin.url"], {
-      stderr: "ignore"
-    });
-    const repo = remoteRepo(url.stdout.toString());
-    if (repo)
-      repos.add(`${repo.owner}/${repo.repo}`.toLowerCase());
-  }
-  const unnamed = scopes.filter((scope) => !named.has(scope));
-  if (unnamed.length === 0)
-    return repos;
-  const logins = new Set([loginOf(data, environment)]);
-  try {
-    logins.add(loginOf(data, {}));
-  } catch {}
-  for (const login of logins)
-    for (const scope of unnamed)
-      repos.add(`${login}/playground-${scope}`.toLowerCase());
-  return repos;
-}
-function finder(repos) {
-  const names = [...repos].map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const pattern = new RegExp(`(?<![\\w.-])(?:${names.join("|")})(?:\\.git)?(?![\\w.-])`, "i");
-  return (text) => {
-    const found = pattern.exec(decoded(text))?.[0];
-    return found ? { detail: `it names ${found}`, fix: OWNER_ROUTE } : undefined;
-  };
-}
-var policy = (repos) => ({
-  anyWrite: true,
-  find: finder(repos),
-  git: true,
-  guard: GUARD2,
-  guarded: (repo) => {
-    const owner = decoded(repo.owner).toLowerCase();
-    const name = decoded(repo.repo).replace(/\.git$/i, "").toLowerCase();
-    if (/[%/]/.test(owner + name))
-      return true;
-    if (owner !== "*")
-      return repos.has(`${owner}/${name}`);
-    return [...repos].some((guarded) => guarded.endsWith(`/${name}`));
-  },
-  hosts: false,
-  place: "an extension repository",
-  what: "a write to an extension repository",
-  why: `The sync renders each extension repository's main into every session's store. ${OWNER_ROUTE}`
-});
-async function check4(raw, environment = process.env, budget = 8000) {
-  const data = dataDir(environment);
-  if (!existsSync6(extensionsDir(data)))
-    return;
-  const read = await readPolicy(data);
-  if (read.refusal !== undefined)
-    return refusedList(raw, `${GUARD2} hook refused this call: ${read.refusal}, then run the call again.`);
-  let repos;
-  try {
-    repos = guardedRepos(data, read.settings.values, environment);
-  } catch (error) {
-    return refusedList(raw, `${GUARD2} hook refused this call: ${error.message}, so it cannot name the extension repositories. ${OWNER_ROUTE}`);
-  }
-  if (repos.size === 0)
-    return;
-  return withDeadline(budget, () => inspectAs(policy(repos), raw, environment));
-}
-if (false) {}
-
-// scripts/hooks/no-extensions-write.ts
-import { dirname as dirname5, join as join11, resolve as resolve6, sep as sep2 } from "path";
-
-// packages/settings/src/jobs.ts
-var jobSchema = strictObject({
-  callsModel: boolean2(),
-  command: string2().min(1).optional(),
-  config: record2(string2(), unknown2()).optional(),
-  cwd: string2().min(1).optional(),
-  description: string2().min(1),
-  disabledWhy: string2().optional(),
-  enabled: boolean2(),
-  heartbeat: string2().min(1),
-  launchd: string2().min(1).optional(),
-  model: string2().min(1).optional(),
-  neverPause: boolean2().optional(),
-  pausedFor: string2().optional(),
-  program: array(string2().min(1)).min(1).optional(),
-  runtime: _enum(["herdr"]).optional(),
-  schedule: union([
-    strictObject({ always: literal(true) }),
-    strictObject({ every: number2().int().positive() })
-  ]),
-  stop: string2().min(1).optional()
-});
-var fromStored = (row) => {
-  if (!row || typeof row !== "object" || Array.isArray(row))
-    return row;
-  const kept = Object.fromEntries(Object.entries(row).filter(([key]) => Object.hasOwn(jobSchema.shape, key)));
-  return kept.runtime === undefined ? kept : { ...kept, runtime: "herdr" };
-};
-var jobRowSchema = jobSchema.partial();
-var jobKey = (name) => `jobs.${name.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase())}`;
-var terminal = (name, command, job) => ({
-  callsModel: false,
-  command,
-  cwd: "{checkout}",
-  enabled: false,
-  heartbeat: name,
-  runtime: "herdr",
-  ...job
-});
-var launchd = (name, job) => ({
-  callsModel: false,
-  cwd: "{checkout}",
-  enabled: false,
-  heartbeat: name,
-  launchd: `com.playground.${name}`,
-  program: ["{bun}", "--no-env-file", `{checkout}/packages/scripts/src/${name}/cli.ts`],
-  ...job
-});
-var bunJob = (name, root = "{checkout}") => `{bun} --no-env-file ${root}/packages/scripts/src/${name}/cli.ts`;
-var JOBS = {
-  "ops-awake": terminal("ops-awake", `${bunJob("ops-awake")} --data {data}`, {
-    description: "Keeps the Mac awake on AC power and on battery with caffeinate, display and lock unchanged.",
-    schedule: { always: true }
-  }),
-  "ops-changelog": terminal("ops-changelog", bunJob("ops-changelog", "{dashboard}"), {
-    cwd: "{dashboard}",
-    description: "Syncs new canary merges and main versions into the Changelog every 5 minutes.",
-    schedule: { every: 300 }
-  }),
-  "ops-dashboard": terminal("ops-dashboard", "{dashboard}/scripts/ops/dashboard/run.sh", {
-    cwd: "{dashboard}",
-    description: "Keeps the live dashboard running on its branch's latest head.",
-    enabled: true,
-    schedule: { every: 60 },
-    stop: "dashboard"
-  }),
-  "ops-dm-watch": terminal("ops-dm-watch", bunJob("ops-dm-watch"), {
-    description: "In Slack mode, hands each message in the owner's DM to the dispatcher, the session in the assistant seat too when no reply lands in 3 minutes.",
-    schedule: { every: 60 }
-  }),
-  "ops-ext-sync": terminal("ops-ext-sync", bunJob("ops-ext-sync"), {
-    description: "Syncs each extension with its private repository at 02:30, pushed only after a clean secrets scan.",
-    schedule: { every: 86400 }
-  }),
-  "ops-flow": launchd("ops-flow", {
-    description: "Tells the leads when a session holds a run slot over 15 minutes, or a model slot over 120.",
-    schedule: { every: 60 }
-  }),
-  "ops-herdr": launchd("ops-herdr", {
-    description: "Starts each herdr server that is down, on the pinned binary and the repo's config.",
-    schedule: { every: 60 }
-  }),
-  "ops-machine": terminal("ops-machine", `${bunJob("ops-machine")} --data {data}`, {
-    description: "Writes one line a minute of the machine's load, memory and live sessions to machine.jsonl.",
-    schedule: { every: 60 }
-  }),
-  "ops-merge-train": terminal("ops-merge-train", "python3 -I {checkout}/scripts/ops/merge-train/run.py", {
-    description: "Runs the merge train: builds a train of ready PRs and checks each step.",
-    neverPause: true,
-    schedule: { every: 60 }
-  }),
-  "ops-restore": {
-    ...launchd("ops-restore", {
-      description: "Restores a lost main checkout by the playbook's steps once a guard is gone on two looks 5 minutes apart.",
-      schedule: { every: 60 }
-    }),
-    cwd: "{dashboard}",
-    program: [
-      "{bun}",
-      "--no-env-file",
-      "{dashboard}/packages/scripts/src/ops-restore/cli.ts",
-      "--main",
-      "{checkout}"
-    ]
-  },
-  "ops-session-resume": launchd("ops-session-resume", {
-    description: "Queues a carry-on line for each factory session once its usage limit resets.",
-    schedule: { every: 60 }
-  }),
-  "ops-sweep": terminal("ops-sweep", bunJob("ops-sweep"), {
-    description: "The Ops lead's sweep: runners, probes, asks, heartbeats and the forecast.",
-    schedule: { every: 300 }
-  }),
-  "ops-tick": launchd("ops-tick", {
-    description: "The factory's timed beats: the roll gate, the tick, the usage-limit watch and the sweeps.",
-    schedule: { every: 60 }
-  }),
-  "ops-unstick": terminal("ops-unstick", "python3 -I {checkout}/scripts/ops/unstick/run.py", {
-    description: "Reads every live session's screen and clears a factory session stuck on a prompt.",
-    neverPause: true,
-    schedule: { every: 120 }
-  }),
-  "ops-usage": terminal("ops-usage", "python3 -I {checkout}/scripts/ops/usage/run.py", {
-    description: "Reads the account's usage windows into usage.json every 5 minutes.",
-    enabled: true,
-    neverPause: true,
-    schedule: { every: 300 }
-  }),
-  "ops-wa": terminal("ops-wa", `${bunJob("ops-wa")} --data {data}`, {
-    description: "Holds the WhatsApp link on the spare number: hands each owner message to the dispatcher, sends its replies, and drops every other message.",
-    schedule: { always: true }
-  }),
-  "ops-zai-usage": launchd("ops-zai-usage", {
-    description: "Reads the GLM plan's credits into zai-usage.json, which the spawn gate reads.",
-    schedule: { every: 300 }
-  })
-};
-var OLD_KEYS = { "ops-dashboard": ["jobs.opsDesk"] };
-var jobSettings = defineSettings(Object.fromEntries(Object.entries(JOBS).map(([name, job]) => [
-  jobKey(name),
-  {
-    aliases: OLD_KEYS[name],
-    default: job,
-    description: `The ${name} ops job: ${job.description}`,
-    merge: true,
-    schema: jobRowSchema,
-    stored: fromStored
-  }
-])));
-var REGISTRY_KEYS = new Set([...Object.keys(JOBS).map(jobKey), ...Object.values(OLD_KEYS).flat()]);
-
-// scripts/hooks/codex.ts
-import { isAbsolute as isAbsolute3, resolve as resolve4 } from "path";
-var HEADERS = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
-var SHELL_PATCH = /(?:^|[\n;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*\/)?(?:apply_patch|applypatch)(?=$|[\s;&|)<>'"`])/;
-var patchPaths = (text) => text.split(`
-`).flatMap((line) => {
-  const trimmed = line.trim();
-  const header = HEADERS.find((h) => trimmed.startsWith(h));
-  return header && trimmed.length > header.length ? [trimmed.slice(header.length)] : [];
-});
-var writeOf = (input, path, patch) => {
-  const cwd = typeof input.cwd === "string" ? input.cwd : "/";
-  return JSON.stringify({
-    ...input,
-    tool_input: { content: patch, file_path: isAbsolute3(path) ? path : resolve4(cwd, path) },
-    tool_name: "Write"
-  });
-};
-function guardInputs(raw) {
-  let input;
-  try {
-    input = JSON.parse(raw);
-  } catch {
-    return [raw];
-  }
-  if (typeof input !== "object" || input === null || typeof input.turn_id !== "string")
-    return [raw];
-  const tool = input.tool_name;
-  const command = input.tool_input?.command;
-  const text = typeof command === "string" ? command : "";
-  const shell = tool === "Bash" && SHELL_PATCH.test(text);
-  if (tool !== "apply_patch" && !shell)
-    return [raw];
-  const paths = patchPaths(text);
-  if (paths.length === 0)
-    return null;
-  return [...shell ? [raw] : [], ...paths.map((path) => writeOf(input, path, text))];
-}
-async function eachInput(raw, guard, judge) {
-  const inputs = guardInputs(raw);
-  if (!inputs)
-    return `${guard} hook refuses an apply_patch whose patch names no file it can read: give the patch whole in the call itself, with each file on its own *** Add File, *** Update File or *** Delete File line.`;
-  for (const input of inputs) {
-    const reason = await judge(input);
-    if (reason)
-      return reason;
-  }
-}
-
-// scripts/hooks/no-main-checkout.ts
-import { existsSync as existsSync7, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync as realpathSync3 } from "fs";
-import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute4, join as join10, normalize, resolve as resolve5, sep } from "path";
-
-// packages/settings/src/live.ts
-var liveSettings = defineSettings({
-  "live.branch": {
-    default: "live/dashboard",
-    description: "The branch the live dashboard's checkout stays on: a stack on it reads the live machine, and ops-desk's roll resets it to canary.",
-    schema: string2().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/, "a git branch name")
-  },
-  "live.container": {
-    default: "playground-dashboard-db",
-    description: "The Docker container holding the live dashboard's database, which every stack off the live checkout refuses.",
-    schema: string2().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, "a Docker container name")
-  }
-});
-
 // scripts/hooks/steady.ts
 var unquoted = (text) => text.replace(/\\\n|\$(?=["'])|["'\\]/g, "");
 var READS_ONLY = /^(?:\}|:?[-+?]|[#%/])/;
@@ -10495,7 +12102,7 @@ var READ2 = /\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})(?!\[)/.source;
 var TEXT = /[^"$`\\]/.source;
 var WORD = new RegExp(String.raw`^(?:(?:[\w./:=@%+,~-]|${READ2})+|'[^']*'|"(?:${TEXT}|${READ2})*")`);
 var REDIRECT2 = /^(?:[<>]&(?:\d+|-)|<<<|&>>?|>>?\|?|<>?)/;
-var KEEPS_PROGRAM = /^(?:builtin|command|do|elif|else|exec|if|nocorrect|noglob|then|time|until|while)$/;
+var KEEPS_PROGRAM = /^(?:-|builtin|command|do|elif|else|exec|if|nocorrect|noglob|then|time|until|while)$/;
 var PROMPT_PARAM = /^(?:PS[0-4]|PROMPT[2-4]?|RPROMPT2?|RPS[12]|SPROMPT)(?!\w)/;
 var QUOTED_DOC = /^<<(-?)[ \t]*((?:[\w.-]*(?:'[^'\n]*'|"[^"\n$`\\]*"|\\[\w.-])[\w.-]*)+)(?=[\s;&|<>]|$)/;
 function quotedBodiesOut(command) {
@@ -10576,7 +12183,7 @@ function quotedBodiesOut(command) {
   }
   return docs.length ? command : out;
 }
-function namings(command) {
+function namings2(command) {
   const counts = new Map;
   const plain = new Set;
   const add = (key) => counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -10763,75 +12370,8 @@ function holdable(key, named, counts) {
   return counts.get(key) === 1 && named.plain.has(key) && !SHELL_SETS.has(key) && !SHELL_SETS_PREFIX.test(key) && !TIED.has(key);
 }
 var NONE2 = { has: () => false };
-var NAME_SETTERS = new Set([
-  "compgen",
-  "declare",
-  "export",
-  "float",
-  "getln",
-  "getopts",
-  "integer",
-  "let",
-  "local",
-  "mapfile",
-  "pcre_match",
-  "print",
-  "printf",
-  "private",
-  "read",
-  "readarray",
-  "readonly",
-  "set",
-  "shift",
-  "stat",
-  "strftime",
-  "syserror",
-  "sysopen",
-  "sysread",
-  "syswrite",
-  "typeset",
-  "unset",
-  "vared",
-  "wait",
-  "zcurses",
-  "zformat",
-  "zgdbmpath",
-  "zgetattr",
-  "zlistattr",
-  "zmodload",
-  "zparseopts",
-  "zpty",
-  "zregexparse",
-  "zselect",
-  "zsocket",
-  "zstat",
-  "zstyle",
-  "zsystem",
-  "ztcp",
-  "ztie",
-  "zuntie"
-]);
-var PRINTS = new Set(["print", "printf"]);
 var NUMERIC = new Set(["float", "integer"]);
 var TYPESETS = new Set(["declare", "export", "local", "readonly", "typeset"]);
-var RUNS_TEXT = new Set([
-  ".",
-  "alias",
-  "autoload",
-  "emulate",
-  "enable",
-  "eval",
-  "fc",
-  "mapfile",
-  "r",
-  "readarray",
-  "sched",
-  "source",
-  "trap",
-  "zmodload",
-  "zregexparse",
-  "zstyle"
-]);
 var TESTS = new Set(["[", "[[", "test"]);
 var PLAIN_NAME = /^[A-Za-z_]\w*$/;
 var EXPANDS = /\$(?![A-Za-z_]\w*|\{[A-Za-z_]\w*\})|`|[<>]\(/;
@@ -10869,24 +12409,23 @@ var testsAName = (args, expands) => args.some((w, k) => {
 var OPENS2 = new Set(["case", "for", "if", "select", "until", "while", "{"]);
 var CLOSES2 = new Set(["done", "esac", "fi", "}"]);
 var LEADS = new Set(["!", "coproc", "do", "elif", "else", "then", "time"]);
-function steadyNames(named, commands) {
+function setterCounts(named, commands, parses) {
   if (named.blind || named.counts.has("IFS"))
-    return () => NONE2;
+    return;
   const counts = new Map(named.counts);
-  const parses = commands.map((cmd) => parse(cmd));
   for (const [at, cmd] of commands.entries()) {
     const { name } = parses[at];
     if (RUNS_TEXT.has(name) || marked(name))
-      return () => NONE2;
+      return;
     const flagged = (letters) => cmd.words.some((w, k) => k > 0 && /^-[^-\s]/.test(w.value) && letters.test(w.value));
     if (NUMERIC.has(name) || TYPESETS.has(name) && flagged(/[EFin]/))
-      return () => NONE2;
+      return;
     if (name === "let" && cmd.words.some((w, k) => k > 0 && /[A-Za-z_]/.test(w.value)))
-      return () => NONE2;
+      return;
     if (name === "print" && flagged(/P/))
-      return () => NONE2;
+      return;
     if (TESTS.has(name) && testsAName(parses[at].args, name !== "[["))
-      return () => NONE2;
+      return;
     const loop = cmd.words.findIndex((w) => !w.quoted && (w.value === "for" || w.value === "select"));
     if (!NAME_SETTERS.has(name) && loop === -1)
       continue;
@@ -10898,14 +12437,23 @@ function steadyNames(named, commands) {
       if (!word)
         continue;
       if (marked(word.value.split("=")[0]))
-        return () => NONE2;
+        return;
       if (word.quoted && word.value.includes("["))
-        return () => NONE2;
+        return;
       for (const key of word.value.match(/[A-Za-z_]\w*/g) ?? [])
         counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
+  return counts;
+}
+function steadyNames(named, commands, past = false) {
+  const parses = commands.map((cmd) => parse(cmd));
+  const counts = setterCounts(named, commands, parses);
+  if (!counts)
+    return () => NONE2;
   const set = new Map;
+  const pasts = new Map;
+  let moves = false;
   const exports = new Map;
   const where = new Map;
   const open = [];
@@ -10940,6 +12488,9 @@ function steadyNames(named, commands) {
     if (head)
       open.push({ depth, ...head });
     const always = !cmd.follows || cmd.follows === ";" || cmd.follows === "&";
+    const moved = moves && cmd.follows === "&&";
+    const isMove = top && !cmd.detached && ["cd", "pushd"].includes(parses[at].name);
+    moves = (always || moved) && (isMove || moved && parses[at].name === "");
     if (!top || cmd.detached || !always && cmd.follows !== "&&")
       continue;
     if (bareExport(parses[at])) {
@@ -10958,6 +12509,12 @@ function steadyNames(named, commands) {
     for (const key of parses[at].local.keys())
       if (holdable(key, named, counts))
         set.set(key, always ? { at } : { at, chain });
+    const literal = first.source?.slice(first.source.indexOf("=") + 1) ?? "";
+    if (past && moved && cmd.words.length === 1 && LITERAL.test(literal) && /^["']?\//.test(literal)) {
+      for (const key of parses[at].local.keys())
+        if (holdable(key, named, counts))
+          pasts.set(key, at);
+    }
   }
   return (cmd) => {
     const here = where.get(cmd);
@@ -10967,10 +12524,29 @@ function steadyNames(named, commands) {
     return {
       exported: (key) => before(exports.get(key)),
       has: (key) => before(set.get(key)),
-      loop: (key) => loops.get(cmd)?.get(key)
+      loop: (key) => loops.get(cmd)?.get(key),
+      past: (key) => (pasts.get(key) ?? here.at) < here.at
     };
   };
 }
+function startingVariables(command, environment, known) {
+  const commands = lex(command, known).commands;
+  const counts = setterCounts(namings2(command), commands, commands.map((cmd) => parse(cmd)));
+  const starting = {};
+  if (!counts)
+    return starting;
+  for (const [key, value] of Object.entries(environment)) {
+    if (!value || key in known || !/^[A-Z_][A-Z0-9_]*$/.test(key) || counts.has(key))
+      continue;
+    if (SHELL_SETS.has(key) || SHELL_SETS_PREFIX.test(key) || TIED.has(key))
+      continue;
+    if (key === "IFS" || key === "ZDOTDIR" || key.startsWith("CLAUDE"))
+      continue;
+    starting[key] = value;
+  }
+  return starting;
+}
+var LITERAL = /^(?:[\w./:@%+,-]|'[^'\s]*'|"[^"$`\\\s]*")+$/;
 var bareExport = ({ args, name }) => name === "export" && args.length > 0 && args.every((w) => !w.quoted && ASSIGN.test(w.value) && PLAIN_NAME.test(w.value.slice(0, w.value.indexOf("="))));
 function forList(cmd, named) {
   const at = cmd.words.findIndex((w) => w.quoted || !(LEADS.has(w.value) || w.value === "{"));
@@ -10985,17 +12561,36 @@ function forList(cmd, named) {
     return;
   return { key: key.value, values: values.map((w) => w.value) };
 }
+function heldReadings(word, env, steady) {
+  if (!word.raw || !marked(word.value))
+    return;
+  const known = heldVars(env, { has: (key) => steady.has(key) || !!steady.exported?.(key), past: steady.past }, word.raw);
+  let sets = [known];
+  for (const key of new Set(word.raw.match(/[A-Za-z_]\w*/g) ?? [])) {
+    const values = steady.loop?.(key);
+    if (!values)
+      continue;
+    sets = sets.flatMap((s) => values.map((v) => ({ ...s, [key]: v })));
+    if (sets.length > LOOP_READINGS)
+      return;
+  }
+  const words = sets.map((s) => relexed(word.raw, s));
+  return words.every(Boolean) ? words : undefined;
+}
+var LOOP_READINGS = 64;
 function heldWord(word, env, steady) {
-  return word.raw && marked(word.value) ? relexed(word.raw, heldVars(env, steady)) : undefined;
+  return word.raw && marked(word.value) ? relexed(word.raw, heldVars(env, steady, word.raw)) : undefined;
 }
 function relexed(raw, known) {
   const words = lex(raw, known).commands.at(-1)?.words ?? [];
   return words.length === 1 && !marked(words[0].value) ? words[0] : undefined;
 }
-function heldVars(env, steady) {
+function heldVars(env, steady, raw) {
+  const alone = raw?.match(/^"\$\{?([A-Za-z_]\w*)\}?"$/)?.[1];
   const known = { ...env.known };
   for (const [key, text] of env.vars) {
-    if (key === "TMPDIR" || !steady.has(key))
+    const held = steady.has(key) || key === alone && !!steady.past?.(key) && env.process[key] === undefined;
+    if (key === "TMPDIR" || !held)
       continue;
     if (!text.unknown && !marked(text.value))
       known[key] = text.value;
@@ -11008,11 +12603,1476 @@ function heldVars(env, steady) {
   return known;
 }
 
+// scripts/hooks/no-playground-leak.ts
+var withPlace = (text, name, fix) => ({
+  ...text,
+  where: { fix, name }
+});
+var EMPTY_TERMS = {
+  aliases: [],
+  everyday: [],
+  names: [],
+  paths: [],
+  probe: "probe",
+  sessions: { roles: [], sins: [] }
+};
+var isTerms = (value) => isRecord(value) && ["aliases", "everyday", "names", "paths"].every((key) => isStrings(value[key])) && typeof value.probe === "string" && isRecord(value.sessions) && isStrings(value.sessions.roles) && isStrings(value.sessions.sins);
+var terms = EMPTY_TERMS;
+var isCleared = (value) => isRecord(value) && Object.values(value).every((entry) => isRecord(entry) && typeof entry.name === "string" && (entry.signature === undefined || typeof entry.signature === "string"));
+var CHAT_TOOL = /^chat_(?:me_message|post_ephemeral|post_message|schedule_message|update)$/;
+var POST_KEYS = { channel: "channel", text: "text" };
+var CONNECTOR_TOOL = "slack_send_message";
+var CONNECTOR_KEYS = { channel: "channel_id", text: "message" };
+var signed = () => {
+  const { cleared } = state();
+  return Object.keys(cleared).filter((c) => cleared[c].signature);
+};
+var OTHER_DESTINATION = /channel|conversation/i;
+var RICH = ["attachments", "blocks", "markdown_text"];
+var isJson = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function chipsSigned(blocks, signature) {
+  let parsed = blocks;
+  if (typeof blocks === "string") {
+    try {
+      parsed = JSON.parse(blocks);
+    } catch {
+      return false;
+    }
+  }
+  if (!Array.isArray(parsed) || !parsed.length)
+    return false;
+  const children = [];
+  const starts = new Set;
+  for (const block of parsed) {
+    if (!isJson(block) || block.type !== "rich_text" || !Array.isArray(block.elements))
+      return false;
+    if (!block.elements.length)
+      return false;
+    for (const section of block.elements) {
+      if (!isJson(section) || section.type !== "rich_text_section")
+        return false;
+      if (!Array.isArray(section.elements))
+        return false;
+      if (isJson(section.elements[0]))
+        starts.add(section.elements[0]);
+      for (const child of section.elements) {
+        if (!isJson(child))
+          return false;
+        const text = child.type === "text" && typeof child.text === "string";
+        const link = child.type === "link" && typeof child.url === "string" && (child.text === undefined || typeof child.text === "string");
+        if (!text && !link)
+          return false;
+        children.push(child);
+      }
+    }
+  }
+  const last = children.findLast((c) => c.type !== "text" || String(c.text).trim());
+  const style = last?.style;
+  if (last?.type !== "text" || !isJson(style) || style.italic !== true)
+    return false;
+  const text = String(last.text).trimEnd();
+  const before = children[children.indexOf(last) - 1];
+  const opensLine = text.includes(`
+`) || starts.has(last) || String(before?.text ?? "").endsWith(`
+`);
+  return opensLine && text.split(`
+`).at(-1)?.trim() === signature.replace(/^_(.*)_$/, "$1");
+}
+var escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var HANDLE = /^[a-z\d][\w.-]{1,63}$/i;
+var MAX_ROSTER_BYTES = 1048576;
+var CHECKOUT2 = join9(__CHECKOUT + "/scripts/hooks", "..", "..");
+function rosterNames(environment) {
+  const path = join9(dataDirOf(environment), "roster.json");
+  try {
+    if (statSync3(path).size > MAX_ROSTER_BYTES)
+      return [];
+    const agents = JSON.parse(readFileSync4(path, "utf8"))?.agents;
+    if (!Array.isArray(agents))
+      return [];
+    return agents.flatMap((a) => {
+      const name = a?.name;
+      return typeof name === "string" && notEveryday(name) ? [name] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+var notEveryday = (name) => HANDLE.test(name) && !terms.everyday.some((w) => w.toLowerCase() === name.toLowerCase());
+function skillNames(checkout = CHECKOUT2) {
+  const ours = join9(checkout, "skills", "playground");
+  try {
+    return readdirSync3(ours, { withFileTypes: true }).filter((d) => d.isDirectory() && existsSync5(join9(ours, d.name, "SKILL.md"))).map((d) => d.name).filter(notEveryday);
+  } catch {
+    return [];
+  }
+}
+function pattern(environment, checkout = CHECKOUT2) {
+  const sources = [
+    ...[...terms.names, ...terms.aliases, ...rosterNames(environment), ...skillNames(checkout)].map((n) => escape(n).replace(/ /g, "[\\s_-]+") + (n.endsWith("_") ? "[a-z\\d_]*" : "")),
+    ...terms.paths.map(escape),
+    ...terms.sessions.sins.length ? [
+      `${escape(terms.probe)}-(?:(?:${terms.sessions.roles.join("|")})-)?(?:${terms.sessions.sins.join("|")})`,
+      `(?:${terms.sessions.roles.join("|")})-(?:${terms.sessions.sins.join("|")})`
+    ] : []
+  ];
+  if (!sources.length)
+    return /(?!)/;
+  return new RegExp(`(?<![a-z\\d])(?:${sources.join("|")})(?![a-z\\d])`, "i");
+}
+var REPHRASE = "Say it without the term: name the work, not who did it or how it is run.";
+var READABLE = `Put the text in the command itself, or write the text to a file with the Write tool first, then run the command again in a call of its own that names that file by its literal absolute path (--body-file /abs/body.md, or -F /abs/msg.md for a commit). ${NOT_RUN}`;
+var MCP_READABLE = "Pass the input as an object whose fields are strings.";
+var spec = (texts, files, others = []) => ({
+  files,
+  takes: new Set([...files, ...others, ...texts, "-R", "--repo"]),
+  texts
+});
+var BODY = ["-b", "--body"];
+var FLAG_PLACES = {
+  "--body": "its body",
+  "--body-file": "its body file",
+  "--comment": "its comment",
+  "--notes": "its notes",
+  "--notes-file": "its notes file",
+  "--title": "its title"
+};
+function longName(name, flags) {
+  const next = flags[flags.indexOf(name) + 1];
+  return name.startsWith("--") || !next?.startsWith("--") ? name : next;
+}
+var BODY_FILE = ["-F", "--body-file"];
+var CLOSING = spec(["-c", "--comment"], [], ["-r", "--reason", "--duplicate-of"]);
+var EDIT = [
+  "--add-assignee",
+  "--add-label",
+  "--add-project",
+  "--add-reviewer",
+  "-B",
+  "--base",
+  "-m",
+  "--milestone",
+  "--remove-assignee",
+  "--remove-label",
+  "--remove-project",
+  "--remove-reviewer"
+];
+var NEW = [
+  "-a",
+  "--assignee",
+  "-B",
+  "--base",
+  "-l",
+  "--label",
+  "-m",
+  "--milestone",
+  "-p",
+  "--project",
+  "-r",
+  "--reviewer",
+  "--recover",
+  "-T",
+  "--template"
+];
+var GH_WRITES = new Map([
+  ["issue close", CLOSING],
+  ["issue comment", spec([...BODY, "--attach"], BODY_FILE)],
+  ["issue create", spec([...BODY, "-t", "--title"], BODY_FILE, NEW)],
+  ["issue edit", spec([...BODY, "-t", "--title"], BODY_FILE, EDIT)],
+  ["issue reopen", CLOSING],
+  ["label create", spec(["-d", "--description"], [], ["-c", "--color"])],
+  ["label edit", spec(["-d", "--description", "-n", "--name"], [], ["-c", "--color"])],
+  ["pr close", CLOSING],
+  ["pr comment", spec([...BODY, "--attach"], BODY_FILE)],
+  ["pr create", spec([...BODY, "--attach", "-H", "--head", "-t", "--title"], BODY_FILE, NEW)],
+  ["pr edit", spec([...BODY, "-t", "--title"], BODY_FILE, EDIT)],
+  [
+    "pr merge",
+    spec([...BODY, "-t", "--subject"], BODY_FILE, ["-A", "--author-email", "--match-head-commit"])
+  ],
+  ["pr reopen", CLOSING],
+  ["pr review", spec(BODY, BODY_FILE)],
+  [
+    "release create",
+    spec(["-n", "--notes", "-t", "--title"], ["-F", "--notes-file"], ["--discussion-category", "--notes-start-tag", "--target"])
+  ],
+  [
+    "release edit",
+    spec(["-n", "--notes", "-t", "--title", "--tag"], ["-F", "--notes-file"], ["--discussion-category", "--target"])
+  ]
+]);
+var GH_GROUPS = new Set(["api", "issue", "label", "pr", "release"]);
+var PR_URL = /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/(?:issues|pull)\/\d+/i;
+var COMMIT_TAKES = new Set([
+  "--author",
+  "-c",
+  "-C",
+  "--cleanup",
+  "--date",
+  "-F",
+  "--file",
+  "--fixup",
+  "-m",
+  "--message",
+  "--pathspec-from-file",
+  "--reedit-message",
+  "--reuse-message",
+  "--squash",
+  "-t",
+  "--template",
+  "--trailer"
+]);
+var PUSH_TAKES2 = new Set(["--exec", "-o", "--push-option", "--receive-pack", "--repo"]);
+var REPO_WRITES = new Map([
+  ["repo archive", []],
+  ["repo delete", []],
+  [
+    "repo edit",
+    [
+      "--add-topic",
+      "-d",
+      "--default-branch",
+      "--description",
+      "-h",
+      "--homepage",
+      "--remove-topic",
+      "--visibility"
+    ]
+  ],
+  ["repo rename", []],
+  ["repo sync", ["-b", "--branch", "-s", "--source"]],
+  ["repo unarchive", []]
+]);
+var CONVERSATION = new Set([
+  "pr close",
+  "pr comment",
+  "pr create",
+  "pr edit",
+  "pr reopen",
+  "pr review"
+]);
+var CONVERSATION_TOOL = /^(?:add_comment_to_pending_review|add_issue_comment|add_reply_to_pull_request_comment|create_pull_request|issue_write|pull_request_review_write|request_copilot_review|sub_issue_write|update_issue_comment|update_pull_request)$/;
+var CREATE_TAKES = [
+  "-d",
+  "--description",
+  "-g",
+  "--gitignore",
+  "-h",
+  "--homepage",
+  "-l",
+  "--license",
+  "-p",
+  "--template",
+  "-r",
+  "--remote",
+  "-s",
+  "--source",
+  "-t",
+  "--team"
+];
+var SUBTREE_TAKES = new Set(["-b", "--branch", "-m", "--message", "--onto", "-P", "--prefix"]);
+var PLACE_FIX = `Run any setup (a git config or remote change, a clone, gh repo set-default) in a call of its own first, then name where the write goes by its literal value in a call of its own: a git push run plainly, with no -c, --config-env, --git-dir or GIT_ variable, to a remote or URL the hook can read (a remote whose URL is a local path cannot be placed, so push from a clone of its GitHub URL), gh -R <owner>/<repo>, or repos/<owner>/<name>/... for gh api. ${NOT_RUN}`;
+var ANY_GH_WRITES = new Map([
+  ["pr update-branch", spec([], [])],
+  ["release delete", spec([], [])],
+  ["release upload", spec([], [])]
+]);
+var PLACEHOLDER = /^(?::owner|:repo|\{owner\}|\{repo\})$/;
+var GH_STATE = new Set(["config set", "repo clone", "repo fork", "repo set-default"]);
+var GIT_CONFIG_PATH = /(?:^|\/)\.git(?:\/|$)|\.gitconfig|(?:^|\/)git\/config$/;
+var CONFIG_WRITE = /^--(?:add|edit|remove-section|rename-section|replace-all|unset|unset-all)$|^-e$/;
+var CONFIG_READ = /^--(?:get|get-all|get-color|get-colorbool|get-regexp|get-urlmatch|list)$|^-l$/;
+var CONFIG_TAKES = new Set(["--blob", "--default", "-f", "--file", "--type"]);
+var builtins2;
+var MCP_TOOL3 = /^mcp__(.+?)__(.+)$/;
+var READ_TOOL = /^(?:download|extract|fetch|get|list|read|search)_|_(?:history|info|list|read|replies|search|unreads)$/;
+var INNER = new Set(["curl", "gh", "git"]);
+var MAYBE = /curl|gh|git/i;
+var MAYBE_ANY = /alias|curl|gh|git|repo|send-pack|subtree/i;
+var WRITE_CALL = /\b(?:curl|gh|git)\b|github|linear|slack/i;
+var leakPolicy = (orgs, term = /(?!)/) => ({
+  find: (text) => {
+    const found = term.exec(visible(text))?.[0];
+    return found ? { detail: `"${found}", a factory term`, fix: REPHRASE } : undefined;
+  },
+  git: true,
+  guard: "no-playground-leak",
+  guarded: (repo) => orgs.has(repo.owner.toLowerCase()),
+  hosts: true,
+  place: "a guarded org",
+  what: "a factory term",
+  why: "the factory is private, so nothing about it, its skills or its sessions goes into anything a guarded org sees, in any shape."
+});
+var calls = new AsyncLocalStorage3;
+var IDLE = {
+  changed: false,
+  cleared: {},
+  moved: false,
+  movedBefore: false,
+  policy: leakPolicy(new Set)
+};
+var state = () => calls.getStore() ?? IDLE;
+var lower = (text) => text[0].toLowerCase() + text.slice(1);
+function refuse5(what, target, detail, fix) {
+  return `${state().policy.guard} hook refused ${what} to ${target.label}: ${detail}. ${state().policy.why} ${fix}`;
+}
+function refuseAny(what, target, fix = NOT_RUN) {
+  return target.where === "guarded" ? refuse5(what, target, `it writes to ${state().policy.place}`, fix) : refuse5(what, target, `the hook cannot tell whether it writes to ${state().policy.place}`, PLACE_FIX);
+}
+async function judge3(what, target, texts, env, extras = []) {
+  if (target.where === "other")
+    return;
+  if (state().policy.anyWrite && !target.byText)
+    return refuseAny(what, target);
+  const resolved = await Promise.all(texts.map((t) => resolveText(t, env)));
+  const seen = (await Promise.all(extras.map((t) => resolveText(t, env)))).filter((t) => !t.unknown);
+  const hits = [...resolved, ...seen].map((t) => state().policy.find(t.value));
+  const at = hits.findIndex(Boolean);
+  const hit = hits[at];
+  const where = texts[at]?.where;
+  const holds = hit && `${hit.detail}${where ? `, in ${where.name}` : ""}`;
+  const fix = hit && (where?.fix ? `${hit.fix} ${where.fix}` : hit.fix);
+  if (target.where === "unknown") {
+    if (!hit)
+      return;
+    return refuse5(what, target, `the hook cannot tell whether it writes to ${state().policy.place}, and its text holds ${holds}`, `Name where it goes by its literal value in a call of its own (gh -R <owner>/<repo>, the pull request number or URL, git -C /abs/checkout, the URL itself, or a REST endpoint naming the repository in place of a GraphQL node id), or ${lower(fix ?? "")} ${NOT_RUN}`);
+  }
+  if (hit)
+    return refuse5(what, target, `its text holds ${holds}`, fix ?? hit.fix);
+  const hidden = resolved.find((t) => t.unknown);
+  if (hidden) {
+    return refuse5(what, target, `the hook cannot read its text before it runs (it comes from ${hidden.unknown}), so it may hold ${state().policy.what}`, READABLE);
+  }
+}
+function decide(candidates) {
+  const ours = candidates.find((c) => c && state().policy.guarded(c));
+  if (ours)
+    return { label: `${ours.owner}/${ours.repo}`, where: "guarded" };
+  if (candidates.length === 0 || candidates.some((c) => !c)) {
+    return { label: "a repository the hook cannot resolve", where: "unknown" };
+  }
+  return { label: "", where: "other" };
+}
+var XARGS_INPUT = { quoted: false, unknown: "xargs's input", value: UNKNOWN };
+var leak = async (cmd, parsed, env) => {
+  const { first, name, xargs } = parsed;
+  if (state().policy.anyWrite)
+    pastDeadline();
+  const appended = state().policy.anyWrite && xargs && xargs.replace === undefined;
+  const args = appended && parsed.args.at(-1) !== XARGS_INPUT ? [...parsed.args, XARGS_INPUT] : parsed.args;
+  if (state().policy.anyWrite && changesState(cmd, parsed))
+    state().changed = true;
+  if (state().policy.anyWrite) {
+    state().movedBefore = state().moved;
+    if (MOVERS.has(name) || first?.unknown)
+      state().moved = true;
+  }
+  const head = args[0]?.value ?? "";
+  const group = GH_GROUPS.has(head) || state().policy.anyWrite && (head === "alias" || head === "repo");
+  if (name === "gh" || first?.unknown && group) {
+    const verdict = await gh(args, cmd, env, parsed.local, xargs);
+    if (verdict || name === "gh" || !state().policy.anyWrite)
+      return verdict;
+  }
+  const pusher = state().policy.anyWrite && (head === "send-pack" || head === "subtree");
+  if (name === "git" || first?.unknown && (head === "commit" || head === "push" || pusher))
+    return state().policy.git ? git2(args, cmd, env, parsed.local) : undefined;
+  if (name === "curl")
+    return curl(args, cmd, env, xargs);
+  if (PRINTERS.has(name))
+    return;
+  const at = args.findIndex((a) => INNER.has(program(a.value)));
+  if (at === -1)
+    return;
+  const inner = {
+    ...parsed,
+    args: args.slice(at + 1),
+    first: args[at],
+    name: program(args[at].value)
+  };
+  const verdict = await leak(cmd, inner, env);
+  if (!verdict || args[at].value === inner.name)
+    return verdict;
+  const read = `It read a word whose path ends in /${inner.name} as ${inner.name} run by ${name}, a program it does not know: a folder or file passes under a path that does not end in /${inner.name}, and ${inner.name} run by ${name} is read the same when written by its own name, ${inner.name}.`;
+  return verdict.endsWith(NOT_RUN) ? `${verdict.slice(0, -NOT_RUN.length)}${read} ${NOT_RUN}` : `${verdict} ${read}`;
+};
+function changesState(cmd, { args, name }) {
+  const words = args.map((a) => a.value);
+  if (name === "gh")
+    return GH_STATE.has(ghCommand(args).head.join(" "));
+  if (name === "git") {
+    let k = 0;
+    while (k < words.length && words[k].startsWith("-"))
+      k += GIT_TAKES.has(words[k]) ? 2 : 1;
+    const [sub, ...rest] = words.slice(k);
+    if (sub === "clone" || sub === "init" || sub === "submodule")
+      return true;
+    const verb = rest.find((w) => !w.startsWith("-"));
+    if (sub === "remote")
+      return ["add", "remove", "rename", "rm", "set-url"].includes(verb ?? "");
+    if (sub !== "config")
+      return false;
+    const { flags, positionals } = parseFlags(args.slice(k + 1), CONFIG_TAKES);
+    const first = positionals[0]?.value ?? "";
+    if (flags.some((f) => CONFIG_WRITE.test(f.name)))
+      return true;
+    if (first === "get" || first === "list")
+      return false;
+    if (["edit", "remove-section", "rename-section", "set", "unset"].includes(first))
+      return true;
+    if (flags.some((f) => CONFIG_READ.test(f.name)))
+      return false;
+    return positionals.length > 1;
+  }
+  const targets = cmd.redirects.flatMap((r) => r.target ? [r.target] : []);
+  return [...args, ...targets].some((w) => GIT_CONFIG_PATH.test(w.value));
+}
+var MOVERS = new Set(["gh", "git"]);
+var implicit = (env, local) => state().policy.anyWrite && state().changed ? [undefined] : implicitRepos(env, local);
+async function gh(args, cmd, env, local, xargs) {
+  const { head, repos, rest } = ghCommand(args);
+  if (head[0] === "api")
+    return api2(rest, cmd, env, local, xargs);
+  const key = head.join(" ");
+  if (state().policy.anyWrite) {
+    if (key === "alias import" || key === "alias set") {
+      return refuse5(`gh ${key}`, decide([]), "an alias can run any gh write under a name the hook does not read", `Run the gh command itself, in a call of its own. ${NOT_RUN}`);
+    }
+    if (head[0] === "issue" || head[0] === "label" || CONVERSATION.has(key))
+      return;
+    if (key === "repo create" || key === "repo fork" || key === "repo rename") {
+      const refused = created(key, rest, env, xargs);
+      if (refused || key !== "repo rename")
+        return refused;
+    }
+    const takes = REPO_WRITES.get(key);
+    if (takes)
+      return repoWrite(key, rest, repos, env, local, xargs, takes);
+  }
+  const found = GH_WRITES.get(key) ?? (state().policy.anyWrite ? ANY_GH_WRITES.get(key) : undefined);
+  if (!found)
+    return;
+  const { flags, positionals } = parseFlags(rest, found.takes);
+  const texts = [];
+  for (const { name, value } of flags) {
+    const posts = found.texts.includes(name) || found.files.includes(name);
+    const long = longName(name, found.texts.includes(name) ? found.texts : found.files);
+    const place = FLAG_PLACES[long] ?? `its ${long} value`;
+    if (!value) {
+      if (posts)
+        texts.push(unknown(`${name} with no value`));
+    } else if (found.texts.includes(name))
+      texts.push(withPlace(value, place));
+    else if (found.files.includes(name)) {
+      const file = value.value === "-" && !value.unknown ? await stdinOf(cmd, env) : await readPath(value, env);
+      texts.push(withPlace(file, place));
+    } else if (name === "-R" || name === "--repo")
+      repos.push(value);
+  }
+  if (xargs && !xargs.replace)
+    texts.push(unknown("the arguments xargs appends"));
+  if (rest.some((a) => flagFromXargs(a, xargs))) {
+    texts.push(unknown(`what xargs puts in place of ${xargs?.replace}`));
+  }
+  const flagged = repos.map((r) => fromXargs(r, xargs) ? undefined : repoOf(r));
+  const urls = positionals.flatMap((p) => {
+    if (fromXargs(p, xargs))
+      return [undefined];
+    if (p === XARGS_INPUT || p.unknown || p.reads?.length || p.value.includes(UNKNOWN))
+      return state().policy.anyWrite ? [] : [undefined];
+    return PR_URL.test(p.value) ? [repoOf(p)] : [];
+  });
+  const named = [...flagged, ...urls];
+  const placed = urls.some(Boolean);
+  const fallback = flagged.length > 0 || placed ? [] : implicit(env, local);
+  if (!placed) {
+    const refused = unplaced(`gh ${key}`, flagged.length > 0 ? flagged : fallback, env);
+    if (refused)
+      return refused;
+  }
+  const target = decide(named.length > 0 ? named : fallback);
+  if (key === "pr create" && target.where !== "other")
+    texts.push(...prCreate2(rest, flags, env));
+  return judge3(`gh ${key}`, target, texts.map((t) => viaXargs(t, xargs)), env, positionals);
+}
+function destination(what, owner, name, fix) {
+  if (owner === undefined || name === undefined)
+    return refuseAny(what, decide([undefined]));
+  if (!state().policy.guarded({ owner, repo: name }))
+    return;
+  const label = owner === "*" ? `a repository named ${name}` : `${owner}/${name}`;
+  return refuseAny(what, { label, where: "guarded" }, fix);
+}
+function created(key, rest, env, xargs) {
+  const takes = key === "repo create" ? CREATE_TAKES : ["--fork-name", "--org", "--remote-name"];
+  const { flags, positionals } = parseFlags(rest, new Set([...takes, "-R", "--repo"]));
+  const flag = (...names) => flags.findLast((f) => names.includes(f.name));
+  const read = (w) => !w || w.unknown || w.reads?.length || marked(w.value) || fromXargs(w, xargs) ? undefined : w.value;
+  const what = `gh ${key}`;
+  if (key === "repo fork") {
+    const name = flag("--fork-name");
+    if (!name)
+      return;
+    const org = flag("--org");
+    return destination(what, org ? read(org.value) : "*", read(name.value));
+  }
+  const [given] = positionals;
+  if (given || key === "repo rename") {
+    const parts = read(given)?.split("/").filter(Boolean) ?? [];
+    const owner = key === "repo create" && parts.length > 1 ? parts.at(-2) : "*";
+    return destination(what, owner, parts.at(-1));
+  }
+  const source = flag("-s", "--source")?.value;
+  const path = source && read(source) !== undefined ? pathOf(source, env) : undefined;
+  return destination(what, "*", path && basename3(path));
+}
+function repoWrite(key, rest, repos, env, local, xargs, takes) {
+  const { flags, positionals } = parseFlags(rest, new Set([...takes, "-R", "--repo"]));
+  for (const { name, value } of flags)
+    if (value && (name === "-R" || name === "--repo"))
+      repos.push(value);
+  const named = key === "repo rename" ? [] : positionals.slice(0, 1);
+  if (key === "repo sync" && named.length === 0)
+    return Promise.resolve(undefined);
+  const given = (named.length > 0 ? named : repos).map((w) => fromXargs(w, xargs) || marked(w.value) ? undefined : repoOf(w));
+  return judge3(`gh ${key}`, decide(given.length > 0 ? given : implicit(env, local)), [], env);
+}
+function unplaced(what, source, env) {
+  const lost = source.length === 0 && !env.cwd;
+  if (!lost && source.every(Boolean))
+    return;
+  if (state().policy.anyWrite && state().changed)
+    return refuse5(what, decide([]), "an earlier command in the call changes the git or gh state it is placed by", PLACE_FIX);
+  return refuse5(what, decide([]), lost ? "the hook cannot tell which repository it writes to, since it names none and runs in a directory the hook lost (after a cd, popd or env -C it cannot follow)" : "the hook cannot tell which repository it writes to, since it names it through a value the hook cannot read", `Name the repository by its literal value (--repo <owner>/<name>, or repos/<owner>/<name>/... for gh api), or cd to a literal path, in a call of its own. ${NOT_RUN}`);
+}
+function prCreate2(rest, flags, env) {
+  const values = rest.map((w) => w.value);
+  const texts = [];
+  const head = flags.findLast((f) => f.name === "-H" || f.name === "--head")?.value;
+  if (!head || unreadable(head) || !head.value.trim() || /[$`*?[\]'"]/.test(head.value))
+    texts.push(...commitTexts(env.cwd, ["HEAD", "--not", ...env.cwd ? heldBy(env.cwd, pushRemote(env.cwd)) : []], "the commits it may push", ", which it may push"), withPlace(branch(env.cwd), "the branch it opens from"));
+  if (values.some((v) => v === "-f" || v.startsWith("--fill"))) {
+    const at = values.findIndex((v) => /^(?:-B|--base)(?:=|$)/.test(v));
+    const base = at === -1 ? "HEAD" : values[at].includes("=") ? values[at].split("=")[1] : values[at + 1];
+    texts.push(...base && !base.includes(UNKNOWN) ? commitTexts(env.cwd, [`origin/${base}..HEAD`], "the commits --fill reads", ", which --fill reads") : [unknown("the base --fill reads from")]);
+  }
+  return texts;
+}
+var branch = (dir) => gitText(dir, ["branch", "--show-current"], "the current branch");
+var TEXT_FIELD = /body|branch|comment|description|head|message|name|notes|query|ref|subject|text|title/i;
+async function api2(args, cmd, env, local, xargs) {
+  const request = await ghApi(args, cmd, env, xargs);
+  if (!request || ["GET", "HEAD"].includes(request.method))
+    return;
+  if (state().policy.anyWrite && xargs && !xargs.replace) {
+    const method = args.some((a) => /^(?:-[A-Za-z]*X|--method)/.test(a.value));
+    if (!method && request.fields.length === 1 && request.inputs.length === 0)
+      return;
+  }
+  if (request.method === "DELETE" && !state().policy.anyWrite)
+    return;
+  const { endpoint, fields, inputs } = request;
+  const posted = (f) => endpoint.value === "graphql" || f.key.includes(UNKNOWN) || TEXT_FIELD.test(f.key);
+  const texts = [...fields.filter(posted).map((f) => f.text), ...inputs];
+  const extras = [endpoint, ...fields.filter((f) => !posted(f)).map((f) => f.text)];
+  if (endpoint.value === "graphql") {
+    const documents = await Promise.all([...fields.filter((f) => f.key === "query").map((f) => f.text), ...inputs].map((d) => resolveText(d, env)));
+    if (!documents.some((d) => d.unknown || /\bmutation\b/.test(d.value)))
+      return;
+    const target = {
+      byText: true,
+      label: "a repository named only by a GraphQL node id",
+      where: "unknown"
+    };
+    return judge3("gh api graphql", target, texts, env, extras);
+  }
+  const value = endpoint.value;
+  const host = hostTarget(value);
+  if (host)
+    return judge3(`gh api ${host.label}`, host, texts, env, extras);
+  const typed = value.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, "").replace(/^api\/v3\//, "");
+  const path = state().policy.anyWrite ? dotless(typed) : typed;
+  const repo = /^repos\/([^/]+)\/([^/]+)/.exec(path);
+  const org = /^orgs\/([^/]+)/.exec(path);
+  const what = `gh api ${path.split("?")[0]}`;
+  if (state().policy.anyWrite) {
+    const refused = await apiDestination(what, request, path, env);
+    if (refused)
+      return refused;
+  }
+  if (state().policy.anyWrite && repo && conversation(path.slice(repo[0].length)))
+    return;
+  if (state().policy.anyWrite && path.startsWith("repositories/"))
+    return judge3(what, { label: "a repository named only by its id", where: "unknown" }, [], env);
+  let candidates;
+  if (fromXargs(endpoint, xargs))
+    candidates = [undefined];
+  else if (state().policy.anyWrite && repo && (PLACEHOLDER.test(repo[1]) || PLACEHOLDER.test(repo[2])))
+    candidates = implicit(env, local).map((r) => r && {
+      owner: PLACEHOLDER.test(repo[1]) ? r.owner : repo[1],
+      repo: PLACEHOLDER.test(repo[2]) ? r.repo : repo[2]
+    });
+  else if (repo?.[1] === "{owner}")
+    candidates = implicit(env, local);
+  else if (repo)
+    candidates = [marked(repo[0]) ? undefined : { owner: repo[1], repo: repo[2] }];
+  else if (org)
+    candidates = [marked(org[0]) ? undefined : { owner: org[1], repo: "*" }];
+  else if (marked(value) && (/^(repos|orgs)\//.test(path) || marked(path.split("/")[0])))
+    candidates = [undefined];
+  else if (marked(value))
+    return judge3(what, decide([undefined]), texts, env, extras);
+  else
+    return;
+  return unplaced(what, candidates, env) ?? judge3(what, decide(candidates), texts, env, extras);
+}
+async function apiDestination(what, request, path, env) {
+  const { fields, inputs, method } = request;
+  const route = path.split(/[?#]/)[0].replace(/\/+$/, "");
+  const has = (key) => fields.some((f) => f.key === key);
+  const repo = /^repos\/([^/]+)\/([^/]+)(?:\/(forks|generate|transfer))?$/.exec(route);
+  const org = /^orgs\/([^/]+)\/repos$/.exec(route);
+  const fixed = (owner) => PLACEHOLDER.test(owner) || marked(owner) ? "*" : owner;
+  const key = (k) => ({ key: k });
+  const lit = (v) => ({ value: v });
+  let dest;
+  if (method === "PATCH" && repo && !repo[3] && has("name"))
+    dest = [lit(fixed(repo[1])), key("name")];
+  else if (method !== "POST")
+    return;
+  else if (repo?.[3] === "generate")
+    dest = [has("owner") ? key("owner") : lit("*"), key("name")];
+  else if (repo?.[3] === "transfer") {
+    if (!has("new_name") && PLACEHOLDER.test(repo[2]))
+      return destination(what);
+    dest = [key("new_owner"), has("new_name") ? key("new_name") : lit(repo[2])];
+  } else if (repo?.[3] === "forks" && has("name"))
+    dest = [has("organization") ? key("organization") : lit("*"), key("name")];
+  else if (route === "user/repos")
+    dest = [lit("*"), key("name")];
+  else if (org)
+    dest = [lit(fixed(org[1])), key("name")];
+  if (!dest)
+    return;
+  if (inputs.length > 0)
+    return destination(what);
+  const value = async (part) => {
+    if ("value" in part)
+      return part.value;
+    const text = fields.findLast((f) => f.key === part.key)?.text;
+    const read = text && await resolveText(text, env);
+    return read && !read.unknown && !marked(read.value) ? read.value : undefined;
+  };
+  return destination(what, await value(dest[0]), await value(dest[1]));
+}
+function dotless(path) {
+  const [route, ...query] = path.split(/(?=[?#])/);
+  const kept = [];
+  for (const segment of route.split("/")) {
+    const plain = segment.toLowerCase().replaceAll("%2e", ".");
+    if (plain === "..")
+      kept.pop();
+    else if (plain !== "." && plain !== "")
+      kept.push(segment);
+  }
+  return [kept.join("/"), ...query].join("");
+}
+function conversation(route) {
+  const segments = route.split(/[?#]/)[0].split("/").filter(Boolean);
+  if (/[%\\]/.test(route) || segments.some((s) => s === "." || s === ".."))
+    return false;
+  if (segments[0] === "issues" || segments[0] === "labels")
+    return true;
+  return segments[0] === "pulls" && !segments.some((s) => s === "merge" || s === "update-branch");
+}
+var hostOf = (url) => /^[a-z][a-z\d+.-]*:\/\/(?:[^/?#@]*@)?([^/?#:]+)/i.exec(url)?.[1]?.toLowerCase().replace(/\.+$/, "");
+var slackHost = (host) => host === "slack.com" || !!host?.endsWith(".slack.com");
+function hostTarget(url) {
+  const host = hostOf(url);
+  if (!host || !state().policy.hosts)
+    return;
+  if (host === "linear.app" || host.endsWith(".linear.app"))
+    return { label: "Linear", where: "guarded" };
+  if (slackHost(host))
+    return { label: "Slack", where: "guarded" };
+}
+async function curl(args, cmd, env, xargs) {
+  const { flags, positionals } = parseFlags(args, CURL_TAKES);
+  const urls = curlUrls(flags, positionals);
+  const globs = state().policy.anyWrite === true && !flags.some((f) => f.name === "-g" || f.name === "--globoff");
+  if (state().policy.anyWrite) {
+    const redirect = args.some((a, i) => /^--(?:connect-to|request-target|resolve)(?:=|$)/.test(a.value) || (a.value === "-H" || a.value === "--header") && /^\s*host\s*:/i.test(args[i + 1]?.value ?? "") || /^(?:-H|--header=)\s*host\s*:/i.test(a.value));
+    if (redirect && args.some((a) => /github/i.test(a.value)))
+      return judge3("curl", { label: "a host the call redirects to", where: "unknown" }, [], env);
+  }
+  const targets = urls.map((u) => {
+    if (u.unknown === XARGS_INPUT.unknown || state().policy.anyWrite && fromXargs(u, xargs))
+      return u.unknown || curlWrites(flags) ? { label: "a URL xargs supplies from its input", where: "unknown" } : { label: "", where: "other" };
+    const value = visible(u.value);
+    if (u.unknown || u.reads?.length || value.includes(UNKNOWN) || fromXargs(u, xargs))
+      return { byText: true, label: "a URL the hook cannot read", where: "unknown" };
+    const url = /^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `http://${value}`;
+    const host = hostTarget(url);
+    if (host)
+      return host;
+    if (state().policy.anyWrite)
+      return curlTarget(url, globs);
+    if (/^https?:\/\/api\.github\.com(?::\d+)?\/graphql(?:[/?#]|$)/i.test(url))
+      return {
+        byText: true,
+        label: "a repository named only by a GraphQL node id",
+        where: "unknown"
+      };
+    const repo = /api\.github\.com\/repos\/([^/\s]+)\/([^/\s?#]+)/i.exec(value);
+    return repo ? decide([{ owner: repo[1], repo: repo[2] }]) : { label: "", where: "other" };
+  });
+  const target = targets.find((t) => t.where === "guarded") ?? targets.find((t) => t.where === "unknown");
+  if (!target)
+    return;
+  if (targets.some((t) => t.label === "Slack")) {
+    const gated = gatedCurl(urls);
+    if (gated)
+      return gated;
+  }
+  const data = await curlData(flags, cmd, env);
+  const get = flags.some((f) => f.name === "-G" || f.name === "--get");
+  const writes = data.length > 0 && !get || urls.some((u) => /\/api\/chat\./i.test(u.value));
+  if (writes && targets.some((t) => t.label === "Slack")) {
+    const read = await Promise.all([...urls, ...data].map((t) => resolveText(t, env)));
+    const id = signed().find((c) => read.some((t) => t.value.includes(c)));
+    if (id) {
+      return `no-playground-leak hook refused curl to ${state().cleared[id].name}: post there through the Slack MCP chat tools, which check that its last line is ${state().cleared[id].signature}.`;
+    }
+  }
+  if (xargs && !xargs.replace)
+    data.push(unknown("the arguments xargs appends"));
+  return judge3("curl", target, data.map((t) => viaXargs(t, xargs)), env, urls);
+}
+function curlWrites(flags) {
+  const method = flags.find((f) => f.name === "-X" || f.name === "--request")?.value;
+  if (method && (unreadable(method) || !/^(?:GET|HEAD)$/i.test(method.value)))
+    return true;
+  if (flags.some((f) => /^(?:-F|--form(?:-string)?|-T|--upload-file)$/.test(f.name)))
+    return true;
+  const get = flags.some((f) => f.name === "-G" || f.name === "--get");
+  return !get && flags.some((f) => /^(?:-d|--data(?:-[a-z]+)?|--json)$/.test(f.name));
+}
+function curlTarget(url, globs) {
+  const cannot = { label: "a URL the hook cannot place", where: "unknown" };
+  const other = { label: "", where: "other" };
+  const host = /^[a-z][a-z\d+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]]*\]|[^/?#:]*)/i.exec(url)?.[1] ?? "";
+  if (globs && /[{[]/.test(host) && !/^\[[\da-f:.]+\]$/i.test(host))
+    return cannot;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return /github/i.test(url) ? cannot : other;
+  }
+  const name = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (!/(?:^|\.)github\.com$/.test(name))
+    return other;
+  if (globs && /[{[]/.test(url))
+    return cannot;
+  const [first, second, third] = parsed.pathname.split("/").filter(Boolean);
+  if (name === "api.github.com" || name === "uploads.github.com") {
+    if (first === "graphql")
+      return {
+        byText: true,
+        label: "a repository named only by a GraphQL node id",
+        where: "unknown"
+      };
+    if (first === "repositories")
+      return { label: "a repository named only by its id", where: "unknown" };
+    return first === "repos" && second && third ? decide([{ owner: second, repo: third }]) : other;
+  }
+  if (name !== "github.com" && name !== "www.github.com")
+    return other;
+  return first && second ? decide([{ owner: first, repo: second.replace(/\.git$/i, "") }]) : other;
+}
+function clearedPost(what, input, at, signedOnly) {
+  const keys = Object.keys(input);
+  if (keys.some((k) => k !== at.channel && OTHER_DESTINATION.test(k)))
+    return;
+  const channel = input[at.channel];
+  const text = input[at.text];
+  if (typeof channel !== "string" || !Object.hasOwn(state().cleared, channel))
+    return;
+  const { name, signature } = state().cleared[channel];
+  if (!signature)
+    return signedOnly ? undefined : "";
+  const signed = typeof text === "string" && text.trimEnd().split(`
+`).at(-1) === signature;
+  const rich = keys.filter((k) => RICH.includes(k));
+  if (signed && rich.every((k) => k === "blocks" && chipsSigned(input.blocks, signature)))
+    return "";
+  return `no-playground-leak hook refused ${what} to ${name}: every post there ends with the line ${signature}, since it goes out through the owner's Slack account and must never read as the owner's own. Put that line last in its text, with no attachments or markdown_text; blocks pass only as rich_text sections of text and links whose last line is that signature as italic text, then run it again.`;
+}
+var COMMIT_FIX = "Reword that commit's message (git commit --amend for the newest one), then run it again.";
+function commitTexts(dir, range, what, after = "") {
+  const log = gitText(dir, ["log", "--format=%h%x00%B%x1e", "-n", "500", ...range], what);
+  if (log.unknown)
+    return [log];
+  const texts = [];
+  for (const entry of log.value.split("\x1E")) {
+    const sha = /^\n?([\da-f]{4,64})\0/.exec(entry);
+    const last = texts.at(-1);
+    if (sha) {
+      const name = `the message of commit ${sha[1]}${after}`;
+      texts.push(withPlace({ value: entry.slice(sha[0].length) }, name, COMMIT_FIX));
+    } else if (last)
+      last.value += `\x1E${entry}`;
+    else
+      texts.push({ value: entry });
+  }
+  return texts;
+}
+function gitText(dir, args, what) {
+  if (!dir)
+    return unknown(`${what}, in a checkout the hook cannot resolve`);
+  const proc = Bun.spawnSync(["git", "-C", dir, ...args], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stderr: "ignore"
+  });
+  return proc.exitCode === 0 ? { value: proc.stdout.toString() } : unknown(what);
+}
+async function git2(args, cmd, env, local = new Map, depth = 0) {
+  let dir = env.cwd;
+  let k = 0;
+  let carried = [...local.keys(), ...env.vars.keys()].some((name) => name.startsWith("GIT_"));
+  let aliasSet = false;
+  const aliases = new Map;
+  let anyAlias = false;
+  for (;k < args.length; k++) {
+    const v = args[k].value;
+    if (v === "-C") {
+      const next = args[++k];
+      dir = next ? pathOf(next, { ...env, cwd: dir }) : undefined;
+    } else if (GIT_TAKES.has(v)) {
+      if (v === "-c" || v === "--config-env" || v === "--git-dir")
+        carried = true;
+      const next = args[k + 1]?.value ?? "";
+      if (v !== "--git-dir" && /^alias\./i.test(next)) {
+        aliasSet = true;
+        const eq = next.indexOf("=");
+        const name = next.slice("alias.".length, eq === -1 ? undefined : eq);
+        if (marked(name))
+          anyAlias = true;
+        else if (eq > 0)
+          aliases.set(name.toLowerCase(), v === "-c" && !marked(next) ? next.slice(eq + 1) : undefined);
+      } else if (v === "-c" && marked(next))
+        anyAlias = true;
+      k++;
+    } else if (/^--(?:config-env|git-dir)=/.test(v)) {
+      carried = true;
+      const alias = /^--config-env=alias\.([^=]+)=/i.exec(v);
+      if (alias) {
+        aliasSet = true;
+        if (marked(alias[1]))
+          anyAlias = true;
+        else
+          aliases.set(alias[1].toLowerCase(), undefined);
+      }
+    } else if (!v.startsWith("-"))
+      break;
+  }
+  const sub = args[k]?.value;
+  const rest = args.slice(k + 1);
+  const here = { ...env, cwd: dir };
+  const maybeAlias = anyAlias || aliasSet && !!sub && marked(sub);
+  if (!state().policy.anyWrite && sub && (maybeAlias || aliases.has(sub.toLowerCase())) && !builtin2(sub)) {
+    const value = aliases.get(sub.toLowerCase());
+    const words = value === undefined || value.trim().startsWith("!") ? undefined : splitCmdline(value);
+    const head = words?.[0]?.value;
+    if (!words || !head || aliases.has(head.toLowerCase()) || depth > 8)
+      return refuse5("git", decide([]), `its alias ${sub}, set with -c or --config-env, runs a command, holds a value the hook cannot read, or names another alias`, `Write the git command out in full in place of the alias, then run it again. ${NOT_RUN}`);
+    return git2([...args.slice(0, k), ...words, ...rest], cmd, env, local, depth + 1);
+  }
+  if (state().policy.anyWrite) {
+    const cannot = (detail) => refuse5("git", decide([]), detail, PLACE_FIX);
+    if (aliasSet)
+      return cannot("it sets a git alias with -c or --config-env, which can run a push under a name the hook does not read");
+    if (sub && marked(sub))
+      return cannot("its subcommand is a value the hook cannot read");
+    if (sub && !["commit", "push", "send-pack", "subtree"].includes(sub) && !builtin2(sub)) {
+      if (carried)
+        return cannot(`it runs ${sub}, which -c, --config-env, --git-dir or a GIT_ variable may define as an alias`);
+      if (state().changed)
+        return cannot(`it runs ${sub}, which an earlier command in the call may define as an alias`);
+      const alias = gitText(dir ?? "/", ["config", "--get", `alias.${sub}`], `alias ${sub}`);
+      if (!alias.unknown) {
+        if (alias.value.trim().startsWith("!") || depth > 8)
+          return cannot(`its alias ${sub} runs a command the hook does not read`);
+        const words = splitCmdline(alias.value);
+        if (!words)
+          return cannot(`its alias ${sub} has an unclosed quote or a trailing backslash`);
+        return git2([...args.slice(0, k), ...words, ...rest], cmd, env, local, depth + 1);
+      }
+    }
+    const subtree = sub === "subtree" && rest[0]?.value === "push";
+    if (sub === "push" || sub === "send-pack" || subtree) {
+      if (carried)
+        return refuse5("git push", decide([]), "it carries -c, --config-env, --git-dir or a GIT_ variable, which can change where it pushes", PLACE_FIX);
+      return subtree ? push(rest.slice(1), here, [], SUBTREE_TAKES) : push(rest, here, [], PUSH_TAKES2, sub === "push");
+    }
+  }
+  if (sub !== "commit" && sub !== "push")
+    return;
+  const checkout = dir ? remotes(dir) : [];
+  if (sub === "push")
+    return push(rest, here, checkout);
+  if (dir && checkout.length === 0)
+    return;
+  if (state().policy.anyWrite) {
+    const target = decide(dir ? checkout : [undefined]);
+    if (target.where !== "guarded")
+      return;
+    const onBranch = state().policy.branchPush && dir && !carried && !state().movedBefore && branchHead(dir);
+    return onBranch ? undefined : judge3("git commit", target, [], env);
+  }
+  const { flags } = parseFlags(rest, COMMIT_TAKES);
+  const texts = [branch(dir)];
+  const extras = [];
+  for (const { name, value } of flags) {
+    if (!value)
+      continue;
+    if (name === "-m" || name === "--message")
+      texts.push(value);
+    else if (name === "-F" || name === "--file") {
+      texts.push(value.value === "-" && !value.unknown ? await stdinOf(cmd, here) : await readPath(value, here));
+    } else if (["-C", "-c", "--reedit-message", "--reuse-message"].includes(name)) {
+      texts.push(value.unknown || value.reads?.length ? unknown("the message of a commit the hook cannot name") : gitText(dir, ["log", "-1", "--format=%B", value.value], `the message of ${value.value}`));
+    } else
+      extras.push(value);
+  }
+  return judge3("git commit", decide(dir ? checkout : [undefined]), texts, env, extras);
+}
+function builtin2(sub) {
+  builtins2 ??= new Set(Bun.spawnSync(["git", "--list-cmds=builtins"], { stderr: "ignore" }).stdout.toString().split(`
+`).filter(Boolean));
+  return builtins2.has(sub);
+}
+function splitCmdline(body) {
+  const words = [];
+  let word;
+  let quote = "";
+  for (let i = 0;i < body.length; i++) {
+    let c = body[i];
+    if (!quote && /\s/.test(c)) {
+      if (word !== undefined)
+        words.push({ quoted: false, value: word });
+      word = undefined;
+      continue;
+    }
+    word ??= "";
+    if (!quote && (c === "'" || c === '"'))
+      quote = c;
+    else if (c === quote)
+      quote = "";
+    else {
+      if (c === "\\" && quote !== "'") {
+        c = body[++i];
+        if (c === undefined)
+          return;
+      }
+      word += c;
+    }
+  }
+  if (quote)
+    return;
+  if (word !== undefined)
+    words.push({ quoted: false, value: word });
+  return words;
+}
+function placeUrl(url) {
+  if (url.includes("::") || /^file:/i.test(url))
+    return;
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(url) || /^[^/:]+:/.test(url))
+    return remoteRepo(url);
+}
+function pushTarget(remote, dir) {
+  if (state().changed || !dir || remote && (remote.unknown || remote.reads?.length || marked(remote.value)))
+    return decide([undefined]);
+  const lines = (args) => {
+    const text = gitText(dir, args, "a remote");
+    return text.unknown ? undefined : text.value.split(`
+`).filter(Boolean);
+  };
+  const urls = (name) => lines(["remote", "get-url", "--push", "--all", name])?.map(placeUrl);
+  const rules = () => lines(["config", "--get-regexp", "^url\\..*\\.(push)?insteadof$"]) ?? [];
+  const literal = (url) => {
+    const rewritten = rules().some((line) => {
+      const prefix = line.slice(line.indexOf(" ") + 1);
+      return line.includes(" ") && prefix !== "" && url.startsWith(prefix);
+    });
+    return rewritten ? undefined : placeUrl(url);
+  };
+  if (!remote) {
+    const names = lines(["remote"]);
+    const branch = lines(["symbolic-ref", "--short", "HEAD"])?.[0];
+    const name = state().movedBefore || dir !== state().startCwd ? ".*" : branch?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const current = name ? `|branch\\.${name}\\.(pushremote|remote)` : "";
+    const keys = lines(["config", "--get-regexp", `^(remote\\.pushdefault${current})$`]);
+    const picked = (keys ?? []).map((line) => line.slice(line.indexOf(" ") + 1)).filter((value) => value !== "" && value !== "." && !names?.includes(value));
+    return decide([
+      ...names ? names.flatMap((name) => urls(name) ?? [undefined]) : [undefined],
+      ...picked.map(literal)
+    ]);
+  }
+  return decide(urls(remote.value) ?? [literal(remote.value)]);
+}
+var BRANCH_PUSH_FLAGS = new Set([
+  "--dry-run",
+  "--force",
+  "--force-if-includes",
+  "--force-with-lease",
+  "--no-verify",
+  "--quiet",
+  "--set-upstream",
+  "--verbose",
+  "-f",
+  "-n",
+  "-q",
+  "-u",
+  "-v"
+]);
+function branchOnly(flags, positionals, dir) {
+  const [remote, ...specs] = positionals;
+  if (!remote || specs.length === 0 || flags.some((f) => !BRANCH_PUSH_FLAGS.has(f.name)))
+    return false;
+  const defaults = new Set(["main", "master"]);
+  if (!/[:/]/.test(remote.value)) {
+    const config = gitText(dir, ["config", "--list"], "the checkout's git config");
+    if (config.unknown || config.value.split(`
+`).some((line) => line.startsWith(`remote.${remote.value}.push=`)))
+      return false;
+    const head = gitText(dir, ["symbolic-ref", "--short", `refs/remotes/${remote.value}/HEAD`], "the remote's default branch");
+    if (!head.unknown)
+      defaults.add(head.value.trim().slice(remote.value.length + 1).toLowerCase());
+  }
+  return specs.every((spec) => {
+    if (unreadable(spec) || /[*?[\\\s]/.test(spec.value))
+      return false;
+    const [source, destination, more] = spec.value.replace(/^\+/, "").split(":");
+    if (more !== undefined || !source || destination === "")
+      return false;
+    if (destination === undefined) {
+      const tags = gitText(dir, ["for-each-ref", "--format=%(refname)", `refs/tags/${source}`], "the tags of that name");
+      if (tags.unknown || tags.value.trim() !== "")
+        return false;
+    }
+    const name = (destination ?? source).replace(/^(?:refs\/)?heads\//, "");
+    return name !== "" && !/^(?:refs\/|@$|head$|tag$)/i.test(name) && !defaults.has(name.toLowerCase());
+  });
+}
+function branchHead(dir) {
+  const head = gitText(dir, ["symbolic-ref", "--short", "-q", "HEAD"], "the checkout's branch");
+  const name = head.value.trim().toLowerCase();
+  if (head.unknown || name === "")
+    return false;
+  const remotes = gitText(dir, ["remote"], "the checkout's remotes");
+  if (remotes.unknown)
+    return false;
+  const defaults = new Set(["main", "master"]);
+  for (const remote of remotes.value.split(`
+`).filter(Boolean)) {
+    const ref = gitText(dir, ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`], "the remote's default branch");
+    if (!ref.unknown)
+      defaults.add(ref.value.trim().slice(remote.length + 1).toLowerCase());
+  }
+  return !defaults.has(name);
+}
+async function push(rest, env, checkout, takes = PUSH_TAKES2, plain = false) {
+  const { flags, positionals } = parseFlags(rest, takes);
+  if (state().policy.anyWrite) {
+    const remote = positionals[0] ?? flags.findLast((f) => f.name === "--repo")?.value;
+    const target = pushTarget(remote, env.cwd);
+    if (plain && state().policy.branchPush && target.where === "guarded" && env.cwd && branchOnly(flags, positionals, env.cwd))
+      return;
+    return judge3("git push", target, [], env);
+  }
+  const names = new Set(flags.map((f) => f.name));
+  const [remote, ...refspecs] = positionals;
+  let target;
+  let pushTo;
+  if (!remote) {
+    target = decide(env.cwd ? checkout : [undefined]);
+    pushTo = env.cwd && pushRemote(env.cwd);
+  } else if (remote.unknown || remote.reads?.length || remote.value.includes(UNKNOWN))
+    target = decide([undefined]);
+  else if (/[:/]/.test(remote.value)) {
+    target = decide([remoteRepo(remote.value)]);
+    pushTo = remote.value;
+  } else {
+    pushTo = remote.value;
+    const url = gitText(env.cwd, ["remote", "get-url", remote.value], `the URL of remote ${remote.value}`);
+    target = decide([url.unknown ? undefined : remoteRepo(url.value)]);
+  }
+  if (target.where === "other")
+    return;
+  const texts = flags.flatMap((f) => f.value && (f.name === "-o" || f.name === "--push-option") ? [withPlace(f.value, "a push option")] : []);
+  const sources = [];
+  if (names.has("--all") || names.has("--branches") || names.has("--mirror")) {
+    texts.push(withPlace(gitText(env.cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"], "the branches it pushes"), "the branch names it pushes"));
+    sources.push("--branches");
+  }
+  if (names.has("--tags") || names.has("--follow-tags") || names.has("--mirror")) {
+    texts.push(withPlace(gitText(env.cwd, ["for-each-ref", "--format=%(refname:short)%0a%(contents)", "refs/tags"], "the tags it pushes"), "the tags it pushes"));
+  }
+  const deleting = names.has("--delete") || names.has("-d");
+  for (const spec of refspecs) {
+    texts.push(withPlace(spec, "a ref it pushes"));
+    if (spec.unknown || spec.reads?.length || spec.value.includes(UNKNOWN))
+      continue;
+    const [source, destination] = spec.value.replace(/^\+/, "").split(":");
+    if (destination === undefined && (source === "HEAD" || source === "@"))
+      texts.push(withPlace(branch(env.cwd), "the branch name it pushes"));
+    if (source !== "" && !deleting)
+      sources.push(source);
+  }
+  if (refspecs.length === 0 && sources.length === 0) {
+    texts.push(withPlace(branch(env.cwd), "the branch name it pushes"));
+    sources.push("HEAD");
+  }
+  if (sources.length > 0) {
+    const held = env.cwd && pushTo ? heldBy(env.cwd, pushTo) : [];
+    texts.push(...commitTexts(env.cwd, [...sources, "--not", ...held], "the messages of the commits it pushes"));
+  }
+  return judge3("git push", target, texts, env);
+}
+var GATED_READS = new Set(["usergroups_me", "users_conversations"]);
+function gatedPost(tool, server, name, input) {
+  const read = name.replace(/^slack_/, "");
+  if (READ_TOOL.test(read) || GATED_READS.has(read))
+    return;
+  const connector = name === CONNECTOR_TOOL;
+  const posting = CHAT_TOOL.test(name) || connector;
+  const what = tool.replace(/^mcp__/, "");
+  for (const gate of state().policy.gates ?? []) {
+    if ("broken" in gate) {
+      if (/slack/i.test(server))
+        return brokenGate(what, gate);
+      continue;
+    }
+    if (!gate.servers.includes(server))
+      continue;
+    const keys = connector ? CONNECTOR_KEYS : POST_KEYS;
+    const alone = posting && input !== undefined && input[keys.channel] === gate.selfDm && !Object.keys(input).some((k) => k !== keys.channel && OTHER_DESTINATION.test(k));
+    if (!alone)
+      return `no-playground-leak hook refused ${what}: the ${gate.org} extension gates its Slack sends on ${server}, so every write there goes through ${gate.path}; only a post whose one destination is its self-DM (${gate.selfDm}) passes here. Send it through that path.`;
+  }
+}
+var brokenGate = (what, gate) => `no-playground-leak hook refused ${what}: the ${gate.org} extension's slack.gatedSends does not read (${gate.broken}), so the hook cannot tell which Slack writes its gate covers. Tell your lead: it is set in that extension's settings as {"path": "<its send path>", "selfDm": "D\u2026", "servers": ["<MCP server>"]}, or "" for no gate; then run the call again.`;
+var SLACK_READ_METHOD = /^(?:auth\.test|search\.[a-z]+|(?:[a-z]+\.)+(?:history|info|list|replies|unreads|get[A-Za-z]*|lookup[A-Za-z]*))$/;
+function gatedCurl(urls) {
+  const gates = state().policy.gates ?? [];
+  if (!gates.length)
+    return;
+  const writes = urls.some((u) => {
+    const value = visible(u.value);
+    const url = /^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `http://${value}`;
+    if (!slackHost(hostOf(url)))
+      return false;
+    const method = /^[a-z][a-z\d+.-]*:\/\/[^/?#]*\/api\/([^/?#]+)(?:[?#]|$)/i.exec(url)?.[1];
+    return !method || !SLACK_READ_METHOD.test(method);
+  });
+  if (!writes)
+    return;
+  const broken = gates.find((g) => ("broken" in g));
+  if (broken && "broken" in broken)
+    return brokenGate("curl", broken);
+  const paths = gates.flatMap((g) => ("path" in g) ? [`${g.org}'s ${g.path}`] : []);
+  return `no-playground-leak hook refused curl to Slack's API: an org gates its Slack sends (slack.gatedSends), so a Slack write goes through ${paths.join(" or ")}, and curl passes only a read method on /api/. Send it through that path.`;
+}
+function strings(node) {
+  if (typeof node === "string")
+    return [node];
+  if (Array.isArray(node))
+    return node.flatMap(strings);
+  if (typeof node === "object" && node !== null)
+    return Object.values(node).flatMap(strings);
+  return [];
+}
+function mcp(tool, input) {
+  const [, server = "", name = ""] = MCP_TOOL3.exec(tool) ?? [];
+  const gated = gatedPost(tool, server, name, input);
+  if (gated)
+    return gated;
+  const surface = /linear/i.test(server) ? "Linear" : /slack/i.test(server) ? "Slack" : /github/i.test(server) ? "GitHub" : undefined;
+  if (!surface || READ_TOOL.test(name) || surface !== "GitHub" && !state().policy.hosts)
+    return;
+  const what = tool.replace(/^mcp__/, "");
+  let target = { label: surface, where: "guarded" };
+  if (!input)
+    return refuse5(what, target, "its input is not an object the hook can read", MCP_READABLE);
+  if (surface === "Slack" && (CHAT_TOOL.test(name) || name === CONNECTOR_TOOL)) {
+    const connector = name === CONNECTOR_TOOL;
+    const verdict = clearedPost(what, input, connector ? CONNECTOR_KEYS : POST_KEYS, connector);
+    if (verdict !== undefined)
+      return verdict || undefined;
+  }
+  if (surface === "GitHub" && state().policy.anyWrite && name === "create_repository") {
+    const owner = input.organization ?? "*";
+    const named = input.name;
+    return destination(what, typeof owner === "string" ? owner : undefined, typeof named === "string" ? named : undefined, "");
+  }
+  if (surface === "GitHub") {
+    const owner = input.owner ?? input.organization;
+    if (owner === undefined)
+      return;
+    if (typeof owner !== "string") {
+      return refuse5(what, { label: "GitHub", where: "unknown" }, "its owner is not text the hook can read", MCP_READABLE);
+    }
+    const repo = { owner, repo: typeof input.repo === "string" ? input.repo : "*" };
+    if (!state().policy.guarded(repo))
+      return;
+    target = { label: `${repo.owner}/${repo.repo}`, where: "guarded" };
+    if (state().policy.anyWrite)
+      return CONVERSATION_TOOL.test(name) ? undefined : refuseAny(what, target, "");
+  }
+  const hit = strings(input).map(state().policy.find).find(Boolean);
+  if (hit)
+    return refuse5(what, target, `its text holds ${hit.detail}`, hit.fix);
+}
+function candidate2(command) {
+  const maybe = state().policy.anyWrite ? MAYBE_ANY : MAYBE;
+  return command.includes("$'") || maybe.test(command.replace(/[\\'"]/g, ""));
+}
+async function factoryTerms(environment = process.env, checkout = CHECKOUT2, lists = join9(coreDir(), "lists")) {
+  const loaded = await guardList("no-playground-leak", "playground-terms", isTerms, EMPTY_TERMS, environment, join9(lists, "playground-terms.json"));
+  if (loaded.refusal !== undefined)
+    return { refusal: loaded.refusal };
+  terms = loaded.list;
+  return { pattern: pattern(environment, checkout) };
+}
+async function check6(raw, environment = process.env, checkout = CHECKOUT2, lists = join9(coreDir(), "lists")) {
+  const loadedTerms = await factoryTerms(environment, checkout, lists);
+  if (loadedTerms.refusal !== undefined)
+    return refusedList(raw, loadedTerms.refusal);
+  const loadedCleared = await guardList("no-playground-leak", "slack-cleared", isCleared, {}, environment, join9(lists, "slack-cleared.json"));
+  if (loadedCleared.refusal !== undefined)
+    return refusedList(raw, loadedCleared.refusal);
+  const read = await readPolicy(dataDir(environment));
+  if (read.refusal !== undefined)
+    return refusedList(raw, `no-playground-leak hook refused this call: ${read.refusal}, then run the call again.`);
+  const orgs = guardedOrgs(read.settings.values);
+  const gates = orgs.flatMap((org) => gateOf(org, readPolicySync(dataDir(environment), org).settings?.values ?? {}));
+  return inspectAs({ ...leakPolicy(new Set(orgs), loadedTerms.pattern), gates }, raw, environment, loadedCleared.list);
+}
+function gateOf(org, values) {
+  const value = values["slack.gatedSends"];
+  if (value === undefined || value === "")
+    return [];
+  const parsed = gatedSendsSchema.safeParse(value);
+  return [
+    parsed.success ? { org, ...parsed.data } : {
+      broken: parsed.error.issues.map((i) => `${i.path.join(".") || "its value"}: ${i.message}`).join("; "),
+      org
+    }
+  ];
+}
+var refusedList = (raw, refusal) => WRITE_CALL.test(subjectOf(raw)) && !readOnly(raw) ? refusal : undefined;
+async function inspectAs(given, raw, environment, cleared = {}) {
+  const call = { changed: false, cleared, moved: false, movedBefore: false, policy: given };
+  return await withLiveBudget(() => calls.run(call, async () => {
+    try {
+      return await inspect4(raw, environment);
+    } catch (error) {
+      const subject = subjectOf(raw);
+      const writes = WRITE_CALL.test(subject) || given.anyWrite && candidate2(subject);
+      if (!writes || !given.anyWrite && !given.find(subject))
+        return;
+      if (given.anyWrite)
+        return `${given.guard} hook refused this call: it could not read it (${error}), so it cannot tell whether it is ${given.what}. Split it into plain commands and run them again.`;
+      return `${given.guard} hook could not read this call (${error}), which may carry ${given.what} to ${given.place}, so it refuses it. Split it into plain commands and run them again.`;
+    }
+  }));
+}
+function subjectOf(raw) {
+  try {
+    const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
+    if (tool === "Bash" && typeof toolInput?.command === "string")
+      return toolInput.command;
+    return `${String(tool)} ${JSON.stringify(toolInput)}`;
+  } catch {
+    return raw;
+  }
+}
+async function inspect4(raw, environment) {
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    payload = undefined;
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return WRITE_CALL.test(raw) && state().policy.find(raw) ? `${state().policy.guard} hook could not parse its input, which may carry ${state().policy.what} to ${state().policy.place}, so it refuses the call.` : undefined;
+  }
+  const { cwd, tool_input: toolInput, tool_name: tool } = payload;
+  state().startCwd = typeof cwd === "string" ? cwd : undefined;
+  const input = typeof toolInput === "object" && toolInput !== null ? toolInput : undefined;
+  if (tool === "Bash") {
+    const command = input?.command;
+    if (typeof command !== "string" || !candidate2(command))
+      return;
+    const directory = typeof cwd === "string" ? cwd : undefined;
+    const own = knownVariables(command, environment, directory);
+    const env = {
+      cwd: directory,
+      files: new Map,
+      known: { ...own, ...startingVariables(command, environment, own) },
+      process: environment,
+      vars: new Map
+    };
+    return run2(lex(command, env.known), env, leak);
+  }
+  if (typeof tool === "string")
+    return mcp(tool, input);
+}
+if (false) {}
+
+// scripts/hooks/no-extension-repo-write.ts
+var GUARD2 = "no-extension-repo-write";
+var OWNER_ROUTE = "Only the owner changes one, typing the command as a ! command in the dispatcher's terminal window: tell your lead what it should do, and the dispatcher hands the owner the command.";
+var REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+var decoded = (text) => text.replace(/%([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+function guardedRepos(data, values, environment) {
+  const given = values["ext.repos"];
+  const named = new Map;
+  if (typeof given === "object" && given !== null) {
+    for (const [scope, repo] of Object.entries(given))
+      if (typeof repo === "string" && REPO.test(repo))
+        named.set(scope, repo.toLowerCase());
+  }
+  const repos = new Set(named.values());
+  const scopes = scopesIn(data);
+  for (const scope of scopes) {
+    const config = join10(extensionsDir(data), scope, ".git", "config");
+    const url = Bun.spawnSync(["git", "config", "--file", config, "--get", "remote.origin.url"], {
+      stderr: "ignore"
+    });
+    const repo = remoteRepo(url.stdout.toString());
+    if (repo)
+      repos.add(`${repo.owner}/${repo.repo}`.toLowerCase());
+  }
+  const unnamed = scopes.filter((scope) => !named.has(scope));
+  if (unnamed.length === 0)
+    return repos;
+  const logins = new Set([loginOf(data, environment)]);
+  try {
+    logins.add(loginOf(data, {}));
+  } catch {}
+  for (const login of logins)
+    for (const scope of unnamed)
+      repos.add(`${login}/playground-${scope}`.toLowerCase());
+  return repos;
+}
+function finder(repos) {
+  const names = [...repos].map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = new RegExp(`(?<![\\w.-])(?:${names.join("|")})(?:\\.git)?(?![\\w.-])`, "i");
+  return (text) => {
+    const found = pattern.exec(decoded(text))?.[0];
+    return found ? { detail: `it names ${found}`, fix: OWNER_ROUTE } : undefined;
+  };
+}
+var policy2 = (repos) => ({
+  anyWrite: true,
+  branchPush: true,
+  find: finder(repos),
+  git: true,
+  guard: GUARD2,
+  guarded: (repo) => {
+    const owner = decoded(repo.owner).toLowerCase();
+    const name = decoded(repo.repo).replace(/\.git$/i, "").toLowerCase();
+    if (/[%/]/.test(owner + name))
+      return true;
+    if (owner !== "*")
+      return repos.has(`${owner}/${name}`);
+    return [...repos].some((guarded) => guarded.endsWith(`/${name}`));
+  },
+  hosts: false,
+  place: "an extension repository",
+  what: "a write to an extension repository",
+  why: `The sync renders each extension repository's main into every session's store. A session commits in its clone on a branch other than the default, as a git commit call of its own, pushes that branch by its remote and refspec (git push origin HEAD:<branch>), opens a pull request, and lands it with bun run ext:merge <owner>/<repo> <n> at the review's 5/5. For anything else: ${OWNER_ROUTE}`
+});
+async function check7(raw, environment = process.env, budget = 8000) {
+  const data = dataDir(environment);
+  if (!existsSync6(extensionsDir(data)))
+    return;
+  const read = await readPolicy(data);
+  if (read.refusal !== undefined)
+    return refusedList(raw, `${GUARD2} hook refused this call: ${read.refusal}, then run the call again.`);
+  let repos;
+  try {
+    repos = guardedRepos(data, read.settings.values, environment);
+  } catch (error) {
+    return refusedList(raw, `${GUARD2} hook refused this call: ${error.message}, so it cannot name the extension repositories. ${OWNER_ROUTE}`);
+  }
+  if (repos.size === 0)
+    return;
+  return withDeadline(budget, () => inspectAs(policy2(repos), raw, environment));
+}
+if (false) {}
+
+// scripts/hooks/no-extensions-write.ts
+import { dirname as dirname5, join as join12, resolve as resolve7, sep as sep2 } from "path";
+
+// scripts/hooks/codex.ts
+import { isAbsolute as isAbsolute3, resolve as resolve5 } from "path";
+var HEADERS2 = ["*** Add File: ", "*** Delete File: ", "*** Update File: ", "*** Move to: "];
+var SHELL_PATCH = /(?:^|[\n;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*\/)?(?:apply_patch|applypatch)(?=$|[\s;&|)<>'"`])/;
+var patchPaths = (text) => text.split(`
+`).flatMap((line) => {
+  const trimmed = line.trim();
+  const header = HEADERS2.find((h) => trimmed.startsWith(h));
+  return header && trimmed.length > header.length ? [trimmed.slice(header.length)] : [];
+});
+var writeOf2 = (input, path, patch) => {
+  const cwd = typeof input.cwd === "string" ? input.cwd : "/";
+  return JSON.stringify({
+    ...input,
+    tool_input: { content: patch, file_path: isAbsolute3(path) ? path : resolve5(cwd, path) },
+    tool_name: "Write"
+  });
+};
+function guardInputs(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return [raw];
+  }
+  if (typeof input !== "object" || input === null || typeof input.turn_id !== "string")
+    return [raw];
+  const tool = input.tool_name;
+  const command = input.tool_input?.command;
+  const text = typeof command === "string" ? command : "";
+  const shell = tool === "Bash" && SHELL_PATCH.test(text);
+  if (tool !== "apply_patch" && !shell)
+    return [raw];
+  const paths = patchPaths(text);
+  if (paths.length === 0)
+    return null;
+  return [...shell ? [raw] : [], ...paths.map((path) => writeOf2(input, path, text))];
+}
+async function eachInput(raw, guard, judge) {
+  const inputs = guardInputs(raw);
+  if (!inputs)
+    return `${guard} hook refuses an apply_patch whose patch names no file it can read: give the patch whole in the call itself, with each file on its own *** Add File, *** Update File or *** Delete File line.`;
+  for (const input of inputs) {
+    const reason = await judge(input);
+    if (reason)
+      return reason;
+  }
+}
+
 // scripts/hooks/no-main-checkout.ts
+import { existsSync as existsSync7, readdirSync as readdirSync4, readFileSync as readFileSync5, realpathSync as realpathSync3 } from "fs";
+import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute4, join as join11, normalize, resolve as resolve6, sep } from "path";
 function mainCheckout2(dir) {
   try {
-    const gitdir = /^gitdir: (.+)$/m.exec(readFileSync4(join10(dir, ".git"), "utf8"))?.[1];
-    const main = gitdir && /^(.+)\/\.git\/worktrees\/[^/]+$/.exec(resolve5(dir, gitdir.trim()))?.[1];
+    const gitdir = /^gitdir: (.+)$/m.exec(readFileSync5(join11(dir, ".git"), "utf8"))?.[1];
+    const main = gitdir && /^(.+)\/\.git\/worktrees\/[^/]+$/.exec(resolve6(dir, gitdir.trim()))?.[1];
     if (main)
       return main;
   } catch {}
@@ -11024,26 +14084,26 @@ function liveCheckout(main, environment) {
     values: {}
   };
   const head = `ref: refs/heads/${liveSettings.get(settings, "live.branch")}`;
-  const worktrees = join10(main, ".git", "worktrees");
+  const worktrees = join11(main, ".git", "worktrees");
   let names;
   try {
-    names = readdirSync3(worktrees);
+    names = readdirSync4(worktrees);
   } catch {
     return;
   }
   for (const name of names) {
     try {
-      if (readFileSync4(join10(worktrees, name, "HEAD"), "utf8").trim() !== head)
+      if (readFileSync5(join11(worktrees, name, "HEAD"), "utf8").trim() !== head)
         continue;
-      return dirname4(resolve5(join10(worktrees, name), readFileSync4(join10(worktrees, name, "gitdir"), "utf8").trim()));
+      return dirname4(resolve6(join11(worktrees, name), readFileSync5(join11(worktrees, name, "gitdir"), "utf8").trim()));
     } catch {}
   }
 }
 function inWorktree(path, worktrees) {
   if (!path.startsWith(worktrees))
     return false;
-  const tree = join10(worktrees, path.slice(worktrees.length).split(sep)[0]);
-  return existsSync7(join10(tree, ".git")) || !isFolder(tree);
+  const tree = join11(worktrees, path.slice(worktrees.length).split(sep)[0]);
+  return existsSync7(join11(tree, ".git")) || !isFolder(tree);
 }
 function real(path) {
   const found = resolved(path);
@@ -11059,7 +14119,7 @@ function real(path) {
     else
       low = mid;
   }
-  return join10(resolved(sep + parts.slice(0, low).join(sep)) ?? sep, ...parts.slice(low));
+  return join11(resolved(sep + parts.slice(0, low).join(sep)) ?? sep, ...parts.slice(low));
 }
 var resolved = (path) => {
   try {
@@ -11073,25 +14133,25 @@ function nearest(path) {
   for (let dir = path;; dir = dirname4(dir)) {
     const found = resolved(dir);
     if (found !== undefined)
-      return join10(found, ...rest.reverse());
+      return join11(found, ...rest.reverse());
     if (dir === dirname4(dir))
       return path;
     rest.push(basename4(dir));
   }
 }
-var FILE_TOOLS = {
+var FILE_TOOLS2 = {
   Edit: "file_path",
   MultiEdit: "file_path",
   NotebookEdit: "notebook_path",
   Write: "file_path"
 };
-var INSTEAD = `the main checkout is what every installed skill follows, so it stays clean. Run it in your own worktree under the main checkout's .claude/worktrees/, made by absolute path so it nests in no other worktree (git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" -b <branch> origin/canary), or start lefthook from a script with cwd set to a scratch repo, as tests/lefthook.test.ts does.`;
-var refuse3 = (what, fix = INSTEAD) => `no-main-checkout hook refuses ${what}: ${fix}`;
+var INSTEAD2 = `the main checkout is what every installed skill follows, so it stays clean. Run it in your own worktree under the main checkout's .claude/worktrees/, made by absolute path so it nests in no other worktree (git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" -b <branch> origin/canary), or start lefthook from a script with cwd set to a scratch repo, as tests/lefthook.test.ts does.`;
+var refuse6 = (what, fix = INSTEAD2) => `no-main-checkout hook refuses ${what}: ${fix}`;
 var UNKNOWN_FIX = "the hook cannot tell which folder it runs in, since a cd before it may not run, may run many times, or names a path it cannot read, so it reads every folder the shell may be in. Name the folder instead: git -C <your worktree>, bun --cwd <your worktree>, or cd by a literal path.";
 var ANYWHERE_FIX = "the line names more folders than the hook carries, so it cannot rule out the main checkout. Name the folder on the command instead: git -C <your worktree>, bun --cwd <your worktree>, or run it as a line of its own after a cd to a literal path.";
-var fixFor2 = (sure, own = INSTEAD) => sure ? own : UNKNOWN_FIX;
+var fixFor2 = (sure, own = INSTEAD2) => sure ? own : UNKNOWN_FIX;
 var BUN_SCRIPTS = new Set(["build", "check-types", "test", "test:file"]);
-var RUNNERS2 = new Set(["npx"]);
+var RUNNERS3 = new Set(["npx"]);
 var X = { quoted: false, value: "x" };
 var TOOLS = new Set(["lefthook", "turbo"]);
 var DUPLICATE = /^(?:\d+|-)$/;
@@ -11162,7 +14222,7 @@ function bunCall(args, env) {
 var landing = (word, env, from) => {
   if (!word || pathOf(word, { ...env, cwd: from }) === undefined)
     return;
-  return kernelPath(word, from, real(resolve5(from ?? "", word.value)));
+  return kernelPath(word, from, real(resolve6(from ?? "", word.value)));
 };
 function gitCall(args, env, local) {
   let cwd = env.cwd;
@@ -11225,7 +14285,7 @@ var GIT_MOVES = new Set([
 var APPLY_READS = new Set(["--check", "--numstat", "--stat", "--summary"]);
 var STEP_FIVE = /^(?:-q |--quiet )?--ff-only (?:-q |--quiet )?origin\/main$/;
 var GIT_FIX = `it moves the HEAD, index or files of the main checkout, which every installed skill, hook and ops job runs from. Name your own tree on every git call, git -C <your worktree> ..., after git -C <your worktree> rev-parse --show-toplevel names it; the main checkout moves only by the release skill's step 5, git -C <main checkout> fetch -q origin main && git -C <main checkout> merge --ff-only -q origin/main, a stray local commit on its main goes by git -C <main checkout> reset --keep origin/main while its tree is clean, and a worktree is made by absolute path under the main checkout's .claude/worktrees/, so it nests in no other worktree, by git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" -b <branch> origin/canary.`;
-var LIVE_FIX = "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each canary head, and a change it needs goes through a PR into canary.";
+var LIVE_FIX = "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each head of the branch the main checkout sits on, and a change it needs goes through a PR into canary.";
 function liveWrite(args, env, local) {
   const { also, cwd, rest, sub } = gitCall(args, env, local);
   if (sub && (sub === "commit" || sub === "merge" || gitMoves(sub, rest)))
@@ -11276,24 +14336,26 @@ function gitMoves(sub, rest) {
     return rest.some((w) => w === "--force" || /^-[a-zA-Z]*f/.test(w));
   return false;
 }
-function turboWords(name, args, env) {
-  if (name === "turbo")
+var turboWords = (name, args, env) => toolWords(["turbo"], name, args, env);
+function toolWords(tools, name, args, env) {
+  const named = (word) => tools.includes(toolName(word));
+  if (tools.includes(name))
     return args;
-  if (RUNNERS2.has(name) || name === "bunx")
-    return runnerTurbo(args);
+  if (RUNNERS3.has(name) || name === "bunx")
+    return runnerTool(named, args);
   if (name !== "bun")
     return;
   const { at, sub, words } = bunCall(args, env);
   if (words[0] === "x")
-    return runnerTurbo(args.slice(sub + 1));
+    return runnerTool(named, args.slice(sub + 1));
   const target = words[0] === "run" ? words[1] : words[0];
-  return isTurbo(target) ? args.slice(at + 1) : undefined;
+  return named(target) ? args.slice(at + 1) : undefined;
 }
-function runnerTurbo(args) {
+function runnerTool(named, args) {
   const at = runnerTarget(args);
-  if (isTurbo(args[at]?.value))
+  if (named(args[at]?.value))
     return args.slice(at + 1);
-  return packagedTools(args).includes("turbo") ? args.slice(at) : undefined;
+  return packagedTools(args).some(named) ? args.slice(at) : undefined;
 }
 var RUNNER_TAKES = new Set([
   "--ca",
@@ -11329,6 +14391,48 @@ function runnerFolders(name, args, env, tool) {
   const folders = [cwdFlag(tool, { ...env, cwd: chained })];
   return xCwd ? [...folders, xCwd.dir] : folders;
 }
+var BUN_SPLITS = new Set(["--cwd", "--filter", "-F"]);
+var STARTED_RUNNERS = new Set(["bun", "bunx", "npx"]);
+var OPTION_READINGS = 16;
+var UNREAD_CWD = {
+  quoted: false,
+  ...unknown("a runner's option past the readings the hook makes")
+};
+function runnerReadings(name, args) {
+  if (!STARTED_RUNNERS.has(name))
+    return [args];
+  const out = [];
+  const walk = (from, head) => {
+    let k = from;
+    for (;k < args.length && out.length <= OPTION_READINGS; k++) {
+      const word = args[k];
+      const next = args[k + 1];
+      const v = word.value;
+      if (!v.startsWith("-") || v === "-") {
+        if (v !== "run" && v !== "x")
+          break;
+      } else if (BUN_SPLITS.has(v) && next) {
+        head = [...head, word, next];
+        k++;
+        continue;
+      } else if (!v.includes("=") && next && !next.value.startsWith("-"))
+        walk(k + 2, [...head, { ...word, value: `${v}=${next.value}` }]);
+      head = [...head, word];
+    }
+    const started = toolName(args[k]?.value);
+    if (!STARTED_RUNNERS.has(started))
+      out.push([...head, ...args.slice(k)]);
+    else
+      for (const sub of runnerReadings(started, args.slice(k + 1)))
+        out.push([...head, args[k], ...sub]);
+  };
+  walk(0, []);
+  return out.length > OPTION_READINGS ? [
+    args,
+    ...out.slice(0, OPTION_READINGS - 1),
+    [{ quoted: false, value: "--cwd" }, UNREAD_CWD, ...args]
+  ] : out;
+}
 function runnerTarget(args) {
   let k = 0;
   while (k < args.length && args[k].value.startsWith("-"))
@@ -11336,7 +14440,6 @@ function runnerTarget(args) {
   return k;
 }
 var toolName = (word) => program((word ?? "").replace(/(?<=.)@[^/]*$/, ""));
-var isTurbo = (word) => toolName(word) === "turbo";
 function validationOff(local, env) {
   const read = (key) => local.get(key)?.value ?? env.vars.get(key)?.value ?? env.process[key];
   return !!read("NODE_ENV") && read("SKIP_ENV_VALIDATION") === "true";
@@ -11348,6 +14451,8 @@ var ranIn = (dir, also) => [
 ];
 var unreadFolder = (also) => also?.includes(undefined) ?? false;
 function runs(name, args, local, env) {
+  if (args[1] === UNREAD_CWD)
+    return { also: [undefined], cwd: undefined, what: `${name} past the readings the hook makes` };
   if (name === "bunx")
     return runs("bun", [X, ...args], local, env);
   const turbo = turboWords(name, args, env);
@@ -11363,10 +14468,15 @@ function runs(name, args, local, env) {
   }
   if (TOOLS.has(name))
     return { cwd: cwdFlag(args, env), what: name };
-  if (RUNNERS2.has(name)) {
+  if (RUNNERS3.has(name)) {
     const tool = [toolName(args[runnerTarget(args)]?.value), ...packagedTools(args)].find((t) => TOOLS.has(t));
     if (tool)
       return { cwd: cwdFlag(args, env), what: `${name} ${tool}` };
+    const at = runnerTarget(args);
+    const started = toolName(args[at]?.value);
+    const ran = STARTED_RUNNERS.has(started) && runs(started, args.slice(at + 1), local, env);
+    if (ran)
+      return { ...ran, what: `${name} ${ran.what}` };
   }
   if (name === "git") {
     const { also, cwd, rest, sub } = gitCall(args, env, local);
@@ -11472,7 +14582,7 @@ function inPlace(name, args) {
     return [];
   return scripted ? positionals : positionals.slice(1);
 }
-function writes(name, args) {
+function writes2(name, args) {
   const positionals = args.filter((a) => !a.value.startsWith("-"));
   if (name === "sed" || name === "perl")
     return inPlace(name, args);
@@ -11507,7 +14617,7 @@ function browserPathless(args, env) {
 function writeTargets(cmd, name, args) {
   const targets = [
     ...cmd.redirects.filter((r) => [">", ">>", ">|"].includes(r.op) || r.op === ">&" && !DUPLICATE.test(r.target?.value ?? "")).flatMap((r) => r.target ? [r.target] : []),
-    ...writes(name, args)
+    ...writes2(name, args)
   ];
   return targets.filter((t) => !["-", "/dev/null"].includes(t.value));
 }
@@ -11515,7 +14625,7 @@ async function unreadScript(shell, here, sure, inMain) {
   const script = await stdinOf(shell, here);
   if (!script.unknown || !inMain(here.cwd))
     return;
-  return refuse3(`a shell whose script (${script.unknown}) the hook cannot read`, fixFor2(sure));
+  return refuse6(`a shell whose script (${script.unknown}) the hook cannot read`, fixFor2(sure));
 }
 var EXPORTS2 = new Set(["declare", "export", "local", "readonly", "typeset"]);
 async function fedScript(cmd, here, sure, inMain, visit) {
@@ -11530,24 +14640,24 @@ async function fedScript(cmd, here, sure, inMain, visit) {
   if (unread) {
     if (!inMain(here.cwd))
       return;
-    return refuse3(`a shell whose script (${unread}) the hook cannot read`, fixFor2(sure));
+    return refuse6(`a shell whose script (${unread}) the hook cannot read`, fixFor2(sure));
   }
   if (kind === "root" && !cmd.bareOf)
-    return run(lex(script.value, here.known), { ...here, vars: new Map }, visit, true);
+    return run2(lex(script.value, here.known), { ...here, vars: new Map }, visit, true);
 }
-async function inspect3(raw, environment, main) {
+async function inspect5(raw, environment, main) {
   const { cwd, tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
   const input = toolInput ?? {};
   const directory = typeof cwd === "string" ? cwd : undefined;
   const checkout = real(main);
-  const worktrees = join10(checkout, ".claude", "worktrees") + sep;
+  const worktrees = join11(checkout, ".claude", "worktrees") + sep;
   const inMain = (raw) => {
-    const path = raw === undefined ? undefined : real(resolve5(directory ?? "", raw));
+    const path = raw === undefined ? undefined : real(resolve6(directory ?? "", raw));
     return path !== undefined && (path === checkout || path.startsWith(checkout + sep)) && !inWorktree(path, worktrees);
   };
   let live;
   const inLive = (raw) => {
-    const path = raw === undefined ? undefined : real(resolve5(directory ?? "", raw));
+    const path = raw === undefined ? undefined : real(resolve6(directory ?? "", raw));
     return live !== undefined && path !== undefined && (path === live || path.startsWith(live + sep));
   };
   let writer;
@@ -11557,11 +14667,11 @@ async function inspect3(raw, environment, main) {
       return;
     if (await (writer ??= liveWriter(raw, environment)))
       return;
-    return refuse3(`${move.what} in the live Dashboard's checkout`, fix);
+    return refuse6(`${move.what} in the live Dashboard's checkout`, fix);
   };
-  const file = typeof tool === "string" ? input[FILE_TOOLS[tool]] : undefined;
+  const file = typeof tool === "string" ? input[FILE_TOOLS2[tool]] : undefined;
   if (typeof file === "string")
-    return inMain(file) ? refuse3(`a write to ${file}`) : undefined;
+    return inMain(file) ? refuse6(`a write to ${file}`) : undefined;
   if (tool !== "Bash")
     return;
   const { command } = input;
@@ -11580,7 +14690,7 @@ async function inspect3(raw, environment, main) {
   const visit = async (cmd, parsed, env) => {
     const pathless = browserOnly.has(cmd) ? browserPathless(parsed.args, env) : undefined;
     if (pathless)
-      return refuse3(`agent-browser ${pathless} with a relative path or none`, BROWSER_FIX);
+      return refuse6(`agent-browser ${pathless} with a relative path or none`, BROWSER_FIX);
     if (parsed.name === "" && !cmd.feedsShell || EXPORTS2.has(parsed.name)) {
       for (const here of places(env, directory)) {
         const sure = env.cwdSure !== undefined && here.cwd === env.cwdSure;
@@ -11592,19 +14702,19 @@ async function inspect3(raw, environment, main) {
     }
     const slot = slotWords(parsed);
     if (slot)
-      return slot.length === 0 ? undefined : examine({ ...cmd, words: slot }, env, visit, false);
+      return slot.length === 0 ? undefined : examine({ ...cmd, words: slot }, { ...env, files: new Map(env.files), vars: new Map(env.vars) }, visit, false);
     const { args, local, name } = parsed;
     if (env.cwdAnywhere) {
       const blind = { ...env, cwd: undefined };
-      const ran = runs(name, args, local, blind);
-      if (ran && ranIn(ran.cwd, ran.also).some((dir) => dir === undefined || inMain(dir)))
-        return refuse3(ran.what, ANYWHERE_FIX);
+      const ran = runnerReadings(name, args).map((reading) => runs(name, reading, local, blind)).find((ran) => ran && ranIn(ran.cwd, ran.also).some((dir) => dir === undefined || inMain(dir)));
+      if (ran)
+        return refuse6(ran.what, ANYWHERE_FIX);
       const blindWrite = writeTargets(cmd, name, args).find((t) => {
         const path = pathOf(t, blind);
         return path === undefined || inMain(path);
       });
       if (blindWrite)
-        return refuse3(`a write to ${blindWrite.value}`, ANYWHERE_FIX);
+        return refuse6(`a write to ${blindWrite.value}`, ANYWHERE_FIX);
       const blindLive = name === "git" ? await liveRefusal(args, local, blind, (cwd) => cwd === undefined || inLive(cwd), ANYWHERE_FIX) : undefined;
       if (blindLive)
         return blindLive;
@@ -11613,7 +14723,7 @@ async function inspect3(raw, environment, main) {
       const sure = env.cwdSure !== undefined && here.cwd === env.cwdSure;
       const pipedTo = fed.get(cmd);
       if (pipedTo?.kind === "code" && inMain(here.cwd))
-        return refuse3(`a pipe into an interpreter whose script, the piped input, the hook cannot read`, fixFor2(sure));
+        return refuse6(`a pipe into an interpreter whose script, the piped input, the hook cannot read`, fixFor2(sure));
       if (pipedTo) {
         const verdict = await unreadScript(pipedTo.consumer, here, sure, inMain);
         if (verdict)
@@ -11622,18 +14732,18 @@ async function inspect3(raw, environment, main) {
       const script = await fedScript(cmd, here, sure, inMain, visit);
       if (script)
         return script;
-      const ran = runs(name, args, local, here);
-      if (ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)))
-        return refuse3(ran.what, fixFor2(sure, ran.fix));
+      const ran = runnerReadings(name, args).map((reading) => runs(name, reading, local, here)).find((ran) => ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)));
+      if (ran)
+        return refuse6(ran.what, fixFor2(sure, ran.fix));
       const moved = name === "git" ? await liveRefusal(args, local, here, inLive, fixFor2(sure, LIVE_FIX)) : undefined;
       if (moved)
         return moved;
       const wrote = writeTargets(cmd, name, args).find((t) => inMain(pathOf(t, here)));
       if (wrote)
-        return refuse3(`a write to ${pathOf(wrote, here)}`, fixFor2(sure));
+        return refuse6(`a write to ${pathOf(wrote, here)}`, fixFor2(sure));
     }
   };
-  const steadyAt = steadyNames(namings(command), lexed.commands);
+  const steadyAt = steadyNames(namings2(command), lexed.commands);
   const env = {
     cwd: directory,
     cwdSure: directory,
@@ -11644,11 +14754,11 @@ async function inspect3(raw, environment, main) {
     process: environment,
     vars: new Map
   };
-  return run(lexed, env, visit, true);
+  return run2(lexed, env, visit, true);
 }
-async function check5(raw, environment = process.env, main = mainCheckout2(resolve5(__CHECKOUT + "/scripts/hooks", "..", ".."))) {
+async function check8(raw, environment = process.env, main = mainCheckout2(resolve6(__CHECKOUT + "/scripts/hooks", "..", ".."))) {
   try {
-    return await eachInput(raw, "no-main-checkout", (one) => inspect3(one, environment, main));
+    return await eachInput(raw, "no-main-checkout", (one) => inspect5(one, environment, main));
   } catch {
     return;
   }
@@ -11657,16 +14767,21 @@ if (false) {}
 
 // scripts/hooks/no-extensions-write.ts
 var WHY_ROOT = "every guard reads its list and policy.json from there, so a session's write would change what a guard allows.";
-var ROUTE = `${WHY_ROOT} A guard's list or setting changes only by the owner typing the playground command as a ! command in the dispatcher's terminal window, which runs without hooks: tell your lead, and the dispatcher hands the owner the command. A session writes nothing there by hand.`;
+var ROUTE2 = `${WHY_ROOT} A guard's list or setting changes only by the owner typing the playground command as a ! command in the dispatcher's terminal window, which runs without hooks: tell your lead, and the dispatcher hands the owner the command. A session writes nothing there by hand.`;
 var PRIVACY_KEYS = new Set(["factory.archiveRepo", "owner.names"]);
 var PRIVACY = "at your login's scope, which Privacy on the Dashboard's Settings page saves";
 var PRIVACY_ROUTE = "every guard reads policy.json from there, so a session's write would change what a guard allows: tell your lead, and the dispatcher asks the owner to save it in Privacy on the Dashboard's Settings page. A session writes nothing there by hand.";
-var refuse4 = (what) => `no-extensions-write hook refuses ${what}: ${what.endsWith(PRIVACY) ? PRIVACY_ROUTE : ROUTE}`;
+var HOOK_TEXT = "which a hook file may not hold";
+var HOOK_ROUTE = "a hook learns a remover's target only when it runs, so no reading of its text can rule out the guarded folder. Write the hook as text the hook can read, with no remover word (in a comment too), no program built from a variable or a substitution or named by a glob, and no eval, or tell your lead what it needs to remove.";
+var LINE_TEXT = "which the hook reads as the hook's own text";
+var LINE_ROUTE = "a line that writes a hook file has every text on it read as the hook's, since text can reach a hook by many paths. Run the hook's write as a call of its own, apart from the command that holds that text.";
+var refuse7 = (what) => `no-extensions-write hook refuses ${what}: ${what.endsWith(PRIVACY) ? PRIVACY_ROUTE : what.endsWith(HOOK_TEXT) ? HOOK_ROUTE : what.endsWith(LINE_TEXT) ? LINE_ROUTE : ROUTE2}`;
 var TOO_LONG = "a command too long or nested too deep to read inside the hook's time: split it into shorter calls";
 var READERS2 = new Set([
   "[",
   "cat",
   "cmp",
+  "df",
   "diff",
   "grep",
   "head",
@@ -11680,6 +14795,7 @@ var READERS2 = new Set([
   "test",
   "wc"
 ]);
+var PIPE_READERS = new Set([...READERS2, "cut", "tr"]);
 var GIT_READS = new Set([
   "blame",
   "cat-file",
@@ -11696,7 +14812,26 @@ var REMOVERS = new Set(["find", "mv", "rm", "rmdir", "rsync", "unlink"]);
 var GETOPT_REMOVERS = new Set(["mv", "rm", "rmdir", "unlink"]);
 var RSYNC_FLAGS = new Set(["backup", "partial"]);
 var WRITERS = new Set(["cp", "dd", "install", "ln", "mkdir", "tee", "touch"]);
-var CLI = join11("packages", "scripts", "src", "playground", "cli.ts");
+var HOOK_REMOVERS = new Set([
+  ...REMOVERS,
+  "-delete",
+  "rimraf",
+  "rm_f",
+  "rm_r",
+  "rm_rf",
+  "rmdirsync",
+  "rmsync",
+  "rmtree",
+  "shred",
+  "srm",
+  "trash",
+  "trash-put",
+  "unlinksync",
+  "wipe"
+]);
+var RUNS = /^(?:EDITOR|GIT_[A-Z0-9_]+|HOME|LESSOPEN|PAGER|VISUAL|XDG_CONFIG_HOME)$/;
+var TEXT_RUNS = new RegExp(`${RUNS.source}|^(?:AGENT_BROWSER_[A-Z0-9_]+|BROWSER|GH_[A-Z0-9_]+)$`);
+var CLI = join12("packages", "scripts", "src", "playground", "cli.ts");
 var varsRun = new WeakMap;
 var GH_READS = new Set([
   "api",
@@ -11716,12 +14851,47 @@ var GH_POSTS = new Set([
   "pr create",
   "pr edit"
 ]);
+var UNREAD_CD_JUDGED = new Set(["chmod", "curl", "mktemp", "shred", "sort", "tar", "truncate"]);
+var NO_WRITES = new Set([
+  ":",
+  "basename",
+  "break",
+  "cd",
+  "continue",
+  "cut",
+  "date",
+  "dirname",
+  "exit",
+  "false",
+  "for",
+  "id",
+  "popd",
+  "printenv",
+  "pushd",
+  "pwd",
+  "read",
+  "return",
+  "set",
+  "shift",
+  "sleep",
+  "sysctl",
+  "tr",
+  "true",
+  "type",
+  "uname",
+  "unset",
+  "wait",
+  "which",
+  "whoami"
+]);
+var PORTLESS_READS = new Set(["get", "list"]);
 var GUARD_KEYS = new Set([
   "ext.links",
   "ext.order",
   "ext.repos",
   "factory.archiveRepo",
   "factory.publicRepo",
+  "github.pollMinutes",
   "glm.readOnlyLoad5",
   "live.branch",
   "owner.names",
@@ -11729,7 +14899,14 @@ var GUARD_KEYS = new Set([
   "sessions.aliases",
   "sessions.names",
   "slack.gatedSends",
-  "usage.keychainService"
+  "usage.keychainService",
+  "wa.alert",
+  "wa.alertCheck",
+  "wa.device",
+  "wa.guestPolicy",
+  "wa.owner",
+  "wa.replyPolicy",
+  "yard.logReaders"
 ]);
 var EXT_WRITES = new Set(["add", "import", "init", "link", "order", "remove", "sync", "unlink"]);
 var EXT_DRY = new Set(["add", "import", "init"]);
@@ -11742,20 +14919,30 @@ var SED_BRACKET = String.raw`\[\^?\]?[^\]/[\n]*\]`;
 var SED_BODY = String.raw`(?:[^/\\\n[]|\\.|${SED_BRACKET})*/`;
 var SED_TEXT = String.raw`(?:[^/\\\n]|\\.)*/`;
 var SED_ADDRESS = String.raw`(?:\d+|\$|/${SED_BODY})`;
-var SED_ITEM = String.raw`[ \t]*(?:${SED_ADDRESS}(?:[ \t]*,[ \t]*(?:${SED_ADDRESS}|[+~]\d+))?[ \t]*!?[ \t]*)?(?:[=dlnNpPqQ]|s/${SED_BODY}${SED_TEXT}[giImMp0-9]*)[ \t]*`;
+var SED_ITEM = String.raw`[ \t]*(?:${SED_ADDRESS}(?:[ \t]*,[ \t]*(?:${SED_ADDRESS}|[+~]\d+))?[ \t]*!?[ \t]*)?(?:[=dlnNpPqQ]|s/${SED_BODY}(${SED_TEXT})[giImMp0-9]*)[ \t]*`;
 var SED_SCRIPT = new RegExp(String.raw`^${SED_ITEM}(?:[;\n]${SED_ITEM})*;?$`);
+var SED_STEP = new RegExp(String.raw`${SED_ITEM}(?:[;\n]|$)`, "y");
+var TEXT_FLAGS = new Set(["--body", "--reason", "--title"]);
 var SED_EDIT_ADDRESS = String.raw`(?:\d+|\$|/${SED_BODY})`;
-var SED_EDIT_ITEM = String.raw`[ \t]*(?:${SED_EDIT_ADDRESS}(?:[ \t]*,[ \t]*${SED_EDIT_ADDRESS})?[ \t]*)?(?:[dp]|s/${SED_BODY}${SED_TEXT}[gpI0-9]*)[ \t]*`;
+var SED_EDIT_ITEM = String.raw`[ \t]*(?:${SED_EDIT_ADDRESS}(?:[ \t]*,[ \t]*${SED_EDIT_ADDRESS})?[ \t]*)?(?:[dp]|s/${SED_BODY}(${SED_TEXT})[gpI0-9]*)[ \t]*`;
 var SED_EDIT = new RegExp(String.raw`^${SED_EDIT_ITEM}(?:[;\n]${SED_EDIT_ITEM})*;?$`);
+var SED_EDIT_STEP = new RegExp(String.raw`${SED_EDIT_ITEM}(?:[;\n]|$)`, "y");
 var PERL_BODY = String.raw`(?:[^/\\\n@$(]|\((?![?*]\??\{)|\\.|\$(?=[/|)]))*/`;
 var PERL_RE = `/${PERL_BODY}`;
 var PERL_MATCH = String.raw`\$[1-9&](?![[{]|->)`;
 var PERL_VALUE = String.raw`(?:"(?:[^"\\$@\n]|\\[nt"\\]|${PERL_MATCH})*"|\$[1-9&_])`;
-var PERL_PRINT = String.raw`print(?:[ \t]+${PERL_VALUE}(?:[ \t]*,[ \t]*${PERL_VALUE})*)?(?:[ \t]+(?:for|if|unless|while)[ \t]+${PERL_RE}[gimsx]*)?`;
-var PERL_SUB = String.raw`s/${PERL_BODY}(?:[^/\\\n@$]|\\.|${PERL_MATCH})*/[gimsx]*`;
-var PERL_ITEM = String.raw`[ \t]*(?:${PERL_PRINT}|${PERL_SUB})[ \t]*`;
+var PERL_PRINT = String.raw`print(?:[ \t]+(${PERL_VALUE}(?:[ \t]*,[ \t]*${PERL_VALUE})*))?(?:[ \t]+(?:for|if|unless|while)[ \t]+${PERL_RE}[gimsx]*)?`;
+var PERL_SUB = String.raw`s/${PERL_BODY}((?:[^/\\\n@$]|\\.|${PERL_MATCH})*/)[gimsx]*`;
+var PERL_ITEM = String.raw`[ \t]*(?:${PERL_SUB}|${PERL_PRINT})[ \t]*`;
 var PERL_SCRIPT = new RegExp(String.raw`^${PERL_ITEM}(?:;${PERL_ITEM})*;?[ \t]*$`);
+var PRINT_VALUE = new RegExp(PERL_VALUE, "g");
+var PERL_STEP = new RegExp(String.raw`${PERL_ITEM}(?:;[ \t]*|$)`, "y");
 var CODE_QUALIFIER = new RegExp(QUALIFIER.source.replace("([^\\s[{<])[^]*?\\1", "([^\\s[{<\\w])[^\\n]*?\\1").replace("|\\+\\w+", ""));
+var LEADS2 = new Set(["!", "(", "do", "elif", "else", "then", "{"]);
+var OPENERS = new Set(["case", "for", "if", "select", "until", "while"]);
+var CLOSERS = new Set(["done", "esac", "fi"]);
+var SILENT = new Set([":", "[", "cd", "false", "test", "true"]);
+var hookFolders = new Map;
 var IMPLICIT_SHELL = new Set(["exec", "execSync"]);
 async function guarded(raw, environment = process.env, wait = 12000, url = new URL(`./no-extensions-write-worker.${import.meta.path.endsWith(".js") ? "js" : "ts"}`, import.meta.url).href) {
   const worker = new Worker(url);
@@ -11768,7 +14955,7 @@ async function guarded(raw, environment = process.env, wait = 12000, url = new U
         worker.postMessage({ environment, raw });
       }),
       new Promise((done) => {
-        timer = setTimeout(() => done(refuse4(TOO_LONG)), wait);
+        timer = setTimeout(() => done(refuse7(TOO_LONG)), wait);
       })
     ]);
   } finally {
@@ -11792,7 +14979,7 @@ var TAKES2 = new Set([
   "-w",
   "--workspace"
 ]);
-var RUNNERS3 = new Set(["bun", "npm", "pnpm", "yarn"]);
+var RUNNERS4 = new Set(["bun", "npm", "pnpm", "yarn"]);
 var EXECS = new Set(["bunx", "npx", "pnpx"]);
 var TEST_BINS = new Set(["jest", "vitest"]);
 var PY_TOOLS = new Set(["pytest", "ruff", "ty"]);
@@ -11821,19 +15008,13 @@ function inner2(cmd, parsed) {
   const { inline, operand } = shellOperand(args, name);
   return inline && operand !== undefined ? lex(operand.value).commands : [];
 }
-function pushes(cmd) {
+function pushes2(cmd) {
   const parsed = parse(cmd);
   const commands = inner2(cmd, parsed);
   if (commands)
-    return commands.some(pushes);
+    return commands.some(pushes2);
   const { args, name } = parsed;
-  if (name !== "git")
-    return false;
-  let k = 0;
-  for (;k < args.length && args[k].value.startsWith("-"); k++)
-    if (GIT_TAKES.has(args[k].value))
-      k++;
-  return args[k]?.value === "push";
+  return name === "git" && gitCommand(args).sub?.value === "push";
 }
 function runsTests(cmd) {
   const parsed = parse(cmd);
@@ -11855,7 +15036,7 @@ function runsTests(cmd) {
   const [sub = "", next = ""] = positionals(args);
   if (EXECS.has(name))
     return TEST_BINS.has(program(sub));
-  if (!RUNNERS3.has(name))
+  if (!RUNNERS4.has(name))
     return false;
   if (sub === "run" || sub === "run-script")
     return TEST_SCRIPT.test(next);
@@ -11883,12 +15064,30 @@ var KEEPS_STATUS = {
   zsh: (s) => setsPipefail(s) || setoptPipefail(s) || /\$\{?pipestatus\[[1-9]/.test(s)
 };
 var dialect = (shell) => program(shell) === "zsh" ? "zsh" : "bash";
-function judge3(script, shell) {
+function heldVariants(cmd, env) {
+  const own = splitHeld(cmd, parse(cmd).name, env);
+  if (!cmd.stdin)
+    return own;
+  const fed = splitHeld(cmd.stdin, parse(cmd.stdin).name, env);
+  return [...own, ...fed.map((stdin) => ({ ...cmd, stdin }))];
+}
+function judge4(script, shell) {
   const guarded = KEEPS_STATUS[shell](script);
+  const vars = new Map;
   for (const cmd of lex(script).commands) {
-    const reason = judgeCommand(cmd, guarded);
-    if (reason)
-      return reason;
+    const parsed = parse(cmd);
+    const env = { files: new Map, known: {}, process: {}, vars };
+    for (const variant of [cmd, ...heldVariants(cmd, env)]) {
+      const reason = judgeCommand(variant, guarded);
+      if (reason)
+        return reason;
+    }
+    if (parsed.name === "")
+      for (const [key, value] of parsed.local)
+        vars.set(key, value);
+    else if (EXPORTS.has(parsed.name))
+      for (const w of parsed.args.filter((a) => ASSIGN.test(a.value)))
+        vars.set(w.value.slice(0, w.value.indexOf("=")), slice(w, w.value.indexOf("=") + 1));
   }
 }
 function judgeCommand(cmd, guarded) {
@@ -11902,7 +15101,7 @@ function judgeCommand(cmd, guarded) {
     if (script)
       return judgeCommand({ ...cmd, scope: 0, words: script }, guarded);
     const { inline, operand } = shellOperand(args, name);
-    const reason = inline && operand ? judge3(operand.value, dialect(name)) : undefined;
+    const reason = inline && operand ? judge4(operand.value, dialect(name)) : undefined;
     if (reason)
       return reason;
   }
@@ -11911,10 +15110,10 @@ function judgeCommand(cmd, guarded) {
     return `no-false-green hook refuses bun ${flag}: bun then misreads the subcommand (run prints its usage and exits 0, test runs package.json's test script with the paths appended in place of the tests), so its exit says nothing about the tests. Join the value with = (--opt=value) or put the option after the subcommand: bun --cwd=<dir> run test:file <files>, or bun run --cwd <dir> <script>.`;
   if (!guarded && cmd.stdin && runsTests(cmd.stdin))
     return `no-false-green hook refuses a test run piped into ${name || "a command group"} with no pipefail: a pipeline's exit status is its last command's, so a failing run reads 0. Drop the pipe (the Bash tool keeps long output), or set pipefail inside the script that holds the pipe (set -o pipefail; first, inside the quotes of a bash -c script) so the test's own exit status comes through.`;
-  if (!guarded && cmd.stdin && pushes(cmd.stdin))
+  if (!guarded && cmd.stdin && pushes2(cmd.stdin))
     return `no-false-green hook refuses a git push piped into ${name || "a command group"} with no pipefail: a pipeline's exit status is its last command's, so a failed push reads 0. Push bare (the Bash tool keeps its output), then check it with git ls-remote origin refs/heads/<branch>, which prints the local head's sha once the push has landed.`;
 }
-async function inspect4(raw, shell) {
+async function inspect6(raw, shell) {
   const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
   if (tool !== "Bash" || typeof toolInput?.command !== "string")
     return;
@@ -11922,11 +15121,11 @@ async function inspect4(raw, shell) {
   const words = /\b(?:bun|bunx|git|jest|npm|npx|pnpm|pnpx|pytest|ruff|ty|vitest|yarn)\b/;
   if (!words.test(command.replace(/["'\\]/g, "")))
     return;
-  return judge3(command, dialect(shell));
+  return judge4(command, dialect(shell));
 }
-async function check6(raw, shell = process.env.SHELL ?? "zsh") {
+async function check9(raw, shell = process.env.SHELL ?? "zsh") {
   try {
-    return await inspect4(raw, shell);
+    return await inspect6(raw, shell);
   } catch {
     return;
   }
@@ -11934,90 +15133,19 @@ async function check6(raw, shell = process.env.SHELL ?? "zsh") {
 if (false) {}
 
 // scripts/hooks/no-glm-heavy-path.ts
-import { existsSync as existsSync8, readdirSync as readdirSync4, readFileSync as readFileSync5, readlinkSync, realpathSync as realpathSync4 } from "fs";
+import {
+  existsSync as existsSync8,
+  readdirSync as readdirSync5,
+  readFileSync as readFileSync6,
+  readlinkSync,
+  realpathSync as realpathSync4,
+  statSync as statSync4
+} from "fs";
 import { loadavg } from "os";
-import { basename as basename5, dirname as dirname6, isAbsolute as isAbsolute5, join as join13, resolve as resolve7 } from "path";
-
-// packages/settings/src/harnesses.ts
-var HARNESSES = [
-  { backends: ["claude", "glm"], id: "claude-code" },
-  { backends: ["openai"], id: "codex" }
-];
-var GLM_MODEL = "glm";
-var readPin = (text) => {
-  const words = text.trim().split(/\s+/);
-  const [harnessId, backend] = words.length === 1 ? ["claude-code", words[0]] : words;
-  if (words.length > 2)
-    return null;
-  const harness = HARNESSES.find((h) => h.id === harnessId);
-  const found = harness?.backends.find((b) => b === backend);
-  return harness && found ? { backend: found, harness: harness.id } : null;
-};
-
-// packages/settings/src/rules.ts
-var percent = number2().int().min(1).max(100);
-var ruleSettings = defineSettings({
-  "battery.alert": {
-    default: 5,
-    description: "The battery percent, while the charge falls on battery or on a charger losing to the load, at which the battery check posts its red alert and the heavy runs wait in run-slot.",
-    schema: percent
-  },
-  "battery.ask": {
-    default: 10,
-    description: "The battery percent, while the Mac discharges on battery, at which the battery check posts its orange ask.",
-    schema: percent
-  },
-  "clock.ownerZone": {
-    default: "UTC",
-    description: "The time zone, by its IANA name, a time shown to the owner reads in.",
-    schema: string2().refine((zone) => {
-      try {
-        new Intl.DateTimeFormat("en", { timeZone: zone });
-        return true;
-      } catch {
-        return false;
-      }
-    }, "an IANA time zone, such as UTC or America/New_York")
-  },
-  "context.window": {
-    default: 400000,
-    description: "The context window, in tokens, every session compacts itself in.",
-    schema: number2().int().positive()
-  },
-  "github.pollMinutes": {
-    default: 5,
-    description: "The fewest minutes between two polls of one pull request by a session.",
-    schema: number2().int().positive()
-  },
-  "glm.readOnlyLoad5": {
-    default: 15,
-    description: "The 5-minute load average above which a GLM session may not install, commit or push.",
-    schema: number2().positive()
-  },
-  "release.hours": {
-    default: 4,
-    description: "The hours of merging after which Ops ships canary to main, whatever the count.",
-    schema: number2().positive()
-  },
-  "release.merges": {
-    default: 3,
-    description: "The user-facing merges since the last ship at which Ops ships canary to main.",
-    schema: number2().int().positive()
-  },
-  "tickets.tracker": {
-    default: "the tracker",
-    description: "The issue tracker the tickets rule names, read inside its sentence, such as Linear.",
-    schema: string2().min(1)
-  },
-  "unstick.escalateMinutes": {
-    default: 5,
-    description: "The minutes a session stays stuck with no turn before ops-session-resume tells the primary dispatcher.",
-    schema: number2().int().positive()
-  }
-});
+import { basename as basename5, dirname as dirname6, isAbsolute as isAbsolute5, join as join14, relative as relative2, resolve as resolve8 } from "path";
 
 // scripts/hooks/no-headless-login.ts
-import { join as join12 } from "path";
+import { join as join13 } from "path";
 var TOKEN = "CLAUDE_CODE_OAUTH_TOKEN";
 var ROLE = "PLAYGROUND_ROLE";
 var KEYCHAIN_SERVICE = "playground-claude-oauth";
@@ -12033,7 +15161,7 @@ async function accountOf(id, environment) {
     const name = await registryName(id, environment);
     if (!name)
       return;
-    const record = await Bun.file(join12(dataDir(environment), "resume", `${name}.sh`)).text();
+    const record = await Bun.file(join13(dataDir(environment), "resume", `${name}.sh`)).text();
     return /^# account: (\S+)/m.exec(record)?.[1] ?? /--account (\S+)/.exec(record)?.[1];
   } catch {
     return;
@@ -12044,7 +15172,7 @@ var sets = (key, { local }, env) => {
   const value = local.get(key) ?? env.vars.get(key);
   return value !== undefined && value.value !== "";
 };
-async function check7(raw, environment = process.env) {
+async function check10(raw, environment = process.env) {
   try {
     const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
     if (tool !== "Bash" || typeof toolInput?.command !== "string")
@@ -12066,7 +15194,7 @@ async function check7(raw, environment = process.env) {
       return missing.length ? "refuse" : undefined;
     };
     const env = { files: new Map, known: {}, process: {}, vars: new Map };
-    if (!await run(lex(toolInput.command), env, visit))
+    if (!await run2(lex(toolInput.command), env, visit))
       return;
     const account = await accountOf(id, environment) ?? "<your --account>";
     return `no-headless-login hook refuses a headless claude that does not set ${missing.join(" or ")}: without the token it bills this machine's own login, not your account, and without the role the factory's hooks pass it. Run it as: tk="$(security find-generic-password -s ${await keychainOf(environment)} -a ${account} -w)"; ${TOKEN}="$tk" ${ROLE}=${role} env -u CLAUDE_CONFIG_DIR -u ANTHROPIC_API_KEY claude -p ...`;
@@ -12107,7 +15235,7 @@ var COMMIT_TAKES2 = new Set([
 ]);
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var ADD_TAKES = new Set(["--chmod", "--pathspec-from-file"]);
-var PUSH_TAKES2 = new Set(["--exec", "-o", "--push-option", "--receive-pack", "--repo"]);
+var PUSH_TAKES3 = new Set(["--exec", "-o", "--push-option", "--receive-pack", "--repo"]);
 var loadLimit = async (environment) => {
   const read = await readPolicy(dataDir(environment)).catch(() => {
     return;
@@ -12151,7 +15279,10 @@ var MCP_RESOURCE_TOOLS = new Set([
 var ORG_CALL = /\b(?:claude|curl|dm|gh|git|https?|wget|xh)\b|linear[-:]|mcp__/i;
 var heavy = (path) => OPUS_PATHS.some((p) => p.endsWith("/") ? path.startsWith(p) : path === p);
 async function onGlm(raw, environment = process.env) {
-  if (/(?:^|\/\/|\.)api\.z\.ai(?:[:/]|$)/.test(environment.ANTHROPIC_BASE_URL ?? ""))
+  const base = environment.ANTHROPIC_BASE_URL ?? "";
+  if (/(?:^|\/\/|\.)api\.z\.ai(?:[:/]|$)/.test(base))
+    return true;
+  if (/^https?:\/\/(?:127\.0\.0\.1|localhost):8000(?:\/|$)/.test(base))
     return true;
   const id = sessionOf(raw);
   if (typeof id !== "string")
@@ -12160,13 +15291,14 @@ async function onGlm(raw, environment = process.env) {
     const name = await registryName(id, environment);
     if (!name || name.includes("/"))
       return false;
-    const pin = join13(dataDir(environment), "backends", name);
-    return readPin(await Bun.file(pin).text())?.backend === "glm";
+    const pin = join14(dataDir(environment), "backends", name);
+    const backend = readPin(await Bun.file(pin).text())?.backend;
+    return backend === "glm" || backend === "local";
   } catch {
     return false;
   }
 }
-var refuse5 = (what, files) => `no-glm-heavy-path hook refuses this ${what}: it touches ${files.join(", ")}, which is Opus work, and this session runs on GLM. Stop, report to your lead with this file list, and the lead moves the change to a Claude worker.`;
+var refuse8 = (what, files) => `no-glm-heavy-path hook refuses this ${what}: it touches ${files.join(", ")}, which is Opus work, and this session runs on GLM. Stop, report to your lead with this file list, and the lead moves the change to a Claude worker.`;
 var unread2 = (what, why) => `no-glm-heavy-path hook refuses this ${what}: it cannot read ${why}, and this session runs on GLM, whose commits and pushes must stay off Opus paths. Run it again from your own worktree with a literal path, or report to your lead.`;
 var loaded = (what, load5, limit) => `no-glm-heavy-path hook refuses this ${what}: load5 is ${load5.toFixed(1)}, and a GLM session goes read-only while load5 is over ${limit} (no install, node_modules clone, commit or push). Wait until load5 is ${limit} or under (the middle figure of sysctl -n vm.loadavg), then run it again, or report to your lead.`;
 function installOrClone(name, args) {
@@ -12237,7 +15369,7 @@ async function mergeHeads(dir) {
   const path = names2(dir, ["rev-parse", "--git-path", "MERGE_HEAD"])?.[0];
   if (!path)
     return null;
-  const file = Bun.file(resolve7(dir, path));
+  const file = Bun.file(resolve8(dir, path));
   if (!await file.exists())
     return [];
   return (await file.text()).split(`
@@ -12247,7 +15379,7 @@ var STAGING = new Set(["add", "diff", "log", "show", "status"]);
 var BRANCH_READS = new Set(["branch --show-current", "rev-parse --abbrev-ref HEAD"]);
 var SUBSTITUTION = unknown("a command substitution");
 var PURE = new Set(["cat", "date", "echo", "printf", "pwd", "true"]);
-var writes2 = (cmd) => cmd.redirects.some((r) => r.op.includes(">") && !/^(?:\d+|-|\/dev\/null)$/.test(r.target?.value ?? ""));
+var writes3 = (cmd) => cmd.redirects.some((r) => r.op.includes(">") && !/^(?:\d+|-|\/dev\/null)$/.test(r.target?.value ?? ""));
 var chainRefusal = (what, made) => `no-glm-heavy-path hook refuses this ${what}: it runs after another command in the same call, which may make ${made} before it runs, and the hook reads the checkout before the call starts, while this session runs on GLM. Run ${what} as its own call${what === "git commit" ? ", or after git add alone" : ""}.`;
 async function commit(rest, dir, chained, forced) {
   const { flags, positionals } = parseFlags(rest, COMMIT_TAKES2);
@@ -12311,14 +15443,13 @@ async function commit(rest, dir, chained, forced) {
   const staged = new Set(lists[0]);
   if (chained && !all && paths.length === 0 && heavyFiles.every((f) => !staged.has(f)))
     return `no-glm-heavy-path hook refuses this git commit: ${heavyFiles.join(", ")} is on disk and not staged, and the hook cannot tell before the call runs whether the git add before it stages it, while this session runs on GLM and that is Opus work. Run git commit as its own call.`;
-  return refuse5("git commit", heavyFiles);
+  return refuse8("git commit", heavyFiles);
 }
-function rebased(dir, named, source, dest, not) {
+function rebased(dir, named, source, dest, held) {
   const branch = dest === "HEAD" ? names2(dir, ["symbolic-ref", "-q", "--short", "HEAD"])?.[0] : dest.replace(/^refs\/heads\//, "");
   if (!branch)
     return;
-  const config = (key) => names2(dir, ["config", "--get", key])?.[0];
-  const remote = named ?? config(`branch.${branch}.pushRemote`) ?? config("remote.pushDefault") ?? config(`branch.${branch}.remote`) ?? "origin";
+  const remote = named ?? pushRemote(dir, branch);
   const old = names2(dir, ["rev-parse", "-q", "--verify", `refs/remotes/${remote}/${branch}`])?.[0];
   if (!old)
     return;
@@ -12328,12 +15459,19 @@ function rebased(dir, named, source, dest, not) {
   });
   if (ancestor.exitCode !== 1)
     return;
-  const oldest = names2(dir, ["rev-list", "--reverse", "--topo-order", source, "--not", not])?.[0];
+  const oldest = names2(dir, [
+    "rev-list",
+    "--reverse",
+    "--topo-order",
+    source,
+    "--not",
+    ...held
+  ])?.[0];
   const base = oldest && names2(dir, ["rev-parse", "-q", "--verify", `${oldest}^`])?.[0];
   return base ? [old, base] : undefined;
 }
 function push2(rest, dir, branchReads) {
-  const { flags, positionals } = parseFlags(rest, PUSH_TAKES2);
+  const { flags, positionals } = parseFlags(rest, PUSH_TAKES3);
   const given = new Set(flags.map((f) => f.name));
   const reads = branchReads.filter((d) => d === dir);
   const [remote, ...refspecs] = positionals.map((w, i) => i > 0 && w.unknown === SUBSTITUTION.unknown && w.value === SUBSTITUTION.value && reads.pop() ? { quoted: w.quoted, value: "HEAD" } : w);
@@ -12361,8 +15499,7 @@ function push2(rest, dir, branchReads) {
   if (deleting && sources.length === 0)
     return;
   const name = remote && !/[:/]/.test(remote.value) ? remote.value : undefined;
-  const tracked = name && names2(dir, ["for-each-ref", "--count=1", `refs/remotes/${name}`])?.length;
-  const not = tracked ? `--remotes=${name}` : "--remotes";
+  const held = heldBy(dir, remote?.value ?? pushRemote(dir));
   const listed = pathsOf(dir, [
     "log",
     "--name-only",
@@ -12371,9 +15508,9 @@ function push2(rest, dir, branchReads) {
     "--format=",
     ...sources,
     "--not",
-    not
+    ...held
   ]);
-  const merges = names2(dir, ["rev-list", "--merges", ...sources, "--not", not]);
+  const merges = names2(dir, ["rev-list", "--merges", ...sources, "--not", ...held]);
   if (listed === null || merges === null)
     return unread2("git push", "the files of the commits it pushes");
   const files = new Set(listed);
@@ -12406,11 +15543,11 @@ function push2(rest, dir, branchReads) {
     for (const file of made)
       files.add(file);
   }
-  const bases = sources.length === 1 && dests.length === 1 && (!remote || name) ? rebased(dir, name, sources[0], dests[0], not) : undefined;
+  const bases = sources.length === 1 && dests.length === 1 && (!remote || name) ? rebased(dir, name, sources[0], dests[0], held) : undefined;
   if (bases)
     beyondMerge(files, bases[0], bases[1], (tree) => [pathsOf(dir, ["diff", "--name-only", "--no-renames", tree, sources[0]])], dir);
   const heavyFiles = [...files].filter(heavy).sort();
-  return heavyFiles.length > 0 ? refuse5("git push", heavyFiles) : undefined;
+  return heavyFiles.length > 0 ? refuse8("git push", heavyFiles) : undefined;
 }
 function forcedPaths(rest, dir) {
   const { flags, positionals } = parseFlags(rest, ADD_TAKES);
@@ -12419,7 +15556,7 @@ function forcedPaths(rest, dir) {
   const named = !dir || flags.some((f) => f.name === "--pathspec-from-file") ? [] : positionals;
   if (named.length === 0 || named.some((w) => !plain(w) || w.value.startsWith(":")))
     return [":(top)"];
-  return named.map((w) => resolve7(dir, w.value));
+  return named.map((w) => resolve8(dir, w.value));
 }
 var guardedOf = async (environment) => {
   try {
@@ -12467,7 +15604,7 @@ var ORG_SCRIPT_DIRS = [
     "the DM sender, which posts to the owner's chat"
   ]
 ];
-var RUNNERS4 = new Set([
+var RUNNERS5 = new Set([
   "bash",
   "bun",
   "bunx",
@@ -12483,11 +15620,11 @@ var RUNNERS4 = new Set([
 ]);
 var RUNNER_DIR = /^(?:--cwd|--dir|--prefix|-C)(?:=|$)/;
 var scriptDir = (path) => path === undefined ? undefined : ORG_SCRIPT_DIRS.find(([at]) => at.test(path))?.[1];
-function packageScripts(dir) {
+function packageScripts2(dir) {
   const found = new Map;
   for (let at = dir;; at = dirname6(at)) {
     try {
-      const { scripts } = JSON.parse(readFileSync5(join13(at, "package.json"), "utf8"));
+      const { scripts } = JSON.parse(readFileSync6(join14(at, "package.json"), "utf8"));
       for (const [name, command] of Object.entries(scripts ?? {}))
         if (!found.has(name) && typeof command === "string")
           found.set(name, { at, command });
@@ -12497,10 +15634,11 @@ function packageScripts(dir) {
   }
 }
 var FOLDER_FIX = "Name the folder literally, in a call of its own, or report to your lead.";
+var programWord = (w, env) => (w.raw && marked(w.value) ? heldWord({ ...w, raw: defaulted(w.raw, env.known, () => false) }, env, NONE2) : undefined) ?? w;
 function orgScript(parsed, env) {
   const { args, first, name } = parsed;
   if (first?.value.includes("/")) {
-    const program = pathOf(first, env);
+    const program = pathOf(programWord(first, env), env);
     if (!program)
       return {
         fix: FOLDER_FIX,
@@ -12512,7 +15650,7 @@ function orgScript(parsed, env) {
   }
   if (name === "playground" && args.find((a) => !a.value.startsWith("-"))?.value === "dm")
     return { why: `it runs ${ORG_SCRIPT_DIRS[1][1]}` };
-  if (!RUNNERS4.has(name))
+  if (!RUNNERS5.has(name))
     return;
   let at = env.cwd;
   for (let i = 0;i < args.length; i++) {
@@ -12528,12 +15666,12 @@ function orgScript(parsed, env) {
       why: "the hook cannot tell which script it runs, since it runs in a folder a value it cannot read names"
     };
   at = realOf2(at);
-  const scripts = packageScripts(at);
+  const scripts = packageScripts2(at);
   for (const a of args) {
     if (a.value.startsWith("-") || unreadValue(a))
       continue;
     const script = scripts.get(a.value);
-    const hit = scriptDir(pathOf(a, { ...env, cwd: at })) ?? script?.command.split(/\s+/).map((word) => scriptDir(resolve7(script.at, word))).find(Boolean);
+    const hit = scriptDir(pathOf(a, { ...env, cwd: at })) ?? script?.command.split(/\s+/).map((word) => scriptDir(resolve8(script.at, word))).find(Boolean);
     if (hit)
       return { why: `it runs ${hit}` };
   }
@@ -12548,11 +15686,11 @@ var GITHUB_URL = /(?:github\.com|githubusercontent\.com)[/:](?:(?:repos|orgs|use
 var REST_PATH = /^\/?(?:repos|orgs|users)\/([\w.-]+)(?:\/([\w.-]+))?/i;
 var SCOPED = /^(?:--owner|--repo|-R)(?:=|$)|(?:^|\s)(?:org|owner|repo|user):\S/;
 var isGuarded = (orgs, owner) => orgs.some((org) => org.toLowerCase() === owner.toLowerCase());
-var label = (owner, repo) => repo ? `${owner}/${repo.replace(/\.git$/, "")}` : owner;
+var label2 = (owner, repo) => repo ? `${owner}/${repo.replace(/\.git$/, "")}` : owner;
 var namedOrg = (orgs, text) => orgs.find((org) => new RegExp(`(?:^|[^a-z\\d])${org.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^a-z\\d])`, "i").test(text));
 var urlOrg = (orgs, value, rest = false) => {
   const m = GITHUB_URL.exec(value) ?? (rest ? REST_PATH.exec(value) : null);
-  return m && isGuarded(orgs, m[1]) ? label(m[1], m[2]) : undefined;
+  return m && isGuarded(orgs, m[1]) ? label2(m[1], m[2]) : undefined;
 };
 var unreadValue = (w) => w.unknown !== undefined || Boolean(w.reads?.length) || marked(w.value);
 var GRAPHQL_FIX = `Use a REST endpoint under repos/<owner>/<name>/ (gh api repos/<owner>/<name>/..., gh pr, gh issue), and reply to a review thread by REST, or report to your lead.`;
@@ -12572,7 +15710,7 @@ function ghOrg(parsed, env, orgs) {
       return orgRefusal(what, "the hook cannot tell which repository it reaches, since a value it cannot read names it", PLACE_FIX2);
     const named = repoOf(repo);
     if (named && isGuarded(orgs, named.owner))
-      return orgRefusal(what, `it reaches ${label(named.owner, named.repo)}, a guarded org's repository`);
+      return orgRefusal(what, `it reaches ${label2(named.owner, named.repo)}, a guarded org's repository`);
     placed = true;
   }
   if (ACCOUNT_WIDE.has(words[0] ?? ""))
@@ -12607,7 +15745,7 @@ function ghOrg(parsed, env, orgs) {
   if (implicit.some((r) => r === undefined) || !env.cwd && implicit.length === 0)
     return orgRefusal(what, "the hook cannot tell which repository it reaches, since it names none and runs where the hook cannot read GH_REPO or the checkout", PLACE_FIX2);
   const fallback = implicit.find((r) => r && isGuarded(orgs, r.owner));
-  return fallback ? orgRefusal(what, `it falls back to ${label(fallback.owner, fallback.repo)}, a guarded org's repository`) : undefined;
+  return fallback ? orgRefusal(what, `it falls back to ${label2(fallback.owner, fallback.repo)}, a guarded org's repository`) : undefined;
 }
 function gitPlaces(parsed, env, dir) {
   const places = [dir];
@@ -12644,7 +15782,7 @@ function gitOrg(parsed, env, dir, sub, orgs) {
   if (places.includes(undefined))
     return orgRefusal(what, "the hook cannot tell which repository it reads, since a value it cannot read names it", "Name the checkout by its literal path, in a call of its own, or report to your lead.");
   const remote = places.flatMap((place) => remotes(place)).find((r) => isGuarded(orgs, r.owner));
-  return remote ? orgRefusal(what, `it runs in a checkout of ${label(remote.owner, remote.repo)}, a guarded org's repository`) : undefined;
+  return remote ? orgRefusal(what, `it runs in a checkout of ${label2(remote.owner, remote.repo)}, a guarded org's repository`) : undefined;
 }
 var realOf2 = (path, depth = 0) => {
   try {
@@ -12653,23 +15791,23 @@ var realOf2 = (path, depth = 0) => {
   if (depth > 40)
     return path;
   try {
-    return realOf2(resolve7(dirname6(path), readlinkSync(path)), depth + 1);
+    return realOf2(resolve8(dirname6(path), readlinkSync(path)), depth + 1);
   } catch {}
   const parent = dirname6(path);
-  return parent === path ? path : join13(realOf2(parent, depth + 1), basename5(path));
+  return parent === path ? path : join14(realOf2(parent, depth + 1), basename5(path));
 };
 function checkoutOf(path, orgs, roots) {
   if (!path)
     return;
   const walked = [];
   let found;
-  for (let at = realOf2(resolve7(path));; at = dirname6(at)) {
+  for (let at = realOf2(resolve8(path));; at = dirname6(at)) {
     if (roots.has(at)) {
       found = roots.get(at);
       break;
     }
     walked.push(at);
-    if (existsSync8(join13(at, ".git"))) {
+    if (existsSync8(join14(at, ".git"))) {
       found = remotes(at).find((r) => isGuarded(orgs, r.owner));
       break;
     }
@@ -12680,9 +15818,298 @@ function checkoutOf(path, orgs, roots) {
     roots.set(at, found);
   return found;
 }
-var checkoutRefusal = (what, repo) => orgRefusal(what, `it reads the checkout of ${label(repo.owner, repo.repo)}, a guarded org's repository`);
+var checkoutRefusal = (what, repo) => orgRefusal(what, `it reads the checkout of ${label2(repo.owner, repo.repo)}, a guarded org's repository`);
+var BELOW_DEPTH = 4;
+var BELOW_FOLDERS = 5000;
+var UNWALKED = new Set([".git", "node_modules"]);
+function checkoutBelow(path, orgs, roots) {
+  let level = [realOf2(resolve8(path))];
+  let walked = 0;
+  for (let depth = 0;depth < BELOW_DEPTH && level.length > 0; depth++) {
+    const next = [];
+    for (const at of level)
+      for (const entry of folderEntries(at)) {
+        if (UNWALKED.has(entry.name))
+          continue;
+        const child = join14(at, entry.name);
+        if (++walked > BELOW_FOLDERS)
+          return "too many";
+        if (entry.isSymbolicLink() || existsSync8(join14(child, ".git"))) {
+          const repo = checkoutOf(child, orgs, roots);
+          if (repo)
+            return repo;
+        }
+        if (entry.isDirectory())
+          next.push(child);
+      }
+    level = next;
+  }
+}
+function folderEntries(at) {
+  try {
+    return readdirSync5(at, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink());
+  } catch {
+    return [];
+  }
+}
+var belowRefusal = (what, path, found) => found === "too many" ? orgRefusal(what, `it reads every folder below ${path}, more than the hook walks to find an org's checkout there`, "Name a folder nearer what you read, in a call of its own, or report to your lead.") : checkoutRefusal(what, found);
+var GREPS = new Set(["egrep", "fgrep", "ggrep", "grep"]);
+var GREP_RECURSIVE = /^(?:-[A-Za-z]*[rR]|--recursive$|--dereference-recursive$|--directories=recurse$)/;
+var recursive2 = (name, args) => name === "rg" || name === "find" || GREPS.has(name) && args.some((a) => GREP_RECURSIVE.test(a.value));
+var FIND_LEADS = /^-(?:[HLPEXdsx]+|O\d*)$/;
+var SEARCH_VALUES = {
+  grep: {
+    long: new Set([
+      "--after-context",
+      "--before-context",
+      "--context",
+      "--exclude",
+      "--exclude-dir",
+      "--file",
+      "--include",
+      "--label",
+      "--max-count",
+      "--regexp"
+    ]),
+    short: "ABCDdefm"
+  },
+  rg: {
+    long: new Set([
+      "--after-context",
+      "--before-context",
+      "--context",
+      "--context-separator",
+      "--encoding",
+      "--engine",
+      "--file",
+      "--glob",
+      "--iglob",
+      "--ignore-file",
+      "--max-columns",
+      "--max-count",
+      "--max-depth",
+      "--max-filesize",
+      "--path-separator",
+      "--pre",
+      "--pre-glob",
+      "--regexp",
+      "--replace",
+      "--sort",
+      "--sortr",
+      "--threads",
+      "--type",
+      "--type-add",
+      "--type-clear",
+      "--type-not"
+    ]),
+    short: "ABCEMdefgjmrtT"
+  }
+};
+var PATTERN_LONG = new Set(["--file", "--regexp"]);
+function searchRoots(name, args, env) {
+  const folder = (w) => {
+    const path = pathOf(w, env);
+    return path && isFolder2(path) ? [path] : [];
+  };
+  const own = env.cwd ? [env.cwd] : [];
+  if (name === "find") {
+    let i = 0;
+    while (i < args.length && (FIND_LEADS.test(args[i].value) || args[i].value === "-D"))
+      i += args[i].value === "-D" ? 2 : 1;
+    const starts = [];
+    let named = false;
+    for (;i < args.length; i++) {
+      const v = args[i].value;
+      if (v === "-f" && args[i + 1]) {
+        named = true;
+        starts.push(...folder(args[++i]));
+        continue;
+      }
+      if (v.startsWith("-") || ["!", "(", ")", ","].includes(v))
+        break;
+      named = true;
+      starts.push(...folder(args[i]));
+    }
+    return named ? starts : own;
+  }
+  const values = SEARCH_VALUES[name === "rg" ? "rg" : "grep"];
+  const operands = [];
+  let given = false;
+  let unsure = false;
+  for (let i = 0;i < args.length; i++) {
+    const v = args[i].value;
+    if (v === "--") {
+      operands.push(...args.slice(i + 1));
+      break;
+    }
+    if (v.startsWith("--")) {
+      const key = v.split("=")[0];
+      if (PATTERN_LONG.has(key))
+        given = true;
+      if (!v.includes("=") && values.long.has(key))
+        i++;
+      else if (!v.includes("="))
+        unsure = true;
+      continue;
+    }
+    if (v.startsWith("-") && v.length > 1) {
+      for (let k = 1;k < v.length; k++) {
+        if (!values.short.includes(v[k]))
+          continue;
+        if (v[k] === "e" || v[k] === "f")
+          given = true;
+        if (k === v.length - 1)
+          i++;
+        break;
+      }
+      continue;
+    }
+    operands.push(args[i]);
+  }
+  const folders = operands.flatMap(folder);
+  return operands.length <= (given ? 0 : 1) || unsure ? [...folders, ...own] : folders;
+}
+var isFolder2 = (path) => {
+  try {
+    return statSync4(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
+function globRoot(pattern, base) {
+  const full = isAbsolute5(pattern) ? pattern : base && join14(base, pattern);
+  if (!full)
+    return;
+  const segments = full.split("/");
+  const at = segments.findIndex((segment) => GLOB_CHARS2.test(segment) || segment.includes("{"));
+  if (at < 0)
+    return { deep: false, root: full };
+  const rest = segments.slice(at);
+  return {
+    deep: rest.length > 1 || rest[0].includes("**"),
+    root: segments.slice(0, at).join("/") || "/"
+  };
+}
+var EDIT_TOOLS = {
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  NotebookEdit: "notebook_path",
+  Write: "file_path"
+};
+function fromCheckout(file) {
+  for (let at = dirname6(file);; at = dirname6(at)) {
+    if (existsSync8(join14(at, ".git")))
+      return relative2(at, file);
+    if (dirname6(at) === at)
+      return;
+  }
+}
 var READ_TOOLS = { Glob: "path", Grep: "path", Read: "file_path" };
 var READS_NOTHING = new Set(["date", "echo", "printf", "pwd", "true"]);
+var UNREAD_TEXT = new Set([
+  "[",
+  "[[",
+  "basename",
+  "case",
+  "dirname",
+  "exit",
+  "for",
+  "select",
+  "test"
+]);
+var AWKS2 = new Set(["awk", "gawk", "mawk", "nawk"]);
+var INLINE_CODE = [
+  [/^python(?:\d+(?:\.\d+)?)?$/, new Set(["-c"])],
+  [/^(?:bun|node)$/, new Set(["--eval", "--print", "-e", "-p"])],
+  [/^(?:perl|ruby)$/, new Set(["-E", "-e"])]
+];
+function textWords(name, args) {
+  const out = new Set;
+  const inline = INLINE_CODE.find(([program]) => program.test(name))?.[1];
+  if (inline) {
+    for (let i = 0;i < args.length - 1; i++)
+      if (inline.has(args[i].value))
+        out.add(++i);
+    return out;
+  }
+  if (SEDS2.has(name))
+    return sedText(name, args);
+  if (!AWKS2.has(name))
+    return out;
+  const program = !args.some((w) => w.value === "-f" || /^-f./.test(w.value));
+  for (let i = 0;i < args.length; i++) {
+    const v = args[i].value;
+    if (v === "--") {
+      if (program && i + 1 < args.length)
+        out.add(i + 1);
+      break;
+    }
+    if (v === "-v" || v === "-F" || v === "-f") {
+      if (v === "-v" && i + 1 < args.length)
+        out.add(i + 1);
+      i++;
+    } else if (v.startsWith("--"))
+      return out;
+    else if (v.startsWith("-v"))
+      out.add(i);
+    else if (!v.startsWith("-")) {
+      if (program)
+        out.add(i);
+      break;
+    }
+  }
+  return out;
+}
+var SEDS2 = new Set(["gsed", "sed"]);
+function sedText(name, args) {
+  const out = new Set;
+  const scripted = args.some((w) => /^(?:-[A-Za-z]*[ef]|--expression|--file)/.test(w.value));
+  for (let i = 0;i < args.length; i++) {
+    const v = args[i].value;
+    if (v === "--") {
+      if (!scripted && i + 1 < args.length)
+        out.add(i + 1);
+      break;
+    }
+    if (v.startsWith("--")) {
+      if (v === "--expression")
+        out.add(++i);
+      else if (v.startsWith("--expression="))
+        out.add(i);
+      else if (v === "--file" || v === "--line-length")
+        i++;
+      continue;
+    }
+    if (v.startsWith("-") && v.length > 1) {
+      for (let k = 1;k < v.length; k++) {
+        const letter = v[k];
+        const rest = v.slice(k + 1);
+        if (letter === "e" || letter === "f") {
+          if (rest === "")
+            i++;
+          if (letter === "e")
+            out.add(i);
+          break;
+        }
+        if (letter === "l") {
+          if (rest === "")
+            i++;
+          break;
+        }
+        if (letter === "i") {
+          if (rest === "" && name === "sed" && args[i + 1]?.value === "")
+            i++;
+          break;
+        }
+      }
+      continue;
+    }
+    if (!scripted)
+      out.add(i);
+    break;
+  }
+  return out;
+}
 var PATH_LIKE = /[/~]/;
 var GLOB_CHARS2 = /[*?[]/;
 var namesFile = (r) => r.target !== undefined && !r.body && (r.op === "<" || r.op === "<>" || r.op.startsWith(">") && !r.op.startsWith(">&"));
@@ -12716,7 +16143,7 @@ function globRegex(segment) {
   }
   return new RegExp(`${re}$`);
 }
-function globbed(value, cwd) {
+function globbed(value, cwd, deep = []) {
   const out = [];
   for (const pattern of braces(value)) {
     const root = isAbsolute5(pattern) ? "/" : cwd;
@@ -12725,22 +16152,24 @@ function globbed(value, cwd) {
     let candidates = [root];
     for (const segment of pattern.split("/").filter((part) => part !== "")) {
       if (!GLOB_CHARS2.test(segment)) {
-        candidates = candidates.map((at) => join13(at, segment));
+        candidates = candidates.map((at) => join14(at, segment));
         continue;
       }
+      if (segment.includes("**"))
+        deep.push(...candidates);
       const re = globRegex(segment.replaceAll("**", "*"));
       const hidden = segment.startsWith(".");
       const next = [];
       for (const at of candidates) {
         let entries;
         try {
-          entries = readdirSync4(at);
+          entries = readdirSync5(at);
         } catch {
           continue;
         }
         for (const entry of entries)
           if ((hidden || !entry.startsWith(".")) && re.test(entry))
-            next.push(join13(at, entry));
+            next.push(join14(at, entry));
         if (next.length >= 200)
           break;
       }
@@ -12752,26 +16181,99 @@ function globbed(value, cwd) {
   }
   return out;
 }
-function opened(cmd, parsed, env) {
-  const { args, name } = parsed;
+var QUIET_PATH = /^[\w./@+,~-]+$/;
+var GIT_FOLDER = /\$\(\s*git(?:\s+-C\s+("[^"$`\\]*"|'[^']*'|[^\s$`()'"\;&|<>]+))?\s+rev-parse((?:\s+--path-format=(?:absolute|relative))?\s+--(?:show-toplevel|git-common-dir|git-dir|absolute-git-dir))\s*\)/g;
+var PATH_NAME = /\$\(\s*(dirname|basename)\s+("[^"$`\\]*"|'[^']*'|[^\s$`()'"\;&|<>]+)\s*\)/g;
+function pureFilled(raw, cwd) {
+  let out = raw.replace(/\$\(\s*pwd(?:\s+-[LP])?\s*\)|`\s*pwd(?:\s+-[LP])?\s*`/g, (m) => cwd ?? m).replace(/\$\(\s*echo\s+([^$`()'"\\|;&<>]*?)\s*\)/g, (_, words) => words);
+  for (let round = 0;round < 4; round++) {
+    const before = out;
+    out = out.replace(GIT_FOLDER, (m, at, flags) => {
+      if (!cwd)
+        return m;
+      const dir = resolve8(cwd, at ? at.replace(/^["']|["']$/g, "") : ".");
+      const answer = names2(dir, ["rev-parse", ...flags.trim().split(/\s+/)])?.[0];
+      return answer && QUIET_PATH.test(answer) ? resolve8(dir, answer) : m;
+    }).replace(PATH_NAME, (m, program, word) => {
+      const path = word.replace(/^["']|["']$/g, "");
+      if (!QUIET_PATH.test(path))
+        return m;
+      return program === "dirname" ? dirname6(path) : basename5(path);
+    });
+    if (out === before)
+      break;
+  }
+  return out;
+}
+var DEFAULTED = /\$\{([A-Za-z_]\w*)(:?)([-?])([^}$`\\]*)\}/g;
+var defaulted = (raw, known, unset) => raw.replace(DEFAULTED, (m, key, colon, op, word) => {
+  const value = known[key];
+  if (value !== undefined && (!colon || value !== ""))
+    return `\${${key}}`;
+  if (op === "-" && unset(key) && QUIET_PATH.test(word))
+    return word;
+  return m;
+});
+async function readable(w, env, steady, held) {
+  if (w.reads?.length && !w.unknown) {
+    const text = await resolveText(w, env);
+    return text.unknown || marked(text.value) ? undefined : [{ ...w, reads: undefined, value: text.value }];
+  }
+  if (!w.raw)
+    return;
+  const here = { ...env, known: { ...held.own, ...env.known } };
+  const filled = { ...w, raw: defaulted(pureFilled(w.raw, env.cwd), here.known, held.unset) };
+  const word = heldWord(filled, here, steady);
+  return word ? [word] : heldReadings(filled, here, steady);
+}
+async function opened(cmd, parsed, env, steady, held) {
+  const { args, name, xargs } = parsed;
   const plain = READS_NOTHING.has(name);
-  const places = plain ? [] : [env.cwd];
-  const open = (w, argument) => {
-    for (const read of w.reads ?? [])
-      if (!read.unknown && !marked(read.value))
-        places.push(pathOf(read, env));
-    if (unreadValue(w) || plain && argument && !PATH_LIKE.test(w.value))
-      return;
-    places.push(pathOf(w, env));
-    if (w.glob)
-      places.push(...globbed(w.value, env.cwd));
+  const text = plain || UNREAD_TEXT.has(name);
+  const code = textWords(name, args);
+  const out = { below: [], places: [] };
+  const blind = (why) => {
+    out.unread ??= why;
   };
-  for (const a of args)
-    open(a, true);
+  if (!plain && env.cwd)
+    out.places.push(env.cwd);
+  else if (!plain && (env.cwdUnread || env.cwdAnywhere))
+    blind("the folder a cd on the line left it in");
+  const named = [];
+  const open = async (w, argument, asText = false) => {
+    for (const read of w.reads ?? []) {
+      const path = read.unknown || marked(read.value) ? undefined : pathOf(read, env);
+      if (path)
+        out.places.push(path);
+      else
+        blind(`a file a substitution reads by ${read.unknown ?? "a value it cannot expand"}`);
+    }
+    if (fromXargs(w, xargs))
+      return text ? undefined : blind(`the word xargs fills in place of ${xargs?.replace}`);
+    const words = unreadValue(w) ? await readable(w, env, steady, held) : [w];
+    if (!words)
+      return text || asText ? undefined : blind(w.unknown ?? "a value it cannot expand");
+    for (const word of words) {
+      if (plain && argument && !PATH_LIKE.test(word.value))
+        continue;
+      const path = pathOf(word, env);
+      if (!path)
+        continue;
+      out.places.push(path);
+      if (argument)
+        named.push(path);
+      if (word.glob)
+        out.places.push(...globbed(word.value, env.cwd, out.below));
+    }
+  };
+  for (const [at, a] of args.entries())
+    await open(a, true, code.has(at));
   for (const r of cmd.redirects)
     if (namesFile(r))
-      open(r.target, false);
-  return places;
+      await open(r.target, false);
+  if (recursive2(name, args))
+    out.below.push(...searchRoots(name, args, env));
+  return out;
 }
 var DB_CLIENTS = new Set([
   "mongo",
@@ -12835,6 +16337,33 @@ function containedClient(parsed) {
   }
   return { ...parsed, args: args.slice(at + 1), local: given, name: words[at] };
 }
+var namedHosts = (hosts, value, service = false) => {
+  if (service)
+    hosts.push(undefined);
+  else
+    for (const host of value.split(","))
+      hosts.push(hostOf2(host));
+};
+var urlHosts = (hosts, value) => {
+  for (const m of value.matchAll(DB_URL)) {
+    namedHosts(hosts, m[1]);
+    for (const pair of (m[2] ?? "").split("&")) {
+      const eq = pair.indexOf("=");
+      const key = eq < 0 ? pair : pair.slice(0, eq);
+      if (key === "host" || key === "hostaddr")
+        namedHosts(hosts, pair.slice(eq + 1));
+      else if (key === "service")
+        namedHosts(hosts, "", true);
+    }
+  }
+};
+function hostRefusal(name, hosts) {
+  const at = hosts.findIndex((h) => h === undefined || !onThisMachine(h));
+  if (at < 0)
+    return;
+  const host = hosts[at];
+  return host === undefined ? orgRefusal(`this ${name} call`, "the hook cannot tell which database it reaches, since a value it cannot read names it", DB_FIX) : orgRefusal(`this ${name} call`, `it reaches ${host}, a database off this machine, which may be an org's`);
+}
 function dbCall(parsed, env) {
   const inner = CONTAINER_RUNNERS.has(parsed.name) ? containedClient(parsed) : undefined;
   if (inner)
@@ -12842,23 +16371,7 @@ function dbCall(parsed, env) {
   const { args, local, name } = parsed;
   const client = dbClient(name);
   const hosts = [];
-  const named = (value, service = false) => {
-    if (service)
-      hosts.push(undefined);
-    else
-      for (const host of value.split(","))
-        hosts.push(hostOf2(host));
-  };
-  const queried = (query) => {
-    for (const pair of query.split("&")) {
-      const eq = pair.indexOf("=");
-      const key = eq < 0 ? pair : pair.slice(0, eq);
-      if (key === "host" || key === "hostaddr")
-        named(pair.slice(eq + 1));
-      else if (key === "service")
-        named("", true);
-    }
-  };
+  const named = (value, service = false) => namedHosts(hosts, value, service);
   for (let i = 0;i < args.length; i++) {
     const a = args[i];
     if (unreadValue(a)) {
@@ -12867,11 +16380,7 @@ function dbCall(parsed, env) {
       continue;
     }
     const v = a.value;
-    for (const m of v.matchAll(DB_URL)) {
-      named(m[1]);
-      if (m[2])
-        queried(m[2]);
-    }
+    urlHosts(hosts, v);
     if (!client)
       continue;
     for (const m of v.matchAll(CONNINFO))
@@ -12900,11 +16409,91 @@ function dbCall(parsed, env) {
     else
       named(set.value);
   }
-  const at = hosts.findIndex((h) => h === undefined || !onThisMachine(h));
-  if (at < 0)
+  return hostRefusal(name, hosts);
+}
+var PG_CONNECT = /^[ \t]*\\(?:c|connect)(?:[ \t]+([^\n]*))?$/gm;
+var MYSQL_CONNECT = /^[ \t]*(?:connect|\\r)(?:[ \t]+([^\n;]*))?;?[ \t]*$/gim;
+var MONGO_CONNECT = /\b(connect|Mongo)\s*\(\s*([^),]*)/g;
+var unquote2 = (word) => word.replace(/^['"`]|['"`]$/g, "");
+function inputHosts(name, text, hosts) {
+  if (pgClient(name))
+    for (const m of text.matchAll(PG_CONNECT)) {
+      const rest = (m[1] ?? "").replace(/(?:^|\s)-reuse-previous=\S+/g, " ").trim();
+      const before = hosts.length;
+      if (marked(rest))
+        hosts.push(undefined);
+      else
+        urlHosts(hosts, rest);
+      if (hosts.length > before)
+        continue;
+      if (rest.includes("="))
+        for (const c of rest.matchAll(CONNINFO))
+          namedHosts(hosts, unquote2(c[2]), c[1] === "service");
+      else {
+        const host = rest.split(/\s+/)[2];
+        if (host && host !== "-")
+          namedHosts(hosts, unquote2(host));
+      }
+    }
+  else if (mysqlClient(name))
+    for (const m of text.matchAll(MYSQL_CONNECT)) {
+      const rest = (m[1] ?? "").trim();
+      const host = rest.split(/\s+/)[1];
+      if (marked(rest))
+        hosts.push(undefined);
+      else if (host)
+        namedHosts(hosts, unquote2(host));
+    }
+  else if (mongoClient(name))
+    for (const [, call, arg] of text.matchAll(MONGO_CONNECT)) {
+      const value = /^(['"`])([^'"`]*)\1\s*$/.exec(arg.trim())?.[2];
+      if (arg.trim() === "")
+        continue;
+      if (value === undefined || marked(value))
+        hosts.push(undefined);
+      else if (value.includes("://"))
+        urlHosts(hosts, value);
+      else if (call === "Mongo" || /[:/]/.test(value))
+        namedHosts(hosts, value.split(/[:/]/)[0]);
+    }
+}
+async function dbInput(cmd, parsed, env) {
+  const contained = CONTAINER_RUNNERS.has(parsed.name) ? containedClient(parsed) : undefined;
+  const { args, name } = contained ?? parsed;
+  if (!dbClient(name))
     return;
-  const host = hosts[at];
-  return host === undefined ? orgRefusal(`this ${name} call`, "the hook cannot tell which database it reaches, since a value it cannot read names it", DB_FIX) : orgRefusal(`this ${name} call`, `it reaches ${host}, a database off this machine, which may be an org's`);
+  const texts = [];
+  for (const r of cmd.redirects) {
+    if (r.body)
+      texts.push(r.body);
+    else if (r.op === "<" && r.target)
+      texts.push(await readPath(r.target, env));
+  }
+  const files = pgClient(name) || mongoClient(name);
+  const scripts = [];
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    const v = a.value;
+    if (files && (v === "-f" || v === "--file")) {
+      const next = args[++i];
+      if (next)
+        scripts.push(next);
+    } else if (files && v.startsWith("--file="))
+      scripts.push({ ...a, value: v.slice(7) });
+    else if (pgClient(name) && /^-f./.test(v))
+      scripts.push({ ...a, value: v.slice(2) });
+    else if (mongoClient(name) && !v.startsWith("-") && /\.[cm]?js$/.test(v))
+      scripts.push(a);
+  }
+  for (const script of scripts)
+    texts.push(contained ? unknown("a script inside the container") : await readPath(script, env));
+  const hosts = [];
+  for (const text of texts)
+    if (text.unknown)
+      hosts.push(undefined);
+    else
+      inputHosts(name, text.value, hosts);
+  return hostRefusal(name, hosts);
 }
 function orgCall(parsed, env, dir, sub, orgs) {
   const { args, name } = parsed;
@@ -12937,7 +16526,9 @@ function orgCall(parsed, env, dir, sub, orgs) {
       return orgRefusal(`this ${name} call`, `it reaches ${hit}, a guarded org's repository`);
   }
 }
-var visitor = (load5, limit, orgs, roots) => {
+var UNHELD = { own: {}, steadyAt: () => NONE2, unset: () => false };
+var PATH_FIX = "Name the path literally, in a call of its own, or report to your lead.";
+var visitor = (load5, limit, orgs, roots, held = UNHELD) => {
   const busy = load5 > limit;
   let earlier = "none";
   const forced = [];
@@ -12945,21 +16536,31 @@ var visitor = (load5, limit, orgs, roots) => {
   const visit = async (cmd, parsed, env) => {
     const slot = slotWords(parsed);
     if (slot)
-      return slot.length === 0 ? undefined : examine({ ...cmd, words: slot }, env, visit, false);
+      return slot.length === 0 ? undefined : examine({ ...cmd, words: slot }, { ...env, files: new Map(env.files), vars: new Map(env.vars) }, visit, false);
     const { args, name } = parsed;
-    if (Array.isArray(orgs) && orgs.length > 0)
-      for (const place of opened(cmd, parsed, env)) {
+    let blind;
+    if (Array.isArray(orgs) && orgs.length > 0) {
+      const { below, places, unread } = await opened(cmd, parsed, env, held.steadyAt(cmd), held);
+      for (const place of places) {
         const repo = checkoutOf(place, orgs, roots);
         if (repo)
           return checkoutRefusal(`this ${name} call`, repo);
       }
+      for (const folder of below) {
+        const found = checkoutBelow(folder, orgs, roots);
+        if (found)
+          return belowRefusal(`this ${name} call`, folder, found);
+      }
+      if (unread)
+        blind = orgRefusal(`this ${name} call`, `it opens ${unread}, a path the hook cannot read, which may be in an org's checkout`, PATH_FIX);
+    }
     const reads = branchReads;
     branchReads = [];
     const busyRun = busy ? installOrClone(name, args) : undefined;
     if (busyRun)
       return loaded(busyRun, load5, limit);
-    if (PURE.has(name) && !writes2(cmd))
-      return;
+    if (PURE.has(name) && !writes3(cmd))
+      return blind;
     const before = earlier;
     const isGit = name === "git";
     let dir = env.cwd;
@@ -12975,10 +16576,10 @@ var visitor = (load5, limit, orgs, roots) => {
         break;
     }
     const sub = isGit ? args[k]?.value : undefined;
-    const org = orgCall(parsed, env, dir, sub, orgs) ?? dbCall(parsed, env);
+    const org = orgCall(parsed, env, dir, sub, orgs) ?? dbCall(parsed, env) ?? await dbInput(cmd, parsed, env) ?? blind;
     if (org)
       return org;
-    if (isGit && !writes2(cmd) && BRANCH_READS.has(args.slice(k).map((a) => a.value).join(" "))) {
+    if (isGit && !writes3(cmd) && BRANCH_READS.has(args.slice(k).map((a) => a.value).join(" "))) {
       branchReads = [...reads, dir];
       return;
     }
@@ -12999,7 +16600,7 @@ var visitor = (load5, limit, orgs, roots) => {
   };
   return visit;
 };
-async function inspect5(raw, environment, load5, limit) {
+async function inspect7(raw, environment, load5, limit) {
   const {
     cwd,
     tool_input: toolInput,
@@ -13008,14 +16609,39 @@ async function inspect5(raw, environment, load5, limit) {
   if (typeof tool === "string" && (tool.startsWith("mcp__") || MCP_RESOURCE_TOOLS.has(tool)))
     return orgRefusal(`this ${tool} call`, "an MCP tool reaches an org's or an outside service's data");
   const directory = typeof cwd === "string" ? cwd : undefined;
+  if (typeof tool === "string" && tool in EDIT_TOOLS) {
+    const given = toolInput?.[EDIT_TOOLS[tool]];
+    const file = typeof given !== "string" || given === "" ? undefined : isAbsolute5(given) ? given : directory && resolve8(directory, given);
+    const path = file ? fromCheckout(file) : undefined;
+    return path && heavy(path) ? refuse8(`${tool} call`, [path]) : undefined;
+  }
   if (typeof tool === "string" && tool in READ_TOOLS) {
     const orgs = await guardedOf(environment);
     if (!Array.isArray(orgs))
       return;
     const given = toolInput?.[READ_TOOLS[tool]];
-    const path = typeof given !== "string" || given === "" ? directory : given.startsWith("~/") && environment.HOME ? join13(environment.HOME, given.slice(2)) : isAbsolute5(given) ? given : directory && resolve7(directory, given);
-    const repo = orgs.length > 0 ? checkoutOf(path, orgs, new Map) : undefined;
-    return repo ? checkoutRefusal(`this ${tool} call`, repo) : undefined;
+    const path = typeof given !== "string" || given === "" ? directory : given.startsWith("~/") && environment.HOME ? join14(environment.HOME, given.slice(2)) : isAbsolute5(given) ? given : directory && resolve8(directory, given);
+    if (orgs.length === 0)
+      return;
+    const roots = new Map;
+    const what = `this ${tool} call`;
+    const repo = checkoutOf(path, orgs, roots);
+    if (repo)
+      return checkoutRefusal(what, repo);
+    const pattern = toolInput?.pattern;
+    const glob = tool === "Glob" && typeof pattern === "string" ? globRoot(pattern, path) : undefined;
+    const root = tool === "Grep" ? path : glob?.root;
+    if (!root)
+      return;
+    if (root !== path) {
+      const at = checkoutOf(root, orgs, roots);
+      if (at)
+        return checkoutRefusal(what, at);
+    }
+    if (tool === "Grep" ? !isFolder2(root) : !glob?.deep)
+      return;
+    const found = checkoutBelow(root, orgs, roots);
+    return found ? belowRefusal(what, root, found) : undefined;
   }
   if (tool !== "Bash" || typeof toolInput?.command !== "string")
     return;
@@ -13026,17 +16652,29 @@ async function inspect5(raw, environment, load5, limit) {
   const text = command.replace(/["'\\]/g, "");
   if (!guarding && !mayRefuse(text, load5, limit) && !RUNNER_CALL.test(text))
     return;
+  const named = namings2(command);
+  const repo = named.blind || named.counts.has("PLAYGROUND_REPO") ? undefined : environment.PLAYGROUND_REPO;
+  const known = {
+    ...knownVariables(command, environment, directory),
+    ...repo ? { PLAYGROUND_REPO: repo } : {}
+  };
+  const lexed = lex(command, known);
+  const steadyAt = steadyNames(named, lexed.commands);
+  const own = named.blind ? {} : Object.fromEntries(Object.entries(environment).filter((entry) => typeof entry[1] === "string" && !named.counts.has(entry[0])));
   const env = {
     cwd: directory,
+    cwdSure: directory,
     files: new Map,
-    known: knownVariables(command, environment, directory),
-    old: { dir: directory },
+    hold: (word, cmd, here) => heldWord(word, here, steadyAt(cmd)),
+    known,
+    old: {},
     process: environment,
     vars: new Map
   };
   const home = guarding ? checkoutOf(directory, orgs, roots) : undefined;
   try {
-    return await run(lex(command, env.known), env, visitor(load5, limit, orgs, roots));
+    const unset = (key) => !named.blind && !named.counts.has(key) && environment[key] === undefined;
+    return await run2(lexed, env, visitor(load5, limit, orgs, roots, { own, steadyAt, unset }));
   } catch (error) {
     if (home)
       return checkoutRefusal("this call, which the hook could not read,", home);
@@ -13044,10 +16682,10 @@ async function inspect5(raw, environment, load5, limit) {
   }
 }
 var mayRefuse = (text, load5, limit) => GIT_CALL.test(text) || ORG_CALL.test(text) || load5 > limit && BUSY_RUN.test(text);
-async function check8(raw, environment = process.env, load5 = currentLoad5()) {
+async function check11(raw, environment = process.env, load5 = currentLoad5()) {
   const limit = await loadLimit(environment);
   try {
-    return await inspect5(raw, environment, load5, limit);
+    return await withLiveBudget(() => inspect7(raw, environment, load5, limit));
   } catch (error) {
     if (!mayRefuse(raw, load5, limit))
       return;
@@ -13055,52 +16693,140 @@ async function check8(raw, environment = process.env, load5 = currentLoad5()) {
   }
 }
 async function refusal(raw, environment = process.env, load5 = currentLoad5()) {
-  return await onGlm(raw, environment) ? check8(raw, environment, load5) : undefined;
+  return await onGlm(raw, environment) ? check11(raw, environment, load5) : undefined;
 }
 if (false) {}
 
+// scripts/hooks/no-hidden-program.ts
+var changedIn = (command) => new Set([...PLAIN_PREFIXES].filter((name) => new RegExp(`(?:^|[\\s;&|(){}])${name}\\+=|\\$\\{${name}:{0,2}=`).test(command)));
+var NUMERIC_RANGE = /<\d*-\d*>/;
+var visitOf = (changed) => async (cmd, { first, via }, at) => {
+  const typed = first?.source ?? first?.value;
+  const primary = parse(cmd).first;
+  if (!first || cmd.casePattern)
+    return;
+  if (!via && typed !== (primary?.source ?? primary?.value))
+    return;
+  if (plainProgram(first, at, changed))
+    return;
+  const held = /^"?\$\{?([A-Za-z_]\w*)\}?"?$/.exec(typed ?? "")?.[1];
+  const value = held === undefined ? undefined : at.vars.get(held);
+  const rewrite = value && !value.unknown && !marked(value.value) && value.value.trim() ? ` Here, write \`${value.value}\` in place of \`${typed}\`.` : "";
+  const before = cmd.words.slice(0, cmd.words.indexOf(first));
+  const lookup = before.some((w) => !w.quoted && w.value === "command") && before.some((w) => !w.quoted && /^-[pvV]*[vV]/.test(w.value)) ? " To look a program up, name it literally, or test with `type`." : "";
+  return `no-hidden-program hook refuses a program name it cannot read as one plain name: \`${typed}\` is a pattern, a brace list, an escape, a leading = lookup or an expansion, and each guard reads a program by its name. Spell the program's name or path as plain text; a quoted or escaped name, ~, $HOME and $PLAYGROUND_REPO are fine.${rewrite}${lookup}`;
+};
+async function inspect8(raw, environment) {
+  const { cwd, tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
+  if (tool !== "Bash")
+    return;
+  const command = toolInput?.command;
+  if (typeof command !== "string")
+    return;
+  const directory = typeof cwd === "string" ? cwd : undefined;
+  const env = {
+    cwd: directory,
+    files: new Map,
+    known: knownVariables(command, environment, directory),
+    process: environment,
+    vars: new Map
+  };
+  if (NUMERIC_RANGE.test(command))
+    return "no-hidden-program hook refuses a call holding a zsh numeric range (`<->`, `<1-5>`), which zsh globs into a word where the shared reader reads a redirect, so the program that runs may not be the one the line spells. Spell the program's name or path as plain text, and put text holding a literal `<\u2026-\u2026>` in a file and pass the file (`git commit -F <file>`).";
+  return run2(lex(command, env.known), env, visitOf(changedIn(command)));
+}
+async function check12(raw, environment = process.env) {
+  try {
+    return await inspect8(raw, environment);
+  } catch (error) {
+    return `no-hidden-program hook could not read this call (${error}), so it refuses it. Split it into plain commands and run them again.`;
+  }
+}
+
 // scripts/hooks/no-kill-by-name.ts
 var BY_NAME = new Set(["killall", "pkill"]);
+var KILLS = ["fuser", "kill", "killall", "pkill"];
 var SEARCHES = new Set(["fuser", "lsof", "pgrep", "pidof", "ps"]);
 var READS_ONLY2 = new Set(["--help", "--version", "-V", "-h"]);
+var LAUNCHERS2 = new Set(["bun", "bunx", "node", "npm", "npx", "pnpm", "pnpx", "yarn"]);
+var GLOBAL_FLAGS = new Set(["--cloudflare", "--funnel", "--lan", "--ngrok", "--tailscale"]);
+var GLOBAL_VALUED = new Set(["--ip", "--lan-ip-auto", "--script"]);
 var WAY_OUT = "Stop a background task with TaskStop, a dev stack with bun run dev:stop in its worktree, and a process you spawned with kill <pid> on the pid you hold ($! or its pid file).";
-var refuse6 = (what, beside = "") => `no-kill-by-name hook refuses ${what}: a name, pattern or port matches the live dashboard and every worker's stack, not only your own process. ${WAY_OUT}${beside}`;
+var refuse9 = (what, beside = "") => `no-kill-by-name hook refuses ${what}: a name, pattern or port matches the live dashboard and every worker's stack, not only your own process. ${WAY_OUT}${beside}`;
 var readsOnly = (cmd, first, args) => {
   const before = cmd.words.slice(0, first ? cmd.words.indexOf(first) : 0);
   return before.some((w, i) => program(w.value) === "command" && /^-[vV]$/.test(before[i + 1]?.value ?? "")) || args.length > 0 && args.every((a) => READS_ONLY2.has(a.value));
 };
+var isPortless = (word) => {
+  const name = word.replace(/(?<=.)@[^@/]*$/, "");
+  return program(name) === "portless" || /(?:^|\/)portless\/dist\/cli\.js$/.test(name);
+};
+var portlessRuns = (name, args) => {
+  const values = args.map((a) => a.value);
+  if (isPortless(name))
+    return [values];
+  if (!LAUNCHERS2.has(name))
+    return [];
+  return values.flatMap((v, i) => isPortless(v) ? [values.slice(i + 1)] : []);
+};
+var probingStop = (words) => {
+  const args = words.filter((v, i) => !GLOBAL_FLAGS.has(v) && !GLOBAL_VALUED.has(v) && !GLOBAL_VALUED.has(words[i - 1] ?? ""));
+  if (args[0] === "clean")
+    return !args.slice(1).some((v) => v === "--help" || v === "-h");
+  if (args[0] !== "proxy" || args[1] !== "stop")
+    return false;
+  const flag = args.includes("--port") ? args.indexOf("--port") : args.indexOf("-p");
+  return flag < 0 || !/^\d+$/.test(args[flag + 1] ?? "");
+};
 var isSearch = (name, args) => SEARCHES.has(name) && !(name === "ps" && args.some((a) => /^-[A-Za-z]*[pq]$|^-[pq]\d|^--(?:quick-)?pid\b/.test(a.value)));
-async function inspect6(raw) {
+async function inspect9(raw) {
   const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
   if (tool !== "Bash" || typeof toolInput?.command !== "string")
     return;
-  if (!/\b(?:fuser|kill|killall|pkill)\b/.test(toolInput.command.replace(/["'\\]/g, "")))
+  const decoded = toolInput.command.includes("$'") ? lex(toolInput.command).commands.flatMap((c) => c.words.map((w) => w.value)).join(" ") : "";
+  const bare = spelledText(`${toolInput.command} ${decoded}`).replace(/["'\\]/g, "");
+  const namesKill = /\b(?:fuser|kill|killall|pkill)\b/.test(bare) || /(?:\$\{?\w+\}?){2,}/.test(bare) || /\w\{[^{}\s]*\.\.[^{}\s]*\}|\{[^{}\s]*\.\.[^{}\s]*\}\w/.test(bare) || globSpells(bare, KILLS);
+  if (!namesKill && !/\bportless\b/.test(bare))
     return;
   const lexed = lex(toolInput.command);
   const fresh = () => ({ files: new Map, known: {}, process: {}, vars: new Map });
   let search;
-  await run(lexed, fresh(), async (_cmd, { args, name }) => {
-    if (isSearch(name, args))
-      search ??= name;
+  const find = async (cmd, parsed, env) => {
+    const slot = slotWords(parsed);
+    if (slot?.length)
+      return examine({ ...cmd, words: slot }, env, find, false);
+    if (isSearch(parsed.name, parsed.args))
+      search ??= parsed.name;
     return;
-  });
+  };
+  await run2(lexed, fresh(), find);
   const handed = lexed.commands.flatMap((c) => parse(c).xargs?.replace || []);
-  const visit = async (cmd, { args, first, name, xargs }) => {
+  const visit = async (cmd, parsed, env) => {
+    const slot = slotWords(parsed) ?? (SHELLS.has(parsed.name) ? shellSlot(parsed.args, parsed.name) : undefined);
+    if (slot?.length) {
+      const slotted = { ...cmd, words: slot };
+      return examine(slotted, env, (c, p, e) => visit(c, c === slotted ? { ...p, xargs: p.xargs ?? parsed.xargs } : p, e), false);
+    }
+    const { args, first, name, xargs } = parsed;
+    if (parsed.unread && namesKill)
+      return refuse9("a command built from a value it cannot read, in a call that names a kill", " Write the program and its words out in the call.");
+    if (portlessRuns(name, args).some(probingStop))
+      return refuse9("a portless proxy stop with no port, or a portless clean", " portless then probes 443, 80 and 1355 and stops whichever proxy answers, the live one every worktree routes through: stop your own proxy with portless proxy stop -p <its port>.");
     if (BY_NAME.has(name) && !readsOnly(cmd, first, args))
-      return refuse6(name);
+      return refuse9(name);
     if (name === "fuser" && args.some((a) => /^-\w*k|^--kill\b/.test(a.value)))
-      return refuse6("fuser -k");
+      return refuse9("fuser -k");
     if (name !== "kill" || !search)
       return;
     const fed = xargs || args.some((a) => a.value.includes(UNKNOWN) || handed.some((h) => a.value.includes(h)));
     if (fed)
-      return refuse6(`a kill in a call that searches with ${search}`, ` Run a kill of a pid you hold in a Bash call of its own, apart from the search.`);
+      return refuse9(`a kill in a call that searches with ${search}`, ` Run a kill of a pid you hold in a Bash call of its own, apart from the search.`);
   };
-  return run(lexed, fresh(), visit);
+  return run2(lexed, { ...fresh(), visitShells: true }, visit);
 }
-async function check9(raw) {
+async function check13(raw) {
   try {
-    return await inspect6(raw);
+    return await inspect9(raw);
   } catch {
     return;
   }
@@ -13109,14 +16835,14 @@ if (false) {}
 
 // scripts/hooks/no-linear-ticket.ts
 import { realpath } from "fs/promises";
-import { basename as basename6, dirname as dirname7, isAbsolute as isAbsolute6, join as join14, resolve as resolve8, sep as sep3 } from "path";
+import { basename as basename6, dirname as dirname7, isAbsolute as isAbsolute6, join as join15, resolve as resolve9, sep as sep3 } from "path";
 var CREATE = /\bissue(?:batch)?create\b/i;
 var LINEAR = /linear\.app/i;
 var GITHUB = /^https?:\/\/(?:[\w-]+\.)*github\.com(?:[/:?#]|$)/i;
 var URL_SCHEME = /^[a-z][a-z\d+.-]*:\/\//i;
-var MCP_TOOL2 = /^mcp__(.+?)__(.+)$/;
+var MCP_TOOL4 = /^mcp__(.+?)__(.+)$/;
 var CREATE_TOOL = /^(?:\w+_)?create_?issues?$|^issues?_?create$/i;
-var FILE_TOOLS2 = new Map([
+var FILE_TOOLS3 = new Map([
   ["Edit", "file_path"],
   ["MultiEdit", "file_path"],
   ["NotebookEdit", "notebook_path"],
@@ -13134,12 +16860,12 @@ var MAYBE2 = /issue(?:batch)?create|linear|ticket-approvals|curl|\bgh\b|bun|deno
 var MAX_APPROVAL_BYTES = 65536;
 var interpreter = (name) => /^python[\d.]*$/.test(name) ? "python" : name;
 var isDispatcher = (environment) => environment.PLAYGROUND_ROLE === "dispatcher";
-var approvalsDir = (environment) => join14(dataDirOf(environment), "ticket-approvals");
+var approvalsDir = (environment) => join15(dataDirOf(environment), "ticket-approvals");
 var slug = (team) => team.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 var day = (now) => now.toISOString().slice(0, 10);
 var RULE = "A new Linear ticket needs the owner's yes first, and the factory's own work never goes in Linear.";
 var ASK_UP = "Ask up the chain with the team and the exact title; once the owner says yes, the dispatcher records it, and the same save_issue call then runs.";
-function refuse7(what, detail, next) {
+function refuse10(what, detail, next) {
   return `no-linear-ticket hook refused ${what}: ${detail}. ${RULE} ${next}`;
 }
 async function real2(path) {
@@ -13153,8 +16879,8 @@ var within = (path, dir) => path === dir || path.startsWith(`${dir}${sep3}`);
 async function inApprovals(path, environment) {
   const dir = approvalsDir(environment);
   const dirs = [dir, await real2(dir)];
-  const target = resolve8(path);
-  const targets = [target, join14(await real2(dirname7(target)), basename6(target))];
+  const target = resolve9(path);
+  const targets = [target, join15(await real2(dirname7(target)), basename6(target))];
   return targets.some((t) => dirs.some((d) => within(t, d)));
 }
 function refuseApprovals(what, environment) {
@@ -13218,7 +16944,7 @@ async function curl2(args, cmd, env, xargs) {
     sent.push(unknown(`what xargs puts in place of ${xargs?.replace}`));
   }
   const texts = await Promise.all([...urls, ...sent].map((t) => resolveText(viaXargs(t, xargs), env)));
-  return judge4("curl", texts, urls.some((u) => LINEAR.test(visible(u.value))), env.process, urls.length);
+  return judge5("curl", texts, urls.some((u) => LINEAR.test(visible(u.value))), env.process, urls.length);
 }
 async function gh2(args, cmd, env, xargs) {
   const { head, rest } = ghCommand(args);
@@ -13232,7 +16958,7 @@ async function gh2(args, cmd, env, xargs) {
   if (!open && !(URL_SCHEME.test(where.value) && !GITHUB.test(where.value)))
     return;
   const texts = await Promise.all([where, ...request.fields.map((f) => f.text), ...request.inputs].map((t) => resolveText(t, env)));
-  return judge4("gh api", texts, open || LINEAR.test(visible(where.value)), env.process, 1);
+  return judge5("gh api", texts, open || LINEAR.test(visible(where.value)), env.process, 1);
 }
 async function script2(language, args, cmd, env, stdin) {
   const takes = CODE_FLAGS.get(language) ?? new Set;
@@ -13265,11 +16991,11 @@ async function script2(language, args, cmd, env, stdin) {
     code.push(await stdinOf(cmd, env));
   }
   const texts = await Promise.all(code.map((c) => resolveText(c, env)));
-  return judge4(language, texts, false, env.process);
+  return judge5(language, texts, false, env.process);
 }
-function judge4(what, texts, toLinear, environment, targets = 0) {
+function judge5(what, texts, toLinear, environment, targets = 0) {
   if (texts.some((t) => CREATE.test(visible(t.value)))) {
-    return refuse7(what, "it sends Linear's issueCreate, which files a new ticket", isDispatcher(environment) ? "Once he says yes, record it and file the ticket with the Linear MCP's save_issue, which the hook matches to the approval; a GraphQL create matches none." : ASK_UP);
+    return refuse10(what, "it sends Linear's issueCreate, which files a new ticket", isDispatcher(environment) ? "Once he says yes, record it and file the ticket with the Linear MCP's save_issue, which the hook matches to the approval; a GraphQL create matches none." : ASK_UP);
   }
   if (!toLinear)
     return;
@@ -13278,14 +17004,14 @@ function judge4(what, texts, toLinear, environment, targets = 0) {
     return;
   const hidden = texts[at];
   if (at < targets) {
-    return refuse7(what, `the hook cannot read where it goes (it comes from ${hidden.unknown}), so it may be Linear's API and file a ticket`, `Name the endpoint or URL by its literal value in the command itself (gh api https://api.linear.app/graphql, or curl https://api.linear.app/graphql). ${NOT_RUN}`);
+    return refuse10(what, `the hook cannot read where it goes (it comes from ${hidden.unknown}), so it may be Linear's API and file a ticket`, `Name the endpoint or URL by its literal value in the command itself (gh api https://api.linear.app/graphql, or curl https://api.linear.app/graphql). ${NOT_RUN}`);
   }
-  return refuse7(what, `it goes to Linear's API, and the hook cannot read what it sends before it runs (it comes from ${hidden.unknown}), so it may file a ticket`, `To read Linear, put the query in the command itself, or write the query to a file with the Write tool first, then run the command again in a call of its own that names that file by its literal absolute path (curl -d @/abs/query.json, or gh api --input /abs/query.json). ${NOT_RUN}`);
+  return refuse10(what, `it goes to Linear's API, and the hook cannot read what it sends before it runs (it comes from ${hidden.unknown}), so it may file a ticket`, `To read Linear, put the query in the command itself, or write the query to a file with the Write tool first, then run the command again in a call of its own that names that file by its literal absolute path (curl -d @/abs/query.json, or gh api --input /abs/query.json). ${NOT_RUN}`);
 }
 var hasId = (input) => typeof input.id === "string" && input.id.trim() !== "";
 var textOf = (value) => typeof value === "string" ? value.trim() : "";
 function creates(tool, input) {
-  const [, server = "", name = ""] = MCP_TOOL2.exec(tool) ?? [];
+  const [, server = "", name = ""] = MCP_TOOL4.exec(tool) ?? [];
   if (name === "save_issue")
     return !input || !hasId(input);
   return CREATE_TOOL.test(name) && /linear/i.test(server);
@@ -13297,15 +17023,15 @@ async function mcp2(tool, input, environment, now) {
   const team = textOf(input?.team ?? input?.teamId ?? input?.teamKey);
   const title = textOf(input?.title);
   if (slug(team) === "" || title === "") {
-    return refuse7(what, "it files a new Linear ticket, and the hook cannot read its team and title to match an approval", "Name the team and the title as the owner approved them.");
+    return refuse10(what, "it files a new Linear ticket, and the hook cannot read its team and title to match an approval", "Name the team and the title as the owner approved them.");
   }
-  const path = join14(approvalsDir(environment), `${slug(team)}-${day(now)}.json`);
+  const path = join15(approvalsDir(environment), `${slug(team)}-${day(now)}.json`);
   const approval = await readApproval(path);
   if (approval.titles?.includes(title))
     return;
   const problem = approval.problem ?? `today's approval does not name ${JSON.stringify(title)}`;
   const shape = `{"ask": "<the Inbox decision he approved>", "titles": [${JSON.stringify(title)}]}`;
-  return refuse7(what, `it files a new Linear ticket in ${JSON.stringify(team)}, and ${problem}`, isDispatcher(environment) ? `Once he says yes, write ${path} as ${shape}, and the same call then runs. An approval holds for the UTC day in its name.` : ASK_UP);
+  return refuse10(what, `it files a new Linear ticket in ${JSON.stringify(team)}, and ${problem}`, isDispatcher(environment) ? `Once he says yes, write ${path} as ${shape}, and the same call then runs. An approval holds for the UTC day in its name.` : ASK_UP);
 }
 async function readApproval(path) {
   const file = Bun.file(path);
@@ -13336,22 +17062,22 @@ async function readApproval(path) {
 async function fileTool(tool, path, cwd, environment) {
   if (isDispatcher(environment) || typeof path !== "string" || path === "")
     return;
-  const absolute = isAbsolute6(path) ? path : resolve8(typeof cwd === "string" ? cwd : "/", path);
+  const absolute = isAbsolute6(path) ? path : resolve9(typeof cwd === "string" ? cwd : "/", path);
   if (await inApprovals(absolute, environment))
     return refuseApprovals(tool, environment);
 }
-function candidate2(command) {
+function candidate3(command) {
   return command.includes("$'") || MAYBE2.test(command.replace(/[\\'"]/g, ""));
 }
 function createCall(subject) {
   return CREATE.test(subject) || /save_issue|create_?issue|issues?_?create/i.test(subject);
 }
-async function check10(raw, environment = process.env, now = new Date) {
+async function check14(raw, environment = process.env, now = new Date) {
   const role = await sessionRole(environment, sessionOf(raw));
   if (!role)
     return;
   try {
-    return await eachInput(raw, "no-linear-ticket", (one) => inspect7(one, { ...environment, PLAYGROUND_ROLE: role }, now));
+    return await eachInput(raw, "no-linear-ticket", (one) => inspect10(one, { ...environment, PLAYGROUND_ROLE: role }, now));
   } catch (error) {
     if (!createCall(subjectOf2(raw)))
       return;
@@ -13368,7 +17094,7 @@ function subjectOf2(raw) {
     return raw;
   }
 }
-async function inspect7(raw, environment, now) {
+async function inspect10(raw, environment, now) {
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -13382,7 +17108,7 @@ async function inspect7(raw, environment, now) {
   const input = typeof toolInput === "object" && toolInput !== null ? toolInput : undefined;
   if (tool === "Bash") {
     const command = input?.command;
-    if (typeof command !== "string" || !candidate2(command))
+    if (typeof command !== "string" || !candidate3(command))
       return;
     const directory = typeof cwd === "string" ? cwd : undefined;
     const env = {
@@ -13392,19 +17118,85 @@ async function inspect7(raw, environment, now) {
       process: environment,
       vars: new Map
     };
-    return run(lex(command, env.known), env, ticket);
+    return run2(lex(command, env.known), env, ticket);
   }
   if (typeof tool !== "string")
     return;
-  const key = FILE_TOOLS2.get(tool);
+  const key = FILE_TOOLS3.get(tool);
   if (key)
     return fileTool(tool, input?.[key], cwd, environment);
   return mcp2(tool, input, environment, now);
 }
 if (false) {}
 
+// scripts/hooks/no-live-sign-in.ts
+import { join as join17 } from "path";
+
+// api/hono/src/lib/dev/proxy.ts
+import { existsSync as existsSync9, mkdirSync as mkdirSync3, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { homedir as homedir4 } from "os";
+import { basename as basename7, dirname as dirname8, join as join16 } from "path";
+var serving = (dir) => {
+  try {
+    const pid = Number(readFileSync7(join16(dir, "proxy.pid"), "utf8").trim());
+    if (!(pid > 0))
+      return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+var portlessDir = (env = process.env) => {
+  if (env.PORTLESS_STATE_DIR)
+    return env.PORTLESS_STATE_DIR;
+  const dir = join16(env.HOME || homedir4(), ".portless");
+  return !serving(dir) && serving(fallbackDir(dir)) ? fallbackDir(dir) : dir;
+};
+var UNPREFIXED = new Set(["main", "master"]);
+var fallbackDir = (dir) => join16(dir, "fallback");
+
+// scripts/hooks/no-live-sign-in.ts
+var SIGN_IN = /\/api\/(?:v1\/onboard\/(?:sign-in|finish)|agents\/sign-in-as)\b/;
+var BARE2 = ["api.playground.localhost", "playground.localhost"];
+var LOOPBACK = /(?<![\w.-])(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|0\.0\.0\.0):(\d+)/g;
+async function liveOf(environment) {
+  const hosts = new Set(BARE2);
+  const ports = new Set;
+  try {
+    const routes = await Bun.file(join17(portlessDir(environment), "routes.json")).json();
+    for (const { hostname, port } of routes)
+      if (typeof port === "number" && BARE2.includes(String(hostname)))
+        ports.add(port);
+    for (const { hostname, port } of routes)
+      if (typeof hostname === "string" && typeof port === "number" && ports.has(port))
+        hosts.add(hostname);
+  } catch {}
+  return { hosts, ports };
+}
+var names3 = (text, host) => new RegExp(`(?<![\\w.-])${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(text);
+async function check15(raw, environment = process.env) {
+  try {
+    const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
+    if (tool !== "Bash" || typeof toolInput?.command !== "string")
+      return;
+    const text = toolInput.command.replace(/["'\\]/g, "");
+    if (!SIGN_IN.test(text))
+      return;
+    const live = await liveOf(environment);
+    const host = [...live.hosts].find((name) => names3(text, name));
+    const port = [...text.matchAll(LOOPBACK)].map((m) => Number(m[1])).find((p) => live.ports.has(p));
+    if (!host && port === undefined)
+      return;
+    return `no-live-sign-in hook refuses a sign-in call to the live dashboard (${host ?? `loopback port ${port}`}): the owner sign-in, first run's finish and the agent sign-in each mint a session holding the owner rung there. Sign in on your own worktree's stack instead, by the dev skill's Agent login, whose names \`bunx portless get api.playground\` prints in your worktree.`;
+  } catch {
+    return;
+  }
+}
+if (false) {}
+
 // scripts/hooks/no-mac-web-build.ts
-import { join as join15 } from "path";
+import { join as join18 } from "path";
 
 // scripts/hooks/docker-build.ts
 var DOCKERS = new Set(["docker", "docker-compose"]);
@@ -13577,9 +17369,9 @@ var INSPECT_TIMEOUT_MS = 8000;
 var WEB_DOCKERFILE = "web/next/Dockerfile";
 var API_HERE = "The api image still builds here (docker compose build api).";
 var BOX_ROUTE = `Build the web image on the box instead: commit, then from the checkout run bash ~/.playground/ops/runner-host/ci.sh web HEAD, which builds HEAD's tree there and never on the Mac. ${API_HERE}`;
-var NO_HOST_ROUTE = `No runner host is set (RUNNER_HOST, or the data folder's ops/runner-host/ip), so there is no box to build it on, and the live dashboard's Postgres stays up: set one up (scripts/ops/runner-host/host.sh setup <ip>, then write its address to that ip file), or build the web image on a machine with no live dashboard running. ${API_HERE}`;
+var NO_HOST_ROUTE = `No runner host is set (RUNNER_HOST, or the data folder's ops/runner-host/ip), so there is no box to build it on, and the live dashboard's Postgres stays up: set one up (a peer machine of your own user, by scripts/ops/README.md's runner-host section, then write its address to that ip file), or build the web image on a machine with no live dashboard running. ${API_HERE}`;
 async function hasRunnerHost(environment) {
-  const ip = environment.RUNNER_HOST || (await Bun.file(join15(dataDirOf(environment), "ops", "runner-host", "ip")).text().catch(() => "")).replace(/\n+$/, "");
+  const ip = environment.RUNNER_HOST || (await Bun.file(join18(dataDirOf(environment), "ops", "runner-host", "ip")).text().catch(() => "")).replace(/\n+$/, "");
   return /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(ip);
 }
 function composeBuild2({ rest, sub }) {
@@ -13618,7 +17410,7 @@ async function dashboardRuns(what, environment) {
   const cannot = async (why) => `no-mac-web-build hook refuses ${what}: ${why}, so it cannot tell whether the live dashboard's Postgres runs in this Mac's Docker VM, where a web image build's memory takes the VM's out-of-memory killer to the dashboard's database. ${await route()}`;
   let name;
   try {
-    name = (await Bun.file(join15(dataDirOf(environment), "ops", "dashboard", "dashboard-db")).text()).trim();
+    name = (await Bun.file(join18(dataDirOf(environment), "ops", "dashboard", "dashboard-db")).text()).trim();
   } catch (error) {
     if (error.code === "ENOENT")
       return cannot("there is no dashboard-db in the dashboard supervisor's state folder");
@@ -13650,7 +17442,7 @@ async function dashboardRuns(what, environment) {
     return `no-mac-web-build hook refuses ${what}: the live dashboard's Postgres (${name}) runs in this Mac's Docker VM, and a web image build peaks past the VM's memory, so its out-of-memory killer takes the dashboard's database. ${await route()}`;
   return cannot(`docker inspect ${name} answered ${(err || out).trim().slice(0, 200) || `exit ${code}`}`);
 }
-var visit2 = async (_cmd, { args, first, name }, env) => {
+var visit4 = async (_cmd, { args, first, name }, env) => {
   const judge = async (words, compose) => {
     const what = webBuild(words, compose);
     return what ? dashboardRuns(what, env.process) : undefined;
@@ -13668,11 +17460,11 @@ var visit2 = async (_cmd, { args, first, name }, env) => {
   if (nested !== -1)
     return judge(args.slice(nested + 1), program(args[nested].value) === "docker-compose");
 };
-var BARE = (command) => command.replace(/[\\'"]/g, "");
+var BARE3 = (command) => command.replace(/[\\'"]/g, "");
 var BUILDS = /build|compose/;
-var candidate3 = (command) => command.includes("$'") || BUILDS.test(BARE(command));
-var buildCall = (command) => /\bdocker/i.test(BARE(command)) && BUILDS.test(BARE(command));
-async function inspect8(raw, environment) {
+var candidate4 = (command) => command.includes("$'") || BUILDS.test(BARE3(command));
+var buildCall = (command) => /\bdocker/i.test(BARE3(command)) && BUILDS.test(BARE3(command));
+async function inspect11(raw, environment) {
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -13685,7 +17477,7 @@ async function inspect8(raw, environment) {
   if (tool !== "Bash")
     return;
   const command = toolInput?.command;
-  if (typeof command !== "string" || !candidate3(command))
+  if (typeof command !== "string" || !candidate4(command))
     return;
   const directory = typeof cwd === "string" ? cwd : undefined;
   const env = {
@@ -13695,11 +17487,11 @@ async function inspect8(raw, environment) {
     process: environment,
     vars: new Map
   };
-  return run(lex(command, env.known), env, visit2);
+  return run2(lex(command, env.known), env, visit4);
 }
-async function check11(raw, environment = process.env) {
+async function check16(raw, environment = process.env) {
   try {
-    return await inspect8(raw, environment);
+    return await inspect11(raw, environment);
   } catch (error) {
     let command = raw;
     try {
@@ -13747,16 +17539,16 @@ var SPECS = new Map([
 ]);
 var LABELS = /^repos\/[^/]+\/[^/]+\/labels(\/[^/]+)?$/;
 var MCP_LABEL = /^mcp__.+__label_write$/;
-var refuse8 = (what, detail) => `no-off-palette-label hook refused ${what}: ${detail}. Every label is a Tailwind 500: ${PALETTE}. Give one of them as the color, written literally, and leave existing labels as they are.`;
-function judge5(what, color, create) {
+var refuse11 = (what, detail) => `no-off-palette-label hook refused ${what}: ${detail}. Every label is a Tailwind 500: ${PALETTE}. Give one of them as the color, written literally, and leave existing labels as they are.`;
+function judge6(what, color, create) {
   if (!color || color.value === "" && !unreadable(color))
-    return create ? refuse8(what, "it sets no color, so GitHub picks one") : undefined;
+    return create ? refuse11(what, "it sets no color, so GitHub picks one") : undefined;
   if (unreadable(color))
-    return refuse8(what, `the hook cannot read its color (it comes from ${color.unknown ?? "a variable"})`);
+    return refuse11(what, `the hook cannot read its color (it comes from ${color.unknown ?? "a variable"})`);
   if (!HEXES.has(color.value.replace(/^#/, "").toLowerCase()))
-    return refuse8(what, `its color ${color.value} is not a Tailwind 500`);
+    return refuse11(what, `its color ${color.value} is not a Tailwind 500`);
 }
-var visit3 = async (cmd, { args, first, name }, env) => {
+var visit5 = async (cmd, { args, first, name }, env) => {
   if (name === "gh" || first?.unknown && ["api", "label"].includes(args[0]?.value ?? ""))
     return gh3(args, cmd, env);
   const nested = args.findIndex((a) => program(a.value) === "gh");
@@ -13773,7 +17565,7 @@ async function gh3(args, cmd, env) {
     return;
   const { flags } = parseFlags(rest, takes);
   const color = flags.findLast((f) => f.name === "-c" || f.name === "--color")?.value;
-  return judge5(`gh ${key}`, color && await resolveText(color, env), key === "label create");
+  return judge6(`gh ${key}`, color && await resolveText(color, env), key === "label create");
 }
 async function api3(args, cmd, env) {
   const request = await ghApi(args, cmd, env, undefined);
@@ -13787,7 +17579,7 @@ async function api3(args, cmd, env) {
   let color = request.fields.findLast((f) => f.key === "color")?.text;
   for (const input of request.inputs)
     color = colorOf(await resolveText(input, env)) ?? color;
-  return judge5(`gh api ${request.method} ${path}`, color && await resolveText(color, env), create);
+  return judge6(`gh api ${request.method} ${path}`, color && await resolveText(color, env), create);
 }
 function colorOf(body) {
   if (body.unknown)
@@ -13807,9 +17599,9 @@ function mcp3(input) {
     return;
   const { color } = input;
   const text = color === undefined || color === "" ? undefined : typeof color === "string" ? { value: color } : { unknown: "a color that is not text", value: "" };
-  return judge5(`label_write ${method}`, text, method === "create");
+  return judge6(`label_write ${method}`, text, method === "create");
 }
-async function inspect9(raw) {
+async function inspect12(raw) {
   const {
     cwd,
     tool_input: toolInput,
@@ -13831,184 +17623,93 @@ async function inspect9(raw) {
     process: process.env,
     vars: new Map
   };
-  return run(lex(command, env.known), env, visit3);
+  return run2(lex(command, env.known), env, visit5);
 }
-async function check12(raw) {
+async function check17(raw) {
   try {
-    return await inspect9(raw);
+    return await inspect12(raw);
   } catch {
     return;
-  }
-}
-if (false) {}
-
-// scripts/hooks/no-stash.ts
-var FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-var READS = new Set(["list", "show"]);
-var WRITES = new Set(["create", "store"]);
-var INSTEAD2 = `Every worktree shares one stash list, so a stash taken by position or without a name can be another session's work. Commit a WIP commit on your own branch instead (git commit -m 'chore: wip <what>'), or take before-shots from a separate worktree on origin/canary, made by absolute path under the main checkout so it nests in no other worktree (git worktree add --detach "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" origin/canary). git stash list, git stash show, git stash push -m <message> and git stash apply <full sha> stay allowed.`;
-var refuse9 = (what, why) => `no-stash hook refuses ${what}: ${why}. ${INSTEAD2}`;
-var BROWSER_CLOSE = new Set(["close", "exit", "quit"]);
-var BROWSER_INSTEAD = "Close only the browser you opened; pass --session <name>: agent-browser --session <name> close.";
-function judgeBrowser(args, session, named) {
-  const batch = args.findIndex((a) => a.value === "batch");
-  const words = args.flatMap((a, k) => batch !== -1 && k > batch ? a.value.split(/\s+/) : [a.value]).filter(Boolean);
-  if (words.some((w) => w === "-h" || w === "--help"))
-    return;
-  const closes = words.some((w, k) => BROWSER_CLOSE.has(w) && words[k - 1] !== "tab");
-  const all = words.some((w) => w === "--all" || w.startsWith("--all="));
-  const hidden = words.find((w) => marked(w));
-  if (all && (closes || named && hidden))
-    return `no-stash hook refuses agent-browser ${hidden && !closes ? "with an action it cannot read and" : "close"} --all: it closes every session's browser, other sessions' included. ${BROWSER_INSTEAD}`;
-  const hasSession = session || words.some((w) => w === "--session" || w.startsWith("--session="));
-  if (named && closes && !hasSession)
-    return `no-stash hook refuses a bare agent-browser close: with no --session it closes the shared default session, which another session may be using. ${BROWSER_INSTEAD}`;
-}
-var sessionIn = (local, env) => ["AGENT_BROWSER_SESSION", "AGENT_BROWSER_SESSION_NAME"].some((key) => local.has(key) || env.vars.has(key) || Boolean(env.process[key]));
-function message(args) {
-  for (let k = 0;k < args.length; k++) {
-    const v = args[k].value;
-    if (v === "--")
-      break;
-    if (v === "-m" || v === "--message")
-      return args[k + 1]?.value || undefined;
-    const attached = /^(?:-m|--message=)(.+)$/.exec(v)?.[1];
-    if (attached)
-      return attached;
-  }
-}
-function judgeStash(args, xargs) {
-  if (xargs)
-    return refuse9("git stash under xargs", "the hook cannot read the arguments xargs adds");
-  const action = args[0];
-  if (!action)
-    return refuse9("a bare git stash", "it saves your changes with no name to find them by");
-  if (marked(action.value))
-    return refuse9("this git stash", `the hook cannot read its action (${visible(action.value)})`);
-  const name = action.value;
-  if (args.some((a) => a.value === "-h" || a.value === "--help"))
-    return;
-  if (READS.has(name) || WRITES.has(name))
-    return;
-  if (name === "push" || name === "save" || name.startsWith("-")) {
-    const implied = name.startsWith("-");
-    if (message(implied ? args : args.slice(1)))
-      return;
-    return refuse9(`${implied ? "git stash" : `git stash ${name}`} without -m <message>`, "an unnamed stash is found again only by its position, which another session's stash moves");
-  }
-  if (name === "apply") {
-    const target = args.slice(1).find((a) => !a.value.startsWith("-"));
-    if (target && !marked(target.value) && FULL_SHA.test(target.value))
-      return;
-    return refuse9("git stash apply without a full commit SHA", "stash@{n} and the default name whatever entry is newest, which can be another session's");
-  }
-  if (name === "pop" || name === "drop" || name === "clear" || name === "branch")
-    return refuse9(`git stash ${name}`, "it removes an entry by position from the list every worktree shares");
-  return refuse9(`git stash ${name}`, "it is not a stash action the hook knows to be safe");
-}
-function gitCommand(args) {
-  const aliases = [];
-  let k = 0;
-  while (k < args.length && args[k].value.startsWith("-")) {
-    const v = args[k].value;
-    if (v === "-c")
-      aliases.push(args[k + 1]?.value ?? "");
-    else if (v.startsWith("-c"))
-      aliases.push(v.slice(2));
-    k += GIT_TAKES.has(v) ? 2 : 1;
-  }
-  return { aliases, rest: args.slice(k + 1), sub: args[k] };
-}
-var stashes = (args) => gitCommand(args).sub?.value === "stash";
-var visit4 = async (_cmd, { args, first, local, name, xargs }, env) => {
-  const session = sessionIn(local, env);
-  if (name === "agent-browser")
-    return judgeBrowser(args, session, true);
-  if (name === "git")
-    return judgeGit(args, xargs);
-  if (first && (first.unknown || marked(first.value))) {
-    if (stashes(args))
-      return judgeGit(args, xargs);
-    const verdict = judgeBrowser(args, session, false);
-    if (verdict)
-      return verdict;
-  }
-  if (PRINTERS.has(name))
-    return;
-  const browser = args.findIndex((a) => program(a.value) === "agent-browser");
-  if (browser !== -1) {
-    const verdict = judgeBrowser(args.slice(browser + 1), session, true);
-    if (verdict)
-      return verdict;
-  }
-  const nested = args.findIndex((a, j) => program(a.value) === "git" && stashes(args.slice(j + 1)));
-  if (nested !== -1)
-    return judgeGit(args.slice(nested + 1), xargs);
-};
-function judgeGit(args, xargs) {
-  const { aliases, rest, sub } = gitCommand(args);
-  if (!sub)
-    return;
-  if (marked(sub.value))
-    return refuse9("this git call", `the hook cannot read which git command it runs (${visible(sub.value)})`);
-  if (sub.value === "stash")
-    return judgeStash(rest, xargs !== undefined);
-  const alias = aliases.find((a) => a.startsWith(`alias.${sub.value}=`));
-  if (alias && /\bstash\b/.test(alias))
-    return refuse9(`git ${sub.value}`, "it is an alias for git stash");
-}
-var BARE2 = (command) => command.replace(/[\\'"]/g, "");
-var teardown = (command) => /agent-browser/i.test(BARE2(command)) && /\b(?:close|exit|quit)\b/.test(BARE2(command));
-var candidate4 = (command) => command.includes("$'") || /stash|--all\b/.test(BARE2(command)) || teardown(command);
-var stashCall = (command) => /\bgit\b/i.test(BARE2(command)) && /\bstash\b/.test(BARE2(command)) || teardown(command);
-function commandOf(raw) {
-  try {
-    const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
-    return tool === "Bash" && typeof toolInput?.command === "string" ? toolInput.command : undefined;
-  } catch {
-    return;
-  }
-}
-async function inspect10(raw, environment) {
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    payload = undefined;
-  }
-  if (typeof payload !== "object" || payload === null)
-    return stashCall(raw) ? "no-stash hook could not parse its input, which reads as a git stash, so it refuses the call." : undefined;
-  const { cwd, tool_input: toolInput, tool_name: tool } = payload;
-  if (tool !== "Bash")
-    return;
-  const command = toolInput?.command;
-  if (typeof command !== "string" || !candidate4(command))
-    return;
-  const directory = typeof cwd === "string" ? cwd : undefined;
-  const env = {
-    cwd: directory,
-    files: new Map,
-    known: knownVariables(command, environment, directory),
-    process: environment,
-    vars: new Map
-  };
-  return run(lex(command, env.known), env, visit4);
-}
-async function check13(raw, environment = process.env) {
-  try {
-    return await inspect10(raw, environment);
-  } catch (error) {
-    if (!stashCall(commandOf(raw) ?? raw))
-      return;
-    return `no-stash hook could not read this call (${error}), which reads as a git stash, so it refuses it. Split it into plain commands and run them again.`;
   }
 }
 if (false) {}
 
 // scripts/hooks/no-ours-merge.ts
 var SUBS = new Set(["merge", "pull"]);
-var SHORT_TAKES = new Set(["F", "X", "j", "m", "o", "s"]);
+var VERIFIED = new Set(["commit", "merge", "pull"]);
+var SHORT_TAKES = new Set(["F", "X", "m", "o", "s"]);
+var ATTACHED = new Set(["S", "j", "u"]);
+var ALIAS_DEPTH = 8;
+var SEQUENCE2 = /\{[^{}]*\.\.[^{}]*\}/;
 var INSTEAD3 = "Merge canary in plainly instead: git merge origin/canary, and resolve each conflict keeping both sides' meaning. With ours, the PR's squash onto canary deletes whatever canary added that the merge ignored, while every gate still reads green.";
+var AGAIN = "Run it again without --no-verify (or a commit's -n), so git runs the hooks of the commit it makes. A reviewer's local merge of canary drops --no-verify too: git -C <clone> merge --no-edit origin/canary runs the clone's own hooks.";
+var TAKES3 = {
+  commit: new Set([
+    "--author",
+    "--cleanup",
+    "--date",
+    "--file",
+    "--fixup",
+    "--message",
+    "--pathspec-from-file",
+    "--reedit-message",
+    "--reuse-message",
+    "--squash",
+    "--template",
+    "--trailer"
+  ]),
+  merge: new Set([
+    "--cleanup",
+    "--file",
+    "--into-name",
+    "--message",
+    "--strategy",
+    "--strategy-option"
+  ]),
+  pull: new Set(["--cleanup", "--file", "--strategy", "--strategy-option", "--upload-pack"])
+};
+var COMMIT_SHORT = new Set(["C", "F", "c", "m", "t"]);
+function walk2(sub, args) {
+  let off;
+  let unread;
+  const commit = sub === "commit";
+  const value = (k) => {
+    if (args[k]?.unknown === BRACE)
+      unread ??= args[k];
+    return k;
+  };
+  for (let k = 0;k < args.length; k++) {
+    const v = args[k].value;
+    if (v === "--")
+      break;
+    if (args[k].unknown === BRACE)
+      unread ??= args[k];
+    else if (v.startsWith("--")) {
+      if (v === "--verify")
+        off = undefined;
+      else if (v === "--no-verify" || commit && v.length > 8 && "--no-verify".startsWith(v))
+        off = v;
+      else if (TAKES3[sub]?.has(v))
+        k = value(k + 1);
+      continue;
+    }
+    if (!v.startsWith("-") || v === "-")
+      continue;
+    for (let c = 1;c < v.length; c++) {
+      const letter = v[c];
+      if (commit && letter === "n")
+        off = "-n";
+      else if (ATTACHED.has(letter))
+        break;
+      else if ((commit ? COMMIT_SHORT : SHORT_TAKES).has(letter)) {
+        if (c === v.length - 1)
+          k = value(k + 1);
+        break;
+      }
+    }
+  }
+  return { off, unread };
+}
 var strategyLong = (name) => name === "strategy" || name.length > "strategy".length && "strategy-option".startsWith(name);
 function strategies(args) {
   const found = [];
@@ -14031,7 +17732,7 @@ function strategies(args) {
       continue;
     for (let c = 1;c < v.length; c++) {
       const letter = v[c];
-      if (letter === "S")
+      if (ATTACHED.has(letter))
         break;
       if (!SHORT_TAKES.has(letter))
         continue;
@@ -14044,43 +17745,153 @@ function strategies(args) {
   }
   return found;
 }
-function judgeGit2(args) {
+var quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+function aliasWords(text) {
+  const words = [];
+  let word;
+  let quoted = "";
+  for (let k = 0;k < text.length; k++) {
+    const c = text[k];
+    if (!quoted && /\s/.test(c)) {
+      if (word !== undefined)
+        words.push(word);
+      word = undefined;
+    } else if (!quoted && (c === "'" || c === '"')) {
+      quoted = c;
+      word ??= "";
+    } else if (c === quoted)
+      quoted = "";
+    else if (c === "\\" && quoted !== "'")
+      word = (word ?? "") + (text[++k] ?? "");
+    else
+      word = (word ?? "") + c;
+  }
+  if (quoted)
+    return;
+  if (word !== undefined)
+    words.push(word);
+  return words;
+}
+var aliasKey = (value, git) => {
+  const key = value.split("=")[0];
+  return /^alias\./i.test(key) || git && (marked(key) || key.includes("{"));
+};
+function aliasDefined(args, git = true) {
+  for (let k = 0;k < args.length && args[k].value.startsWith("-"); k++) {
+    const v = args[k].value;
+    if (v.startsWith("--config-env=")) {
+      if (aliasKey(v.slice("--config-env=".length), git))
+        return args[k];
+    } else if (GIT_TAKES.has(v)) {
+      const value = args[++k];
+      if (!value || v !== "-c" && v !== "--config-env")
+        continue;
+      if (aliasKey(value.value, git))
+        return value;
+    }
+  }
+}
+async function judgeGit2(args, env, depth, git = true, cluster = true) {
+  const found = await readGit(args, env, depth, cluster);
+  if (found)
+    return found;
+  const alias = aliasDefined(args, git);
+  if (alias)
+    return `no-ours-merge hook refuses this git call: it defines a git alias on its own line (${visible(alias.source ?? alias.value)}), which can run a merge, pull or commit with its hooks off or with ours under a name the hook may not read. Run the git command directly, its words written out in place of the alias.`;
+}
+async function readGit(args, env, depth, cluster) {
   const { aliases, rest, sub } = gitCommand(args);
   if (!sub)
     return;
   if (marked(sub.value)) {
-    return rest.some((a) => a.value === "ours") ? `no-ours-merge hook refuses this git call: it cannot read which git command runs (${visible(sub.value)}) beside ours. ${INSTEAD3}` : undefined;
+    if (rest.some((a) => a.value === "ours"))
+      return `no-ours-merge hook refuses this git call: it cannot read which git command runs (${visible(sub.value)}) beside ours. ${INSTEAD3}`;
+    const off = rest.find((a) => a.value.startsWith("--no-veri") || cluster && /^-[^-]*n/.test(a.value));
+    if (off)
+      return `no-ours-merge hook refuses this git call: it cannot read which git command runs (${visible(sub.value)}) beside ${visible(off.value)}, which may turn a commit's hooks off. ${AGAIN}`;
+    const alias = rest.find((a) => /^(?:--config-env=)?alias\./i.test(a.value));
+    if (alias)
+      return `no-ours-merge hook refuses this git call: it cannot read which git command runs (${visible(sub.value)}) beside ${visible(alias.value)}, which may define a git alias. Run the git command directly, its words written out in place of the alias.`;
+    return;
   }
-  const alias = aliases.find((a) => a.startsWith(`alias.${sub.value}=`));
-  if (alias && /\b(?:merge|pull)\b/.test(alias) && /\bours\b/.test(alias))
-    return `no-ours-merge hook refuses git ${sub.value}: it is an alias for a merge with ours. ${INSTEAD3}`;
+  const key = `alias.${sub.value.toLowerCase()}`;
+  const found = aliases.findLast((a) => a.includes("=") && a.slice(0, a.indexOf("=")).toLowerCase() === key);
+  const text = found?.slice(found.indexOf("=") + 1);
+  if (text !== undefined && !VERIFIED.has(sub.value)) {
+    if (depth >= ALIAS_DEPTH)
+      return `no-ours-merge hook refuses git ${sub.value}: it is an alias chain deeper than the ${ALIAS_DEPTH} aliases the hook follows, so it cannot read what runs. Call the git command the chain ends in. ${AGAIN}`;
+    if (text.startsWith("!")) {
+      const line = `${text.slice(1)} ${rest.map((w) => quote(w.value)).join(" ")}`;
+      return run2(lex(line, env.known), env, visitor2(depth + 1));
+    }
+    const words = aliasWords(text);
+    if (!words)
+      return;
+    const own = words.map((value) => ({
+      ...sub,
+      raw: undefined,
+      source: value,
+      unknown: undefined,
+      value
+    }));
+    return judgeGit2([...args.slice(0, args.indexOf(sub)), ...own, ...rest], env, depth + 1);
+  }
+  if (!VERIFIED.has(sub.value))
+    return;
+  const { off, unread } = walk2(sub.value, rest);
+  if (unread)
+    return `no-ours-merge hook refuses git ${sub.value} with a brace list it cannot expand (${visible(unread.source ?? unread.value)}), which may spell --no-verify${SUBS.has(sub.value) ? " or ours" : ""}: write the words out. ${SUBS.has(sub.value) ? `${INSTEAD3} ` : ""}${AGAIN}`;
+  if (off)
+    return `no-ours-merge hook refuses git ${sub.value} ${off}, which turns its hooks off. ${AGAIN}`;
   if (!SUBS.has(sub.value))
     return;
-  if (rest.some((a) => a.value === "-h" || a.value === "--help"))
-    return;
   for (const { flag, value } of strategies(rest)) {
-    if (value && marked(value.value))
-      return `no-ours-merge hook refuses git ${sub.value} ${flag} with a value it cannot read (${visible(value.value)}). ${INSTEAD3}`;
+    if (value && (marked(value.value) || value.unknown === BRACE))
+      return `no-ours-merge hook refuses git ${sub.value} ${flag} with a value it cannot read (${visible(value.source ?? value.value)}). ${INSTEAD3}`;
     if (value?.value === "ours")
       return `no-ours-merge hook refuses git ${sub.value} ${flag} ours. ${INSTEAD3}`;
   }
 }
-var merges = (args) => SUBS.has(gitCommand(args).sub?.value ?? "");
-var visit5 = async (_cmd, { args, first, name }) => {
+var verified = (args) => VERIFIED.has(gitCommand(args).sub?.value ?? "");
+var judged = (args) => {
+  const sub = gitCommand(args).sub?.value;
+  return sub !== undefined && (VERIFIED.has(sub) || marked(sub));
+};
+var expanded = (args) => args.flatMap((w) => {
+  if (w.unknown !== BRACE)
+    return [w];
+  const words = braceWords(w.value);
+  if (!words || words.some((v) => SEQUENCE2.test(v)))
+    return [w];
+  return words.map((value) => ({ ...w, unknown: undefined, value }));
+});
+var visitor2 = (depth) => async (_cmd, { args: typed, first, name }, env) => {
+  const args = expanded(typed);
   if (name === "git")
-    return judgeGit2(args);
-  if (first && (first.unknown || marked(first.value)) && merges(args))
-    return judgeGit2(args);
+    return judgeGit2(args, env, depth);
+  if (first && (first.unknown || marked(first.value)) && (verified(args) || aliasDefined(args, false)))
+    return judgeGit2(args, env, depth, false);
   if (PRINTERS.has(name))
     return;
-  const nested = args.findIndex((a, j) => program(a.value) === "git" && merges(args.slice(j + 1)));
+  const nested = args.findIndex((a, j) => program(a.value) === "git" && (judged(args.slice(j + 1)) || aliasDefined(args.slice(j + 1), false)));
   if (nested !== -1)
-    return judgeGit2(args.slice(nested + 1));
+    return judgeGit2(args.slice(nested + 1), env, depth, false, false);
 };
-var BARE3 = (command) => command.replace(/[\\'"]/g, "");
-var candidate5 = (command) => command.includes("$'") || /ours/.test(BARE3(command));
-var mergeCall = (command) => /\bgit\b/i.test(BARE3(command)) && /\b(?:merge|pull)\b/.test(BARE3(command)) && /ours/.test(BARE3(command));
-async function inspect11(raw, environment) {
+var BARE4 = (command) => command.replace(/[\\'"]/g, "");
+var candidate5 = (command) => command.includes("$'") || /ours|veri|alias|config-env|(?:^|\s)-c\s|(?:^|[\s{,])-[^\s-]*n|\{[^}]*(?:,|\.\.)/i.test(BARE4(command));
+var mergeCall = (command) => {
+  const bare = BARE4(command);
+  if (!/\bgit\b/i.test(bare))
+    return false;
+  if (/alias\./i.test(bare))
+    return true;
+  if (/\b(?:merge|pull)\b/.test(bare) && /ours/.test(bare))
+    return true;
+  if (/\b(?:commit|merge|pull)\b/.test(bare) && /--no-veri/.test(bare))
+    return true;
+  return /\bcommit\b/.test(bare) && /(?:^|[\s{,])-[^\s-]*n/.test(bare);
+};
+async function inspect13(raw, environment) {
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -14088,7 +17899,7 @@ async function inspect11(raw, environment) {
     payload = undefined;
   }
   if (typeof payload !== "object" || payload === null)
-    return mergeCall(raw) ? "no-ours-merge hook could not parse its input, which reads as a merge with ours, so it refuses the call." : undefined;
+    return mergeCall(raw) ? "no-ours-merge hook could not parse its input, which reads as a merge with ours, a git call with its hooks off or one that defines an alias, so it refuses the call." : undefined;
   const { cwd, tool_input: toolInput, tool_name: tool } = payload;
   if (tool !== "Bash")
     return;
@@ -14103,11 +17914,11 @@ async function inspect11(raw, environment) {
     process: environment,
     vars: new Map
   };
-  return run(lex(command, env.known), env, visit5);
+  return run2(lex(command, env.known), env, visitor2(0));
 }
-async function check14(raw, environment = process.env) {
+async function check18(raw, environment = process.env) {
   try {
-    return await inspect11(raw, environment);
+    return await inspect13(raw, environment);
   } catch (error) {
     let command = raw;
     try {
@@ -14117,8 +17928,562 @@ async function check14(raw, environment = process.env) {
     } catch {}
     if (!mergeCall(command))
       return;
-    return `no-ours-merge hook could not read this call (${error}), which reads as a merge with ours, so it refuses it. Split it into plain commands and run them again.`;
+    return `no-ours-merge hook could not read this call (${error}), which reads as a merge with ours, a git call with its hooks off or one that defines an alias, so it refuses it. Split it into plain commands and run them again.`;
   }
+}
+if (false) {}
+
+// scripts/hooks/no-outside-pr-code.ts
+import { existsSync as existsSync10, lstatSync as lstatSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync8, realpathSync as realpathSync5 } from "fs";
+import { basename as basename8, dirname as dirname9, isAbsolute as isAbsolute7, join as join19, resolve as resolve10 } from "path";
+var CHECKERS = new Set(["reviewer", "tester"]);
+var TOOLS2 = new Set(["Bash", "Monitor"]);
+var FILE_TOOLS4 = new Map([
+  ["Edit", "file_path"],
+  ["MultiEdit", "file_path"],
+  ["NotebookEdit", "notebook_path"],
+  ["Write", "file_path"]
+]);
+var PULL = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/;
+var UTILITIES = new Set([
+  "[",
+  "basename",
+  "break",
+  "case",
+  "cat",
+  "cd",
+  "comm",
+  "continue",
+  "cut",
+  "date",
+  "diff",
+  "dirname",
+  "du",
+  "echo",
+  "exit",
+  "false",
+  "grep",
+  "head",
+  "jq",
+  "ls",
+  "mkdir",
+  "printf",
+  "pwd",
+  "realpath",
+  "sleep",
+  "tail",
+  "test",
+  "tr",
+  "true",
+  "uniq",
+  "wc"
+]);
+var INTERPRETERS2 = new Set(["node", "python", "python3"]);
+var GH2 = new Set(["api", "issue", "label", "pr", "repo", "run", "search"]);
+var GIT_READS2 = new Set([
+  "blame",
+  "branch",
+  "cat-file",
+  "describe",
+  "diff",
+  "for-each-ref",
+  "grep",
+  "log",
+  "ls-files",
+  "ls-tree",
+  "merge-base",
+  "merge-tree",
+  "name-rev",
+  "remote",
+  "rev-list",
+  "rev-parse",
+  "shortlog",
+  "show",
+  "status"
+]);
+var GIT_RUN_NAMES = ["ext-diff", "open-files-in-pager", "output", "textconv"];
+var GREP_VALUED = "ABCefm";
+var gitRuns = (w, sub) => {
+  if (sub === "grep" && /^-[^-]/.test(w))
+    for (const c of w.slice(1)) {
+      if (c === "O")
+        return true;
+      if (GREP_VALUED.includes(c))
+        break;
+    }
+  const long = /^--([^=]+)/.exec(w)?.[1];
+  return long !== undefined && long !== "text" && GIT_RUN_NAMES.some((n) => n.startsWith(long));
+};
+var REMOTE = /^[A-Za-z0-9_][\w.-]*$/;
+var FETCH_OPTIONS = new Set([
+  "--all",
+  "--force",
+  "--no-tags",
+  "--prune",
+  "--tags",
+  "--unshallow",
+  "-f",
+  "-p",
+  "-t"
+]);
+var QUIET = new Set(["-q", "--quiet"]);
+var STATE_READS = new Set(["checks", "delta", "fresh", "pr", "scan", "touched-tests", "wait"]);
+var SED_ADDRESS2 = String.raw`(?:\d+|\$|/(?:[^/\\]|\\.)*/)`;
+var SED_PRINT = new RegExp(`^${SED_ADDRESS2}(?:,${SED_ADDRESS2})?p$`);
+var SED_SUBSTITUTE = /^s\/(?:[^/\\]|\\.)*\/(?:[^/\\]|\\.)*\/[gIp\d]*$/;
+var PLAYGROUND_READS = new Set(["ext score", "ext search", "ext show", "ext which", "rules"]);
+var FIND_ACTIONS = new Set([
+  "-delete",
+  "-exec",
+  "-execdir",
+  "-fls",
+  "-fprint",
+  "-fprint0",
+  "-fprintf",
+  "-ok",
+  "-okdir"
+]);
+var DEVICES = new Set(["/dev/null", "/dev/stderr", "/dev/stdout"]);
+var UNIQ_VALUED = new Set(["--check-chars", "--skip-chars", "--skip-fields", "-f", "-s", "-w"]);
+var writer = ({ op, target }) => [">", ">>", ">|", "<>"].includes(op) || op === ">&" && !/^(?:\d+|-)$/.test(target?.value ?? "");
+var GITHUB_URL2 = /^(?:https:\/\/github\.com\/|git@github\.com:)[\w.-]+\/[\w.-]+?(?:\.git)?$/;
+var unread3 = (repo, n) => `GitHub did not answer for ${repo}#${n}, so the hook counts it as an outside author's PR until a read of it succeeds. It reads again on the first call once the github rule's poll interval (github.pollMinutes, 5 minutes by default) has passed since the failed read.`;
+var REASONS = {
+  none: "its roster row names no PR, so the hook cannot rule out an outside author's code. A row written before spawn.sh required a checker's --pr <pull url> has none; its worker or lead names the PR it serves from the main checkout: bun scripts/roster.ts set <this session's name> pr=<pull url>. An extension item's reviewer has no PR and stays in read mode: read each revision with playground ext show <scope> <kind> <key> --rev <sha> piped into jq (.content.files, .content.body), and say in the verdict that the item was read, not run.",
+  outside: "it serves an outside author's PR, whose tests, scripts and installs run that author's code on this machine. Read the PR instead: the Read, Grep and Glob tools, gh pr diff, git diff and git show <rev> in the clone, and move a clone with no node_modules (a fresh one, never an installed one, whose git hooks would run) with git fetch and git checkout --detach. Score on the PR's own GitHub checks, and say in the verdict that its code was read, not run."
+};
+function real3(path) {
+  try {
+    return realpathSync5.native(path);
+  } catch {
+    return resolve10(path);
+  }
+}
+function bareAt(folder, lookup) {
+  for (let at = folder;; at = dirname9(at)) {
+    if (basename8(at) === ".git" || lookup.holds(at, ".git"))
+      return false;
+    if (lookup.holds(at, "HEAD") && lookup.holds(at, "objects") && lookup.holds(at, "refs"))
+      return true;
+    if (dirname9(at) === at)
+      return false;
+  }
+}
+function installedAt(folder, lookup) {
+  for (let at = folder;; at = dirname9(at)) {
+    if (lookup.holds(at, "node_modules"))
+      return true;
+    if (lookup.holds(at, ".git") || dirname9(at) === at)
+      return false;
+  }
+}
+var under = (path, folder) => (path + "/").toLowerCase().startsWith(folder.toLowerCase().replace(/\/?$/, "/"));
+function placed(written) {
+  if (written === undefined || written.split("/").includes(".."))
+    return;
+  const path = resolve10(written);
+  for (let at = path;; at = dirname9(at)) {
+    if (existsSync10(at))
+      return join19(real3(at), path.slice(at.length));
+    if (dirname9(at) === at)
+      return path;
+  }
+}
+function gitFolder(path, lookup) {
+  if (path === undefined || path.split("/").some((part) => part.toLowerCase() === ".git"))
+    return true;
+  for (let at = path;; at = dirname9(at)) {
+    if (lookup.holds(at, "HEAD") && lookup.holds(at, "objects") && lookup.holds(at, "refs"))
+      return true;
+    if (dirname9(at) === at)
+      return false;
+  }
+}
+function gitAllows(words, folder, lookup, environment) {
+  if ("GIT_DIR" in environment || "GIT_WORK_TREE" in environment)
+    return false;
+  const dashC = words[1] === "-C";
+  const [sub, ...all] = words.slice(dashC ? 3 : 1);
+  const written = dashC && folder ? isAbsolute7(words[2]) ? words[2] : `${folder}/${words[2]}` : folder;
+  const at = written === undefined ? undefined : real3(written);
+  if (at === undefined || bareAt(at, lookup) || all.some((w) => gitRuns(w, sub)))
+    return false;
+  const rest = all.filter((w) => !QUIET.has(w));
+  const plain = (w) => !w.startsWith("-") && !w.includes("::");
+  const verb = all.find(plain);
+  if (sub === "remote" && verb !== undefined && verb !== "get-url" && verb !== "show")
+    return false;
+  if (sub === "diff" && all.includes("--no-index"))
+    return all.includes("--no-ext-diff") && all.includes("--no-textconv");
+  if (readsWords(words) || GIT_READS2.has(sub))
+    return true;
+  if (sub === "fetch") {
+    const options = rest.filter((w) => w.startsWith("-"));
+    const [source, ...refs] = rest.filter((w) => !w.startsWith("-"));
+    return options.every((w) => FETCH_OPTIONS.has(w) || /^--depth=\d+$/.test(w)) && (source === undefined || REMOTE.test(source) || GITHUB_URL2.test(source)) && refs.every(plain);
+  }
+  if (sub === "clone")
+    return rest.length === 2 && GITHUB_URL2.test(rest[0]) && plain(rest[1]);
+  if (sub === "checkout" || sub === "switch")
+    return rest.length === 2 && rest[0] === "--detach" && plain(rest[1]) && !installedAt(at, lookup);
+  if (sub !== "worktree")
+    return false;
+  if (rest[0] === "list")
+    return true;
+  if (rest[0] !== "add")
+    return false;
+  const operands = rest[1] === "--detach" ? rest.slice(2) : rest.slice(1);
+  return operands.length === 2 && operands.every(plain);
+}
+async function inspect14(command, directory, environment, lookup, own = []) {
+  const data = dataDirOf(environment);
+  const extensions = join19(lookup.main, "extensions");
+  const slot = join19(data, "ops", "run-slot.sh");
+  let allowed = true;
+  let ownWrites = false;
+  let reshapes = false;
+  const skillScript = (written) => {
+    if (written === undefined)
+      return false;
+    const path = real3(written);
+    return under(path, extensions) && path.slice(extensions.length).toLowerCase().includes("/skills/") && lookup.tracked(path);
+  };
+  const runsPrTests = (script, rest) => script !== undefined && real3(script).endsWith("/code-review-loop/scripts/state.ts") && !STATE_READS.has(rest[0] ?? "") && !(rest[0] === "merge" && rest.includes("--conflict-only"));
+  const inMain = (folder) => {
+    if (folder === undefined)
+      return false;
+    const main = real3(lookup.main);
+    for (let at = real3(folder);; at = dirname9(at)) {
+      if (lookup.holds(at, ".git"))
+        return at === main;
+      if (dirname9(at) === at)
+        return false;
+    }
+  };
+  const ownPath = (text, here) => {
+    const path = text && placed(pathOf(text, here));
+    return path !== undefined && own.some((folder) => {
+      const at = placed(folder);
+      return at !== undefined && under(path, at);
+    });
+  };
+  const ownTarget = (text, here) => {
+    const path = text && !text.glob ? pathOf(text, here) : undefined;
+    if (path === undefined || !existsSync10(dirname9(resolve10(path))) || !ownPath(text, here))
+      return false;
+    if (gitFolder(placed(path), lookup))
+      return false;
+    try {
+      const stat = lstatSync2(path);
+      if (stat.isSymbolicLink() || !stat.isDirectory() && stat.nlink > 1)
+        return false;
+    } catch {}
+    ownWrites = true;
+    return true;
+  };
+  const writesOwn = (cmd, here) => cmd.redirects.every((r) => {
+    if (!writer(r))
+      return true;
+    const path = r.target && !r.target.glob ? pathOf(r.target, here) : undefined;
+    return path !== undefined && DEVICES.has(path) || ownTarget(r.target, here);
+  });
+  const permitted = (cmd, parsed, here) => {
+    const { args, first, local, name } = parsed;
+    if (name === "")
+      return args.length === 0 && [...local.keys()].every((key) => !(key in environment));
+    if (marked(name) || local.size > 0)
+      return false;
+    const program = first ? pathOf(first, here) : undefined;
+    if (first && first.value.includes("/")) {
+      if (program && under(program, slot) && program.length === slot.length)
+        return true;
+      if (!skillScript(program) || runsPrTests(program, args.map((a) => a.value)))
+        return false;
+      const runner = lookup.runner(real3(program));
+      return runner === undefined || FOLDERLESS.has(runner) || inMain(here.cwd);
+    }
+    const words = [name, ...args.map((a) => a.value)];
+    if (name === "git") {
+      const sub = words[words[1] === "-C" ? 3 : 1];
+      if (["checkout", "clone", "switch", "worktree"].includes(sub))
+        reshapes = true;
+      return gitAllows(words, here.cwd, lookup, environment);
+    }
+    if (name === "uniq") {
+      const operands = [];
+      let ended = false;
+      for (let i = 0;i < args.length; i++) {
+        const v = args[i].value;
+        if (ended || v === "-" || !v.startsWith("-"))
+          operands.push(args[i]);
+        else if (v === "--")
+          ended = true;
+        else if (UNIQ_VALUED.has(v))
+          i++;
+      }
+      return operands.length < 2 || operands.length === 2 && ownTarget(operands[1], here);
+    }
+    if (UTILITIES.has(name) || readsWords(words))
+      return true;
+    if (name === "find")
+      return !words.some((w) => FIND_ACTIONS.has(w));
+    if (name === "for")
+      return !(words[1] in environment);
+    if (name === "read")
+      return words.slice(1).every((w) => w.startsWith("-") || !(w in environment));
+    if (name === "sed") {
+      const print = words[1] === "-n";
+      return (print ? SED_PRINT : SED_SUBSTITUTE).test(words[print ? 2 : 1] ?? "") && words.slice(print ? 3 : 2).every((w) => w === "-" || !w.startsWith("-"));
+    }
+    if (SHELLS.has(name)) {
+      const { inline, operand } = shellOperand(args, name);
+      return inline || operand !== undefined && skillScript(pathOf(operand, here));
+    }
+    if (name === "playground") {
+      if (words[1] === "rm")
+        reshapes = true;
+      return (PLAYGROUND_READS.has(words[1]) || PLAYGROUND_READS.has(words.slice(1, 3).join(" ")) || words[1] === "rm" && args.length > 1 && args.slice(1).every((a) => !a.value.startsWith("-") && ownPath(a, here))) && here.cwd !== undefined && (!lookup.holds(here.cwd, "bunfig.toml") || inMain(here.cwd));
+    }
+    if (name === "gh") {
+      const [group, ...rest] = words.slice(1);
+      const checkout = group === "pr" && rest.some((w) => w === "checkout" || w === "co") || group === "issue" && rest.includes("develop");
+      if (group === "repo" && rest.some((w) => w === "clone" || w === "fork"))
+        reshapes = true;
+      if (group === "run" && rest.includes("download")) {
+        const folders = args.flatMap((a, i) => {
+          if (a.value === "-D" || a.value === "--dir")
+            return args[i + 1] ? [args[i + 1]] : [a];
+          if (a.value.startsWith("--dir="))
+            return [slice(a, 6)];
+          return a.value.startsWith("-D") ? [slice(a, a.value.startsWith("-D=") ? 3 : 2)] : [];
+        });
+        const into = folders.length > 0 ? folders : [{ value: "." }];
+        if (!into.every((folder) => ownTarget(folder, here)))
+          return false;
+      }
+      return GH2.has(group) && !checkout && !words.includes("--");
+    }
+    if (INTERPRETERS2.has(name) && args[0] && !args[0].value.startsWith("-")) {
+      const script = pathOf(args[0], here);
+      return skillScript(script) && !runsPrTests(script, args.slice(1).map((a) => a.value));
+    }
+    return false;
+  };
+  const visit = async (cmd, parsed, env) => {
+    if (!writesOwn(cmd, env))
+      allowed = false;
+    if (parsed.name === "run-slot.sh" && parsed.first && permitted(cmd, parsed, env)) {
+      const at = parsed.args.findIndex((a) => a.value === "--");
+      return at === -1 ? undefined : examine({ ...cmd, words: parsed.args.slice(at + 1) }, env, visit, false);
+    }
+    for (const reading of [parsed, ...parsed.also])
+      if (!permitted(cmd, reading, env))
+        allowed = false;
+  };
+  const variables = knownVariables(command, environment, directory);
+  const env = {
+    cwd: directory,
+    cwdSure: directory,
+    files: new Map,
+    known: variables,
+    old: { dir: directory },
+    process: environment,
+    vars: new Map,
+    visitShells: true
+  };
+  await run2(lex(command, variables), env, visit, true);
+  return allowed && !(ownWrites && reshapes);
+}
+async function readMode(sessionId, lookup) {
+  const prs = (await lookup.prsOf(sessionId)).flatMap((url) => {
+    const m = PULL.exec(url);
+    return m ? [{ number: Number(m[2]), repo: m[1] }] : [];
+  });
+  if (prs.length === 0)
+    return REASONS.none;
+  for (const { number, repo } of prs) {
+    const pr = await lookup.author(repo, number);
+    if (!pr)
+      return unread3(repo, number);
+    if (pr.ownerType === "User" && pr.author.toLowerCase() !== pr.owner.toLowerCase())
+      return REASONS.outside;
+  }
+}
+async function check19(raw, environment = process.env, lookup = live2(environment)) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  const { cwd, session_id: sessionId, tool_input: toolInput, tool_name: tool } = input;
+  if (typeof tool !== "string")
+    return;
+  const key = FILE_TOOLS4.get(tool);
+  const patch = tool === "apply_patch";
+  if (!TOOLS2.has(tool) && key === undefined && !patch)
+    return;
+  const command = toolInput?.command;
+  if (key === undefined && !patch && typeof command !== "string")
+    return;
+  if (!CHECKERS.has(await sessionRole(environment, sessionId)))
+    return;
+  const why = await readMode(sessionId, lookup);
+  if (!why)
+    return;
+  const directory = typeof cwd === "string" && isAbsolute7(cwd) ? cwd : undefined;
+  if (key !== undefined || patch) {
+    const named = patch ? typeof command === "string" ? patchPaths(command) : [] : [toolInput?.[key]];
+    let git = named.length === 0;
+    try {
+      git ||= named.some((path) => {
+        if (typeof path !== "string")
+          return true;
+        const at = isAbsolute7(path) ? path : patch && directory ? resolve10(directory, path) : undefined;
+        return gitFolder(at === undefined ? undefined : placed(at), lookup);
+      });
+    } catch {
+      git = true;
+    }
+    if (!git)
+      return;
+    return `no-outside-pr-code hook keeps this reviewer or tester in read mode, which writes no file into a git folder (a .git part, or a folder holding HEAD, objects and refs), since its config and hooks name programs a later git read runs: ${why}`;
+  }
+  if (typeof command !== "string")
+    return;
+  let allowed = false;
+  try {
+    const name = await lookup.name(sessionId);
+    const data = dataDirOf(environment);
+    const own = name ? [join19(data, "scratch", name), join19(data, "scratchpad", name)] : [];
+    allowed = await inspect14(command, directory, environment, lookup, own);
+  } catch {}
+  if (allowed)
+    return;
+  return `no-outside-pr-code hook keeps this reviewer or tester in read mode, which runs only reads, git's fetch, clone and detached checkout, gh, and a skill's scripts the main checkout tracks unchanged, and writes a file only into a folder already in its own scratch or scratchpad (make the folder in one call, then write in the next), outside any git folder: ${why}`;
+}
+async function output(argv) {
+  const child = Bun.spawn(argv, { stderr: "pipe", stdout: "pipe" });
+  const timer = setTimeout(() => child.kill(), 5000);
+  try {
+    const [text, error] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text()
+    ]);
+    return await child.exited === 0 ? { error, text: text.trim() } : { error };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+var isPr = (read) => typeof read === "object" && read !== null && ["author", "owner", "ownerType"].every((key) => typeof read[key] === "string");
+var firstLine = (script) => {
+  try {
+    return readFileSync8(script, "utf8").split(`
+`, 1)[0];
+  } catch {
+    return;
+  }
+};
+var FOLDERLESS = new Set(["bash", "node", "python", "python3", "sh", "zsh"]);
+var ENV_VALUED = new Set(["--chdir", "--unset", "-C", "-P", "-u"]);
+var runnerOf = (line) => {
+  if (!line?.startsWith("#!"))
+    return;
+  const [interpreter, ...rest] = line.slice(2).trim().split(/\s+/);
+  if (!interpreter)
+    return;
+  if (basename8(interpreter) !== "env")
+    return basename8(interpreter);
+  for (let i = 0;i < rest.length; i++) {
+    const word = rest[i];
+    if (ENV_VALUED.has(word))
+      i++;
+    else if (word === "-S" || word === "--split-string" || /^-[iv0]+$/.test(word))
+      continue;
+    else if (/^(?:--(?:chdir|unset)=|-[CPu].)/.test(word) || word === "--ignore-environment")
+      continue;
+    else if (word.startsWith("-S"))
+      return /[$\\]/.test(word) ? "" : basename8(word.slice(2));
+    else if (word.startsWith("-"))
+      return "";
+    else if (!word.includes("="))
+      return /[$\\]/.test(word) ? "" : basename8(word);
+  }
+  return "";
+};
+function trackedIn(main, script) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const git = (...args) => Bun.spawnSync(["git", "--literal-pathspecs", "-C", main, ...args], {
+    env,
+    stderr: "ignore",
+    stdout: "ignore"
+  }).exitCode === 0;
+  return git("ls-files", "--error-unmatch", "--", script) && git("diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--", script);
+}
+function live2(environment) {
+  const data = dataDirOf(environment);
+  const cache = join19(data, "hook-outside-pr");
+  const pollMs = async () => {
+    const read = await readPolicy(data).catch(() => {
+      return;
+    });
+    const settings = read?.settings ?? { schemaVersion: 1, values: {} };
+    return ruleSettings.get(settings, "github.pollMinutes") * 60000;
+  };
+  return {
+    author: async (repo, pr) => {
+      const file = join19(cache, `${repo.replace("/", "__")}__${pr}.json`);
+      try {
+        const kept = await Bun.file(file).json();
+        if (isPr(kept))
+          return kept;
+        if (typeof kept.failedAt === "number" && Date.now() - kept.failedAt < await pollMs())
+          return;
+      } catch {}
+      const jq = "{author: .user.login, owner: .base.repo.owner.login, ownerType: .base.repo.owner.type}";
+      const argv = ["gh", "api", `repos/${repo}/pulls/${pr}`, "--jq", jq];
+      const once = await output(argv);
+      const text = once.text ?? (/HTTP 4\d\d/.test(once.error) ? undefined : (await Bun.sleep(1000).then(() => output(argv))).text);
+      let read;
+      try {
+        read = text ? JSON.parse(text) : undefined;
+      } catch {}
+      try {
+        mkdirSync4(cache, { recursive: true });
+        await Bun.write(file, JSON.stringify(isPr(read) ? read : { failedAt: Date.now() }));
+      } catch {}
+      return isPr(read) ? read : undefined;
+    },
+    holds: (folder, entry) => existsSync10(join19(folder, entry)),
+    main: mainCheckout2(process.cwd()),
+    name: async (sessionId) => {
+      if (typeof sessionId !== "string")
+        return;
+      try {
+        return await registryName(sessionId, environment);
+      } catch {}
+    },
+    prsOf: async (sessionId) => {
+      if (typeof sessionId !== "string")
+        return [];
+      try {
+        const name = await registryName(sessionId, environment);
+        if (!name)
+          return [];
+        const roster = await Bun.file(join19(data, "roster.json")).json();
+        const row = roster.agents?.find((agent) => agent?.name === name);
+        const listed = Array.isArray(row?.prs) ? row.prs : [];
+        return [...new Set([row?.pr, ...listed])].filter((url) => typeof url === "string");
+      } catch {
+        return [];
+      }
+    },
+    runner: (script) => {
+      const line = firstLine(script);
+      return line === undefined ? "" : runnerOf(line);
+    },
+    tracked: (script) => trackedIn(mainCheckout2(process.cwd()), script)
+  };
 }
 if (false) {}
 
@@ -14128,11 +18493,11 @@ var GUARD3 = "__guarded__";
 var VARIABLES_TO_STOP = 2;
 var variables = (path) => path.split("/").filter((part) => part.startsWith(UNKNOWN)).length;
 var shown = (path) => path.replaceAll(UNKNOWN, "$\u2026").replaceAll(GUARD3, "${\u2026:?}");
-var FIX = {
+var FIX2 = {
   rm: "Name each path literally: a file in your worktree or scratchpad with rm, anything else with playground rm <literal path> (in a script, removeScratch for a folder makeScratch made), and run it again.",
   rmdir: 'Guard each one as ${VAR:?} ("${S:?}/${m:?}"), or name a literal path, and run it again.'
 };
-var refuse10 = (name, path) => `no-prompt-stop hook refuses ${name} ${shown(path)}: Claude Code stops on a removal whose target has two or more parts that start with a variable and waits for a person, who is not there. ${FIX[name]}`;
+var refuse12 = (name, path) => `no-prompt-stop hook refuses ${name} ${shown(path)}: Claude Code stops on a removal whose target has two or more parts that start with a variable and waits for a person, who is not there. ${FIX2[name]}`;
 var AT_ROOT = /^\/[^/\u0000]+\/?$/;
 var AT_ROOT_FIX = {
   rm: "Write and remove in the session's scratchpad, a folder there with playground rm <literal path>, and run it again.",
@@ -14145,12 +18510,12 @@ var visit6 = async (_cmd, { args, name }) => {
   const operands = args.filter((a) => !a.value.startsWith("-"));
   const path = operands.find((a) => variables(a.value) >= VARIABLES_TO_STOP);
   if (path)
-    return refuse10(name, path.value);
+    return refuse12(name, path.value);
   const atRoot = operands.find((a) => AT_ROOT.test(a.value));
   if (atRoot)
     return refuseAtRoot(name, atRoot.value);
 };
-async function inspect12(raw) {
+async function inspect15(raw) {
   const {
     cwd,
     tool_input: toolInput,
@@ -14169,11 +18534,11 @@ async function inspect12(raw) {
     process: {},
     vars: new Map
   };
-  return run(lex(command, env.known), env, visit6);
+  return run2(lex(command, env.known), env, visit6);
 }
-async function check15(raw) {
+async function check20(raw) {
   try {
-    return await inspect12(raw);
+    return await inspect15(raw);
   } catch {
     return;
   }
@@ -14181,7 +18546,7 @@ async function check15(raw) {
 if (false) {}
 
 // packages/scripts/src/release-notes/notes.ts
-var HIDDEN = new Set(["ci"]);
+var HIDDEN2 = new Set(["ci"]);
 var ARTICLES = new Set(["a", "an", "the"]);
 var COMMANDS = new Set(["bun", "bunx", "gh", "git", "npx", "playground"]);
 var CONTRIBUTORS_HEADING = "### \u2764\uFE0F Contributors";
@@ -14191,324 +18556,6 @@ function ownerWords(name, login, owner) {
     return [];
   return name.split(/\s+/).filter((word) => own.has(word.toLowerCase()));
 }
-
-// packages/settings/src/accounts.ts
-var email2 = string2().email();
-var label2 = string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a label of lowercase letters, digits, dots, dashes and underscores");
-var claudeAccount = strictObject({
-  email: email2,
-  ends: string2().datetime({ offset: true }).nullable().optional(),
-  endsFirst: boolean2().optional(),
-  label: label2.optional(),
-  nearLimit: boolean2().optional(),
-  own: boolean2().optional(),
-  parkedUntil: string2().datetime({ offset: true }).optional(),
-  provider: literal("claude").optional(),
-  renews: number2().int().min(1).max(31).nullable().optional(),
-  weekReset: strictObject({ hour: number2().min(0).lt(24), weekday: number2().int().min(0).max(6) }).optional()
-});
-var glmAccount = strictObject({ label: label2, provider: literal("glm") });
-var account = union([claudeAccount, glmAccount]);
-var providerOf = (row) => row.provider === "glm" ? "glm" : "claude";
-var accountKey = (row) => (providerOf(row) === "glm" ? row.label : row.email) ?? "";
-var accountsOf = (rows, provider) => rows.filter((row) => providerOf(row) === provider);
-var accountSettings = defineSettings({
-  "models.probe": {
-    default: "claude-haiku-4-5",
-    description: "The model the usage scripts send one 1-token call to, as an account's own token, to read its 5-hour and week use from the reply's rate-limit headers.",
-    schema: string2().min(1)
-  },
-  "usage.accounts": {
-    default: [],
-    description: "The accounts the factory spends, any number of each provider: a Claude row by its email, in the order the login flip reads them, with its plan's end or billing day, whether the near-limit marks count it, whether it is the owner's own (own, spent at a fifth of its share unless it resets within a day), the time until which no new session starts on it (parkedUntil), and its week's reset; a GLM row (provider glm) by its label, the Keychain item its key is kept under.",
-    schema: array(account).refine((rows) => new Set(rows.map((row) => `${providerOf(row)}:${accountKey(row)}`)).size === rows.length, "each account is listed once")
-  },
-  "usage.keychainService": {
-    default: "playground-claude-oauth",
-    description: "The macOS Keychain service each account's long-lived token is kept under, one item an account by its email: spawn.sh's --account and the usage probes read it.",
-    schema: string2().regex(/^[A-Za-z0-9._-]+$/, "a Keychain service name")
-  },
-  "usage.switchAccount": {
-    default: "",
-    description: "The account whose full week the ops tick tells the dispatchers and leads about, so the factory moves off it; empty for none.",
-    schema: union([email2, literal("")])
-  }
-});
-// packages/settings/src/channel.ts
-var channelSettings = defineSettings({
-  "channel.skipUser": {
-    default: "",
-    description: "The Slack member id whose own posts the channel watch skips, the account it posts as; none until set.",
-    schema: string2().regex(/^(?:[UW][A-Z0-9]+)?$/, "a Slack member id")
-  },
-  "channel.slackId": {
-    default: "",
-    description: "The Slack channel id of the shared channel the channel watch relays to the dispatcher; the watch reads nothing until it is set.",
-    schema: string2().regex(/^(?:[CG][A-Z0-9]+)?$/, "a Slack channel id")
-  }
-});
-// packages/settings/src/content.ts
-var contentFields = {
-  body: string2().nullable(),
-  files: record2(string2(), string2()).nullable(),
-  meta: record2(string2(), unknown2()).nullable(),
-  value: union([array(unknown2()), record2(string2(), unknown2())]).nullable()
-};
-// packages/settings/src/items.ts
-var ATTACHMENT_LIMIT = 50 * 1024 * 1024;
-// packages/settings/src/factory.ts
-var repo = string2().regex(/^(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?$/, "a repository as owner/name, or empty for unset");
-var factorySettings = defineSettings({
-  "factory.archiveRepo": {
-    default: "",
-    description: "The archive repository: a link to it is private history, so the trace ratchet counts it and no-public-leak refuses it in a public write.",
-    schema: repo
-  },
-  "factory.publicRepo": {
-    default: "",
-    description: "The public repository, or a list of them, the checkout's origin when unset: no-public-leak refuses a write to one that holds private text, and the trace ratchet reads past each one's own name.",
-    schema: union([repo, array(repo)])
-  },
-  "factory.repo": {
-    default: "",
-    description: "The repository the factory's pull requests land in, the checkout's origin when unset: pr:merge needs GitGuardian's check there, Checks reads its PRs, and the roster links a bare PR number into it.",
-    schema: repo
-  }
-});
-// packages/settings/src/gates.ts
-var gateSettings = defineSettings({
-  "gates.glmLoad5Max": {
-    default: 30,
-    description: "The load5 a GLM session starts under.",
-    schema: number2().positive()
-  },
-  "gates.glmSwapinsMax": {
-    default: 100,
-    description: "The swap-ins a second a GLM session, and a fresh Claude worker, starts under.",
-    schema: number2().int().positive()
-  },
-  "gates.memoryFreeMin": {
-    default: 8,
-    description: "The free memory share, in percent, a Claude session starts at or over.",
-    schema: number2().int().min(0).max(100)
-  },
-  "gates.reviewReserve": {
-    default: 0.125,
-    description: "The share of the load gate's line a small worker keeps back for reviewers and testers, so a held review starts first; set it under gates.smallReserve, or a small worker's line falls below a medium one's.",
-    schema: number2().min(0).lt(1)
-  },
-  "gates.smallReserve": {
-    default: 0.25,
-    description: "The share of the load gate's line kept for small items, so a big plan never blocks a small one.",
-    schema: number2().min(0).lt(1)
-  },
-  "gates.startsWindow": {
-    default: 300,
-    description: "The seconds a start counts toward the load gate, since the load average lags a session's start.",
-    schema: number2().int().positive()
-  }
-});
-// packages/settings/src/harness-alpha.ts
-var HARNESS_IDS = HARNESSES.map((harness) => harness.id);
-var harnessSettings = defineSettings({
-  "harness.alpha": {
-    default: "claude-code",
-    description: "The harness the first dispatcher starts on: claude-code or codex. First run's pick and Settings' Switch write it, and the Dashboard's Start runs spawn.sh --harness with it.",
-    schema: _enum(HARNESS_IDS)
-  }
-});
-// packages/settings/src/models.ts
-var id = string2().regex(/^[a-z0-9][a-z0-9.-]*$/, "a model id, such as claude-opus-5-5");
-var modelSettings = defineSettings({
-  "models.checker": {
-    default: "claude-opus-5-5",
-    description: "The Claude model a reviewer or a tester runs on, and the one --model it takes, since its verdict gates a merge.",
-    schema: id
-  },
-  "models.claude": {
-    default: ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"],
-    description: "The Claude models spawn.sh and playground add take with --model.",
-    schema: array(id).min(1)
-  },
-  "models.default": {
-    default: "claude-opus-5-5",
-    description: "The Claude model a session runs on when its start names no --model.",
-    schema: id
-  },
-  "models.glm": {
-    default: "glm-5.3-flash",
-    description: "The GLM model a --backend glm session runs on, every model Claude Code asks for mapped to it.",
-    schema: id
-  },
-  "models.glmKeychainService": {
-    default: "playground-glm",
-    description: "The Keychain service a --backend glm session's Z.ai key is kept under, one item a usage.accounts GLM row by its label.",
-    schema: string2().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "a Keychain service name, such as playground-glm")
-  }
-});
-// packages/settings/src/owner.ts
-var ownerSettings = defineSettings({
-  "owner.names": {
-    default: [],
-    description: "The owner's first name and handles as chat writes them, lowercase: the inbox gate refuses a manager's stop on a line that addresses one of them and asks for an action, and never reads @<handle> as an agent.",
-    schema: array(string2().regex(/^[a-z0-9][a-z0-9._-]*$/, "a name or handle, lowercase"))
-  },
-  "owner.voice": {
-    default: "",
-    description: "The voice a draft or a slack decision speaks in as the owner: singular has bun run ask refuse one that says we, us, our, ours or ourselves; empty checks none.",
-    schema: _enum(["", "singular"])
-  }
-});
-// packages/settings/src/paths.ts
-var pathsSettings = defineSettings({
-  "paths.codeRoot": {
-    default: "",
-    description: "The folder that holds your code, the folder that holds the checkout when unset: spawn.sh answers Claude's folder trust prompt there and moves a session off the Desktop into it.",
-    schema: string2().regex(/^(?:\/.*)?$/, "an absolute path, or empty for unset")
-  }
-});
-// packages/settings/src/sessions.ts
-var name = string2().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, "a session name, lowercase words joined by hyphens");
-var manager = _enum(["builder", "dispatcher", "ops", "planner"]);
-var TEMPLATE_KINDS = [
-  "assistant",
-  "builder",
-  "dispatcher",
-  "ops",
-  "optimizer",
-  "orchestrator",
-  "planner"
-];
-var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-var BRIEF_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-var sessionTemplate = strictObject({
-  account: string2().email().optional(),
-  brief: string2().regex(BRIEF_NAME, "a brief is a file name, with no /").refine((brief) => !brief.includes(".."), "a brief is a file name, with no .."),
-  effort: _enum(EFFORTS).optional(),
-  harness: literal("claude-code"),
-  id: name,
-  kind: _enum(TEMPLATE_KINDS),
-  label: string2().min(1).max(40),
-  model: string2().regex(/^[a-z0-9][a-z0-9.-]*$/, "a model id").optional()
-}).refine((t) => t.model !== GLM_MODEL || t.account === undefined && t.effort === undefined, {
-  message: "a GLM template runs on models.glm and its first GLM row, so it takes no account or effort"
-});
-var storedTemplates = (value) => Array.isArray(value) ? value.map((row) => {
-  if (typeof row !== "object" || row === null || !("backend" in row) || "harness" in row)
-    return row;
-  const { backend, ...rest } = row;
-  const { model, ...modelless } = rest;
-  if (backend === "glm")
-    return { ...rest, harness: "claude-code", model: GLM_MODEL };
-  if (backend !== "claude")
-    return { ...rest, backend, harness: "claude-code" };
-  return { ...model === GLM_MODEL ? modelless : rest, harness: "claude-code" };
-}) : value;
-var sessionTemplates = array(sessionTemplate).refine((rows) => new Set(rows.map((row) => row.id)).size === rows.length, "each id is listed once");
-var unknownAccounts = (templates, accounts) => {
-  const known = new Set(accountsOf(accounts, "claude").map(accountKey));
-  return templates.flatMap((template, at) => template.account && !known.has(template.account) ? [
-    {
-      message: `${template.account} is not in usage.accounts: add it in Settings > Accounts`,
-      path: [at, "account"]
-    }
-  ] : []);
-};
-var sessionSettings = defineSettings({
-  "sessions.aliases": {
-    default: {},
-    description: "Old names of the managers' sessions, each mapped to its kind, so a session or a stored row under one still reads as that kind.",
-    schema: record2(name, manager)
-  },
-  "sessions.names": {
-    default: { builder: "builder", dispatcher: "dispatcher", ops: "ops", planner: "planner" },
-    description: "The session name each manager kind starts under; the second dispatcher takes the dispatcher's with -2.",
-    schema: strictObject({ builder: name, dispatcher: name, ops: name, planner: name })
-  },
-  "sessions.templates": {
-    against: (templates, read) => unknownAccounts(templates, read("usage.accounts")),
-    default: [
-      {
-        brief: "assistant.md",
-        harness: "claude-code",
-        id: "assistant",
-        kind: "assistant",
-        label: "Assistant"
-      },
-      {
-        brief: "orchestrator.md",
-        harness: "claude-code",
-        id: "orchestrator",
-        kind: "orchestrator",
-        label: "Orchestrator"
-      },
-      {
-        brief: "dispatcher-2.md",
-        harness: "claude-code",
-        id: "second-dispatcher-claude",
-        kind: "dispatcher",
-        label: "Second dispatcher on Claude"
-      },
-      {
-        brief: "dispatcher-2.md",
-        harness: "claude-code",
-        id: "second-dispatcher-glm",
-        kind: "dispatcher",
-        label: "Second dispatcher on GLM",
-        model: GLM_MODEL
-      }
-    ],
-    description: "The templates the sidebar's plus starts a dispatcher or an orchestrator from, A to Z by label: each one's kind, harness, model (a Claude id, or glm), effort, account (a Claude row of usage.accounts) and brief. A dispatcher template starts the second dispatcher; any other kind starts a new <id>-<kind> lead reporting to the dispatcher.",
-    schema: sessionTemplates,
-    stored: storedTemplates
-  }
-});
-// packages/settings/src/slots.ts
-var slotSettings = defineSettings({
-  "slots.modelBound": {
-    default: 2,
-    description: "How many runs that mostly wait on a model (run-slot.sh <who> --model-bound -- <command>, such as a parity replay) hold a slot at once, counted apart from the CPU slots, so one never holds a CPU slot while its CPU idles.",
-    schema: number2().int().min(1).max(16)
-  },
-  "slots.peers": {
-    default: [],
-    description: "The ops folders of other factories on this machine, each an absolute path: run-slot counts each live holder of their run slots against this factory's load units, and spawn.sh's load gate counts their starts beside its own, both reading only.",
-    schema: array(string2().regex(/^\/.+/, "an absolute path"))
-  }
-});
-// packages/settings/src/whatsapp.ts
-var e1642 = string2().regex(/^(?:\+[1-9]\d{7,14})?$/, "a phone number is + and 8 to 15 digits, as +15550100001");
-var whatsappSettings = defineSettings({
-  "wa.device": {
-    default: "",
-    description: "The spare number ops-wa links to as a device, in E.164: its pairing code is for this number. Never the owner's own number; ops-wa does not run until it is set.",
-    masked: true,
-    schema: e1642
-  },
-  "wa.owner": {
-    default: "",
-    description: "The owner's WhatsApp number in E.164, the allowlist of one: ops-wa hands on only this number's 1:1 messages and sends only to it; ops-wa does not run until it is set.",
-    masked: true,
-    schema: e1642
-  }
-});
-// packages/scripts/src/playground/setting.ts
-import { resolve as resolve9 } from "path";
-var CHECKOUT2 = resolve9(__CHECKOUT + "/packages/scripts/src/playground", "../../../..");
-var origins = new Map;
-var originRepo = (checkout = CHECKOUT2) => {
-  if (!origins.has(checkout)) {
-    const run = Bun.spawnSync(["git", "-C", checkout, "remote", "get-url", "origin"], {
-      stderr: "ignore"
-    });
-    const url = run.stdout.toString().trim();
-    const slug = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(url)?.[1] ?? "";
-    origins.set(checkout, slug.toLowerCase());
-  }
-  return origins.get(checkout);
-};
-if (false)
-  ;
 
 // packages/scripts/src/trace-count/kinds.ts
 var reposOf = (settings, checkout) => {
@@ -14618,15 +18665,17 @@ function ownLinesPast(text, owner) {
   }).join(`
 `);
 }
+var EXAMPLE_ADDRESS = /@(?:[a-z\d-]+\.)*example\.(?:com|net|org)$/i;
+var holds = (kind, re, text) => kind === "emails" ? (text.match(re) ?? []).some((hit) => !EXAMPLE_ADDRESS.test(hit)) : text.search(re) !== -1;
 function finder2(list, repos, owner) {
   const kinds = patterns(list, repos).filter(([kind]) => SAID[kind]);
   return (text) => {
     const said = readPast(owner ? ownLinesPast(text, owner) : text, repos);
-    const found = kinds.find(([, re]) => said.search(re) !== -1);
+    const found = kinds.find(([kind, re]) => holds(kind, re, said));
     return found && SAID[found[0]];
   };
 }
-var policy2 = (list, repos, owner) => ({
+var policy3 = (list, repos, owner) => ({
   find: finder2(list, repos, owner),
   git: false,
   guard: "no-public-leak",
@@ -14644,23 +18693,23 @@ var shipWrite = (raw) => {
     return false;
   }
 };
-async function check16(raw, environment = process.env) {
+async function check21(raw, environment = process.env, checkout) {
   const loaded = await guardList("no-public-leak", "no-public-leak", isPublicList, EMPTY_LIST, environment);
   if (loaded.refusal)
     return refusedList(raw, `${loaded.refusal} The list is a JSON object with an array of strings under each of ${LIST_KEYS.join(", ")}.`);
   const read = await readPolicy(dataDir(environment));
   if (read.refusal !== undefined)
     return refusedList(raw, `no-public-leak hook refused this call: ${read.refusal}, then run the call again.`);
-  return inspectAs(policy2(loaded.list ?? EMPTY_LIST, reposOf(read.settings), shipWrite(raw) ? ownerSettings.get(read.settings, "owner.names") : undefined), raw, environment);
+  return inspectAs(policy3(loaded.list ?? EMPTY_LIST, reposOf(read.settings, checkout), shipWrite(raw) ? ownerSettings.get(read.settings, "owner.names") : undefined), raw, environment);
 }
 if (false) {}
 
 // scripts/hooks/no-raw-delete.ts
-import { realpathSync as realpathSync5 } from "fs";
-import { basename as basename7, dirname as dirname8, resolve as resolve10, sep as sep4 } from "path";
+import { realpathSync as realpathSync6 } from "fs";
+import { basename as basename9, dirname as dirname10, resolve as resolve11, sep as sep4 } from "path";
 var INSTEAD4 = "Move it to the 7-day trash with playground rm <path> (a worktree: playground rm --worktree <path>), which takes up to 5,000 files or 2 GB; leave a bigger tree or a scratch folder in place for your lead's cleanup, and let bun install rebuild a node_modules in place. A plain rm of a file inside your own worktree or scratchpad, with no -r, still runs.";
-var WORKTREE = "Remove a worktree with playground rm --worktree <path>, which moves it to the 7-day trash once no live session holds it, it holds no uncommitted change and its work has landed on canary.";
-var refuse11 = (what, why = "a recursive delete is final, and one aimed wrong takes a whole tree", instead = INSTEAD4) => `no-raw-delete hook refuses ${what}: ${why}. ${instead}`;
+var WORKTREE = "Remove a worktree with playground rm --worktree <path>, which moves it to the 7-day trash once no live session holds it (a clean worktree, detached at a commit canary already has, counts as held by none), it holds no uncommitted change and its work has landed on canary or on a branch origin still holds.";
+var refuse13 = (what, why = "a recursive delete is final, and one aimed wrong takes a whole tree", instead = INSTEAD4) => `no-raw-delete hook refuses ${what}: ${why}. ${instead}`;
 var shown2 = (word) => word.variable ? `$${word.variable}` : visible(word.value);
 var DATA = new Set([
   ...PRINTERS,
@@ -14681,12 +18730,26 @@ var DATA = new Set([
   "sed"
 ]);
 var isData = (name) => DATA.has(name) || /^python[\d.]*$/.test(name);
-var scriptStaysText = (cmd, args, browserOnly) => browserOnly.has(cmd) && args[0]?.value === "eval";
+var scriptStaysText = (cmd, args, browserOnly) => browserOnly.has(cmd) && browserEval(args);
+var BROWSER_FLAGS = new Set(["--ignore-https-errors", "--json"]);
+var BROWSER_VALUES = new Set(["--args", "--session"]);
+var browserEval = (args) => {
+  for (let k = 0;k < args.length; k++) {
+    const { value } = args[k];
+    if (value === "eval")
+      return true;
+    const [name, attached] = value.split(/=(.*)/s);
+    const own = BROWSER_VALUES.has(name) ? attached ?? args[++k]?.value : undefined;
+    if (!BROWSER_FLAGS.has(value) && (own === undefined || /\s/.test(own)))
+      return false;
+  }
+  return false;
+};
 var STARTERS = new Set(["screen", "tmux"]);
 var RM = new Set(["grm", "rm"]);
 var DEL = new Set(["del", "del-cli"]);
 var DELETER_PROGRAMS = new Set([...DEL, "rimraf"]);
-var RUNNERS5 = new Map([
+var RUNNERS6 = new Map([
   ["bun", ["x"]],
   ["bunx", []],
   ["npm", ["exec", "x"]],
@@ -14711,7 +18774,7 @@ var JUDGED = new Set([
   "rsync"
 ]);
 function packageOf(name, args) {
-  const subs = RUNNERS5.get(name);
+  const subs = RUNNERS6.get(name);
   if (!subs)
     return;
   const words = args.filter((a) => !a.value.startsWith("-"));
@@ -14721,41 +18784,41 @@ function packageOf(name, args) {
 }
 var READERS3 = new Set([...PRINTERS, "egrep", "fgrep", "grep", "rg"]);
 var APPENDS = new Set(["gxargs", "parallel"]);
-var RUNS = {
+var RUNS2 = {
   fd: new Set(["--exec", "--exec-batch", "-X", "-x"]),
   find: new Set(["-exec", "-execdir", "-ok", "-okdir"]),
   gfind: new Set(["-exec", "-execdir", "-ok", "-okdir"])
 };
 var QUEUES = new Set(["at", "batch"]);
 var unversioned = (name) => name.replace(/(?<=.)@[^@/]*$/, "");
-var ATTACHED = /^(?:--exec(?:-batch)?=|-[01FHILVaghilpqsu]*[xX]=?)(.*)$/s;
-var recursive2 = (v) => v.startsWith("--") ? v.length >= 3 && "--recursive".startsWith(v) : /^-[A-Za-z]*[rR]/.test(v);
-var spellsRecursive = (v) => v.split(/[\s,{}]+/).some((part) => part.startsWith("-") && recursive2(part));
+var ATTACHED2 = /^(?:--exec(?:-batch)?=|-[01FHILVaghilpqsu]*[xX]=?)(.*)$/s;
+var recursive3 = (v) => v.startsWith("--") ? v.length >= 3 && "--recursive".startsWith(v) : /^-[dfiIPRrvWx]*[rR][dfiIPRrvWx]*$/.test(v);
+var spellsRecursive = (v) => v.split(/[\s,{}]+/).some((part) => part.startsWith("-") && recursive3(part));
 var hidden = (word) => unreadable(word) || !!word.glob && /[*?]|\[[^\]]*\]/.test(word.value);
 var prefixOf = (v, option, shortest) => v.length >= shortest && option.startsWith(v);
-function real3(path) {
+function real4(path) {
   try {
-    return realpathSync5(path);
+    return realpathSync6(path);
   } catch {
-    const parent = dirname8(path);
-    return parent === path ? path : resolve10(real3(parent), basename7(path));
+    const parent = dirname10(path);
+    return parent === path ? path : resolve11(real4(parent), basename9(path));
   }
 }
 function rootsOf(cwd, session) {
-  const at = cwd ? real3(cwd) : "";
+  const at = cwd ? real4(cwd) : "";
   const worktree = /^(.*\/\.claude\/worktrees\/[^/]+)(?:\/|$)/.exec(at)?.[1];
   const id = typeof session === "string" && /^[\w-]+$/.test(session) ? session : undefined;
   const scratch = id ? new RegExp(`^(?:/private)?/tmp/claude-\\d+/[^/]+/${id}/scratchpad/`) : undefined;
   return { scratch, worktree };
 }
 var inside = (path, { scratch, worktree }) => {
-  const at = real3(path);
+  const at = real4(path);
   return !!worktree && at.startsWith(worktree + sep4) || !!scratch && scratch.test(at);
 };
 var OWN = { appends: false, nested: false };
 function judgeRm(args, xargs, env, roots, { nested }) {
   if (xargs)
-    return refuse11("rm under xargs", "the hook cannot read the paths xargs hands it");
+    return refuse13("rm under xargs", "the hook cannot read the paths xargs hands it");
   let options = true;
   const targets = [];
   for (const a of args) {
@@ -14764,11 +18827,11 @@ function judgeRm(args, xargs, env, roots, { nested }) {
       continue;
     }
     const option = options && a.value.startsWith("-") && a.value !== "-";
-    if (option && recursive2(a.value))
-      return refuse11(`a recursive rm (${a.value})`);
+    if (option && recursive3(a.value))
+      return refuse13(`a recursive rm (${a.value})`);
     const spread = marked(a.value) && (!nested || !a.quoted);
     if (spread || options && spellsRecursive(a.value) || option && hidden(a))
-      return refuse11(`an rm with a word the hook cannot read (${shown2(a)})`, "it may be -r or any path");
+      return refuse13(`an rm with a word the hook cannot read (${shown2(a)})`, "it may be -r or any path");
     if (!option)
       targets.push(a);
   }
@@ -14779,7 +18842,7 @@ function judgeRm(args, xargs, env, roots, { nested }) {
     return !path || !inside(path, roots);
   });
   if (outside)
-    return refuse11(`an rm of ${visible(outside.value)}`, "it is outside your own worktree and scratchpad, where a plain rm runs");
+    return refuse13(`an rm of ${visible(outside.value)}`, "it is outside your own worktree and scratchpad, where a plain rm runs");
 }
 function judgeGit3(args) {
   const { rest, sub } = gitCommand(args);
@@ -14790,21 +18853,23 @@ function judgeGit3(args) {
     if (cluster("n") || words.some((v) => prefixOf(v, "--dry-run", 3)))
       return;
     if (cluster("d") || cluster("x") || cluster("X"))
-      return refuse11("git clean with -d or -x", "it deletes untracked folders or ignored files for good");
+      return refuse13("git clean with -d or -x", "it deletes untracked folders or ignored files for good");
   }
   if (sub?.value === "worktree" && words[0] === "remove" && force)
-    return refuse11("git worktree remove --force", "it deletes a worktree's uncommitted work for good", WORKTREE);
+    return refuse13("git worktree remove --force", "it deletes a worktree's uncommitted work for good", WORKTREE);
 }
-async function inspect13(raw, environment) {
+async function inspect16(raw, environment) {
   const payload = JSON.parse(raw);
   const { cwd, session_id: session, tool_input: input, tool_name: tool } = payload;
   if (tool !== "Bash")
     return;
   const command = input?.command;
-  if (typeof command !== "string" || !CANDIDATE.test(bare(command)))
+  if (typeof command !== "string" || !CANDIDATE.test(bare(spelledText(command))))
     return;
   const directory = typeof cwd === "string" ? cwd : undefined;
   const roots = rootsOf(directory, session);
+  const text = bare(spelledText(decodedText(command)));
+  const named = DELETES.test(text) || globSpells(text, SPELLED);
   const env = {
     cwd: directory,
     files: new Map,
@@ -14814,8 +18879,10 @@ async function inspect13(raw, environment) {
   };
   const lexed = lex(command, env.known);
   const browserOnly = new Set(lexed.commands.every((c) => c.words[0]?.source === "agent-browser") ? lexed.commands : []);
-  const line = (text, at) => run(lex(text, at.known), { ...at, vars: new Map(at.vars) }, visit);
+  const line = (text, at) => run2(lex(text, at.known), { ...at, vars: new Map(at.vars) }, visit);
   const visitAs = (reach) => async (cmd, parsed, at) => {
+    if (cmd.casePattern)
+      return;
     const { args, name } = parsed;
     const verdict = await judge(cmd, parsed, at, reach);
     if (verdict)
@@ -14832,7 +18899,7 @@ async function inspect13(raw, environment) {
       for (const [k, a] of args.entries()) {
         if (hidden(a)) {
           if (!isData(name) && args.slice(k).some((w) => spellsRecursive(w.value)))
-            return refuse11(`a program the hook cannot read (${shown2(a)}) given -r`, "it may be rm");
+            return refuse13(`a program the hook cannot read (${shown2(a)}) given -r`, "it may be rm");
           continue;
         }
         const named = unversioned(program(a.value));
@@ -14857,17 +18924,12 @@ async function inspect13(raw, environment) {
   const judge = async (cmd, parsed, at, reach) => {
     const { args, first, xargs } = parsed;
     const name = unversioned(parsed.name);
+    if (named && unreadRun(parsed))
+      return refuse13("a command built from a value it cannot read, in a call that names a delete", "it may be any delete", `Write the program and its words out in the call, or write the script to a file and run it. ${INSTEAD4}`);
     const end = args.findIndex((a) => !a.value.startsWith("-") && !hidden(a));
     const lead = end < 0 ? args : args.slice(0, end);
     if (first && hidden(first) && (spellsRecursive(first.value) || args.some((a) => spellsRecursive(a.value)) || lead.some((a) => hidden(a) && !a.quoted)))
-      return refuse11(`a program the hook cannot read (${shown2(first)}) given -r`, "it may be rm");
-    const held = first && !first.quoted && first.value === UNKNOWN && first.variable ? at.vars.get(first.variable) : undefined;
-    if (held && !held.unknown && /\s/.test(held.value.trim())) {
-      const split = held.value.trim().split(/\s+/).map((value) => ({ quoted: false, value }));
-      const found = await examine({ ...cmd, words: [...split, ...args] }, at, visitAs(reach), false);
-      if (found)
-        return found;
-    }
+      return refuse13(`a program the hook cannot read (${shown2(first)}) given -r`, "it may be rm");
     const slot = slotWords(parsed);
     if (slot)
       return examine({ ...cmd, words: slot }, at, visitAs(reach), false);
@@ -14876,25 +18938,25 @@ async function inspect13(raw, environment) {
     if (name === "git")
       return judgeGit3(args);
     if (DELETER_PROGRAMS.has(name))
-      return refuse11(name);
+      return refuse13(name);
     if (name === "rsync" && args.some(({ value }) => value === "--del" || value.startsWith("--delete")))
-      return refuse11("rsync --delete", "it deletes every file its source lacks, for good");
+      return refuse13("rsync --delete", "it deletes every file its source lacks, for good");
     if (name === "rsync" && args.some(({ value }) => /^--remove-s(?:ent|ource)-files$/.test(value)))
-      return refuse11("rsync --remove-source-files", "it deletes every source file it sends");
+      return refuse13("rsync --remove-source-files", "it deletes every source file it sends");
     if (SHRED.has(name) && args.some(({ value }) => /^-[a-z]*u/.test(value) || prefixOf(value.split("=")[0], "--remove", 4)))
-      return refuse11(`${name} -u`, "it overwrites each file and then deletes it, past any recovery");
+      return refuse13(`${name} -u`, "it overwrites each file and then deletes it, past any recovery");
     if (TAR.has(name) && args.some(({ value }) => prefixOf(value, "--remove-files", 5)))
-      return refuse11(`${name} --remove-files`, "it deletes every file it adds to the archive");
+      return refuse13(`${name} --remove-files`, "it deletes every file it adds to the archive");
     if (name === "chflags")
-      return refuse11("chflags", "it lifts the flags that keep a file from deletion");
+      return refuse13("chflags", "it lifts the flags that keep a file from deletion");
     if (name === "chmod" && args.some((a) => /^-[A-Za-z]*[aN]/.test(a.value)))
-      return refuse11("chmod -a or -N", "it strips the access entries that keep a file from deletion");
-    const runs = Object.hasOwn(RUNS, name) ? RUNS[name] : undefined;
+      return refuse13("chmod -a or -N", "it strips the access entries that keep a file from deletion");
+    const runs = Object.hasOwn(RUNS2, name) ? RUNS2[name] : undefined;
     if (runs) {
       if (args.some((a) => a.value === "-delete"))
-        return refuse11(`${name} -delete`);
+        return refuse13(`${name} -delete`);
       for (const [k, a] of args.entries()) {
-        const attached = name === "fd" ? ATTACHED.exec(a.value) : null;
+        const attached = name === "fd" ? ATTACHED2.exec(a.value) : null;
         if (!runs.has(a.value) && !attached)
           continue;
         const value = attached?.[1] || undefined;
@@ -14904,7 +18966,7 @@ async function inspect13(raw, environment) {
           ...args.slice(k + 1, end === -1 ? undefined : end)
         ];
         if (RM.has(parse({ ...cmd, words }).name))
-          return refuse11(value === undefined ? `${name} ${a.value} rm` : `${name} ${a.value}`, `it deletes every path ${name} reaches`);
+          return refuse13(value === undefined ? `${name} ${a.value} rm` : `${name} ${a.value}`, `it deletes every path ${name} reaches`);
         const found = await examine({ ...cmd, words }, at, visitAs({ appends: true, nested: true }), false);
         if (found)
           return found;
@@ -14916,7 +18978,7 @@ async function inspect13(raw, environment) {
       if (fed) {
         const script = await (file === -1 ? stdinOf(cmd, at) : readPath(args[file + 1] ?? { value: "" }, at)).catch((error) => ({ unknown: `a read that failed: ${error}`, value: "" }));
         if (script.unknown)
-          return refuse11(`${name} given a job it cannot read (${script.unknown})`, "it may queue a recursive delete");
+          return refuse13(`${name} given a job it cannot read (${script.unknown})`, "it may queue a recursive delete");
         return line(script.value, at);
       }
     }
@@ -14929,9 +18991,10 @@ async function inspect13(raw, environment) {
           return found;
       }
   };
-  return run(lexed, env, visit);
+  return run2(lexed, env, visit);
 }
 var bare = (command) => command.replace(/[\\'"]/g, "");
+var SPELLED = [...RM, ...DELETER_PROGRAMS, ...SHRED, "chflags", "chmod"];
 var CANDIDATE = /rm|del|chflags|chmod|clean|worktree|rimraf|rsync|shred|\bg?tar\b|screen|tmux|\bat\b|batch|\$|`|[{*?[]/i;
 var DELETES = /\bg?rm\b|-delete\b|\bchflags\b|\bchmod\b|\bclean\b|\bworktree\b|\brimraf\b|\bdel-cli\b|\bg?shred\b|--del|--rem/i;
 function commandOf2(raw) {
@@ -14942,20 +19005,20 @@ function commandOf2(raw) {
     return;
   }
 }
-async function check17(raw, environment = process.env) {
+async function check22(raw, environment = process.env) {
   try {
-    return await withDeadline(1e4, async () => inspect13(raw, environment));
+    return await withDeadline(1e4, async () => inspect16(raw, environment));
   } catch (error) {
     if (!DELETES.test(bare(commandOf2(raw) ?? raw)))
       return;
-    return refuse11(`a call it could not read (${error})`, "it reads as a delete").concat(" Split it into plain commands and run them again.");
+    return refuse13(`a call it could not read (${error})`, "it reads as a delete").concat(" Split it into plain commands and run them again.");
   }
 }
 if (false) {}
 
 // scripts/hooks/no-raw-spawn.ts
-import { join as join16, resolve as resolve11, sep as sep5 } from "path";
-var SPAWN = join16(__CHECKOUT + "/scripts/hooks", "..", "spawn.sh");
+import { join as join20, resolve as resolve12, sep as sep5 } from "path";
+var SPAWN = join20(__CHECKOUT + "/scripts/hooks", "..", "spawn.sh");
 var HEADS = new Set([
   "agent",
   "agent-hibernation",
@@ -15040,7 +19103,7 @@ function unixTarget(name, args) {
   }
 }
 var EXPORTS4 = new Set(["declare", "export", "local", "readonly", "typeset"]);
-var refuse12 = (what) => `no-raw-spawn hook refuses ${what}: a factory session starts another only through ${SPAWN}, which refuses unless the machine has room, its gate naming the reading that failed. Run it instead (worker, runner, column, manager, resume or restore; with no arguments it prints how).`;
+var refuse14 = (what) => `no-raw-spawn hook refuses ${what}: a factory session starts another only through ${SPAWN}, which refuses unless the machine has room, its gate naming the reading that failed. Run it instead (worker, runner, column, manager, resume or restore; with no arguments it prints how).`;
 var refuseHerdr = (what) => `no-raw-spawn hook refuses ${what}: herdr's socket has no access control, so a factory session runs only herdr's reads (current, edges, get, layout, list, neighbor, process-info, read and status, agent explain, agent wait, api snapshot, pane wait-output and the like) on herdr's own socket. Talk to another session with SendMessage; start, resume or restore one only through ${SPAWN} (with no arguments it prints how).`;
 var beforeDashes = (args) => {
   const dashes = args.findIndex((a) => a.value === "--");
@@ -15062,7 +19125,7 @@ function judgeCmux(args) {
   if (args.length === 1 && CMUX_READS.has(args[0].value))
     return;
   const [head] = positionals3(beforeDashes(args));
-  return refuse12(`a cmux ${head ?? "call"}, since every session runs in herdr and no factory session calls cmux (only \`cmux --help\`, \`-h\`, \`--version\` and \`version\` run)`);
+  return refuse14(`a cmux ${head ?? "call"}, since every session runs in herdr and no factory session calls cmux (only \`cmux --help\`, \`-h\`, \`--version\` and \`version\` run)`);
 }
 function herdrArgs(args) {
   const found = [];
@@ -15088,7 +19151,7 @@ var SCRATCH_GROUPS = new Set([
   "workspace",
   "worktree"
 ]);
-var MOVES = /^--(?:machine|remote|session)(?:=|$)/;
+var MOVES2 = /^--(?:machine|remote|session)(?:=|$)/;
 var STARTS_CLAUDE = /(?<![.\w])claude(?!\w)/i;
 function scratchWorld(args, local, env) {
   const session = local.get("HERDR_SESSION");
@@ -15097,12 +19160,12 @@ function scratchWorld(args, local, env) {
     return;
   const tmp = env.process.TMPDIR;
   const path = socket.value;
-  if (!tmp?.startsWith("/") || unreadable(socket) || !path.startsWith("/") || !resolve11(path).startsWith(resolve11(tmp) + sep5))
+  if (!tmp?.startsWith("/") || unreadable(socket) || !path.startsWith("/") || !resolve12(path).startsWith(resolve12(tmp) + sep5))
     return `a scratch herdr call whose HERDR_SOCKET_PATH is not a literal path under your TMPDIR (${tmp ?? "unset"}), where a scratch server's socket goes`;
   const servers = (env.process.PLAYGROUND_HERDR_SESSIONS ?? "").split(",");
   if (unreadable(session) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(session.value) || ["default", "factory", "playground", "playground-probes", "probes", ...servers].includes(session.value))
     return "a scratch herdr call whose HERDR_SESSION is not a word of its own: herdr keeps a server's state under ~/.config/herdr/sessions/<name>, so default, Playground's servers (playground, playground-probes) and the factory's (factory, probes) stay theirs";
-  if (args.some((a) => MOVES.test(a.value)))
+  if (args.some((a) => MOVES2.test(a.value)))
     return "a scratch herdr call with --session, --machine or --remote, which moves it off the scratch socket";
   const [head] = herdrWords(args);
   if (!SCRATCH_GROUPS.has(head ?? ""))
@@ -15194,13 +19257,13 @@ var visit7 = async (cmd, { args, first, local, name }, env) => {
     return head && HEADS.has(head) ? judgeCmux(args) : undefined;
   }
   if (name === "claude" && reopens(args))
-    return refuse12("a claude --resume or --continue");
+    return refuse14("a claude --resume or --continue");
 };
-var BARE4 = (command) => command.replace(/[\\'"]/g, "");
+var BARE5 = (command) => command.replace(/[\\'"]/g, "");
 var OPENS3 = new RegExp(`\\b(?:cmux|hc|herdr|HERDR_BIN_PATH|HERDR_SESSION|HERDR_SOCKET_PATH|${[...HEADS, ...HERDR_HEADS, ...HC_HEADS].join("|")})\\b`, "i");
 var REOPEN = /\bclaude\b[\s\S]*(?:\s-[cr]\b|--resume|--continue)/i;
-var candidate6 = (command) => command.includes("$'") || OPENS3.test(BARE4(command)) || /\bcmux\b/i.test(BARE4(command)) || REOPEN.test(BARE4(command)) || UNIX.test(BARE4(command));
-var spawnCall = (command) => /\b(?:hc|herdr|HERDR_BIN_PATH|HERDR_SESSION|HERDR_SOCKET_PATH)/i.test(BARE4(command)) || /\bcmux\b/i.test(BARE4(command)) && /\b(?:claude|claude-teams|omc|recover|wake|restore|restore-session|fork)\b/.test(BARE4(command)) || REOPEN.test(BARE4(command));
+var candidate6 = (command) => command.includes("$'") || OPENS3.test(BARE5(command)) || /\bcmux\b/i.test(BARE5(command)) || REOPEN.test(BARE5(command)) || UNIX.test(BARE5(command));
+var spawnCall = (command) => /\b(?:hc|herdr|HERDR_BIN_PATH|HERDR_SESSION|HERDR_SOCKET_PATH)/i.test(BARE5(command)) || /\bcmux\b/i.test(BARE5(command)) && /\b(?:claude|claude-teams|omc|recover|wake|restore|restore-session|fork)\b/.test(BARE5(command)) || REOPEN.test(BARE5(command));
 function commandOf3(raw) {
   try {
     const { tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
@@ -15209,7 +19272,7 @@ function commandOf3(raw) {
     return;
   }
 }
-async function inspect14(raw, environment) {
+async function inspect17(raw, environment) {
   const {
     cwd,
     tool_input: toolInput,
@@ -15229,25 +19292,417 @@ async function inspect14(raw, environment) {
     vars: new Map,
     visitShells: true
   };
-  return run(lex(command, env.known), env, visit7, true);
+  return run2(lex(command, env.known), env, visit7, true);
 }
-async function check18(raw, environment = process.env) {
+async function check23(raw, environment = process.env) {
   try {
-    return await inspect14(raw, environment);
+    return await inspect17(raw, environment);
   } catch (error) {
     const command = commandOf3(raw);
     if (!command || !spawnCall(command))
       return;
-    return `no-raw-spawn hook could not read this call (${error}), which reads as a session spawn, so it refuses it. ${refuse12("it")}`;
+    return `no-raw-spawn hook could not read this call (${error}), which reads as a session spawn, so it refuses it. ${refuse14("it")}`;
   }
 }
 if (false) {}
 
+// scripts/hooks/no-raw-vercel.ts
+import { basename as basename10, isAbsolute as isAbsolute8, resolve as resolve13 } from "path";
+var NAMES2 = ["vc", "vercel"];
+var words = (text) => new Set(text.split(" "));
+var GLOBAL = {
+  flags: words("--debug --help --no-color --non-interactive --version -d -h -v"),
+  takes: words("--api --cwd --global-config --local-config --scope --team --token -A -Q -S -T -t")
+};
+var DEPLOY = {
+  flags: words("--confirm --create-if-missing --dry --force --guidance --json --logs --no-clipboard --no-logs --no-wait --prebuilt --prod --skip-domain --temporary --turbo --verify --with-cache --yes -c -f -l -y"),
+  takes: words("--archive --build-env --env --environment --format --meta --name --project --regions --target -F -b -e -m -n -p")
+};
+var INSTALL = {
+  flags: words("--claim --json --no-claim --no-connect --no-env-pull"),
+  takes: words("--billing-plan --environment --installation --meta --name --prefix -e")
+};
+var OWN2 = {
+  api: {
+    flags: words("--dangerously-skip-permissions --include --paginate --raw --refresh --silent --verbose -i"),
+    takes: words("--field --generate --header --input --method --raw-field --spec-url -F -H -X -f")
+  },
+  deploy: DEPLOY,
+  env: {
+    flags: words("--guidance --json --yes -y"),
+    takes: words("--environment --format --git-branch --project -F -e -p")
+  },
+  install: INSTALL,
+  integration: INSTALL,
+  promote: { flags: words("--yes -y"), takes: words("--timeout") },
+  redeploy: { flags: words("--no-wait"), takes: words("--environment --target -e") },
+  rollback: { flags: words("--yes -y"), takes: words("--timeout") }
+};
+var ALIASES = new Map(Object.entries({
+  aliases: "alias",
+  budget: "budgets",
+  cert: "certs",
+  cron: "crons",
+  daemon: "daemons",
+  "deploy-hook": "deploy-hooks",
+  develop: "dev",
+  domain: "domains",
+  drain: "drains",
+  "edge-config": "global-config",
+  environment: "environments",
+  i: "install",
+  image: "images",
+  ir: "integration-resource",
+  ln: "alias",
+  log: "logs",
+  ls: "list",
+  mf: "microfrontends",
+  organization: "organizations",
+  permission: "permissions",
+  projects: "project",
+  rm: "remove",
+  rr: "rolling-release",
+  "status-page": "health",
+  switch: "teams",
+  tags: "tag",
+  target: "environments",
+  targets: "environments",
+  team: "teams",
+  versions: "version",
+  webhook: "webhooks"
+}));
+var COMMANDS2 = words("activity agent agent-runs ai-gateway alerts alias api bisect blob budgets build builders buy cache certs changelog ci comments config connect contract crons curl daemons deploy deploy-hooks dev dns domains drains env environments experiments feedback firewall flags git global-config guidance health help httpstat image images init inspect install integration integration-resource kms link list login logout logs mcp metrics microfrontends monitors notifications open organizations page-integrity permissions pricing project promote pull redeploy redirects remove rollback rolling-release routes sandbox schedules security setup signup skills storage tag teams telemetry tokens traces upgrade usage vcr version webhooks whoami");
+var READS2 = words("help inspect list logs whoami");
+var LISTS = words("dns domains integration project teams");
+var HELP2 = new Set(["--help", "--version", "-h", "-v"]);
+var API_BODY = new Set(["--field", "--input", "--raw-field", "-F", "-f"]);
+var READINGS2 = 64;
+var MENTION2 = /\bv(?:ercel|c)\b|\byard\b/i;
+var STEP_NAMED = /\byard\b/i;
+var NAMED = /(?:^|[\s=;&|(`'"])v(?:ercel|c)(?=$|[\s;&|)`'"@])/i;
+function readingsOf(args, { flags, takes }, toSub = false) {
+  const out = [];
+  const walk = (k, read) => {
+    if (out.length >= READINGS2)
+      return false;
+    for (;k < args.length; k++) {
+      const v = args[k].value;
+      if (v === "--") {
+        out.push({ ...read, positionals: [...read.positionals, ...args.slice(k + 1)] });
+        return true;
+      }
+      if (v.startsWith("--")) {
+        const eq = v.indexOf("=");
+        const name = eq === -1 ? v : v.slice(0, eq);
+        if (eq !== -1)
+          read = {
+            ...read,
+            flags: [...read.flags, { name, value: { ...args[k], value: v.slice(eq + 1) } }]
+          };
+        else if (takes.has(name))
+          read = { ...read, flags: [...read.flags, { name, value: args[++k] }] };
+        else if (flags.has(name))
+          read = { ...read, flags: [...read.flags, { name }] };
+        else {
+          if (!walk(k + 2, { ...read, flags: [...read.flags, { name, value: args[k + 1] }] }))
+            return false;
+          read = { ...read, flags: [...read.flags, { name }] };
+        }
+        continue;
+      }
+      if (v.startsWith("-") && v.length > 1) {
+        for (let c = 1;c < v.length; c++) {
+          const name = `-${v[c]}`;
+          const attached = c + 1 < v.length ? { ...args[k], value: v.slice(v[c + 1] === "=" ? c + 2 : c + 1) } : undefined;
+          if (flags.has(name)) {
+            read = { ...read, flags: [...read.flags, { name }] };
+            continue;
+          }
+          const taken = {
+            ...read,
+            flags: [...read.flags, { name, value: attached ?? args[k + 1] }]
+          };
+          if (takes.has(name)) {
+            read = taken;
+            if (!attached)
+              k++;
+            break;
+          }
+          if (!walk(attached ? k + 1 : k + 2, taken))
+            return false;
+          read = { ...read, flags: [...read.flags, { name }] };
+        }
+        continue;
+      }
+      read = { ...read, positionals: [...read.positionals, args[k]] };
+      if (toSub)
+        break;
+    }
+    out.push(read);
+    return true;
+  };
+  return walk(0, { flags: [], positionals: [] }) ? out : undefined;
+}
+var commandOf4 = (word) => word === undefined ? undefined : ALIASES.get(word.value) ?? word.value;
+function judgeAll(args, fed) {
+  const unread = {
+    production: false,
+    what: "a vercel call with more options than the hook reads"
+  };
+  const first = readingsOf(args, GLOBAL, true);
+  if (!first)
+    return unread;
+  const verdicts = [];
+  for (const name of new Set(first.map((r) => commandOf4(r.positionals[0])))) {
+    if (name !== undefined && READS2.has(name))
+      continue;
+    const own = OWN2[name !== undefined && COMMANDS2.has(name) ? name : "deploy"];
+    const options = own ? {
+      flags: new Set([...GLOBAL.flags, ...own.flags]),
+      takes: new Set([...GLOBAL.takes, ...own.takes])
+    } : GLOBAL;
+    const readings = readingsOf(args, options);
+    if (!readings)
+      return unread;
+    for (const reading of readings)
+      verdicts.push(judge7(reading, args.some(unreadable), fed));
+  }
+  return verdicts.find((v) => v && !v.production) ?? verdicts.find(Boolean);
+}
+function judge7({ flags, positionals }, unreadWord, fed) {
+  if (flags.some((f) => HELP2.has(f.name)))
+    return;
+  const [sub, ...rest] = positionals;
+  if (sub && unreadable(sub))
+    return { production: false, what: "a subcommand built at run time" };
+  if (fed)
+    return { production: false, what: "a vercel call whose words xargs feeds" };
+  const built = unreadWord;
+  const has = (...names) => flags.some((f) => names.includes(f.name));
+  const toProduction = (names, absent) => {
+    const flag = flags.findLast((f) => names.includes(f.name));
+    if (!flag)
+      return absent;
+    return !flag.value || unreadable(flag.value) || flag.value.value.toLowerCase() === "production";
+  };
+  const next = rest[0]?.value;
+  const name = commandOf4(sub);
+  const listing = next === "ls" || next === "list";
+  const path = sub !== undefined && !COMMANDS2.has(name) && /[./~]/.test(sub.value);
+  if (name === "deploy" && rest[0] !== undefined && next !== "init") {
+    if (next === "continue")
+      return { production: true, what: "a manual deploy's continue" };
+    if (unreadable(rest[0]))
+      return { production: false, what: "a word built at run time after vercel deploy" };
+    if (!/[./~]/.test(next))
+      return { production: false, what: `\`vercel deploy ${next}\`` };
+  }
+  const envLetter = flags.some((f) => f.name === "-e" && (!f.value || unreadable(f.value) || !f.value.value.includes("=")));
+  if (name === undefined || name === "deploy" || path)
+    return has("--prod") || toProduction(["--environment", "--target"], false) || envLetter || built ? { production: true, what: "a production deploy" } : undefined;
+  if (name === "redeploy")
+    return toProduction(["--environment", "-e", "--target"], true) || built ? { production: true, what: "a redeploy that may land in production" } : undefined;
+  if (name === "promote" || name === "rollback")
+    return next === "status" ? undefined : { production: true, what: `a ${name}` };
+  if (name === "alias")
+    return listing ? undefined : { production: true, what: "an alias change" };
+  if (name === "rolling-release")
+    return next === "inspect" ? undefined : { production: true, what: "a rolling release step" };
+  if (LISTS.has(name) && listing)
+    return;
+  if (name === "env" && listing) {
+    const format = flags.findLast((f) => f.name === "--format" || f.name === "-F");
+    const json = !!format && (!format.value || unreadable(format.value) || format.value.value.toLowerCase() === "json");
+    return has("--json") || json || built ? { production: false, what: "an env list with its values" } : undefined;
+  }
+  if (name === "api")
+    return judgeApi2(rest, flags, built);
+  const words = [sub.value, ...next === undefined || unreadable(rest[0]) ? [] : [next]];
+  return { production: false, what: `\`vercel ${words.join(" ")}\`` };
+}
+function judgeApi2(rest, flags, built) {
+  const [endpoint] = rest;
+  if (!endpoint || endpoint.value === "list")
+    return;
+  if (built)
+    return { production: false, what: "a vercel api call built at run time" };
+  const method = flags.findLast((f) => f.name === "-X" || f.name === "--method");
+  if (method && (!method.value || method.value.value.toUpperCase() !== "GET"))
+    return { production: false, what: "a vercel api write" };
+  if (flags.some((f) => API_BODY.has(f.name)))
+    return { production: false, what: "a vercel api call with a body" };
+  if (/(?:^|\/)env(?:[/?#]|$)/i.test(endpoint.value))
+    return { production: false, what: "a vercel api read of a project's env" };
+}
+var STEP_FILE = /(?:^|\/)packages\/scripts\/src\/ship\/yard\.ts$/;
+var STEP_HELP = new Set(["--help", "-h"]);
+var RUNNERS7 = new Set(["npm", "pnpm", "yarn"]);
+function yardStep(name, args, shell) {
+  if (RUNNERS7.has(name))
+    return args.some((a) => a.value === "ship:yard");
+  if (name !== "bun")
+    return false;
+  const { at, chained, words } = bunCall(args, shell);
+  const file = words[0] === "run" ? words[1] : words[0];
+  if (file === undefined)
+    return false;
+  const path = isAbsolute8(file) ? file : chained ? resolve13(chained, file) : undefined;
+  const step = file === "ship:yard" || (path ? STEP_FILE.test(path) : basename10(file) === "yard.ts");
+  const end = args.findIndex((a, k) => k > at && a.value === "--");
+  return step && !args.slice(at + 1, end === -1 ? undefined : end).some((a) => STEP_HELP.has(a.value));
+}
+var PACKAGE_RUNNERS = new Set(["bunx", "npm", "npx", "pnpm", "yarn"]);
+var MOVES3 = /^(?:--(?:cwd|dir|filter|prefix|workspace)(?:=|$)|-[CFw]|workspaces?$)/;
+var CALLS = new Set(["--call", "--shell-mode", "-c"]);
+function runnerBuns(name, args, shell) {
+  let offset = 0;
+  if (name === "bun") {
+    const { at, chained, sub, words } = bunCall(args, shell);
+    if (words[0] !== "x") {
+      const started = toolName(args[at]?.value);
+      const there = { ...shell, cwd: chained };
+      if (started === "bun")
+        return [{ args: args.slice(at + 1), shell: there }];
+      return PACKAGE_RUNNERS.has(started) ? runnerBuns(started, args.slice(at + 1), there) : [];
+    }
+    offset = sub + 1;
+  } else if (!PACKAGE_RUNNERS.has(name))
+    return [];
+  const reached = [];
+  for (let at = offset;at < args.length; at++) {
+    if (toolName(args[at].value) !== "bun")
+      continue;
+    const moved = args.slice(0, at).some((a) => MOVES3.test(a.value));
+    reached.push({ args: args.slice(at + 1), shell: moved ? { ...shell, cwd: undefined } : shell });
+  }
+  return reached;
+}
+function throughRunners(name, args, shell) {
+  const reached = [];
+  const queue = runnerBuns(name, args, shell);
+  while (queue.length > 0 && reached.length < 32) {
+    const next = queue.shift();
+    reached.push(next);
+    for (const reading of runnerReadings("bun", next.args))
+      queue.push(...runnerBuns("bun", reading, next.shell));
+  }
+  return reached;
+}
+function runnerCalls(name, args) {
+  if (!PACKAGE_RUNNERS.has(name) || name === "bunx")
+    return [];
+  const calls = [];
+  for (let k = 0;k < args.length; k++) {
+    const v = args[k].value;
+    if (CALLS.has(v) && args[k + 1])
+      calls.push(args[k + 1]);
+    else if (v.startsWith("--call="))
+      calls.push({ ...args[k], value: v.slice(7) });
+  }
+  return calls;
+}
+var builtName = (word) => !!word && marked(word.value.slice(word.value.lastIndexOf("/") + 1));
+function chain(name, args, shell) {
+  const links = [];
+  for (;; ) {
+    if (args[1] === UNREAD_CWD)
+      return [...links, { unread: "a runner call past the readings the hook makes" }];
+    links.push({ args, name });
+    if (!STARTED_RUNNERS.has(name) || toolWords(NAMES2, name, args, shell))
+      return links;
+    let rest = args;
+    let at;
+    if (name === "bun") {
+      const call = bunCall(args, shell);
+      at = call.at;
+      if (call.words[0] === "x") {
+        rest = args.slice(call.sub + 1);
+        at = runnerTarget(rest);
+      }
+    } else
+      at = runnerTarget(rest);
+    if (builtName(rest[at]))
+      return [...links, { unread: "a runner's program built at run time" }];
+    const started = toolName(rest[at]?.value);
+    if (!STARTED_RUNNERS.has(started))
+      return links;
+    name = started;
+    args = rest.slice(at + 1);
+  }
+}
+async function check24(raw, environment = process.env) {
+  const {
+    cwd,
+    tool_input: toolInput,
+    tool_name: tool
+  } = JSON.parse(raw);
+  if (tool !== "Bash" || typeof toolInput?.command !== "string")
+    return;
+  const command = toolInput.command;
+  if (!MENTION2.test(command.replace(/["'\\]/g, "")))
+    return;
+  const verdicts = [];
+  const visit = async (_cmd, parsed, shell) => {
+    if (parsed.first && unreadable(parsed.first) && NAMED.test(command))
+      verdicts.push({
+        production: false,
+        what: "a program built at run time on a line naming vercel"
+      });
+    const slotted = slotWords(parsed);
+    const name = slotted ? program(slotted[0]?.value ?? "") : parsed.name;
+    for (const args of runnerReadings(name, slotted ? slotted.slice(1) : parsed.args)) {
+      if (yardStep(name, args, shell) || throughRunners(name, args, shell).some((bun) => yardStep("bun", bun.args, bun.shell)))
+        verdicts.push({ production: true, what: "the Yard ship step, which deploys production" });
+      let scanned = false;
+      for (const link of chain(name, args, shell)) {
+        if ("unread" in link) {
+          if (NAMED.test(command))
+            verdicts.push({ production: false, what: `${link.unread} on a line naming vercel` });
+          continue;
+        }
+        if (!scanned) {
+          for (const call of runnerCalls(link.name, link.args))
+            if (!unreadable(call))
+              await run2(lex(call.value), { ...shell, vars: new Map(shell.vars) }, visit);
+            else if (STEP_NAMED.test(command))
+              verdicts.push({
+                production: true,
+                what: "a runner's command line built at run time on a line naming the Yard ship step"
+              });
+        }
+        scanned ||= link.name === "npx";
+        const words = toolWords(NAMES2, link.name, link.args, shell);
+        const verdict = words && judgeAll(words.map((w) => ({ ...w, ...viaXargs(w, parsed.xargs) })), parsed.xargs !== undefined);
+        if (verdict)
+          verdicts.push(verdict);
+      }
+    }
+    return;
+  };
+  const env = {
+    cwd: typeof cwd === "string" ? cwd : undefined,
+    files: new Map,
+    known: {},
+    process: {},
+    vars: new Map
+  };
+  await run2(lex(command), env, visit);
+  const always = verdicts.find((v) => !v.production);
+  if (always)
+    return `no-raw-vercel hook refuses ${always.what}: in a factory session vercel runs its reads alone (whoami, ls, inspect, logs, help, the ls of alias, dns, domains, integration, project and teams, env ls without its values, promote and rollback status, rolling-release inspect, a vercel api GET outside /env) and a preview deploy (vercel deploy, vercel deploy init, or vercel ./<folder>). A secret reaches a project through an Inbox secret ask, and production ships from main through the release skill's ship:merge.`;
+  const production = verdicts.find((v) => v.production);
+  if (!production || await opsLead(raw, environment) && !namesRole(command))
+    return;
+  return `no-raw-vercel hook refuses ${production.what}: it changes what production serves, and a production deploy also migrates the hosted database. Production ships from main through the release skill's ship:merge; the Ops lead alone makes a hand production move, in a call that names no role variable and sources no file. A preview deploy (vercel deploy without --prod) and the reads (whoami, ls, inspect, logs, help) run.`;
+}
+
 // scripts/hooks/no-raw-wa.ts
-import { realpathSync as realpathSync6 } from "fs";
-import { homedir as homedir4 } from "os";
-import { resolve as resolve12 } from "path";
-var refuse13 = (what) => `no-raw-wa hook refuses ${what}: the data folder's whatsapp/ holds ops-wa's linked device, its auth state, its socket and the owner's messages, which no session reads or writes. To write to the owner on WhatsApp, run playground wa send <absolute file>; to see ops-wa's state, read its row on the System page.`;
+import { realpathSync as realpathSync7 } from "fs";
+import { homedir as homedir5 } from "os";
+import { resolve as resolve14 } from "path";
+var refuse15 = (what) => `no-raw-wa hook refuses ${what}: the data folder's whatsapp/ holds ops-wa's linked device, its auth state, its socket and the owner's messages, which no session reads or writes. To write to the owner on WhatsApp, run playground wa send <absolute file>; to see ops-wa's state, read its row on the System page.`;
+var refuseJob = (what) => `no-raw-wa hook refuses ${what}: the relay tags each line with its queue's job, and a line tagged [ops-wa] or [ops-dm-watch] reads as the owner's own words, so only ops-wa and ops-dm-watch queue under those jobs. Queue your line under your own job, notify.sh <your job> <text>, or tell your manager with SendMessage.`;
+var OWNER_JOBS = new Set(["dm-watch", "wa"]);
 var RECURSIVE = new Set(["ack", "ag", "ditto", "find", "rg", "rsync", "tar"]);
 var RECURSIVE_WITH = {
   cp: /^-[A-Za-z]*[rRa]|^--(?:recursive|archive)$/,
@@ -15258,14 +19713,24 @@ var RECURSIVE_WITH = {
   zip: /^-[A-Za-z]*r/
 };
 var targetsOf = (environment) => {
-  const typed = resolve12(dataDirOf(environment), "whatsapp");
+  const typed = resolve14(dataDirOf(environment), "whatsapp");
   let real = typed;
   try {
-    real = resolve12(realpathSync6(dataDirOf(environment)), "whatsapp");
+    real = resolve14(realpathSync7(dataDirOf(environment)), "whatsapp");
   } catch {}
   return [...new Set([typed, real].map((p) => p.toLowerCase()))];
 };
-var segments = (path) => resolve12(path).toLowerCase().split("/").filter(Boolean);
+var queuesOf = (environment) => {
+  const data = dataDirOf(environment);
+  let real = data;
+  try {
+    real = realpathSync7(data);
+  } catch {}
+  return [
+    ...new Set([data, real].flatMap((d) => [...OWNER_JOBS].map((job) => resolve14(d, "ops", "outbox", `ops-${job}.jsonl`).toLowerCase())))
+  ];
+};
+var segments = (path) => resolve14(path).toLowerCase().split("/").filter(Boolean);
 function reach(path, target, glob = false) {
   const p = segments(path);
   const t = segments(target);
@@ -15285,6 +19750,10 @@ var namesTarget = (command, targets) => {
   const text = command.replace(/["'\\]/g, "").toLowerCase();
   return targets.some((t) => text.includes(t)) || /(?:\.playground|playground_data_dir\}?)\/+whatsapp(?![\w.-])/.test(text);
 };
+var namesOwnerJob = (command) => {
+  const text = command.replace(/["'\\]/g, "").toLowerCase();
+  return /notify\.sh\s+(?:dm-watch|wa)(?![\w.-])/.test(text) || /outbox\/+ops-(?:dm-watch|wa)\.jsonl/.test(text);
+};
 var readOf = (word, at) => {
   if (!marked(word.value))
     return word;
@@ -15297,19 +19766,43 @@ var readOf = (word, at) => {
   const again = lex(word.raw, known).commands[0]?.words[0];
   return again && !marked(again.value) ? again : undefined;
 };
-var recursive3 = (name, args) => RECURSIVE.has(name) || args.some((a) => RECURSIVE_WITH[name]?.test(a.value));
+var recursive4 = (name, args) => RECURSIVE.has(name) || args.some((a) => RECURSIVE_WITH[name]?.test(a.value));
+var ownerJob = (name, args, at) => {
+  let rest = args;
+  if (SHELLS.has(name)) {
+    const { inline, operand } = shellOperand(args, name);
+    if (inline || !operand || program(operand.value) !== "notify.sh")
+      return;
+    rest = args.slice(args.indexOf(operand) + 1);
+  } else if (program(name) !== "notify.sh")
+    return;
+  if (!rest[0])
+    return;
+  const job = readOf(rest[0], at);
+  if (!job)
+    return refuseJob("a notify.sh call whose job it cannot read");
+  if (OWNER_JOBS.has(job.value))
+    return refuseJob(`a notify.sh call as ops-${job.value}`);
+};
 async function judgeBash(command, cwd, environment) {
   const targets = targetsOf(environment);
   if (namesTarget(command, targets))
-    return refuse13("a command naming whatsapp/ in the data folder");
+    return refuse15("a command naming whatsapp/ in the data folder");
+  if (namesOwnerJob(command))
+    return refuseJob("a command naming an owner-word job's queue");
+  const queues = queuesOf(environment);
   const env = {
     cwd,
     files: new Map,
     known: knownVariables(command, environment, cwd),
     process: environment,
-    vars: new Map
+    vars: new Map,
+    visitShells: true
   };
   const visit = async (cmd, { args, first, name }, at) => {
+    const job = ownerJob(name, args, at);
+    if (job || SHELLS.has(name))
+      return job;
     const words = [
       ...first ? [first] : [],
       ...args,
@@ -15317,29 +19810,31 @@ async function judgeBash(command, cwd, environment) {
     ];
     for (const place of places(at)) {
       if (place.cwd && worst(place.cwd, targets) === "inside")
-        return refuse13(`a command run inside whatsapp/ in the data folder`);
+        return refuse15(`a command run inside whatsapp/ in the data folder`);
       for (const typed of words) {
         const word = readOf(typed, at);
         if (!word?.value)
           continue;
         for (const raw of [word.value, word.value.slice(word.value.indexOf("=") + 1)]) {
-          const value = /^~(?:\/|$)/.test(raw) ? `${homedir4()}${raw.slice(1)}` : raw;
-          const path = value.startsWith("/") ? value : place.cwd && resolve12(place.cwd, value);
+          const value = /^~(?:\/|$)/.test(raw) ? `${homedir5()}${raw.slice(1)}` : raw;
+          const path = value.startsWith("/") ? value : place.cwd && resolve14(place.cwd, value);
           if (!path)
             continue;
           const stands = worst(path, targets, !!word.glob);
           if (stands === "inside")
-            return refuse13(`${visible(word.value)}, which reaches whatsapp/ in the data folder`);
-          if (stands === "above" && recursive3(program(name), args))
-            return refuse13(`${name} through ${visible(word.value)}, which reads whatsapp/ in the data folder on its way down`);
+            return refuse15(`${visible(word.value)}, which reaches whatsapp/ in the data folder`);
+          if (worst(path, queues, !!word.glob) === "inside")
+            return refuseJob(`${visible(word.value)}, an owner-word job's queue`);
+          if (stands === "above" && recursive4(program(name), args))
+            return refuse15(`${name} through ${visible(word.value)}, which reads whatsapp/ in the data folder on its way down`);
         }
       }
     }
   };
-  return run(lex(command, env.known), env, visit, true);
+  return run2(lex(command, env.known), env, visit, true);
 }
-var FILE_TOOLS3 = new Set(["Edit", "MultiEdit", "NotebookEdit", "Read", "Write"]);
-async function inspect15(raw, environment) {
+var FILE_TOOLS5 = new Set(["Edit", "MultiEdit", "NotebookEdit", "Read", "Write"]);
+async function inspect18(raw, environment) {
   const {
     cwd,
     tool_input: input,
@@ -15349,10 +19844,12 @@ async function inspect15(raw, environment) {
   const targets = targetsOf(environment);
   if (tool === "Bash" && typeof input?.command === "string")
     return judgeBash(input.command, folder, environment);
-  if (typeof tool === "string" && FILE_TOOLS3.has(tool)) {
+  if (typeof tool === "string" && FILE_TOOLS5.has(tool)) {
     const path = input?.file_path ?? input?.notebook_path;
     if (typeof path === "string" && worst(path, targets) === "inside")
-      return refuse13(`a ${tool} of ${path}`);
+      return refuse15(`a ${tool} of ${path}`);
+    if (typeof path === "string" && worst(path, queuesOf(environment)) === "inside")
+      return refuseJob(`a ${tool} of ${path}, an owner-word job's queue`);
     return;
   }
   if (tool === "Grep" || tool === "Glob") {
@@ -15361,15 +19858,15 @@ async function inspect15(raw, environment) {
       return;
     const at = worst(path, targets);
     if (at === "inside" || tool === "Grep" && at === "above")
-      return refuse13(`a ${tool} through ${path}, which reads whatsapp/ in the data folder`);
+      return refuse15(`a ${tool} through ${path}, which reads whatsapp/ in the data folder`);
     const pattern = input?.pattern;
-    if (tool === "Glob" && typeof pattern === "string" && worst(resolve12(path, pattern), targets, true) === "inside")
-      return refuse13(`a Glob of ${pattern}, which reaches whatsapp/ in the data folder`);
+    if (tool === "Glob" && typeof pattern === "string" && worst(resolve14(path, pattern), targets, true) === "inside")
+      return refuse15(`a Glob of ${pattern}, which reaches whatsapp/ in the data folder`);
   }
 }
-async function check19(raw, environment = process.env) {
+async function check25(raw, environment = process.env) {
   try {
-    return await eachInput(raw, "no-raw-wa", (one) => inspect15(one, environment));
+    return await eachInput(raw, "no-raw-wa", (one) => inspect18(one, environment));
   } catch {
     return;
   }
@@ -15377,7 +19874,7 @@ async function check19(raw, environment = process.env) {
 if (false) {}
 
 // scripts/hooks/no-release-comment.ts
-import { join as join17 } from "path";
+import { join as join21 } from "path";
 var guardedOwners = new Set;
 var WORD2 = /release/i;
 var UNRESOLVED = "a repository the hook cannot resolve";
@@ -15404,7 +19901,7 @@ var COMMENT_PATH = /(?:^|\/)(?:comments|replies|reviews)(?:\/|$)/;
 var COMMENT_MUTATION = /\b(?:addComment|addPullRequestReview(?:Comment|Thread|ThreadReply)?|submitPullRequestReview|updateIssueComment|updatePullRequestReview(?:Comment)?)\b/;
 var MCP_COMMENT = /^mcp__.+__(?:add_comment_to_pending_review|add_issue_comment|add_reply_to_pull_request_comment|pull_request_review_write|update_issue_comment)$/;
 var BODY_KEY = /body/i;
-var GH2 = /\bgh\b|github/i;
+var GH3 = /\bgh\b|github/i;
 var MAYBE_COMMENT = /\b(?:api|close|comment|reopen|review)/i;
 var COMMENT_CALL = /(?:\b|_)(?:close|comment|reopen|review)(?:\b|_)|\bapi\b[\s\S]*(?:comments|graphql|replies|reviews)/i;
 var comment = async (cmd, { args, first, local, name, xargs }, env) => {
@@ -15460,7 +19957,7 @@ async function gh4(args, cmd, env, local, xargs) {
     ...xargs && !xargs.replace ? [undefined] : []
   ];
   const target = decide2(named.length > 0 ? named : implicitRepos(env, local));
-  return judge6(`gh ${key}`, target, bodies.map((b) => viaXargs(b, xargs)), env);
+  return judge8(`gh ${key}`, target, bodies.map((b) => viaXargs(b, xargs)), env);
 }
 function altText(value) {
   const tail = Math.max(value.value.lastIndexOf(UNKNOWN), value.value.lastIndexOf(READ)) + 1;
@@ -15479,7 +19976,7 @@ async function api4(args, cmd, env, local, xargs) {
     const resolved = await Promise.all(documents.map((d) => resolveText(d, env)));
     if (!resolved.some((d) => d.unknown || COMMENT_MUTATION.test(d.value)))
       return;
-    return judge6("gh api graphql", { guarded: true, label: "a repository named only by a GraphQL node id" }, [...fields.map((f) => f.text), ...inputs], env, INLINE_QUERY);
+    return judge8("gh api graphql", { guarded: true, label: "a repository named only by a GraphQL node id" }, [...fields.map((f) => f.text), ...inputs], env, INLINE_QUERY);
   }
   const path = endpoint.value.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+/, "").replace(/^api\/v3\//, "").split("?")[0];
   const match = /^repos\/([^/]+)\/([^/]+)\/(.+)$/.exec(path);
@@ -15497,7 +19994,7 @@ async function api4(args, cmd, env, local, xargs) {
     ...fields.filter((f) => marked(f.key) || BODY_KEY.test(f.key)).map((f) => f.text),
     ...await Promise.all(inputs.map((i) => bodyOf2(i, env)))
   ];
-  return judge6(`gh api ${path.replaceAll(UNKNOWN, "*").replaceAll(READ, "*")}`, decide2(candidates), bodies, env);
+  return judge8(`gh api ${path.replaceAll(UNKNOWN, "*").replaceAll(READ, "*")}`, decide2(candidates), bodies, env);
 }
 async function bodyOf2(payload, env) {
   const text = await resolveText(payload, env);
@@ -15534,7 +20031,7 @@ async function curl3(args, cmd, env) {
   if (data.length === 0)
     return;
   const owner = marked(url[1]) ? undefined : { owner: url[1], repo: url[2] };
-  return judge6(`curl to api.github.com/repos/${url[1]}/${url[2]}`, decide2([owner]), await Promise.all(data.map((d) => bodyOf2(d, env))), env);
+  return judge8(`curl to api.github.com/repos/${url[1]}/${url[2]}`, decide2([owner]), await Promise.all(data.map((d) => bodyOf2(d, env))), env);
 }
 function decide2(candidates) {
   if (candidates.length === 0)
@@ -15545,27 +20042,27 @@ function decide2(candidates) {
   const repo = candidates[hit];
   return { guarded: true, label: repo ? `${repo.owner}/${repo.repo}` : UNRESOLVED };
 }
-function refuse14(what, target, detail, fix) {
+function refuse16(what, target, detail, fix) {
   return `no-release-comment hook refused ${what} on ${target.label}: ${detail}. On a guarded owner's repos an owner comment containing "release" in any case publishes to npm, and gh and the GitHub MCP post as that owner. ${fix}`;
 }
 var READABLE2 = "Put the text in the command itself, or write the text to a file with the Write tool first, then run the command again in a call of its own that names that file by its literal absolute path (--body-file /abs/body.md).";
 var INLINE_QUERY = "Write the query and each of its fields in the command itself, not in a variable: gh api graphql -f query='query { viewer { login } }'. For a long one, write it to a file with the Write tool first and pass it by its literal absolute path (-F query=@/abs/query.graphql, -F body=@/abs/body.md).";
-var REWORD = 'Write "ship" or "publish step" instead, or leave the comment out. For a file or rule whose name holds the word, name it by what it is, such as "the ship rule" or "the comment hook", with its line number; for a patch that holds it, write the patch to a file in your scratchpad, send its absolute path to the PR\'s worker by SendMessage, and say in the comment that a patch went to the author, since gh\'s `--attach` uploads only images and video.';
-async function judge6(what, target, bodies, env, fix = READABLE2) {
+var REWORD = 'Write "ship" or "publish step" instead, or leave the comment out. For a file or rule whose name holds the word, name it by what it is, such as "the ship rule" or "the comment hook", with its line number; for a patch that holds it, write the patch to a file in your scratchpad, send the PR\'s worker one SendMessage holding its absolute path and, under it, its whole text, since an auto-end moves your scratch folder to the trash, and say in the comment that a patch went to the author, since gh\'s `--attach` uploads only images and video.';
+async function judge8(what, target, bodies, env, fix = READABLE2) {
   if (!target.guarded)
     return;
   const texts = await Promise.all(bodies.map((b) => resolveText(b, env)));
   if (texts.some((t) => WORD2.test(visible(t.value))))
-    return refuse14(what, target, 'its text contains "release"', REWORD);
+    return refuse16(what, target, 'its text contains "release"', REWORD);
   const hidden = texts.find((t) => t.unknown);
   if (hidden) {
-    return refuse14(what, target, `the hook cannot read its text before the command runs (it comes from ${hidden.unknown})`, fix);
+    return refuse16(what, target, `the hook cannot read its text before the command runs (it comes from ${hidden.unknown})`, fix);
   }
 }
 function mcp4(tool, input) {
   const what = tool.replace(/^mcp__/, "");
   if (!input)
-    return refuse14(what, { guarded: true, label: UNRESOLVED }, "its input is not an object", REWORD);
+    return refuse16(what, { guarded: true, label: UNRESOLVED }, "its input is not an object", REWORD);
   const { body, owner, repo } = input;
   if (body === undefined || body === null)
     return;
@@ -15574,22 +20071,22 @@ function mcp4(tool, input) {
   if (!target.guarded)
     return;
   if (typeof body !== "string")
-    return refuse14(what, target, "its body is not text the hook can read", REWORD);
+    return refuse16(what, target, "its body is not text the hook can read", REWORD);
   if (WORD2.test(body))
-    return refuse14(what, target, 'its text contains "release"', REWORD);
+    return refuse16(what, target, 'its text contains "release"', REWORD);
 }
-var commentCall = (raw) => GH2.test(raw) && COMMENT_CALL.test(raw);
+var commentCall = (raw) => GH3.test(raw) && COMMENT_CALL.test(raw);
 function candidate7(command) {
   const bare = command.replace(/[\\'"]/g, "");
-  return command.includes("$'") || GH2.test(bare) && MAYBE_COMMENT.test(bare);
+  return command.includes("$'") || GH3.test(bare) && MAYBE_COMMENT.test(bare);
 }
-async function check20(raw, environment = process.env, lists = join17(coreDir(), "lists")) {
-  const owners = await guardList("no-release-comment", "release-owners", isStrings, [], environment, join17(lists, "release-owners.json"));
+async function check26(raw, environment = process.env, lists = join21(coreDir(), "lists")) {
+  const owners = await guardList("no-release-comment", "release-owners", isStrings, [], environment, join21(lists, "release-owners.json"));
   if (owners.refusal)
     return commentCall(subjectOf3(raw)) ? owners.refusal : undefined;
   guardedOwners = new Set((owners.list ?? []).map((owner) => owner.toLowerCase()));
   try {
-    return await inspect16(raw, environment);
+    return await inspect19(raw, environment);
   } catch (error) {
     if (!commentCall(subjectOf3(raw)))
       return;
@@ -15606,7 +20103,7 @@ function subjectOf3(raw) {
     return raw;
   }
 }
-async function inspect16(raw, environment) {
+async function inspect19(raw, environment) {
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -15630,7 +20127,7 @@ async function inspect16(raw, environment) {
       process: environment,
       vars: new Map
     };
-    return run(lex(command, env.known), env, comment);
+    return run2(lex(command, env.known), env, comment);
   }
   if (typeof tool === "string" && MCP_COMMENT.test(tool))
     return mcp4(tool, input);
@@ -15638,10 +20135,10 @@ async function inspect16(raw, environment) {
 if (false) {}
 
 // scripts/hooks/no-unslotted-run.ts
-import { existsSync as existsSync9, mkdtempSync, rmdirSync as rmdirSync2, rmSync as rmSync2 } from "fs";
+import { existsSync as existsSync11, mkdtempSync, rmdirSync as rmdirSync2, rmSync as rmSync3 } from "fs";
 import { tmpdir } from "os";
-import { join as join18, resolve as resolve13, sep as sep6 } from "path";
-var refuse15 = (what, cd, command) => `no-unslotted-run hook refuses ${what} in a worktree outside run-slot: every heavy run goes through it (playbook's **slots**), so the machine runs a few at a time. Run it as ${cd}~/.playground/ops/run-slot.sh <your name> -- ${command}`;
+import { join as join22, resolve as resolve15, sep as sep6 } from "path";
+var refuse17 = (what, cd, command) => `no-unslotted-run hook refuses ${what} in a worktree outside run-slot: every heavy run goes through it (playbook's **slots**), so the machine runs a few at a time. Run it as ${cd}~/.playground/ops/run-slot.sh <your name> -- ${command}`;
 var refuseDocker = (what, cd, command, fix) => fix ? `no-unslotted-run hook refuses ${what} from any folder, which run-slot refuses too: ${fix}` : `no-unslotted-run hook refuses ${what} outside run-slot, from any folder: a build fills the Docker VM the live dashboard's Postgres shares (6 Nov: a parallel compose build got it killed), so run-slot runs one docker build at a time, a compose build one service at a time. Run it as ${cd}~/.playground/ops/run-slot.sh <your name> -- ${command}`;
 var COMMIT_TAKES3 = new Set([
   "--author",
@@ -15665,8 +20162,8 @@ var COMMIT_TAKES3 = new Set([
 var REUSED = new Set(["-c", "-C", "--fixup", "--reedit-message", "--reuse-message", "--squash"]);
 var LINT_BUDGET = 8000;
 var NO_WRITE = new Set(["add", "diff", "fetch", "log", "show", "status"]);
-var QUIET = new Set([":", "cd", "export", "popd", "pushd", "set", "true", "unset"]);
-var mayWrite = (cmd, name, args) => cmd.redirects.some((r) => r.op.includes(">")) || name !== "cat" && !QUIET.has(name) && (name !== "git" || !NO_WRITE.has(args.find((a) => !a.value.startsWith("-"))?.value ?? ""));
+var QUIET2 = new Set([":", "cd", "export", "popd", "pushd", "set", "true", "unset"]);
+var mayWrite = (cmd, name, args) => cmd.redirects.some((r) => r.op.includes(">")) || name !== "cat" && !QUIET2.has(name) && (name !== "git" || !NO_WRITE.has(args.find((a) => !a.value.startsWith("-"))?.value ?? ""));
 async function message2(cmd, rest, env, wrote) {
   const { flags } = parseFlags(rest, COMMIT_TAKES3);
   const last = (names) => flags.findLast((f) => names.includes(f.name))?.name;
@@ -15718,11 +20215,11 @@ async function commitLint(cmd, args, env, wrote) {
     stderr: "ignore"
   });
   const root = top.success ? top.stdout.toString().trim() : "";
-  const lint = join18(root, "node_modules", ".bin", "commitlint");
-  if (!root || !existsSync9(lint))
+  const lint = join22(root, "node_modules", ".bin", "commitlint");
+  if (!root || !existsSync11(lint))
     return;
-  const folder = mkdtempSync(join18(tmpdir(), "commit-msg-"));
-  const file = join18(folder, "COMMIT_EDITMSG");
+  const folder = mkdtempSync(join22(tmpdir(), "commit-msg-"));
+  const file = join22(folder, "COMMIT_EDITMSG");
   let out = "";
   let err = "";
   let code;
@@ -15744,7 +20241,7 @@ async function commitLint(cmd, args, env, wrote) {
     ]);
     signal = proc.signalCode;
   } finally {
-    rmSync2(file, { force: true });
+    rmSync3(file, { force: true });
     rmdirSync2(folder);
   }
   if (code === 0 || signal)
@@ -15761,7 +20258,7 @@ Fix the message by the gh-commit skill's Commit step, then commit again.`;
 }
 var anywhere = (what, command) => `no-unslotted-run hook refuses ${what} on a line that names more folders than the hook carries, since it cannot rule out a worktree: every heavy run goes through run-slot (playbook's **slots**). Run it as ~/.playground/ops/run-slot.sh <your name> -- ${command}, or as a line of its own after a cd to a literal path.`;
 var BUN_SCRIPTS2 = new Set(["build", "check-types", "test"]);
-var RUNNERS6 = new Set(["bunx", "npx"]);
+var RUNNERS8 = new Set(["bunx", "npx"]);
 var TEST_TAKES = new Set([
   "--conditions",
   "--console-depth",
@@ -15825,8 +20322,10 @@ function turboTask(words) {
   const tasks = (beside ? lineWords(values) : values).filter((v) => v !== "" && !v.startsWith("-"));
   return (tasks[0] === "run" ? tasks.slice(1) : tasks).find((t) => TURBO_TASKS.has(t));
 }
-var recursive4 = (args) => args.some((a) => /^-[a-zA-Z]*[Rra]/.test(a.value) || ["--archive", "--recursive"].includes(a.value));
+var recursive5 = (args) => args.some((a) => /^-[a-zA-Z]*[Rra]/.test(a.value) || ["--archive", "--recursive"].includes(a.value));
 function heavy2(name, args, env) {
+  if (args[1] === UNREAD_CWD)
+    return { also: [undefined], dir: undefined, what: `${name} past the readings the hook makes` };
   const compose = portlessCompose(name, args);
   if (DOCKERS.has(name) || compose) {
     const build = compose ? dockerBuild(compose, true) : dockerBuild(args, name === "docker-compose");
@@ -15835,7 +20334,7 @@ function heavy2(name, args, env) {
   if (name === "cp") {
     const paths = args.filter((a) => !a.value.startsWith("-"));
     const from = paths.slice(0, -1);
-    if (recursive4(args) && from.some((a) => program(a.value.replace(/\/+$/, "")) === "node_modules"))
+    if (recursive5(args) && from.some((a) => program(a.value.replace(/\/+$/, "")) === "node_modules"))
       return {
         dir: paths.at(-1) && pathOf(paths.at(-1), env),
         what: "a node_modules clone"
@@ -15853,7 +20352,7 @@ function heavy2(name, args, env) {
       what: `turbo run ${task}`
     } : undefined;
   }
-  if (RUNNERS6.has(name)) {
+  if (RUNNERS8.has(name)) {
     const words = args.filter((a, k) => !a.value.startsWith("-") && !RUNNER_TAKES.has(args[k - 1]?.value ?? ""));
     const values = words.map((w) => w.value);
     const base = name === "bunx" ? bunCall([X, ...args], env).chained : env.cwd;
@@ -15868,7 +20367,11 @@ function heavy2(name, args, env) {
       };
     if (packagedTools(args).includes("next") && nextBuild(values))
       return { also: runnerFolders(name, args, env, []), dir: env.cwd, what: `${name} next build` };
-    return name === "bunx" ? heavy2("bun", [X, ...args], env) : undefined;
+    if (name === "bunx")
+      return heavy2("bun", [X, ...args], env);
+    const at = runnerTarget(args);
+    const started = toolName(args[at]?.value);
+    return STARTED_RUNNERS.has(started) ? heavy2(started, args.slice(at + 1), env) : undefined;
   }
   if (name !== "bun")
     return;
@@ -15923,7 +20426,7 @@ var shown3 = (word) => {
   return word.quoted ? `'${value.replaceAll("'", "'\\''")}'` : value;
 };
 var quotedDir = (dir) => /^[\w@%+=:,./~-]+$/.test(dir) ? dir : `'${dir.replaceAll("'", "'\\''")}'`;
-function inspect17(raw, environment, main) {
+function inspect20(raw, environment, main) {
   const { cwd, tool_input: toolInput, tool_name: tool } = JSON.parse(raw);
   if (tool !== "Bash")
     return;
@@ -15931,10 +20434,10 @@ function inspect17(raw, environment, main) {
   if (typeof command !== "string")
     return;
   const worktrees = [
-    join18(main, ".claude", "worktrees"),
-    real(join18(main, ".claude", "worktrees"))
+    join22(main, ".claude", "worktrees"),
+    real(join22(main, ".claude", "worktrees"))
   ].map((w) => w + sep6);
-  const inWorktree = (dir) => dir !== undefined && [resolve13(dir), real(resolve13(dir))].some((d) => worktrees.some((w) => d.startsWith(w)));
+  const inWorktree = (dir) => dir !== undefined && [resolve15(dir), real(resolve15(dir))].some((d) => worktrees.some((w) => d.startsWith(w)));
   const directory = typeof cwd === "string" ? cwd : undefined;
   let line = [];
   let wrote = false;
@@ -15971,23 +20474,23 @@ function inspect17(raw, environment, main) {
       ].join(" ");
     };
     if (env.cwdAnywhere) {
-      const found = heavy2(name, args, { ...env, cwd: undefined });
+      const found = runnerReadings(name, args).map((reading) => heavy2(name, reading, { ...env, cwd: undefined })).find((found) => found && (found.anywhere || ranIn(found.dir, found.also).some((dir) => dir === undefined || inWorktree(dir))));
       const line = words();
       if (found?.anywhere && line !== undefined)
         return refuseDocker(found.what, "", line, found.fix);
-      if (found && line !== undefined && ranIn(found.dir, found.also).some((dir) => dir === undefined || inWorktree(dir)))
+      if (found && line !== undefined)
         return anywhere(found.what, line);
     }
     for (const here of places(env)) {
-      const found = heavy2(name, args, here);
-      if (!found || !(found.anywhere || unreadFolder(found.also) || ranIn(found.dir, found.also).some(inWorktree)))
+      const found = runnerReadings(name, args).map((reading) => heavy2(name, reading, here)).find((found) => found && (found.anywhere || unreadFolder(found.also) || ranIn(found.dir, found.also).some(inWorktree)));
+      if (!found)
         continue;
       const line = words();
       if (line === undefined)
         return;
-      const moved = here.cwd !== undefined && (directory === undefined || resolve13(here.cwd) !== resolve13(directory));
+      const moved = here.cwd !== undefined && (directory === undefined || resolve15(here.cwd) !== resolve15(directory));
       const cd = moved ? `cd ${quotedDir(here.cwd)} && ` : "";
-      return found.anywhere ? refuseDocker(found.what, cd, line, found.fix) : refuse15(found.what, cd, line);
+      return found.anywhere ? refuseDocker(found.what, cd, line, found.fix) : refuse17(found.what, cd, line);
     }
   };
   const env = {
@@ -16000,11 +20503,11 @@ function inspect17(raw, environment, main) {
   };
   const lexed = lex(command, env.known);
   line = lexed.commands;
-  return run(lexed, env, visit);
+  return run2(lexed, env, visit);
 }
-async function check21(raw, environment = process.env, main = mainCheckout2(resolve13(__CHECKOUT + "/scripts/hooks", "..", ".."))) {
+async function check27(raw, environment = process.env, main = mainCheckout2(resolve15(__CHECKOUT + "/scripts/hooks", "..", ".."))) {
   try {
-    return await inspect17(raw, environment, main);
+    return await inspect20(raw, environment, main);
   } catch {
     return;
   }
@@ -16018,46 +20521,64 @@ var GUARDS = [
   {
     factory: true,
     name: "no-extension-repo-write",
-    run: (raw, env) => check4(raw, env)
+    run: (raw, env) => check7(raw, env)
   },
   { factory: true, name: "no-extensions-write", run: (raw, env) => guarded(raw, env) },
-  { factory: true, name: "no-false-green", run: (raw, env) => check6(raw, env.SHELL ?? "zsh") },
+  { factory: true, name: "no-false-green", run: (raw, env) => check9(raw, env.SHELL ?? "zsh") },
   { factory: true, name: "no-glm-heavy-path", run: (raw, env) => refusal(raw, env) },
-  { factory: false, name: "no-headless-login", run: (raw, env) => check7(raw, env) },
-  { factory: true, name: "no-kill-by-name", run: (raw) => check9(raw) },
-  { factory: false, name: "no-linear-ticket", run: (raw, env) => check10(raw, env) },
-  { factory: true, name: "no-mac-web-build", run: (raw, env) => check11(raw, env) },
-  { factory: true, name: "no-main-checkout", run: (raw, env) => check5(raw, env) },
-  { factory: false, name: "no-off-palette-label", run: (raw) => check12(raw) },
-  { factory: true, name: "no-ours-merge", run: (raw, env) => check14(raw, env) },
-  { factory: true, name: "no-playground-leak", run: (raw, env) => check3(raw, env) },
-  { factory: true, name: "no-prompt-stop", run: (raw) => check15(raw) },
-  { factory: true, name: "no-public-leak", run: (raw, env) => check16(raw, env) },
-  { factory: false, name: "no-raw-delete", run: (raw, env) => check17(raw, env) },
-  { factory: true, name: "no-raw-spawn", run: (raw, env) => check18(raw, env) },
-  { factory: true, name: "no-raw-wa", run: (raw, env) => check19(raw, env) },
-  { factory: false, name: "no-release-comment", run: (raw, env) => check20(raw, env) },
-  { factory: true, name: "no-stash", run: (raw, env) => check13(raw, env) },
-  { factory: true, name: "no-unslotted-run", run: (raw, env) => check21(raw, env) }
+  { factory: false, name: "no-headless-login", run: (raw, env) => check10(raw, env) },
+  { factory: true, name: "no-hidden-program", run: (raw, env) => check12(raw, env) },
+  { factory: true, name: "no-kill-by-name", run: (raw) => check13(raw) },
+  { factory: false, name: "no-linear-ticket", run: (raw, env) => check14(raw, env) },
+  { factory: true, name: "no-live-sign-in", run: (raw, env) => check15(raw, env) },
+  { factory: true, name: "no-mac-web-build", run: (raw, env) => check16(raw, env) },
+  { factory: true, name: "no-main-checkout", run: (raw, env) => check8(raw, env) },
+  { factory: false, name: "no-off-palette-label", run: (raw) => check17(raw) },
+  { factory: true, name: "no-ours-merge", run: (raw, env) => check18(raw, env) },
+  { factory: false, name: "no-outside-pr-code", run: (raw, env) => check19(raw, env) },
+  { factory: true, name: "no-playground-leak", run: (raw, env) => check6(raw, env) },
+  { factory: true, name: "no-prepare-write", run: (raw, env) => check4(raw, env) },
+  { factory: true, name: "no-prompt-stop", run: (raw) => check20(raw) },
+  { factory: true, name: "no-protected-push", run: (raw, env) => check5(raw, env) },
+  { factory: true, name: "no-public-leak", run: (raw, env) => check21(raw, env) },
+  { factory: false, name: "no-raw-delete", run: (raw, env) => check22(raw, env) },
+  { factory: true, name: "no-raw-spawn", run: (raw, env) => check23(raw, env) },
+  { factory: true, name: "no-raw-vercel", run: (raw, env) => check24(raw, env) },
+  { factory: true, name: "no-raw-wa", run: (raw, env) => check25(raw, env) },
+  { factory: false, name: "no-release-comment", run: (raw, env) => check26(raw, env) },
+  { factory: true, name: "no-stash", run: (raw, env) => check3(raw, env) },
+  { factory: true, name: "no-unslotted-run", run: (raw, env) => check27(raw, env) }
 ];
 var threw = (name, error) => `guards hook: ${name} threw (${error instanceof Error ? error.message : String(error)}), so the call is refused until it runs; report it to your lead.`;
-async function check22(raw, environment = process.env, guards = GUARDS) {
+var late = (names) => `guards hook: ${names.join(", ")} did not answer by its deadline, about ${DEADLINE / 1000} s, inside the runner's 15 s timeout, so the call is refused; split it into smaller calls, or report it to your lead.`;
+async function check28(raw, environment = process.env, guards = GUARDS, wait = DEADLINE) {
   let factory;
-  const reasons = await Promise.all(guards.map(async ({ factory: gated, name, run }) => {
+  const verdicts = [];
+  const answered = new Set;
+  const all = withLiveBudget(() => Promise.all(guards.map(async ({ factory: gated, name, run }, i) => {
     try {
-      if (gated && !await (factory ??= fromFactory(raw, environment)))
-        return;
-      return await run(raw, environment);
+      if (!gated || await (factory ??= fromFactory(raw, environment)))
+        verdicts[i] = await run(raw, environment);
     } catch (error) {
-      return threw(name, error);
+      verdicts[i] = threw(name, error);
     }
-  }));
+    answered.add(i);
+  })));
+  let timer;
+  const slow = await Promise.race([
+    all.then(() => []),
+    new Promise((done) => {
+      timer = setTimeout(() => done(guards.filter((_, i) => !answered.has(i)).map(({ name }) => name)), wait);
+    })
+  ]).finally(() => clearTimeout(timer));
+  const reasons = [...verdicts, slow.length > 0 ? late(slow) : undefined];
   return reasons.filter(Boolean).join(`
 
 `) || undefined;
 }
-async function hook() {
-  const reason = await check22(await Bun.stdin.text());
+async function hook(guards = GUARDS, deadline = DEADLINE) {
+  const raw = await input("guards", "guard", deadline);
+  const reason = await check28(raw, process.env, guards, deadline - performance.now());
   if (!reason)
     return 0;
   console.error(reason);
@@ -16067,6 +20588,6 @@ if (import.meta.main)
   process.exit(await hook());
 export {
   GUARDS,
-  check22 as check,
+  check28 as check,
   hook
 };

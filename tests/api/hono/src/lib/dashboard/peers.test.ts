@@ -168,8 +168,15 @@ describe("registryOf", () => {
     )
   })
 
-  test("a procStart in any shape but ps's C lstart is dropped, leaving the session id to decide", () => {
-    for (const procStart of ["2026-10-05T23:37:23.000Z", "1791243443000", 1791243443000, ""]) {
+  test("a procStart of clock ticks, as Claude Code writes it on Linux, is kept as it is", () => {
+    const text = JSON.stringify({ pid: 7, procStart: "1801742", sessionId: "s" })
+    expect(registryOf([{ pid: 7, text }])).toEqual(
+      new Map([[7, { procStart: "1801742", sessionId: "s" }]]),
+    )
+  })
+
+  test("a procStart in any shape but ps's C lstart or clock ticks is dropped, leaving the session id to decide", () => {
+    for (const procStart of ["2026-10-05T23:37:23.000Z", 1791243443000, ""]) {
       const text = JSON.stringify({ pid: 7, procStart, sessionId: "s" })
       expect(registryOf([{ pid: 7, text }])).toEqual(
         new Map([[7, { procStart: null, sessionId: "s" }]]),

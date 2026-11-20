@@ -10,6 +10,7 @@
   A pg advisory lock allows one importer per database, so a second copy prints `another importer holds the lock; nothing to do` and exits 0.
   It reads only files, so it needs no herdr socket.
   On a fixture stack, once the backfill is in, it writes the fixture's made-up threads and tags their lines (`seedFixtureThreads`, `.agents/dashboard/asks.md`); on any other source it writes none.
+  The API's start seeds the same threads (`seedFixtureThreadsAtStart`) while the table is empty, before ingest's first run.
   A transcript replaced under its path (a new inode) or cut shorter is read again from 0 and its rows replaced (`ingestFile` in `api/hono/src/lib/sessions/ingest.ts`).
   A thread-tagged row stays through that wipe at a negative seq until a re-read line with its uuid takes it, keeping its tag, and the read that reaches the file's end deletes the tagged rows the new file dropped, so a reader stopped part way keeps every tag and its next pass carries on.
 - The runner hosting the dashboard keeps the follower running beside `bun run dev`, from the same checkout (its `.env` points at the dashboard's Postgres), as a second background task with its own log.
@@ -24,8 +25,9 @@
   Healthy is `follower: running`, with `never read` and `with unread bytes` small and back at 0 once the sessions go quiet (a line still being written counts as unread until its newline lands).
   The log has one line a minute while it reads anything, and a `reads failed` line when any read failed.
   When status exits 1, or the unread counts keep climbing for a minute, stop the background task (a stop finishes the chunk in hand) and start it again: a restart reads only what changed while it was down.
+  With `POSTGRES_URL` empty, as in first run's setup, every form prints asks.md's no-database line and exits 1, and a restart waits until setup has made the database.
   The importer exits 1 by itself on any of these, its two lock checks running from the moment it takes the lock, through the backfill as well as the follow; start it again after fixing what the log names:
   - the connection holding its lock drops, no longer holds the lock, or leaves a check unanswered for 10s (`LOCK_CHECK_MS`, `LOCK_DEADLINE_MS` in `dashboard-ingest.ts`), since a connection dropped without a reset hangs rather than errs;
   - a write finds the lock gone, since every write transaction checks it last, so that write rolls back;
   - every read fails for three rescans in a row.
-  After a pull, or the live dashboard's roll onto a new canary head, restart it as well, since a running follower keeps the code it started with: when that changes `packages/*`, restart `bun run dev` first (its build of `packages/*` is what the follower imports) and run `bun run db:migrate` when a migration landed, then the follower.
+  After a pull, or the live dashboard's roll onto a new head, restart it as well, since a running follower keeps the code it started with: when that changes `packages/*`, restart `bun run dev` first (its build of `packages/*` is what the follower imports) and run `bun run db:migrate` when a migration landed, then the follower.

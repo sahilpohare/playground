@@ -74,11 +74,11 @@ export const exampleRouter = new Hono().post(
 
 ## 3. Restart the stack and test
 
-`bun --hot` will NOT see a new file, so restart the stack (see the `dev` skill), then:
+`bun --hot` will NOT see a new file, so restart the stack (see the `dev` skill), then, with `<pdir>` the path the `dev` skill's Start prints:
 
 ```bash
-WEB=$(bunx portless get playground); API=$(bunx portless get api.playground)
-curl -sS -X POST -H "Content-Type: application/json" -H "Origin: $WEB" \
+WEB=$(PORTLESS_STATE_DIR=<pdir> bunx portless get playground); API=$(PORTLESS_STATE_DIR=<pdir> bunx portless get api.playground)
+curl -sS --cacert <pdir>/ca.pem -X POST -H "Content-Type: application/json" -H "Origin: $WEB" \
   -d '{"email":"<your email>"}' "$API/api/<name>"
 ```
 
@@ -134,6 +134,10 @@ A capability the owner may keep or remove is an experiment, so it is a plugin, a
 - **One registry line**: `api/hono/src/plugins/registry.ts` mounts it with `.use("/<id>/*", requirePlugin("<id>")).route("/<id>", <id>Router)` and re-exports its types with `export type * from "@/plugins/<id>/types"`. The apps router mounts the registry, so every plugin route sits under `/api/v1/apps/<id>` behind `guardWrites`, auth and the owner rung, and `bun run verify map` finds it there.
 - **Web**: `web/next/src/plugins/<id>/` holds its page view and hooks; core reaches it only through `web/next/src/plugins/registry.ts` (the sidebar's `useAppUnread`, for one), so core imports no plugin there either. Its page file under `app/(protected)/dashboard/apps/<id>/` and its entry in `lib/apps.ts` go with it on removal. The page calls `notFound()` and `lib/apps.ts` drops its entry while `features.<id>` is off; the env override reaches only the API, so a web query of its routes reads a 404 as empty with `retry: false`.
 - Done when `tests/api/hono/src/plugins/registry.test.ts` passes: its import check fails a core file that imports a plugin other than through the registry, and a plugin that imports another.
+
+## A lib file that starts a process
+
+A file under `api/hono/src/lib` that starts a process (`Bun.spawn`, `Bun.$`, `child_process`) goes on the `ALLOWLIST` in `tests/api/hono/src/lib/spawn-allowlist.test.ts` in the same change, since that test fails on a start it does not list.
 
 ## WebSocket routes
 

@@ -46,7 +46,8 @@ const save = (
 describe("Settings > Jobs (PG-1196)", () => {
   test("lists every registry job by name, A to Z, with its description, schedule, state and whether a setting sets it", () => {
     const data = setUp("list")
-    const rows = jobRows(listSettings(data), ME)
+    // on macOS, which lists every registry job, a macOS-alone one too
+    const rows = jobRows(listSettings(data, "darwin"), ME)
     expect(rows.map((row) => row.name)).toEqual(Object.keys(JOBS))
     expect(rows.find((row) => row.name === "ops-sweep")).toEqual({
       config: undefined,
@@ -63,6 +64,14 @@ describe("Settings > Jobs (PG-1196)", () => {
       enabled: true,
       set: false,
     })
+  })
+
+  test("the keep-awake job is listed on, with its switch, on macOS alone, and on Linux is no row, as the render gives it none there (#2906)", () => {
+    const data = setUp("mac-only")
+    const awake = (platform: string) =>
+      jobRows(listSettings(data, platform), ME).find((row) => row.name === "ops-keep-awake")
+    expect(awake("darwin")).toMatchObject({ enabled: true, set: false })
+    expect(awake("linux")).toBeUndefined()
   })
 
   test("a toggle stores the job's enabled field alone at your login's scope, so the job still reads the registry's", () => {
@@ -167,7 +176,8 @@ describe("Settings > Jobs' org jobs (#1336)", () => {
     schedule: { every: 60 },
   }
   const listed = (data: string) => {
-    const read = listSettings(data)
+    // on macOS, which lists every registry job, a macOS-alone one too
+    const read = listSettings(data, "darwin")
     return { ...read, rows: [...read.rows, { key: KEY, scope: ORG, value: row }] }
   }
 
@@ -202,7 +212,7 @@ describe("Settings > Jobs' org jobs (#1336)", () => {
   })
 
   test("lists no row at your login's scope or core's as an org's job, no alias of a registry job, and no row off a job's shape", () => {
-    const read = listSettings(setUp("org-skip"))
+    const read = listSettings(setUp("org-skip"), "darwin")
     const rows = jobRows(
       {
         ...read,

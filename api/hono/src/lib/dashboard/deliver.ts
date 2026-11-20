@@ -1,7 +1,7 @@
 import { readdir, realpath, stat } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 
-import { storedAs } from "@packages/config/console"
+import { SESSION_MODELS, storedAs } from "@packages/config/console"
 import {
   activity,
   db,
@@ -20,7 +20,15 @@ import {
   type Attachment,
 } from "@/lib/dashboard/attachments"
 import { configDir, readsLive } from "@/lib/dashboard/fixture"
-import { pressEnter, prompt, promptOutcome } from "@/lib/dashboard/herdr"
+import {
+  pressEnter,
+  prompt,
+  promptOnScreen,
+  promptOutcome,
+  switchKeys,
+  typeKeys,
+  type KeyStep,
+} from "@/lib/dashboard/herdr"
 import { settingCommand, settingSummary, type SessionSetting } from "@/lib/dashboard/setting"
 import { readScreen } from "@/lib/dashboard/terminal"
 import { readTail, TEXT_LIMIT, type Entry } from "@/lib/dashboard/transcript"
@@ -80,9 +88,10 @@ export const deliveryEvent = (
         ),
       }
 
-// Why a delivery did not happen, or has not yet. INPUT_NOT_EMPTY, NOT_FOUND, ON_PICKER and SESSIONS_FAILED come before anything is typed (SESSIONS_FAILED includes a send herdr refused before sending anything, tried twice here), so they can succeed on a retry once the session or herdr changes, but for an INPUT_NOT_EMPTY marked `pasted`, whose message sits unsent in the box for its retry to press Enter on; AMBIGUOUS, COMMAND, EMPTY and TOO_LONG cannot until the text or the names change. INTERRUPTED means typing began and did not finish, or a held message left the screen with a transcript that cannot be read back to when it was queued: some or all of the message may be in the session's input or already sent, so it is never retried unseen. QUEUED means Claude Code holds a herdr session's message, in its box while it compacts or in its queue while it works, and takes it on its own: a retry under the same id types nothing and reads it again, and LOST is that retry finding it neither on the screen nor in the transcript QUEUED_MS after it was queued, so Retry sends it again.
+// Why a delivery did not happen, or has not yet. BUSY, INPUT_NOT_EMPTY, NOT_FOUND, ON_PICKER and SESSIONS_FAILED come before anything is typed (BUSY: a model switch to a session working a turn or compacting, whose confirm would come with no one to answer it, or its own paste such a session held, cleared) (SESSIONS_FAILED includes a send herdr refused before sending anything, tried twice here), so they can succeed on a retry once the session or herdr changes, but for an INPUT_NOT_EMPTY marked `pasted`, whose message sits unsent in the box for its retry to press Enter on; AMBIGUOUS, COMMAND, EMPTY and TOO_LONG cannot until the text or the names change. INTERRUPTED means typing began and did not finish, or a held message left the screen with a transcript that cannot be read back to when it was queued: some or all of the message may be in the session's input or already sent, so it is never retried unseen. QUEUED means Claude Code holds a herdr session's message, in its box while it compacts or in its queue while it works, and takes it on its own: a retry under the same id types nothing and reads it again, and LOST is that retry finding it neither on the screen nor in the transcript QUEUED_MS after it was queued, so Retry sends it again.
 export const DELIVERY_FAILURES = [
   "AMBIGUOUS",
+  "BUSY",
   "COMMAND",
   "EMPTY",
   "INPUT_NOT_EMPTY",
@@ -100,6 +109,7 @@ export type DeliveryFailure = (typeof DELIVERY_FAILURES)[number]
 // How a route reports each refusal: its HTTP status and the API's error code, with the reason's own code under `delivery`.
 export const FAILURE_STATUS: Record<DeliveryFailure, [ContentfulStatusCode, ErrorCode]> = {
   AMBIGUOUS: [409, "CONFLICT"],
+  BUSY: [409, "CONFLICT"],
   COMMAND: [400, "VALIDATION_ERROR"],
   EMPTY: [400, "VALIDATION_ERROR"],
   INPUT_NOT_EMPTY: [409, "CONFLICT"],
@@ -264,6 +274,41 @@ export const holdsUnsent = (screen: string, text: string, images: string[]): boo
 // How a herdr session's box is read after the send: up to 8 reads 150ms apart, 1.2s in all, the first after one gap, so Claude Code has drawn the paste or taken the Enter.
 export const SETTLE_GAP_MS = 150
 export const SETTLE_READS = 8
+// How long the model menu's switch reads the pane for its end state: up to 40 reads SETTLE_GAP_MS apart, 6s in all, since a confirm drawn over the box comes first and the status line redraws after the switch.
+export const SWITCH_READS = 40
+
+// Whether something other than the input box sits where it shows: no box framed by rules, or one that does not open on its ❯ prompt, as a prompt drawn over it reads.
+const coveredBox = (screen: string): boolean => {
+  const box = inputBox(screen)
+  return !box || boxWords(box) === null
+}
+
+// The status line: the lines below the input box's bottom rule, as one line.
+const statusLine = (screen: string): string => {
+  const lines = screen.split("\n").map((line) => line.trimEnd())
+  return flat(lines.slice(lines.findLastIndex((line) => RULE.test(line)) + 1).join(" "))
+}
+
+// The model the session's status line names, by its alias followed by its version (Opus 5.5 reads opus), so a folder or branch named for a model is not one; null when it names none, or no box shows, since a prompt drawn over the box names models of its own.
+const statusModel = (screen: string): string | null => {
+  if (!inputBox(screen)) return null
+  const status = statusLine(screen)
+  return SESSION_MODELS.find((alias) => new RegExp(`\\b${alias} \\d`, "i").test(status)) ?? null
+}
+
+const cut = (words: string): string => (words.length > 300 ? `${words.slice(0, 299)}…` : words)
+
+// Pure: what the pane shows, in words for a refusal to name: the status line under an empty box, the words a box holds, or, with no box, the lines below the last rule (a prompt drawn over the box), else the last 3 lines.
+const shownOn = (screen: string): string => {
+  const lines = screen.split("\n").map((line) => line.trimEnd())
+  const box = inputBox(screen)
+  if (box && inputState(screen) === "empty")
+    return `its status line reads "${cut(statusLine(screen))}"`
+  if (box) return `its input holds "${cut(boxWords(box) ?? flat(box.join(" ")))}"`
+  const rule = lines.findLastIndex((line) => NAMED_RULE.test(line))
+  const below = (rule >= 0 ? lines.slice(rule + 1) : lines).filter((line) => line.trim())
+  return `its pane shows "${cut(flat((rule >= 0 ? below : below.slice(-3)).join(" ")))}"`
+}
 
 // The lines between the last two rules on the screen, or null when no rules frame a box.
 const inputBox = (screen: string): string[] | null => {
@@ -302,10 +347,14 @@ const firstLine = (text: string): string =>
     .find((line) => line.trim() && !line.startsWith(ATTACHED_LABEL))
     ?.trim() ?? ""
 
+// Whether the spinner above the box says Claude Code compacts.
+const compacting = (screen: string): boolean =>
+  aboveBox(screen).some((line) => line.includes("Compacting conversation"))
+
 // Pure: whether Claude Code holds the message to take on its own: in its box while its spinner says it compacts (its "Compacting conversation" status), or drawn in its queue above a box showing a queue hint while it works. Either goes once the session is free, so it reads queued rather than failed.
 export const holdsQueued = (screen: string, text: string): boolean => {
   const above = aboveBox(screen)
-  if (above.some((line) => line.includes("Compacting conversation"))) {
+  if (compacting(screen)) {
     return holdsMessage(screen, text)
   }
   const start = firstLine(text)
@@ -336,6 +385,7 @@ export type DeliverDeps = {
   record: (event: ActivityEvent, typing: () => Promise<void>) => Promise<void>
   said: (worker: Worker) => Promise<Entry[]>
   skills: (cwd: string) => Promise<ReadonlySet<string>>
+  typeKeys: (surface: string, steps: KeyStep[]) => Promise<void>
   wait: (ms: number) => Promise<void>
 }
 
@@ -378,6 +428,7 @@ export const deliverDeps: DeliverDeps = {
     return path ? readTail(path, Number.POSITIVE_INFINITY) : []
   },
   skills: sessionSkills,
+  typeKeys,
   wait: (ms) => Bun.sleep(ms),
 }
 
@@ -514,6 +565,12 @@ async function target(to: string, read: () => Promise<Live>): Promise<Refusal | 
       `${worker.name} is waiting on a picker or a prompt. Answer that first: typing now would answer it instead.`,
     )
   }
+  if (worker.remote) {
+    return refused(
+      "NOT_FOUND",
+      `${worker.name} runs on another machine over ssh, so its transcript is not here to confirm a message; nothing was typed.`,
+    )
+  }
   const surface = live.surfaces.get(worker.sessionId)
   if (!surface) return refused("NOT_FOUND", `${worker.name} has no terminal to type into.`)
   return { surface, worker }
@@ -529,6 +586,7 @@ export async function deliver(
   const { refused: refusedText, skill, words } = deliveryWords(delivery, true)
   if (refusedText) return refusedText
   const text = withAttachments(words, attachments)
+  const switching = delivery.setting && "model" in delivery.setting ? delivery.setting.model : null
   const images = attachments.filter((file) => file.kind === "image").map((file) => file.path)
   // A paste is this message's when it carries this id, or, for a message with none, these words.
   const isThis = (paste: Paste): boolean =>
@@ -555,6 +613,11 @@ export async function deliver(
     const { surface, worker } = found
     if (skill && !(await deps.skills(worker.cwd)).has(skill)) return commandRefusal(skill)
     const event = deliveryEvent(delivery, worker.name, words)
+    const busy = (model: string, cleared = false): Refusal =>
+      refused(
+        "BUSY",
+        `${worker.name} is working a turn or compacting, so the switch to ${model} ${cleared ? "it held was cleared" : "was not typed"}: its confirm would come with no one to answer it. Pick it again once it is idle.`,
+      )
     // One try, from reading the screen to the Enter. A first send herdr refused before sending anything typed nothing and comes back as BeforeTyping, which the loop below tries once more at once, since the screen is read again and finds anything that landed after all.
     const attempt = async (): Promise<DeliveryResult | BeforeTyping> => {
       let screen: string
@@ -567,6 +630,7 @@ export async function deliver(
         )
       }
       const input = inputState(screen)
+      if (switching && (worker.light === "working" || compacting(screen))) return busy(switching)
       // QUEUED carries when the message was pasted, which a queued_command's stamp follows within moments, so the outbox's retry after a restart reads the transcript from there
       const stillQueued = (at: number): Refusal => ({
         ...refused(
@@ -764,6 +828,75 @@ export async function deliver(
           "held",
         )
       }
+      // The model menu's switch after its /model paste, judged by the model the session then runs, as its status line names it, never by a fixed screen text, since Claude Code may draw a confirm over the box, a reworded one or none. It presses a key only on what it has read: the one option of a prompt over the box that reads as the switch (switchKeys()), since the owner's pick is the consent, one more Enter on its own paste still in the box, and once the wait is out, a Backspace for each character of that paste, so the box ends as empty as it was. A refusal names what the pane shows.
+      const switchedTo = async (model: string, at: string, lost: unknown): Promise<void> => {
+        const press = async (steps: KeyStep[]): Promise<void> => {
+          try {
+            await deps.typeKeys(at, steps)
+          } catch (error) {
+            throw new TypingFailed(1, true, error)
+          }
+        }
+        const notSwitched = (why: string): TypingStopped =>
+          new TypingStopped(
+            refused("INTERRUPTED", `${worker.name} did not switch to ${model}: ${why}`),
+            "held",
+          )
+        let screen = ""
+        let answered = false
+        let entered = false
+        for (let i = 0; i < SWITCH_READS; i++) {
+          await deps.wait(SETTLE_GAP_MS)
+          try {
+            screen = await deps.readScreen(at)
+          } catch (error) {
+            throw new TypingFailed(1, true, lost ?? error)
+          }
+          if (holdsQueued(screen, text)) {
+            if (!holdsUnsent(screen, text, [])) {
+              throw notSwitched(
+                "it waits in its queue behind the session's turn, and its confirm will need an answer in the session.",
+              )
+            }
+            await press(Array.from(text, () => ({ key: "backspace" as const })))
+            throw new TypingStopped(busy(model, true), "held")
+          }
+          const input = inputState(screen)
+          if (input === "empty") {
+            if (statusModel(screen) === model) return
+            continue
+          }
+          if (input === "holds" && holdsMessage(screen, text)) {
+            if (entered) continue
+            entered = true
+            try {
+              await deps.pressEnter(at)
+            } catch (error) {
+              throw new TypingFailed(1, true, error)
+            }
+            continue
+          }
+          const shown = promptOnScreen(screen)
+          if (answered || !coveredBox(screen) || !shown.options.some((o) => o.on)) continue
+          const keys = switchKeys(shown, model)
+          if (!keys) {
+            throw notSwitched(
+              `${shownOn(screen)}, and none of its options reads as the switch, so nothing was pressed. Answer it in the session.`,
+            )
+          }
+          await press(keys)
+          answered = true
+        }
+        if (holdsUnsent(screen, text, [])) {
+          await press(Array.from(text, () => ({ key: "backspace" as const })))
+          throw notSwitched(
+            `the command sat unsent in its input after one more Enter, so it was cleared. Pick it again.`,
+          )
+        }
+        throw notSwitched(
+          `${shownOn(screen)} after ${(SWITCH_READS * SETTLE_GAP_MS) / 1000}s. Check the session before you pick again.`,
+        )
+      }
       try {
         await deps.record(event, async () => {
           // read once more before the send: a herdr pane's id changes when it moves, so this read names where the session is now
@@ -843,6 +976,8 @@ export async function deliver(
             if (outcome !== "typed") throw new TypingFailed(0, false, error)
             lost = error
           }
+          // a switch's paste is never remembered, so no later send presses Enter on a /model it left
+          if (switching) return switchedTo(switching, again.surface, lost)
           // herdr took the paste, or may have, so it is remembered for a later try to find
           const kept = (pastes.get(sessionId) ?? []).filter((paste) => !isThis(paste))
           pastes.set(

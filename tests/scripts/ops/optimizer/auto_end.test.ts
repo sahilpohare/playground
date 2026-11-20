@@ -6,16 +6,26 @@ import { join } from "node:path"
 import type { RmDeps } from "../../../../packages/scripts/src/playground/rm"
 import {
   type CleanupDeps,
+  checkersOf,
   cleanWorktree,
   cleanupHeld,
+  cleanupLive,
+  type Carried,
   containersFor,
+  drainCarried,
   type EndDeps,
   endMerged,
   endOne,
+  LEADS_WORKTREE,
+  reportArgv,
   finishedOf,
+  leftoversOf,
+  procHoldersOf,
+  reasonOf,
   sweep,
   type Target,
   unsavedLive,
+  worktreesOf,
 } from "../../../../scripts/ops/optimizer/auto_end"
 import type {
   CollectInput,
@@ -79,6 +89,27 @@ test("finishedOf reads rm's reader shape, a PR beside its head, number and state
   expect(finishedOf({ head: "h", number: 7, state: "CLOSED" })).toBe(true)
   expect(finishedOf({ head: "h", number: 7, state: "OPEN" })).toBe(false)
   expect(finishedOf(null)).toBe(false)
+})
+
+// PG-2144: the roster reader the kept-clone step asks, a reviewer or tester by its row's kind or its name
+test("checkersOf names each live reviewer and tester row on the PR alone, by its pr or its prs list, and reads null off a roster with no agents list", () => {
+  const pr = "https://github.com/o/r/pull/7"
+  const agents = [
+    { name: "k3m9px-reviewer", pr, status: "working" },
+    { kind: "tester", name: "tester-calm-otter", pr, status: "waiting" },
+    { name: "m2xv8k-reviewer", pr: "https://github.com/o/r/pull/6", prs: [pr], status: "working" },
+    { name: "q7wz2b-tester", pr, status: "ended" },
+    { name: "k3m9px-worker", pr, status: "working" },
+    { name: "h8rt4d-reviewer", pr: "https://github.com/o/r/pull/8", status: "working" },
+    null,
+  ]
+  expect(checkersOf(JSON.stringify({ agents }), pr)).toEqual([
+    "k3m9px-reviewer",
+    "tester-calm-otter",
+    "m2xv8k-reviewer",
+  ])
+  expect(checkersOf("", pr)).toBeNull()
+  expect(checkersOf(JSON.stringify({ agents: {} }), pr)).toBeNull()
 })
 
 describe("sweep: ops-tick ends what the detector flags", () => {
@@ -146,6 +177,38 @@ describe("sweep: ops-tick ends what the detector flags", () => {
     ])
   })
 
+  // PG-2120: the sweep's row carries the roster pr, so a checker it ends hands its cleanup the PR its review-<n> clone is found by
+  test("a checker the sweep ends hands its cleanup its roster pr", async () => {
+    const handed: (string | undefined)[] = []
+    const { deps } = fakes({ cleanup: async (target) => (handed.push(target.pr), []) })
+    await sweep(
+      input({
+        roster: { "m4tqzr-reviewer": { kind: "reviewer", name: "m4tqzr-reviewer", pr: URL } },
+        sessions: {
+          "m4tqzr-reviewer": live("m4tqzr-reviewer"),
+          "m4tqzr-worker": live("m4tqzr-worker", { status: "busy" }),
+        },
+        workerPrs: async (name) => (name === "m4tqzr-reviewer" ? [URL] : []),
+      }),
+      deps,
+    )
+    expect(handed).toEqual([URL])
+  })
+
+  test("a worker the sweep ends hands its cleanup no pr, so its worktrees keep their own PR's reading", async () => {
+    const handed: (string | undefined)[] = []
+    const { deps } = fakes({ cleanup: async (target) => (handed.push(target.pr), []) })
+    await sweep(
+      input({
+        roster: { "q6dmtb-worker": { kind: "worker", name: "q6dmtb-worker", pr: URL } },
+        sessions: { "q6dmtb-worker": live("q6dmtb-worker") },
+        workerPrs: async (name) => (name === "q6dmtb-worker" ? [URL] : []),
+      }),
+      deps,
+    )
+    expect(handed).toEqual([undefined])
+  })
+
   test("a reviewer idle 30+ minutes on a scored head ends with its resume named and its worktrees left for that resume; a tester does not", async () => {
     const scored: PrState = { head: "abc1234567", state: "open", verdicts: ["abc1234"] }
     const cleaned: string[] = []
@@ -171,11 +234,60 @@ describe("sweep: ops-tick ends what the detector flags", () => {
     expect(closed).toEqual(["k8wjf3-reviewer"])
     expect(cleaned).toEqual([])
     const text =
-      "Ended k8wjf3-reviewer: checker-nothing (head scored); resume it on the next push: scripts/spawn.sh resume k8wjf3-reviewer <dir> --pr <PR url>"
+      "Ended k8wjf3-reviewer: checker-nothing (head scored); resume it on the next push: scripts/spawn.sh resume k8wjf3-reviewer <dir> --force --pr <PR url>"
     expect(lines).toEqual([
       { text, to: "builder" },
       { text, to: "k8wjf3-worker" },
     ])
+  })
+
+  // PG-2228: the hint keeps the account the session runs on, read from its resume record before the close, since a resume rewrites it.
+  describe("an idle reviewer's resume hint names the account its resume record holds", () => {
+    const NAME = "m4tq7x-reviewer"
+    const target: Target = {
+      kind: "reviewer",
+      name: NAME,
+      pr: URL,
+      refs: [],
+      worker: "m4tq7x-worker",
+    }
+    const head = "#!/bin/bash\n# server: playground\n"
+    const exec = `exec /m/scripts/spawn.sh resume ${NAME} /wt 1111`
+    const hint = (account: string) =>
+      `Ended ${NAME}: checker-nothing (head scored); resume it on the next push: scripts/spawn.sh resume ${NAME} <dir> --force --pr ${URL}${account}`
+    const end = async (record: string | null) => {
+      const resumeDir = realpathSync(mkdtempSync(join(tmpdir(), "auto-end-resume-")))
+      const path = join(resumeDir, `${NAME}.sh`)
+      if (record !== null) writeFileSync(path, record)
+      const { deps } = fakes({
+        close: async () => (writeFileSync(path, `${head}${exec}\n`), { ok: true, out: "" }),
+        resumeDir,
+      })
+      return (await endOne(target, "checker-nothing (head scored)", deps)).map((l) => l.text)
+    }
+
+    test("an account line, a gate's pick included, is read before the close rewrites the record", async () => {
+      const lines = await end(
+        `${head}# account: seat-b@example.test\n${exec} --model claude-opus-5-5\n`,
+      )
+      expect(lines).toEqual([
+        hint(" --account seat-b@example.test"),
+        hint(" --account seat-b@example.test"),
+      ])
+    })
+
+    test("with no account line, the exec line's --account, as an own login's record holds it", async () => {
+      const lines = await end(`${head}${exec} --account seat-c@example.test\n`)
+      expect(lines).toEqual([
+        hint(" --account seat-c@example.test"),
+        hint(" --account seat-c@example.test"),
+      ])
+    })
+
+    test("a record naming no account, or none at all, keeps today's hint", async () => {
+      expect(await end(`${head}${exec}\n`)).toEqual([hint(""), hint("")])
+      expect(await end(null)).toEqual([hint(""), hint("")])
+    })
   })
 
   test("a line goes to the roster lead, its worker's, or ops for a ops checker; a roster-says flag ends nobody", async () => {
@@ -312,6 +424,30 @@ describe("sweep: ops-tick ends what the detector flags", () => {
       deps,
     )
     expect([closed, lines]).toEqual([[], []])
+  })
+
+  // issue 2030: a worker leaves its checkers to this beat, which holds one idle under 10 minutes and closes it on the first beat past 10
+  test("a checker whose worker has ended stays while idle under 10 minutes and closes on the first beat past 10", async () => {
+    const roster = {
+      "h8tq2m-reviewer": { kind: "reviewer", name: "h8tq2m-reviewer", worker: "h8tq2m-worker" },
+    }
+    const beat = (minutes: number) => {
+      const { closed, deps } = fakes()
+      const ran = sweep(
+        input({
+          roster,
+          sessions: {
+            "h8tq2m-reviewer": live("h8tq2m-reviewer", {
+              statusUpdatedAt: (NOW - minutes * 60) * 1000,
+            }),
+          },
+        }),
+        deps,
+      )
+      return ran.then(() => closed)
+    }
+    expect(await beat(9)).toEqual([])
+    expect(await beat(11)).toEqual(["h8tq2m-reviewer"])
   })
 
   // GitHub closes a PR's issue a beat after its merge, so the issue never counts as the last close
@@ -469,6 +605,31 @@ describe("endMerged: right after a merge", () => {
       "ended automatically: #2110 merged as daaac8e",
     ])
     expect(lines).toHaveLength(3)
+  })
+
+  test("a worker in shell, its background task still running, stays; its reviewer in shell is ended", async () => {
+    const { closed, deps } = fakes()
+    await endMerged(
+      URL,
+      "daaac8e0000",
+      input({
+        roster: {
+          "b4t5xn-reviewer": {
+            kind: "reviewer",
+            name: "b4t5xn-reviewer",
+            pr: URL,
+            worker: "b4t5xn-worker",
+          },
+          "b4t5xn-worker": { kind: "worker", name: "b4t5xn-worker", pr: URL },
+        },
+        sessions: {
+          "b4t5xn-reviewer": live("b4t5xn-reviewer", { status: "shell" }),
+          "b4t5xn-worker": live("b4t5xn-worker", { status: "shell" }),
+        },
+      }),
+      deps,
+    )
+    expect(closed).toEqual(["b4t5xn-reviewer"])
   })
 
   test("a worker with a next task, and the checkers of a worker on its next PR, stay", async () => {
@@ -733,6 +894,40 @@ describe("unsavedLive: the worktrees a session used, read for unsaved work", () 
     expect(await unsavedLive(target, projects)).toBeNull()
   })
 
+  // PG-2521: a worker resumed from the managers' worktree was held by the managers' untracked .scratch/ there
+  test("the managers' leads worktree a worker ran in is not the worker's: its untracked files hold no end, it is never cleaned, and the worker's own PR worktree still is", async () => {
+    const { main, projects } = scratch()
+    const leads = join(main, LEADS_WORKTREE)
+    sh(main, "git", "worktree", "add", "-q", "-b", "leads", leads)
+    mkdirSync(join(leads, ".scratch"))
+    writeFileSync(join(leads, ".scratch", "card.ts"), "x\n")
+    const own = join(main, ".claude", "worktrees", "pg-7")
+    sh(main, "git", "worktree", "add", "-q", "-b", "PG-7-fix", own)
+    writeFileSync(join(projects, "-scratch", "sess-1.jsonl"), `${JSON.stringify({ cwd: leads })}\n`)
+    const worker: Target = {
+      kind: "worker",
+      name: "pyctkg-worker",
+      pr: "https://github.com/o/r/pull/7",
+      refs: ["PG-7-fix"],
+      sessionId: "sess-1",
+    }
+    expect(await worktreesOf(worker, projects, main)).toEqual([own])
+    expect(await unsavedLive(worker, projects)).toBeNull()
+    const ended = await endOne(worker, "worker-prs-done", {
+      cleanup: async () => [],
+      close: async () => ({ ok: true, out: "" }),
+      report: async () => {},
+      unsaved: (t) => unsavedLive(t, projects),
+    })
+    expect(ended[0]!.text).toStartWith("Ended pyctkg-worker: worker-prs-done")
+    expect(existsSync(join(leads, ".scratch", "card.ts"))).toBe(true)
+  })
+
+  test("auto-end's leads worktree is the folder spawn.sh's manager mode starts every manager in", async () => {
+    const spawn = await Bun.file(join(import.meta.dir, "../../../../scripts/spawn.sh")).text()
+    expect(spawn).toContain(`DIR="\${PLAYGROUND_REPO:-$MAIN}/${LEADS_WORKTREE}"`)
+  })
+
   test("a read that fails holds the end: a worktree with no commit to read, and a transcript folder that cannot be read", async () => {
     const { main, projects, target } = scratch()
     const bare = join(projects, "..", "empty")
@@ -746,6 +941,44 @@ describe("unsavedLive: the worktrees a session used, read for unsaved work", () 
 })
 
 // PG-919: a merge cleans what each closed session used
+describe("reasonOf: the line a kept worktree names, from playground rm's or dev:stop's output (#2407)", () => {
+  const crash = [
+    "12 |   const moved = quarantine(path)",
+    "                 ^",
+    "error: ENOENT: no such file or directory, lstat '/made/up/trash'",
+    "      at quarantine (/made/up/index.ts:500:12)",
+    "",
+    "Bun v1.4.4 (Linux arm64)",
+    "",
+  ].join("\n")
+
+  test.each([
+    [
+      "a Bun crash names its error line, not the version footer",
+      crash,
+      "error: ENOENT: no such file or directory, lstat '/made/up/trash'",
+    ],
+    [
+      "a refusal names its own last line",
+      "checking /made/up/wt\nplayground: refused: it holds work no remote has",
+      "playground: refused: it holds work no remote has",
+    ],
+    [
+      "dev:stop's own line wins over the footer",
+      "starting\ndev:stop: no stack is recorded in /made/up/wt\nBun v1.4.4 (Linux x64)",
+      "dev:stop: no stack is recorded in /made/up/wt",
+    ],
+    [
+      "a footer alone after a plain line names that line",
+      "something failed\nBun v1.4.4 (Linux arm64)\n",
+      "something failed",
+    ],
+    ["no output at all names none", "", ""],
+  ])("%s", (_, out, line) => {
+    expect(reasonOf(out)).toBe(line)
+  })
+})
+
 describe("cleanWorktree: each worktree a closed session used, removed with its containers and branch once its work is saved", () => {
   const ENV = {
     ...process.env,
@@ -956,7 +1189,7 @@ describe("cleanWorktree: each worktree a closed session used, removed with its c
 
   test("a clean worktree rm refuses for work not on canary goes through --discard once its PR merged or closed, and stays while it is open", async () => {
     const { main, wt } = machine()
-    const unlanded = `${wt}'s HEAD holds work not landed on origin/canary (fetch origin canary if it merged since): playground rm --worktree ${wt} --discard removes it anyway`
+    const unlanded = `${wt}'s HEAD holds work not landed on origin/canary or on any remote branch (fetch origin if it merged or was pushed since): playground rm --worktree ${wt} --discard removes it anyway`
     for (const finished of [false, true]) {
       const moved: string[] = []
       const { deps } = fakes(main, [], undefined, {
@@ -1049,13 +1282,14 @@ describe("cleanWorktree: each worktree a closed session used, removed with its c
   test("a stale working row naming the branch no longer keeps a merged PR's worktree, and one with a commit past the merged head stays, its commit named", async () => {
     const url = "https://github.com/o/r/pull/1"
     const rmOf = (data: string, main: string, prHead: string): RmDeps => ({
-      caller: async () => undefined,
       clones: () => [],
       data,
-      decision: async () => null,
+      defaultBranch: () => null,
       home: data,
+      liveBranch: () => "live/dashboard",
       main,
       merged: () => null,
+      mergedHead: () => null,
       notify: () => {},
       places: () => [],
       prState: async () => ({ head: prHead, number: 1, state: "MERGED" }),
@@ -1101,6 +1335,97 @@ describe("cleanWorktree: each worktree a closed session used, removed with its c
     expect(existsSync(over.wt)).toBe(true)
   })
 
+  // PG-2498: cleanupHeld always passes --discard, so a row holding the worktree by its own merged PR alone frees it at that PR's head, and keeps it, its commit named, past it
+  test("a live row holding the worktree only by its merged PR frees it at the PR's head, and keeps it with a commit past that head", async () => {
+    const url = "https://github.com/o/r/pull/1"
+    const rmOf = (data: string, main: string, prHead: string): RmDeps => ({
+      clones: () => [],
+      data,
+      defaultBranch: () => null,
+      home: data,
+      liveBranch: () => "live/dashboard",
+      main,
+      merged: () => null,
+      mergedHead: (_, u) => (u === url ? prHead : null),
+      notify: () => {},
+      places: () => [],
+      prState: async () => ({ head: prHead, number: 1, state: "MERGED" }),
+      procs: () => [],
+      session: async () => "t",
+    })
+    const roster = (root: string) =>
+      writeFileSync(
+        join(root, "roster.json"),
+        JSON.stringify({
+          agents: [{ branch: "PG-9-other", name: "abc123-worker", pr: url, status: "working" }],
+        }),
+      )
+    const at = machine()
+    recorded(at.wt)
+    roster(at.root)
+    const head = Bun.spawnSync(["git", "-C", at.wt, "rev-parse", "HEAD"]).stdout.toString().trim()
+    const freed = fakes(at.main, [], undefined, {
+      held: (path, pr) => cleanupHeld(path, pr, rmOf(at.root, at.main, head)),
+    })
+    expect(await cleanWorktree(at.wt, "r ended", freed.deps)).toContain(`removed ${at.wt}`)
+
+    const over = machine()
+    roster(over.root)
+    writeFileSync(join(over.wt, "b.txt"), "b\n")
+    run(over.wt, "git", "add", "b.txt")
+    run(over.wt, "git", "commit", "-qm", "b")
+    const rev = (r: string, short = false) =>
+      Bun.spawnSync(["git", "-C", over.wt, "rev-parse", ...(short ? ["--short"] : []), r])
+        .stdout.toString()
+        .trim()
+    const kept = fakes(over.main, [], undefined, {
+      finished: async () => true,
+      held: (path, pr) => cleanupHeld(path, pr, rmOf(over.root, over.main, rev("HEAD~1"))),
+    })
+    expect(await cleanWorktree(over.wt, "r ended", kept.deps)).toBe(
+      `kept ${over.wt}: ${over.wt} is held by abc123-worker, which the roster lists as working, and its commits past merged PR #1's head stay: ${rev("HEAD", true)}`,
+    )
+    expect(existsSync(over.wt)).toBe(true)
+  })
+
+  // #2344: a live row holds a worktree by the worktree's own PR, as removePath's does, so the cleanup's held check keeps it before dev:stop runs in it
+  test("a live row listing the worktree's own open PR keeps it at the held check, with no dev:stop", async () => {
+    const { main, root, wt } = machine()
+    recorded(wt)
+    writeFileSync(
+      join(root, "roster.json"),
+      JSON.stringify({
+        agents: [
+          { name: "def456-reviewer", pr: "https://github.com/o/r/pull/2435", status: "working" },
+        ],
+      }),
+    )
+    const head = Bun.spawnSync(["git", "-C", wt, "rev-parse", "HEAD"]).stdout.toString().trim()
+    const rm: RmDeps = {
+      clones: () => [],
+      data: root,
+      defaultBranch: () => null,
+      home: root,
+      liveBranch: () => "live/dashboard",
+      main,
+      merged: () => null,
+      mergedHead: () => null,
+      notify: () => {},
+      places: () => [],
+      prState: async () => ({ head, number: 2435, state: "OPEN" }),
+      procs: () => [],
+      session: async () => "t",
+    }
+    const { calls, deps } = fakes(main, [], undefined, {
+      held: (path, pr) => cleanupHeld(path, pr, rm),
+    })
+    expect(await cleanWorktree(wt, "r ended", deps)).toBe(
+      `kept ${wt}: ${wt} is held by def456-reviewer, which the roster lists as working`,
+    )
+    expect(calls).toEqual([])
+    expect(existsSync(wt)).toBe(true)
+  })
+
   test("the container names are the worktree's own, whole, and never the live dashboard's or first run's", () => {
     const main = "/h/playground"
     const wt = (name: string) => join(main, ".claude", "worktrees", name)
@@ -1125,6 +1450,260 @@ describe("cleanWorktree: each worktree a closed session used, removed with its c
     expect(await cleanWorktree(wt, "r ended", deps)).toBe(`removed ${wt}, branch PG-1-thing`)
     expect(calls.filter((c) => c.startsWith("docker"))).toEqual([])
   })
+
+  // PG-2120: a reviewer reads its review-<n> clone from outside it, so no transcript cwd names the clone
+  const cloned = (names = ["review-7"]) => {
+    const { main, root } = machine()
+    run(main, "git", "remote", "set-url", "origin", "https://github.com/o/r.git")
+    const [clone, ...rest] = names.map((n) => join(main, ".claude", "worktrees", n))
+    for (const dir of [clone!, ...rest]) run(main, "git", "worktree", "add", "-q", "--detach", dir)
+    const projects = join(root, "projects")
+    mkdirSync(join(projects, "-scratch"), { recursive: true })
+    writeFileSync(
+      join(projects, "-scratch", "sess-1.jsonl"),
+      `${JSON.stringify({ cwd: root, type: "user" })}\n`,
+    )
+    const target: Target = {
+      kind: "reviewer",
+      name: "k3m9px-reviewer",
+      pr: "https://github.com/o/r/pull/7",
+      refs: [],
+      sessionId: "sess-1",
+    }
+    return { clone: clone!, main, projects, rest, target }
+  }
+
+  test("a reviewer whose row names the main checkout's PR n has its review-<n> clone found and cleaned, though its transcript never ran there", async () => {
+    const { clone, main, projects, target } = cloned()
+    expect(await worktreesOf(target, projects, main)).toEqual([clone])
+    const { calls, deps } = fakes(main, [])
+    expect(await cleanupLive(projects, async () => deps)(target)).toEqual([`removed ${clone}`])
+    expect(calls).toEqual([`rm ${clone} (k3m9px-reviewer ended)`])
+    expect(existsSync(clone)).toBe(false)
+  })
+
+  test("a tester whose row names PR n has its test-<n> and test-<n>-before clones found, and never the reviewer's review-<n>", async () => {
+    const { clone, main, projects, rest, target } = cloned(["review-7", "test-7", "test-7-before"])
+    const tester: Target = { ...target, kind: "tester", name: "k3m9px-tester" }
+    expect(await worktreesOf(tester, projects, main)).toEqual(rest)
+    expect(await worktreesOf(target, projects, main)).toEqual([clone])
+    const lone = cloned(["test-7"])
+    expect(await worktreesOf(tester, lone.projects, lone.main)).toEqual([lone.clone])
+  })
+
+  test("a transcript that cannot be read cleans nothing, the review clone included, and says so", async () => {
+    const { clone, main, projects, target } = cloned()
+    const { calls, deps } = fakes(main, [])
+    const file = join(projects, "..", "not-a-folder")
+    writeFileSync(file, "")
+    expect(await cleanupLive(file, async () => deps)(target)).toEqual([
+      `could not read its transcript in ${file}, so nothing was cleaned`,
+    ])
+    expect(calls).toEqual([])
+    expect(existsSync(clone)).toBe(true)
+  })
+
+  test("a held or dirty review-<n> clone is found, then kept and named", async () => {
+    const { clone, main, projects, target } = cloned()
+    expect(await worktreesOf(target, projects, main)).toEqual([clone])
+    const holder = `${clone} is held by k3m9px-worker, which the roster lists as working`
+    const held = fakes(main, [], undefined, { held: async () => holder })
+    expect(await cleanWorktree(clone, "r ended", held.deps, { pr: target.pr })).toBe(
+      `kept ${clone}: ${holder}`,
+    )
+    writeFileSync(join(clone, "wip.txt"), "x\n")
+    const dirty = fakes(main, [])
+    expect(await cleanWorktree(clone, "r ended", dirty.deps, { pr: target.pr })).toBe(
+      `kept ${clone}: uncommitted work`,
+    )
+    expect([...held.calls, ...dirty.calls]).toEqual([])
+    expect(existsSync(clone)).toBe(true)
+  })
+
+  test("a checker with no PR on its row, a PR of another repo or of a missing clone, a worker, or no main checkout given finds no review clone", async () => {
+    const { main, projects, target } = cloned()
+    expect(await worktreesOf({ ...target, kind: "reviewer" }, projects, main)).toHaveLength(1)
+    const { pr: _pr, ...bare } = target
+    expect(await worktreesOf(bare, projects, main)).toEqual([])
+    expect(
+      await worktreesOf({ ...target, pr: "https://github.com/x/r/pull/7" }, projects, main),
+    ).toEqual([])
+    expect(
+      await worktreesOf({ ...target, pr: "https://github.com/o/r/pull/8" }, projects, main),
+    ).toEqual([])
+    expect(await worktreesOf({ ...target, kind: "worker" }, projects, main)).toEqual([])
+    expect(await worktreesOf(target, projects)).toEqual([])
+  })
+
+  // PG-2144: an end keeps the other checker's clone of its PR while that checker is live, so the other checker's own end takes it
+  const reading = (deps: CleanupDeps, live: string[] | null) =>
+    Object.assign(deps, { checkers: async (_pr: string) => live })
+
+  test("a clone the tester's end kept, since the PR's reviewer held it, is taken at the reviewer's end", async () => {
+    const { clone, main, projects, rest, target } = cloned(["review-7", "test-7", "test-7-before"])
+    const tester: Target = { ...target, kind: "tester", name: "k3m9px-tester" }
+    const holder = (path: string) =>
+      `${path} is held by k3m9px-reviewer, which the roster lists as working`
+    const first = fakes(main, [], undefined, { held: async (path) => holder(path) })
+    const atTester = reading(first.deps, ["k3m9px-reviewer"])
+    expect(await cleanupLive(projects, async () => atTester)(tester)).toEqual([
+      ...rest.map((p) => `kept ${p}: ${holder(p)}`),
+      `kept ${clone}: k3m9px-reviewer still checks #7`,
+    ])
+    const atReviewer = reading(fakes(main, []).deps, ["k3m9px-reviewer"])
+    expect(await cleanupLive(projects, async () => atReviewer)(target)).toEqual(
+      [clone, ...rest].map((p) => `removed ${p}`),
+    )
+    expect([clone, ...rest].filter((p) => existsSync(p))).toEqual([])
+  })
+
+  test("a kept clone a third, still-live checker of the PR holds stays, named with it, while the ending checker's own clone goes", async () => {
+    const { clone, main, projects, rest, target } = cloned(["review-7", "test-7", "test-7-before"])
+    const { calls, deps } = fakes(main, [])
+    const asked: string[] = []
+    const third = Object.assign(deps, {
+      checkers: async (pr: string) => (asked.push(pr), ["q7wz2b-tester"]),
+    })
+    expect(await cleanupLive(projects, async () => third)(target)).toEqual([
+      `removed ${clone}`,
+      ...rest.map((p) => `kept ${p}: q7wz2b-tester still checks #7`),
+    ])
+    expect(asked).toEqual([target.pr!])
+    expect(calls).toEqual([`rm ${clone} (k3m9px-reviewer ended)`])
+    expect(rest.filter((p) => existsSync(p))).toEqual(rest)
+  })
+
+  test("with no other checker live, the other checker's clone still keeps its uncommitted work and a live roster row's hold", async () => {
+    const { clone, main, projects, rest, target } = cloned(["review-7", "test-7", "test-7-before"])
+    const [head, before] = rest as [string, string]
+    const holder = `${head} is held by k3m9px-worker, which the roster lists as working`
+    writeFileSync(join(before, "wip.txt"), "x\n")
+    const { calls, deps } = fakes(main, [], undefined, {
+      held: async (path) => (path === head ? holder : null),
+    })
+    expect(await cleanupLive(projects, async () => reading(deps, []))(target)).toEqual([
+      `removed ${clone}`,
+      `kept ${head}: ${holder}`,
+      `kept ${before}: uncommitted work`,
+    ])
+    expect(calls).toEqual([`rm ${clone} (k3m9px-reviewer ended)`])
+  })
+
+  test("a roster that cannot be read keeps the other checker's clones, and deps with no roster reader never look at them", async () => {
+    const { clone, main, projects, rest, target } = cloned(["review-7", "test-7", "test-7-before"])
+    const unread = fakes(main, [])
+    expect(await cleanupLive(projects, async () => reading(unread.deps, null))(target)).toEqual([
+      `removed ${clone}`,
+      ...rest.map((p) => `kept ${p}: the roster could not be read`),
+    ])
+    const tester: Target = { ...target, kind: "tester", name: "k3m9px-tester" }
+    const bare = fakes(main, [])
+    expect(await cleanupLive(projects, async () => bare.deps)(tester)).toEqual(
+      rest.map((p) => `removed ${p}`),
+    )
+  })
+
+  // #2407: safe-delete's cap of 3 moves a minute for each charged name, as a count; each move's name and each carried move kept
+  const capped = (deps: CleanupDeps, spent: Record<string, number> = {}) => {
+    const charged: string[] = []
+    const carried: Carried[] = []
+    const spend = (who: string, path: string) => {
+      charged.push(`${who} ${path}`)
+      spent[who] = (spent[who] ?? 0) + 1
+    }
+    const { rm } = deps
+    const over: Partial<CleanupDeps> = {
+      carry: async (item) => void carried.push(item),
+      rm: async (path, reason, pr, discard, who) => (
+        spend(who!, path),
+        rm(path, reason, pr, discard)
+      ),
+      rmOwn: async (path, _reason, who) => (spend(who, path), { ok: true, out: "" }),
+      room: (who) => (spent[who] ?? 0) < 3,
+    }
+    Object.assign(deps, over)
+    return { carried, charged, spent }
+  }
+
+  test("an ended checker's clone and leftovers are each charged to the checker, so its worker's own rm right after has its whole minute (#2407)", async () => {
+    const { clone, main, projects, target } = cloned()
+    const leftovers = ["scratch-k3m9px-reviewer", "tmp-k3m9px-reviewer"].map((n) =>
+      join(main, "..", n),
+    )
+    const { deps } = fakes(main, [], undefined, { leftovers: () => leftovers })
+    const { charged, spent } = capped(deps)
+    expect(await cleanupLive(projects, async () => deps)(target)).toEqual(
+      [clone, ...leftovers].map((p) => `removed ${p}`),
+    )
+    expect(charged).toEqual([clone, ...leftovers].map((p) => `k3m9px-reviewer ${p}`))
+    expect(spent["k3m9px-worker"]).toBeUndefined()
+    expect(deps.room!("k3m9px-worker")).toBe(true)
+  })
+
+  test("a checker with two clones of one PR has both removed under its name: the one past the cap is carried, never failed, and the next beat takes it (#2407)", async () => {
+    const { clone, main, projects, rest, target } = cloned(["test-7", "test-7-before"])
+    const [before] = rest as [string]
+    const tester: Target = { ...target, kind: "tester", name: "k3m9px-tester" }
+    const { deps } = fakes(main, [])
+    const spent: Record<string, number> = { "k3m9px-tester": 2 }
+    const { carried, charged } = capped(deps, spent)
+    expect(await cleanupLive(projects, async () => deps)(tester)).toEqual([
+      `removed ${clone}`,
+      `kept ${before}: carried to the next auto-end beat, since k3m9px-tester has made its moves for this minute`,
+    ])
+    expect(carried).toEqual([
+      {
+        path: before,
+        pr: target.pr,
+        reason: "k3m9px-tester ended",
+        who: "k3m9px-tester",
+        worktree: true,
+      },
+    ])
+    expect(existsSync(before)).toBe(true)
+    spent["k3m9px-tester"] = 0
+    expect(await drainCarried(carried, deps)).toEqual([`removed ${before}`])
+    expect(charged).toEqual([clone, before].map((p) => `k3m9px-tester ${p}`))
+    expect(existsSync(before)).toBe(false)
+    expect(await drainCarried(carried, deps)).toEqual([])
+  })
+
+  test("a leftover a live process holds is kept with its pid in the lead's line and never moved, while the rest go (#2407)", async () => {
+    const { main, projects, target } = cloned()
+    const worker: Target = { ...target, kind: "worker", name: "k3m9px-worker" }
+    const [held, free] = ["tmp-held", "tmp-free"].map((n) => join(main, "..", n)) as [
+      string,
+      string,
+    ]
+    const { deps } = fakes(main, [], undefined, {
+      heldBy: (path) => (path === held ? "held by pid 4242 (sleep), which still runs in it" : null),
+      leftovers: () => [held, free],
+    })
+    const { charged } = capped(deps)
+    expect(await cleanupLive(projects, async () => deps)(worker)).toEqual([
+      `kept ${held}: held by pid 4242 (sleep), which still runs in it`,
+      `removed ${free}`,
+    ])
+    expect(charged).toEqual([`k3m9px-worker ${free}`])
+  })
+
+  test("a leftover safe-delete refuses, a temp folder past 2 GB, is kept with its refusal in the lead's line while the rest go (#2407)", async () => {
+    const { main, projects, target } = cloned()
+    const worker: Target = { ...target, kind: "worker", name: "k3m9px-worker" }
+    const [big, small] = ["tmp-big", "tmp-small"].map((n) => join(main, "..", n)) as [
+      string,
+      string,
+    ]
+    const refusal = `${big} holds over 2 GB, past the tripwire: it stays in place`
+    const { deps } = fakes(main, [], undefined, { leftovers: () => [big, small] })
+    capped(deps)
+    deps.rmOwn = async (path) =>
+      path === big ? { ok: false, out: refusal } : { ok: true, out: "" }
+    expect(await cleanupLive(projects, async () => deps)(worker)).toEqual([
+      `kept ${big}: ${refusal}`,
+      `removed ${small}`,
+    ])
+  })
 })
 
 describe("endMerged: a closed session's worktrees are cleaned after its close, and only then", () => {
@@ -1147,4 +1726,79 @@ describe("endMerged: a closed session's worktrees are cleaned after its close, a
     await endMerged(URL, "daaac8e0000", input({ roster, sessions }), refused.deps)
     expect(cleaned).toEqual([`m4tqzr-reviewer ${URL}`])
   })
+})
+
+describe("reportArgv: the roster write that ends a row records why", () => {
+  test.each([
+    ["ended automatically: worker-prs-done", "worker-prs-done"],
+    ["ended automatically: checker-nothing (head scored), with no live session", "checker-nothing"],
+    ["ended automatically: #12 merged as daaac8e", "merged"],
+  ])("%s ends the row with endReason %s, so a resume needs --force", (text, reason) => {
+    expect(reportArgv("w1-worker", text).slice(2)).toEqual([
+      "report",
+      "w1-worker",
+      text,
+      `endReason=${reason}`,
+      "status=ended",
+    ])
+  })
+})
+
+describe("an ended session's leftovers and the moves its end carried (#2407)", () => {
+  test("leftoversOf names its scratch and scratchpad folders, its memory settings file and, on Linux alone, each temp folder spawn.sh made it, never a longer name's", () => {
+    const tmp = [
+      "playground-k3m9px-worker.AbC123",
+      "playground-k3m9px-worker.Zz9",
+      "playground-k3m9px-worker-x.Q1",
+      "playground-k3m9px-worker2.Q2",
+      "playground-builder.Z2",
+    ]
+    expect(leftoversOf("k3m9px-worker", "/d", tmp, "darwin")).toEqual([
+      "/d/scratch/k3m9px-worker",
+      "/d/scratchpad/k3m9px-worker",
+      "/d/factory-settings-400k-memory-k3m9px-worker.json",
+    ])
+    expect(leftoversOf("k3m9px-worker", "/d", tmp, "linux")).toEqual([
+      "/d/scratch/k3m9px-worker",
+      "/d/scratchpad/k3m9px-worker",
+      "/d/factory-settings-400k-memory-k3m9px-worker.json",
+      "/tmp/playground-k3m9px-worker.AbC123",
+      "/tmp/playground-k3m9px-worker.Zz9",
+    ])
+  })
+
+  test("the sweep makes the moves an earlier end carried before it ends anyone", async () => {
+    const line = { text: "Cleanup an earlier end carried: removed /x", to: "ops" }
+    const { deps } = fakes({ carried: async () => [line] })
+    expect(await sweep(input(), deps)).toEqual([line])
+  })
+})
+
+// #2407: a process still running in an ended session's leftover, an orphan that outlived it, keeps the leftover, named by its pid
+describe("a leftover a live process holds stays (#2407)", () => {
+  test.skipIf(process.platform !== "linux")(
+    "procHoldersOf names a child whose working folder is inside, and one holding a file there open, and nothing for a folder no process holds",
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "held-")))
+      const [cwdHeld, fileHeld, free] = ["cwd", "file", "free"].map((n) => join(root, n)) as [
+        string,
+        string,
+        string,
+      ]
+      for (const dir of [cwdHeld, fileHeld, free]) mkdirSync(dir)
+      writeFileSync(join(fileHeld, "log"), "")
+      const sleeper = Bun.spawn(["sleep", "30"], { cwd: cwdHeld })
+      const tail = Bun.spawn(["tail", "-f", join(fileHeld, "log")], { cwd: root })
+      try {
+        await Bun.sleep(200)
+        expect(procHoldersOf(cwdHeld)).toContainEqual({ command: "sleep", pid: sleeper.pid })
+        expect(procHoldersOf(fileHeld)).toContainEqual({ command: "tail", pid: tail.pid })
+        expect(procHoldersOf(free)).toEqual([])
+        expect(procHoldersOf(join(root, "gone"))).toEqual([])
+      } finally {
+        sleeper.kill()
+        tail.kill()
+      }
+    },
+  )
 })

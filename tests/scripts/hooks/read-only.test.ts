@@ -79,6 +79,8 @@ describe("a call outside the read shapes", () => {
     "git log $~HOME",
     "git log $^HOME",
     "git log $+HOME",
+    "nice (git push origin main)",
+    "command (git log; git push)",
   ])("%s does not read only", (command) => {
     expect(readOnly(bash(command))).toBe(false)
   })

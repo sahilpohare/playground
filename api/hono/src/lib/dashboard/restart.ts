@@ -72,13 +72,26 @@ export function fixtureRestart(name: string, path = unstickPath()): void {
 }
 
 export async function restartSession(
-  session: { account?: string; cwd: string; name: string; prs?: string[]; sessionId: string },
+  session: {
+    account?: string
+    cwd: string
+    name: string
+    prs?: string[]
+    remote?: true
+    sessionId: string
+  },
   {
     live = readsLive(),
     root = checkoutRoot(),
     run: runCommand = run,
   }: { live?: boolean; root?: string | null; run?: Run } = {},
 ): Promise<Restarted> {
+  // spawn.sh resume refuses an --ssh probe's record, so the close before it would end the probe with nothing to bring it back
+  if (session.remote)
+    return {
+      detail: `${session.name} runs on another machine over ssh, which spawn.sh does not resume: start it again instead`,
+      status: "refused",
+    }
   if (!live) {
     fixtureRestart(session.name)
     return { status: "restarted" }

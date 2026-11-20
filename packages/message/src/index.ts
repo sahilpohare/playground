@@ -36,7 +36,7 @@ export const invitePath = (inviteId: string) => `/yard/invites/${encodeURICompon
 // Where the hosted API's relay to the owner's own Mac sits: the hosted web's dashboard reads go to this prefix plus their own path.
 export const RELAY_PREFIX = "/api/v1/yard/relay"
 
-// The Inbox cards a relayed answer may reach, by their kind (answerKind), A to Z: each one whose poster carries out the answer. Every other kind stays on the Mac, one added later included: an Approve the Mac carries out itself on its own settings and permissions (an extension accept, an apps change, a grant, a guard setting, an own account change), a delete, a secret ask, whose value goes to its sink through its own Submit alone, and a reveal card, whose value shows on the Mac's own click.
+// The Inbox cards a relayed answer may reach, by their kind (answerKind), A to Z: each one whose poster carries out the answer. Every other kind stays on the Mac, one added later included: an Approve the Mac carries out itself on its own settings and permissions (an extension accept, an extensions clone, an apps change, a grant, a guard setting, an own account change, a root step), a delete, a secret ask, whose value goes to its sink through its own Submit alone, and a reveal card, whose value shows on the Mac's own click.
 export const RELAY_ANSWER_KINDS = [
   "ask",
   "budget",
@@ -111,6 +111,15 @@ export const githubLoginSchema = z
   .string()
   .trim()
   .regex(/^[a-z\d](?:[a-z\d-]{0,38})$/i, "a GitHub login")
+
+// A bot's name, which also names its Keychain item (playground-yard-bot-<name>), so it keeps to that item's lowercase letters, digits and dashes.
+export const botNameSchema = z
+  .string()
+  .regex(/^[a-z\d][a-z\d-]{0,29}$/, "lowercase letters, digits and dashes, 1 to 30")
+
+// A bot's login, <name>[bot]: no GitHub login holds a bracket, so no GitHub sign-in can claim it, and githubLoginSchema refuses it, so no invite or new DM can name it.
+export const botLogin = (name: string) => `${name}[bot]`
+export const isBotLogin = (login: string) => login.endsWith("[bot]")
 
 // An invite code as a newcomer types it, the one shape the redeem route takes.
 export const inviteCodeSchema = z.string().trim().min(1, "the invite code").max(64)

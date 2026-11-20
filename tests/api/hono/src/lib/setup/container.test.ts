@@ -1,352 +1,408 @@
-import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { afterAll, beforeEach, describe, expect, test, vi } from "bun:test"
+import { randomUUID } from "node:crypto"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
-const {
-  containerName,
-  DOCKER_DOWN,
-  parseLaunch,
-  PGLAUNCH,
+import { livePair } from "../../../../../../api/hono/src/lib/dev/live-dashboard"
+import {
+  isNamedContainer,
+  portFromPort,
   setupName,
+  startArgv,
   startLocal,
   startPgliteDatabase,
+  urlFor,
   withDatabase,
-} = await import("../../../../../../api/hono/src/lib/setup/container")
-const { livePair } = await import("../../../../../../api/hono/src/lib/dev/live-dashboard")
-const { othersLiveDashboard } = await import("../../../../../../api/hono/src/lib/dev/launch")
-const { locate } = await import("../../../../../../api/hono/src/lib/sessions/guard")
-type Run = import("../../../../../../api/hono/src/lib/setup/container").Run
-type Docker = import("../../../../../../api/hono/src/lib/sessions/guard").Docker
+} from "../../../../../../api/hono/src/lib/setup/container"
+import { stubs } from "../../../../../../packages/scripts/src/new-user-gate/stubs"
 
-const LIVE = livePair()
-
+// A fresh temp folder per test, so no startLocal writes a real .env and no test leaves files behind.
 const dir = mkdtempSync(join(tmpdir(), "setup-container-"))
+const envFile = join(dir, ".env")
 afterAll(() => rmSync(dir, { force: true, recursive: true }))
 
-type Answer = Partial<{ code: number; stderr: string; stdout: string }>
+// The password every argv and URL in this suite uses, so startLocal's URL and run argv stay in step.
+// It is read back from docker inspect on a reuse, so it is a random value this run chose, never a literal.
+const PASSWORD = randomUUID()
 
-// A command as a script: each call's argv is recorded, and answers come from the first rule whose first argument matches, else success with no output.
-const fake = (answers: Record<string, Answer> = {}) => {
-  const calls: string[][] = []
-  const run: Run = async (args) => {
-    calls.push(args)
-    return { code: 0, stderr: "", stdout: "", ...answers[args[0]!] }
+const URL = `postgres://postgres:${PASSWORD}@localhost:54123/postgres`
+
+// A fake Run: it logs each call, replies to the ones startLocal makes, and never touches Docker.
+class FakeRun {
+  calls: { args: string[]; when: string }[] = []
+  constructor(public readonly when: string) {}
+  run = async (args: string[]) => {
+    this.calls.push({ args, when: this.when })
+    return { code: 0, stderr: "", stdout: "" }
   }
-  return { calls, run }
 }
 
-// pglaunch 5.5.7's own words, its URL line coloured as it prints it.
-const URL = "postgres://postgres:postgres@localhost:54123/postgres"
-const STARTED = `- A container with name "playground-a-db-x9Kq :54123" started successfully.\n\n  \u001b[34mPOSTGRES_URL=${URL}\u001b[39m\n`
-const RUNNING = `- A container by similar name "playground-a-db-Ab12" running at port 54123.\n\n  \u001b[32mPOSTGRES_URL=${URL}\u001b[39m\n`
-const COLLIDED = "  Error:\n  - Specify a different name with the `-n` flag, e.g. -n my-project.\n"
-
-// pglaunch answering in turn: each call takes the next answer.
-const pglaunch = (...answers: Answer[]) => {
-  const calls: string[][] = []
-  const run: Run = async (args) => {
-    calls.push(args)
-    return { code: 0, stderr: "", stdout: "", ...answers[calls.length - 1] }
+// A fake that also answers docker ps and docker port, keyed on the first arg so startLocal's list reuses the running child.
+class FakeDocker extends FakeRun {
+  containers: string[]
+  runningPort: number
+  constructor(when: string, containers: string[] = [], runningPort: number = 54123) {
+    super(when)
+    this.containers = containers
+    this.runningPort = runningPort
   }
-  return { calls, run }
+  run = async (args: string[]) => {
+    this.calls.push({ args, when: this.when })
+    if (args[0] === "ps") {
+      return {
+        code: 0,
+        stderr: "",
+        stdout: this.containers.map((c) => (c.includes("\t") ? c : `${c}\trunning`)).join("\n"),
+      }
+    }
+    if (args[0] === "port") {
+      return { code: 0, stderr: "", stdout: `5432/tcp -> 127.0.0.1:${this.runningPort}\n` }
+    }
+    return { code: 0, stderr: "", stdout: "" }
+  }
 }
 
-const envFile = (name: string, text = "BETTER_AUTH_SECRET=x\nPOSTGRES_URL=\n") => {
-  const file = join(dir, name)
-  writeFileSync(file, text)
-  return file
-}
+// Pure: the name an argv names, as `run --name <name> -d ...`, so a test derives the child's name from the run call.
+const named = (argv: string[]): string => argv[argv.indexOf("--name") + 1]
 
+// Pure: the password an argv binds, from the `POSTGRES_PASSWORD=<pw>` element, so a test can compare the URL's and the run's.
+const passwordOfArgv = (argv: string[]): string =>
+  argv.find((arg) => arg.startsWith("POSTGRES_PASSWORD="))?.slice("POSTGRES_PASSWORD=".length) ?? ""
+
+describe("startArgv", () => {
+  test("publishes the Postgres port on 127.0.0.1 alone, with the checkout's name, the postgres login and this run's password", () => {
+    expect(startArgv("playground-db", PASSWORD)).toEqual([
+      "run",
+      "--name",
+      "playground-db",
+      "-d",
+      "-p",
+      "127.0.0.1::5432",
+      "-e",
+      "POSTGRES_USER=postgres",
+      "-e",
+      `POSTGRES_PASSWORD=${PASSWORD}`,
+      "-e",
+      "POSTGRES_DB=postgres",
+      "postgres:alpine",
+    ])
+  })
+
+  test("binds the host port to 127.0.0.1, so only this machine can reach it", () => {
+    const argv = startArgv("playground-db", PASSWORD)
+    expect(argv[argv.indexOf("-p") + 1]).toMatch(/^127\.0\.0\.1::5432$/)
+  })
+
+  test("binds this run's password to the postgres login, so the URL reads it back", () => {
+    expect(passwordOfArgv(startArgv("playground-db", PASSWORD))).toBe(PASSWORD)
+  })
+})
+
+describe("portFromPort and urlFor", () => {
+  test("portFromPort reads the host port docker port prints, or is null", () => {
+    expect(portFromPort("5432/tcp -> 127.0.0.1:54123\n")).toBe(54123)
+    expect(portFromPort("5432/tcp -> 127.0.0.1:54123")).toBe(54123)
+    expect(portFromPort("")).toBeNull()
+  })
+
+  test("urlFor names the postgres login, this run's password, on localhost and the port", () => {
+    expect(urlFor(54123, PASSWORD)).toBe(URL)
+  })
+})
+
+describe("isNamedContainer", () => {
+  test("is a base dash four letters or digits, like a fresh start's child", () => {
+    expect(isNamedContainer("playground-db", "playground-db-a1B2")).toBe(true)
+    expect(isNamedContainer("playground-db", "playground-db-x9Kq")).toBe(true)
+    expect(isNamedContainer("playground-db", "playground-db")).toBe(false)
+    expect(isNamedContainer("playground-db", "playground-db-a1B2c")).toBe(false)
+    expect(isNamedContainer("playground-db", "playground-db-12ab")).toBe(true)
+  })
+})
+
+describe("withDatabase and setupName", () => {
+  const live = { branch: "live/dashboard", database: "playground-dashboard-db" }
+  test("withDatabase replaces the line or adds one, and setupName is the live database on its branch", () => {
+    expect(withDatabase("", URL)).toContain(`POSTGRES_URL=${URL}\n`)
+    expect(withDatabase("NODE_ENV=local\nPOSTGRES_URL=old\n", URL)).toBe(
+      "NODE_ENV=local\nPOSTGRES_URL=" + URL + "\n",
+    )
+    expect(setupName("/repo/.claude/worktrees/pg-x-db", "feature", live)).toBe(
+      "playground-pg-x-db-db",
+    )
+    expect(setupName("/repo", "live/dashboard", live)).toBe("playground-dashboard-db")
+  })
+})
+
+// Spies, so no test waits, proves or migrates for real while the rest of startLocal is stubbed.
+const noMigrate = vi.fn(async () => {})
+const noProve = vi.fn(async () => "")
+const noWait = vi.fn(async () => {})
+
+// A fake startLocal: docker is fake, migrate/prove/wait are spies, and onStep logs.
 const go = (
-  docker: Run,
-  bunx: Run,
-  file: string,
+  docker: FakeDocker,
+  fileText = "",
   more: Partial<Parameters<typeof startLocal>[0]> = {},
 ) =>
   startLocal({
-    bunx,
-    docker,
-    envFile: file,
-    migrate: async () => {},
-    name: "playground-a-db",
-    onStep: () => {},
-    prove: async () => "proved",
-    wait: async () => {},
+    envFile,
+    name: "playground-db",
+    onStep: () => undefined,
+    docker: docker.run,
+    migrate: noMigrate,
+    prove: noProve,
+    wait: noWait,
     ...more,
-  })
+  } as Parameters<typeof startLocal>[0])
 
-describe("containerName", () => {
-  test("is playground-db in a checkout of its own, and the worktree's own under .claude/worktrees/", () => {
-    expect(containerName("/home/me/dispatcher")).toBe("playground-db")
-    expect(containerName("/home/me/dispatcher/.claude/worktrees/pg-939-first-run")).toBe(
-      "playground-pg-939-first-run-db",
-    )
-  })
-})
-
-describe("withDatabase", () => {
-  test("replaces the POSTGRES_URL line, or adds one", () => {
-    expect(withDatabase("A=1\nPOSTGRES_URL=\nB=2\n", "postgres://x")).toBe(
-      "A=1\nPOSTGRES_URL=postgres://x\nB=2\n",
-    )
-    expect(withDatabase("A=1", "postgres://x")).toBe("A=1\nPOSTGRES_URL=postgres://x\n")
-    expect(withDatabase("", "postgres://x")).toBe("POSTGRES_URL=postgres://x\n")
-  })
-})
-
-describe("parseLaunch", () => {
-  test("reads the URL and the container pglaunch started, or the running one it found by name", () => {
-    expect(parseLaunch(STARTED)).toEqual({ container: "playground-a-db-x9Kq", url: URL })
-    expect(parseLaunch(RUNNING + COLLIDED)).toEqual({ container: "playground-a-db-Ab12", url: URL })
-  })
-
-  test("is null when pglaunch printed no URL", () => {
-    expect(parseLaunch("- Docker is installed but not running.\n")).toBeNull()
-  })
+beforeEach(async () => {
+  await Bun.write(envFile, "")
+  noMigrate.mockClear()
+  noProve.mockClear()
+  noWait.mockClear()
 })
 
 describe("startLocal", () => {
-  test("starts Postgres with the pinned pglaunch, waits for it, proves, migrates and saves .env as 0600", async () => {
-    const docker = fake()
-    const bunx = pglaunch({ stdout: STARTED })
+  test("starts the container published on 127.0.0.1 alone, waits, proves, migrates and saves .env", async () => {
+    const docker = new FakeDocker("Starting", [], 54123)
+    const url = await go(docker)
+
+    // It lists, then runs the container on loopback alone, naming it, and reads the port back off that child. The run and the URL carry the same password this run chose.
+    const runCall = docker.calls.find((c) => c.args[0] === "run")
+    expect(runCall).toBeDefined()
+    const child = named(runCall!.args)
+    expect(runCall!.args).toEqual(startArgv(child, passwordOfArgv(runCall!.args)))
+    expect(runCall!.args).toContain("127.0.0.1::5432")
+
+    expect(docker.calls.find((c) => c.args[0] === "port")!.args).toEqual(["port", child])
+    expect(url).toBe(urlFor(54123, passwordOfArgv(runCall!.args)))
+
+    const execCall = docker.calls.find((c) => c.args[0] === "exec")
+    expect(execCall!.args).toEqual(["exec", child, "pg_isready", "-U", "postgres"])
+    expect(noProve).toHaveBeenCalledWith(url)
+    expect(noMigrate).toHaveBeenCalledWith(url)
+
+    expect(await Bun.file(envFile).text()).toContain(`POSTGRES_URL=${url}`)
+  })
+
+  test("the loopback argv names only this container and this run's password, nothing from a request", async () => {
+    const docker = new FakeDocker("Starting", [], 54123)
+    await go(docker)
+    const argv = docker.calls.find((c) => c.args[0] === "run")!.args
+    expect(argv[argv.indexOf("-p") + 1]).toBe("127.0.0.1::5432")
+    expect(argv).toEqual(startArgv(named(argv), passwordOfArgv(argv)))
+  })
+
+  test("when docker reports no port, it says what docker printed and leaves the running container", async () => {
+    const docker = new FakeDocker("Starting", ["playground-db-a1B2"], 54123)
+    const origRun = docker.run
+    docker.run = async (args) =>
+      args[0] === "port" ? { code: 0, stderr: "", stdout: "" } : { ...(await origRun(args)) }
+    await expect(go(docker)).rejects.toThrow("docker reported no port")
+  })
+
+  test("a name already running is reused, not started again, so no argv run is made", async () => {
+    const docker = new FakeDocker("Starting", ["playground-db-x9Kq"], 54123)
+    await go(docker)
+    expect(docker.calls.find((c) => c.args[0] === "run")).toBeUndefined()
+  })
+
+  test("asked to move, a reused container moves onto loopback on its own port before the proof", async () => {
+    const docker = new FakeDocker("Starting", ["playground-db-x9Kq"], 216)
+    const moveTo = vi.fn(async () => ["Moved"])
     const steps: string[] = []
-    const proved: string[] = []
-    const migrated: string[] = []
-    const file = envFile("ok.env")
-    const url = await go(docker.run, bunx.run, file, {
-      migrate: async (u) => void migrated.push(u),
-      onStep: (s) => steps.push(s),
-      prove: async (u) => {
-        proved.push(u)
-        return "proved"
-      },
-    })
-    expect(PGLAUNCH).toBe("pglaunch@5.5.7")
-    expect(url).toBe(URL)
-    expect(bunx.calls).toEqual([["--bun", "pglaunch@5.5.7", "-k", "-n", "playground-a-db"]])
-    expect(docker.calls).toEqual([
-      ["info"],
-      ["exec", "playground-a-db-x9Kq", "pg_isready", "-U", "postgres"],
-    ])
-    expect(proved).toEqual([URL])
-    expect(migrated).toEqual([URL])
-    expect(readFileSync(file, "utf8")).toBe(`BETTER_AUTH_SECRET=x\nPOSTGRES_URL=${URL}\n`)
-    expect(statSync(file).mode & 0o777).toBe(0o600)
-    expect(steps).toEqual([
-      "Checking Docker",
-      "Starting Postgres",
-      "Waiting for Postgres",
-      "Checking the database is on this Mac",
-      "Creating the tables",
-      "Saving the database address",
-    ])
-  })
-
-  test("a .env made from .env.example, its POSTGRES_URL empty above other keys, starts and is saved", async () => {
-    const example = readFileSync(join(import.meta.dir, "../../../../../../.env.example"), "utf8")
-    expect(example).toMatch(/^POSTGRES_URL=\n/m)
-    const file = envFile("example.env", example)
-    expect(await go(fake().run, pglaunch({ stdout: STARTED }).run, file)).toBe(URL)
-    expect(readFileSync(file, "utf8").match(/^POSTGRES_URL=.*$/gm)).toEqual([`POSTGRES_URL=${URL}`])
-  })
-
-  test("a name already running is reused from the URL pglaunch prints as it exits 1", async () => {
-    const docker = fake()
-    const bunx = pglaunch({ code: 1, stderr: COLLIDED, stdout: RUNNING })
-    expect(await go(docker.run, bunx.run, envFile("reuse.env"))).toBe(URL)
-    expect(bunx.calls).toHaveLength(1)
-    expect(docker.calls[1]).toEqual([
-      "exec",
-      "playground-a-db-Ab12",
-      "pg_isready",
-      "-U",
-      "postgres",
-    ])
-  })
-
-  test("with no URL printed, runs pglaunch once more with -c, then says what it printed", async () => {
-    const twice = pglaunch({ code: 1, stderr: "boom" }, { stdout: STARTED })
-    expect(await go(fake().run, twice.run, envFile("again.env"))).toBe(URL)
-    expect(twice.calls[1]).toEqual(["--bun", "pglaunch@5.5.7", "-k", "-n", "playground-a-db", "-c"])
-    const never = pglaunch(
-      { code: 1, stderr: "no space left" },
-      { code: 1, stderr: "no space left" },
+    const url = await go(docker, "", { move: true, moveTo, onStep: (step) => steps.push(step) })
+    expect(moveTo).toHaveBeenCalledWith("playground-db-x9Kq", 216, docker.run, noWait)
+    expect(steps.indexOf("Moved")).toBeLessThan(
+      steps.indexOf("Checking the database is on this Mac"),
     )
-    await expect(go(fake().run, never.run, envFile("never.env", "A=1\n"))).rejects.toThrow(
-      "pglaunch printed no database address: no space left",
-    )
+    expect(noProve).toHaveBeenCalledWith(url)
+    const again = new FakeDocker("Starting", ["playground-db-x9Kq"], 216)
+    await Bun.write(envFile, "")
+    await go(again, "", { moveTo })
+    expect(moveTo).toHaveBeenCalledTimes(1)
   })
 
-  test("with Docker down, says how to start it and runs nothing else", async () => {
-    const docker = fake({ info: { code: 1, stderr: "Cannot connect" } })
-    const bunx = pglaunch()
-    await expect(go(docker.run, bunx.run, envFile("down.env"))).rejects.toThrow(DOCKER_DOWN)
-    expect(docker.calls.map((c) => c[0])).toEqual(["info"])
-    expect(bunx.calls).toEqual([])
+  test("a reused container's URL reads its password from docker inspect, not a fixed one", async () => {
+    const docker = new FakeDocker("Starting", ["playground-db-x9Kq"], 216)
+    const origRun = docker.run
+    docker.run = async (args) =>
+      args[0] === "inspect"
+        ? {
+            code: 0,
+            stderr: "",
+            stdout: JSON.stringify([{ Config: { Env: [`POSTGRES_PASSWORD=${PASSWORD}`] } }]),
+          }
+        : { ...(await origRun(args)) }
+    const url = await go(docker)
+    expect(docker.calls.find((c) => c.args[0] === "run")).toBeUndefined()
+    expect(url).toBe(urlFor(216, PASSWORD))
+    expect(noProve).toHaveBeenCalledWith(url)
   })
 
-  test("a step that fails leaves .env as it was and removes no container", async () => {
-    const cases: [Run, Partial<Parameters<typeof startLocal>[0]>, string][] = [
-      [fake({ exec: { code: 2 } }).run, {}, "did not start in 30 seconds"],
-      [fake().run, { prove: async () => Promise.reject(new Error("no proof")) }, "no proof"],
-      [
-        fake().run,
-        { migrate: async () => Promise.reject(new Error("relation exists")) },
-        "relation exists",
-      ],
-    ]
-    for (const [docker, more, words] of cases) {
-      const calls: string[][] = []
-      const watched: Run = async (args) => (calls.push(args), docker(args))
-      const file = envFile("failed.env", "A=1\n")
-      await expect(go(watched, pglaunch({ stdout: STARTED }).run, file, more)).rejects.toThrow(
-        words,
-      )
-      expect(calls.some((c) => c[0] === "rm")).toBe(false)
-      expect(readFileSync(file, "utf8")).toBe("A=1\n")
-    }
+  test("a stopped container of the name is left as it is, and a new one is started beside it", async () => {
+    const docker = new FakeDocker("Starting", ["playground-db-x9Kq\texited"], 54123)
+    await go(docker)
+    const run = docker.calls.find((c) => c.args[0] === "run")
+    expect(run).toBeDefined()
+    expect(named(run?.args ?? [])).not.toBe("playground-db-x9Kq")
   })
 
-  test("a .env that already names a database is kept, and nothing starts", async () => {
-    const docker = fake()
-    const bunx = pglaunch({ stdout: STARTED })
-    const file = envFile("set.env", "POSTGRES_URL=postgres://postgres:pw@127.0.0.1:5999/postgres\n")
-    const refused = await go(docker.run, bunx.run, file).then(
-      () => "",
-      (error: Error) => error.message,
-    )
-    expect(refused).toContain(
-      ".env already names a database (POSTGRES_URL), so Playground uses it on its next start",
-    )
-    expect(refused).not.toContain("bun run dev")
-    expect([docker.calls, bunx.calls]).toEqual([[], []])
-    expect(readFileSync(file, "utf8")).toBe(
-      "POSTGRES_URL=postgres://postgres:pw@127.0.0.1:5999/postgres\n",
-    )
+  test("with no name running, it starts one and, if the live dashboard's, keeps it running after a reboot", async () => {
+    const docker = new FakeDocker("Starting", [], 54123)
+    await go(docker, undefined, { name: "playground-dashboard-db", branch: "live/dashboard" })
+    expect(docker.calls.find((c) => c.args[0] === "run")).toBeDefined()
+    expect(docker.calls.find((c) => c.args[0] === "update")).toBeDefined()
   })
 
-  test("refuses the live dashboard's database by name off the live dashboard's branch", async () => {
-    for (const branch of [null, "feat/a"]) {
-      const docker = fake()
-      await expect(
-        go(docker.run, pglaunch().run, envFile("live.env"), {
-          branch,
-          name: LIVE.database,
-        }),
-      ).rejects.toThrow("the Playground you run every day")
-      expect(docker.calls).toEqual([])
-    }
-  })
-
-  test("starts the live dashboard's database on its own branch, a fresh install's first run, set to start again after a restart", async () => {
-    const bunx = pglaunch({ stdout: STARTED.replace("playground-a-db", LIVE.database) })
-    const docker = fake()
-    const migrated: string[] = []
-    const steps: string[] = []
-    const url = await go(docker.run, bunx.run, envFile("live-fresh.env"), {
-      branch: LIVE.branch,
-      migrate: async (u) => void migrated.push(u),
-      name: LIVE.database,
-      onStep: (s) => steps.push(s),
-    })
-    expect(url).toBe(URL)
-    expect(bunx.calls).toEqual([["--bun", PGLAUNCH, "-k", "-n", LIVE.database]])
-    expect(docker.calls).toContainEqual([
-      "update",
-      "--restart",
-      "unless-stopped",
-      `${LIVE.database}-x9Kq`,
-    ])
-    expect(steps).toContain("Keeping Postgres running after a restart")
-    expect(migrated).toEqual([URL])
-  })
-
-  test("a live dashboard's database Docker cannot set to restart stops setup with Docker's words", async () => {
-    const docker = fake({ update: { code: 1, stderr: "no such container" } })
-    const migrated: string[] = []
+  test("with the live dashboard's own unsuffixed database, it refuses to start a second one beside it", async () => {
+    const docker = new FakeDocker("Starting", ["playground-dashboard-db"], 54123)
     await expect(
-      go(
-        docker.run,
-        pglaunch({ stdout: STARTED.replace("playground-a-db", LIVE.database) }).run,
-        envFile("live-policy.env"),
-        {
-          branch: LIVE.branch,
-          migrate: async (u) => void migrated.push(u),
-          name: LIVE.database,
-        },
-      ),
-    ).rejects.toThrow("docker update --restart unless-stopped")
-    expect(migrated).toEqual([])
+      go(docker, undefined, { branch: "live", name: "playground-dashboard-db" }),
+    ).rejects.toThrow("holds the")
   })
 
-  // Docker can come up between the launcher's check and the click, and pglaunch reuses only a running container it named, so setup asks Docker itself before it starts one.
-  test("on the live dashboard's branch, refuses while its database exists where pglaunch cannot reuse it, or when Docker cannot list them", async () => {
-    for (const listed of [
-      `other-db\trunning\n${LIVE.database}\trunning\n`,
-      `${LIVE.database}-x9Kq\texited\n`,
-    ]) {
-      const docker = fake({ ps: { stdout: listed } })
-      const bunx = pglaunch()
-      await expect(
-        go(docker.run, bunx.run, envFile("live-held.env"), {
-          branch: LIVE.branch,
-          name: LIVE.database,
-        }),
-      ).rejects.toThrow("holds the live dashboard's database")
-      expect(docker.calls).toEqual([["info"], ["ps", "-a", "--format", "{{.Names}}\t{{.State}}"]])
-      expect(bunx.calls).toEqual([])
-    }
-    const failed = pglaunch()
-    await expect(
-      go(fake({ ps: { code: 1 } }).run, failed.run, envFile("live-unlisted.env"), {
-        branch: LIVE.branch,
-        name: LIVE.database,
-      }),
-    ).rejects.toThrow("could not list")
-    expect(failed.calls).toEqual([])
+  test("when docker cannot list its containers, it says so and does not start one", async () => {
+    const docker = new FakeDocker("Docker down", [], 54123)
+    const origRun = docker.run
+    docker.run = async (args) =>
+      args[0] === "info" || args[0] === "ps"
+        ? { code: 1, stderr: "docker down", stdout: "" }
+        : { ...(await origRun(args)) }
+    await expect(go(docker)).rejects.toThrow(/could not list|Docker is not running/)
   })
 
-  test("on the live dashboard's branch, Try again after a failed migrate reuses the running container it started", async () => {
-    const file = envFile("live-retry.env")
-    const started = STARTED.replace("playground-a-db", LIVE.database)
-    await expect(
-      go(fake().run, pglaunch({ stdout: started }).run, file, {
-        branch: LIVE.branch,
-        migrate: async () => {
-          throw new Error("migrate failed")
-        },
-        name: LIVE.database,
-      }),
-    ).rejects.toThrow("migrate failed")
-    const reused = RUNNING.replace("playground-a-db", LIVE.database)
-    const bunx = pglaunch({ code: 1, stdout: reused })
-    const migrated: string[] = []
-    // Docker answers in the format asked for, so a list that reads names alone sees the running container too.
-    const docker: Run = async (args) => ({
-      code: 0,
-      stderr: "",
-      stdout:
-        args[0] !== "ps"
-          ? ""
-          : `${LIVE.database}-Ab12${args.at(-1)?.includes("State") ? "\trunning" : ""}\n`,
-    })
-    const url = await go(docker, bunx.run, file, {
-      branch: LIVE.branch,
-      migrate: async (u) => void migrated.push(u),
-      name: LIVE.database,
-    })
-    expect(url).toBe(URL)
-    expect(bunx.calls).toEqual([["--bun", PGLAUNCH, "-k", "-n", LIVE.database]])
-    expect(migrated).toEqual([URL])
+  test("when docker cannot start the container, it says what docker printed and leaves it unstarted", async () => {
+    const docker = new FakeDocker("Starting", [], 54123)
+    const origRun = docker.run
+    docker.run = async (args) =>
+      args[0] === "run"
+        ? { code: 1, stderr: "cannot create network", stdout: "" }
+        : { ...(await origRun(args)) }
+    await expect(go(docker)).rejects.toThrow("docker run")
   })
+
+  test("when Postgres does not come up, it waits, then says so and does not migrate or save .env", async () => {
+    const docker = new FakeDocker("Starting", ["playground-db-a1B2"], 54123)
+    const origRun = docker.run
+    docker.run = async (args) =>
+      args[0] === "exec" ? { code: 1, stderr: "", stdout: "" } : { ...(await origRun(args)) }
+    await expect(go(docker)).rejects.toThrow("did not start")
+    expect(noMigrate).not.toHaveBeenCalled()
+    expect(await Bun.file(envFile).text()).not.toContain("POSTGRES_URL")
+  })
+
+  test("the container first run starts under it, published on 127.0.0.1 alone, passes the live guard", async () => {
+    // A loopback-only container is the live dashboard's database; it is reused, and startArgv binds it to 127.0.0.1.
+    const docker = new FakeDocker("Starting", ["playground-db-a1B2"], 54123)
+    await go(docker, undefined, { branch: "live" })
+    const runCall = docker.calls.find((c) => c.args[0] === "run")
+    expect(runCall).toBeUndefined()
+    // A fresh one would bind to loopback alone.
+    expect(startArgv("playground-db", PASSWORD)).toContain("127.0.0.1::5432")
+  })
+})
+
+// A new-user gate box whose stand-ins front a host docker (host-docker.ts) holding one decoy the box did not make: a running container named as first run reuses, on its own port, with the password the box would use.
+const decoyBox = (nameOf: (dir: string) => string) => {
+  const box = realpathSync(mkdtempSync(join(tmpdir(), "pg-gate-decoy-")))
+  const host = join(box, "host")
+  const stand = join(box, "stubs")
+  const state = join(box, "docker.json")
+  mkdirSync(host)
+  mkdirSync(stand)
+  writeFileSync(
+    join(host, "docker"),
+    `#!/bin/sh\nexec bun ${join(import.meta.dir, "host-docker.ts")} "$@"\n`,
+  )
+  chmodSync(join(host, "docker"), 0o755)
+  for (const [name, text] of Object.entries(stubs(box, "", "", join(host, "docker")))) {
+    writeFileSync(join(stand, name), text)
+    chmodSync(join(stand, name), 0o755)
+  }
+  const name = nameOf(box)
+  const decoy = {
+    env: ["POSTGRES_PASSWORD=box-password"],
+    id: "d".repeat(64),
+    labels: {},
+    name: `${name}-ab12`,
+    port: 55001,
+    state: "running",
+  }
+  writeFileSync(state, JSON.stringify([decoy]))
+  const env = {
+    DOCKER_STATE: state,
+    PATH: `${stand}:${host}:${dirname(process.execPath)}:/usr/bin:/bin`,
+  }
+  const docker = async (args: string[]) => {
+    const child = Bun.spawn([Bun.which("docker", { PATH: env.PATH })!, ...args], {
+      env,
+      stderr: "pipe",
+      stdout: "pipe",
+    })
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    return { code, stderr, stdout }
+  }
+  return { box, decoy: decoy.name, docker, name, state }
+}
+
+describe("first run in a new-user gate box", () => {
+  const live = livePair()
+  for (const [label, nameOf] of [
+    ["with no live.container seed", () => live.database],
+    ["with the box's own live.container seed", (box: string) => `${basename(box)}-db`],
+  ] as const) {
+    test(`on the live branch, never reaches a decoy the box did not make, ${label}`, async () => {
+      const { box, decoy, docker, name, state } = decoyBox(nameOf)
+      try {
+        const url = await startLocal({
+          branch: live.branch,
+          docker,
+          envFile: join(box, ".env"),
+          migrate: async () => {},
+          name,
+          onStep: () => {},
+          prove: async () => "",
+          wait: async () => {},
+        })
+        expect(url).not.toContain(":55001/")
+        expect(url).not.toContain("box-password")
+        const touched = readFileSync(`${state}.log`, "utf8")
+          .split("\n")
+          .filter((line) => line.includes(decoy))
+        expect(touched).toEqual([])
+        expect((await docker(["inspect", decoy])).code).not.toBe(0)
+        expect(readFileSync(join(box, "calls.log"), "utf8")).toContain(
+          `docker refused inspect ${decoy}`,
+        )
+      } finally {
+        rmSync(box, { force: true, recursive: true })
+      }
+    })
+  }
 })
 
 describe("startPgliteDatabase", () => {
   const LITE = "postgres://postgres@127.0.0.1:54200/postgres?prepare=false"
 
   test("starts the checkout's PGlite, proves it, migrates it and saves its URL, with no Docker", async () => {
-    const file = envFile("pglite.env")
+    const file = join(dir, "pglite.env")
+    writeFileSync(file, "BETTER_AUTH_SECRET=x\n")
     const steps: string[] = []
     const order: string[] = []
     const url = await startPgliteDatabase({
@@ -370,45 +426,16 @@ describe("startPgliteDatabase", () => {
   })
 
   test("refuses a .env that already names a database, starting nothing", async () => {
+    const file = join(dir, "pglite-set.env")
+    writeFileSync(file, `POSTGRES_URL=${LITE}\n`)
     const started: string[] = []
     const run = startPgliteDatabase({
-      envFile: envFile("pglite-set.env", `POSTGRES_URL=${LITE}\n`),
+      envFile: file,
       name: "playground-a-db",
       onStep: () => {},
       start: async (name) => (started.push(name), LITE),
     })
     await expect(run).rejects.toThrow("already names a database")
     expect(started).toEqual([])
-  })
-})
-
-describe("setupName", () => {
-  test("is the live dashboard's database on its branch, and the checkout's own anywhere else", () => {
-    const root = "/home/me/dispatcher/.claude/worktrees/desk"
-    expect(setupName(root, LIVE.branch, LIVE)).toBe(LIVE.database)
-    expect(setupName(root, "feat/a", LIVE)).toBe("playground-desk-db")
-    expect(setupName(root, null, LIVE)).toBe("playground-desk-db")
-  })
-
-  // pglaunch publishes on every interface and suffixes the name, so the container a fresh live checkout's setup starts must pass the exposure guard's first-run exception and still be the live dashboard's database to every other branch.
-  test("the container pglaunch starts under it passes both the exposure guard and the live guard", () => {
-    const started = `${setupName("/home/me/dispatcher/.claude/worktrees/desk", LIVE.branch, LIVE)}-x9Kq`
-    const run: Docker = (args) =>
-      args[0] === "ps"
-        ? "c1\n"
-        : JSON.stringify([
-            {
-              Config: { Image: "postgres:17-alpine" },
-              Id: "c1",
-              Name: `/${started}`,
-              NetworkSettings: {
-                Ports: { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "54123" }] },
-              },
-            },
-          ])
-    const { owner } = locate(URL, run)
-    expect(owner.name).toBe(started)
-    expect(othersLiveDashboard(owner.name, LIVE.branch, LIVE)).toBe(false)
-    expect(othersLiveDashboard(owner.name, "feat/a", LIVE)).toBe(true)
   })
 })

@@ -200,12 +200,12 @@ export const rowTitle = (worker: Worker): string =>
   worker.task ??
   (worker.role === "dispatcher" ? "Hands each task to a worker" : "No task yet")
 
-// The board's groups in order, and the group every role the API gives belongs to, for the sidebar and the dashboard's table alike. A role missing from GROUP_OF, or a group GROUP_ORDER does not list, is a type error, so a new one cannot quietly drop its sessions from the board. Scripts holds no session: it is the ops jobs, which run with no Claude session behind them.
+// The board's groups in order, and the group every role the API gives belongs to, for the sidebar and the dashboard's table alike; the table keeps this order, and the sidebar starts from it until you move a group (useGroupOrder). A role missing from GROUP_OF, or a group GROUP_ORDER does not list, is a type error, so a new one cannot quietly drop its sessions from the board. AI Runners sits right under Orchestrators, so a long Subagents list never pushes the runners out of view. Scripts holds no session: it is the ops jobs, which run with no Claude session behind them.
 export const GROUP_ORDER = [
   "Dispatchers",
   "Orchestrators",
-  "Subagents",
   "AI Runners",
+  "Subagents",
   "Scripts",
   "Other",
 ] as const
@@ -226,7 +226,7 @@ export const agentGroup = (agent: Pick<Agent, "kind" | "role">): GroupLabel =>
 
 export type SessionGroup = { label: GroupLabel; sessions: Worker[] }
 
-// The sidebar's session groups in order (Dispatchers for the dispatchers, whose rows the sidebar draws in its header, then ZeroSDK's: Orchestrators for the managers, Subagents for `worker-<sin>`, `reviewer-<sin>`, `tester-<sin>` and any the roster calls a worker, AI Runners for `runner-<sin>` and any the roster calls a runner, Scripts for the ops jobs, which the sidebar fills itself, Other for `probe-<what>` and any other name), each holding its sessions in the board's order (orderByStatus's, as the dashboard hands it on). Dispatchers, Orchestrators, Subagents, AI Runners and Scripts show even when empty; Other only holds strays, so it shows only when one is live.
+// The sidebar's session groups in order (Dispatchers for the dispatchers, whose rows the sidebar draws in its header, then ZeroSDK's: Orchestrators for the managers, AI Runners for `runner-<sin>` and any the roster calls a runner, Subagents for `worker-<sin>`, `reviewer-<sin>`, `tester-<sin>` and any the roster calls a worker, Scripts for the ops jobs, which the sidebar fills itself, Other for `probe-<what>` and any other name), each holding its sessions in the board's order (orderByStatus's, as the dashboard hands it on). Dispatchers, Orchestrators, AI Runners, Subagents and Scripts show even when empty; Other only holds strays, so it shows only when one is live.
 export const sessionGroups = (sessions: Worker[]): SessionGroup[] =>
   GROUP_ORDER.map((label) => ({
     label,

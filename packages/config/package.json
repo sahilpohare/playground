@@ -11,42 +11,57 @@
   "exports": {
     "./accounts": {
       "types": "./dist/accounts.d.mts",
+      "bun": "./src/accounts.ts",
       "default": "./dist/accounts.mjs"
     },
     "./console": {
       "types": "./dist/console.d.mts",
+      "bun": "./src/console.ts",
       "default": "./dist/console.mjs"
     },
     "./inbox": {
       "types": "./dist/inbox.d.mts",
+      "bun": "./src/inbox.ts",
       "default": "./dist/inbox.mjs"
     },
     "./kinds": {
       "types": "./dist/kinds.d.mts",
+      "bun": "./src/kinds.ts",
       "default": "./dist/kinds.mjs"
     },
     "./org": {
       "types": "./dist/org.d.mts",
+      "bun": "./src/org.ts",
       "default": "./dist/org.mjs"
     },
     "./schedule": {
       "types": "./dist/schedule.d.mts",
+      "bun": "./src/schedule.ts",
       "default": "./dist/schedule.mjs"
     },
     "./session-state": {
       "types": "./dist/session-state.d.mts",
+      "bun": "./src/session-state.ts",
       "default": "./dist/session-state.mjs"
     },
     "./site": {
       "types": "./dist/site.d.mts",
+      "bun": "./src/site.ts",
       "default": "./dist/site.mjs"
+    },
+    "./ssh-probe": {
+      "types": "./dist/ssh-probe.d.mts",
+      "bun": "./src/ssh-probe.ts",
+      "default": "./dist/ssh-probe.mjs"
     },
     "./threads": {
       "types": "./dist/threads.d.mts",
+      "bun": "./src/threads.ts",
       "default": "./dist/threads.mjs"
     },
     "./verdicts": {
       "types": "./dist/verdicts.d.mts",
+      "bun": "./src/verdicts.ts",
       "default": "./dist/verdicts.mjs"
     },
     "./tsconfig.json": "./tsconfig.json",

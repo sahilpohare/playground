@@ -48,10 +48,11 @@ const put = (root: string, files: Record<string, string>) => {
   }
 }
 
-// A throwaway repo whose origin/main holds mainFiles, with head's files committed on top, as a PR's head sits on a canary main lacks.
+// A throwaway repo whose origin/main holds mainFiles, with head's files committed on top, as a PR's head sits on a canary main lacks; its origin is a path that holds no repo, so a fetch fails.
 const repo = (mainFiles: Record<string, string>, head: Record<string, string>) => {
   const root = mkdtempSync(join(scratch, "repo-"))
   git(root, "init", "-q", "-b", "canary")
+  git(root, "remote", "add", "origin", join(scratch, "no-such-remote"))
   put(root, { "README.md": "x\n", ...mainFiles })
   git(root, "add", "-A")
   git(root, "commit", "-q", "-m", "main")
@@ -154,6 +155,17 @@ describe("the command", () => {
     const result = Bun.spawnSync(["bun", CLI], { cwd: root })
     expect(result.exitCode).toBe(1)
     expect(result.stdout.toString()).toContain("FAIL origin/main does not read")
+  })
+
+  test("skips, saying why, in a checkout with no origin, as the runner host's run clone is, and fails there under CI", () => {
+    const root = repo({}, {})
+    git(root, "remote", "remove", "origin")
+    const off = Bun.spawnSync(["bun", CLI], { cwd: root, env: { ...process.env, CI: "" } })
+    expect(off.exitCode).toBe(0)
+    expect(off.stdout.toString()).toContain("SKIP the checkout has no origin to read main from")
+    const ci = Bun.spawnSync(["bun", CLI], { cwd: root, env: { ...process.env, CI: "true" } })
+    expect(ci.exitCode).toBe(1)
+    expect(ci.stdout.toString()).toContain("FAIL the checkout has no origin")
   })
 
   test("exits 1, naming the script, when a registration's script main lacks", () => {

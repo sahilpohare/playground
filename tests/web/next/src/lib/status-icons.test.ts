@@ -9,7 +9,6 @@ import {
   lightOf,
   NO_PROGRESS_MS,
   PR_TONES,
-  PROVIDER_ICONS,
   prTone,
   stateWords,
   STATES,
@@ -45,10 +44,12 @@ const SET = [
   ["no-progress", "RiTimeLine", "text-destructive", "No progress", false],
   ["fixing", "RiLoader4Line", "text-caution", "Fixing", true],
   ["working", "RiLoader4Line", "text-info", "Working", true],
+  ["conflicts", "RiGitMergeLine", "text-destructive", "Conflicts", false],
   ["waiting", "RiSearchEyeLine", "text-caution", "Waiting", false],
   ["approval", "RiUserLine", "text-caution", "Waiting on approvals", false],
   ["approvals", "RiGroupLine", "text-caution", "Waiting on approvals", false],
   ["ready", "RiZzzLine", "text-success", "Ready", false],
+  ["gated", "RiShieldLine", "text-caution", "Gated", false],
   ["parked", "RiPauseCircleLine", "text-inactive", "Parked", false],
   ["unknown", "RiQuestionLine", "text-inactive", "State unknown", false],
   ["idle", "RiCheckboxBlankCircleLine", "text-inactive", "Idle", false],
@@ -85,7 +86,10 @@ type Pull = NonNullable<Agent["pr"]>
 const pull = (fields: Partial<Pull> = {}): Pull => ({
   approvals: 0,
   ci: "passing",
+  conflicts: false,
   draft: false,
+  gates: null,
+  head: "abc1234def",
   number: 97,
   queued: false,
   reviewed: false,
@@ -132,7 +136,7 @@ describe("lightOf", () => {
     expect(light({ light: "unknown" })).toBe("unknown")
     expect(light({ light: "unknown", parked: "held" })).toBe("parked")
     expect(light({ light: "unknown", waits: ["inbox"] })).toBe("waiting")
-    expect(light({ light: "unknown", pr: pull({ score: "5/5" }) })).toBe("ready")
+    expect(light({ light: "unknown", pr: pull({ gates: [] }) })).toBe("ready")
     expect(light({ light: "unknown", pr: pull({ approvals: 1 }) })).toBe("approval")
     expect(light({ checked: true, light: "unknown" })).toBe("done")
     expect(light({ light: "unknown", pr: pull({ state: "merged" }) })).toBe("merged")
@@ -196,6 +200,16 @@ describe("lightOf", () => {
     expect(light({ light: "working", waits: ["checks"] })).toBe("working")
   })
 
+  test("Conflicts: idle on an open pull request that conflicts with its base, ahead of every wait (#2457)", () => {
+    expect(light({ pr: pull({ conflicts: true }), waits: ["checks"] })).toBe("conflicts")
+    expect(light({ pr: pull({ ci: "none", conflicts: true, score: "5/5" }) })).toBe("conflicts")
+    expect(light({ light: "working", pr: pull({ conflicts: true }) })).toBe("working")
+    expect(light({ pr: pull({ conflicts: true, state: "merged" }) })).toBe("merged")
+    expect(light({ pr: pull({ conflicts: true, state: "closed" }), waits: ["checks"] })).toBe(
+      "waiting",
+    )
+  })
+
   test("Waiting: idle with something still open", () => {
     for (const wait of ["checks", "ci", "queue", "helper", "job", "inbox"] as const)
       expect(light({ waits: [wait] })).toBe("waiting")
@@ -207,16 +221,35 @@ describe("lightOf", () => {
     expect(light({ pr: pull({ approvals: 2 }) })).toBe("approvals")
   })
 
-  test("Ready: idle at 5/5 on its head, CI green or none, no approval missing", () => {
-    expect(light({ pr: pull({ score: "5/5" }) })).toBe("ready")
-    expect(light({ pr: pull({ ci: "none", score: "5/5" }) })).toBe("ready")
-    expect(light({ pr: pull({ ci: "failing", score: "5/5" }) })).toBe("idle")
-    expect(light({ pr: pull({ score: "4/5" }) })).toBe("idle")
+  test("Ready: idle while the merge train read every pr:merge gate passing at its head (#2499)", () => {
+    expect(light({ pr: pull({ gates: [], score: "5/5" }) })).toBe("ready")
+    expect(light({ pr: pull({ ci: "none", gates: [], score: "5/5" }) })).toBe("ready")
+    expect(light({ pr: pull({ gates: ["ci"], score: "5/5" }) })).toBe("gated")
+    // no train read at this head: a 5/5 and green CI alone are not pr:merge's gates
+    expect(light({ pr: pull({ score: "5/5" }) })).toBe("idle")
+    expect(light({ pr: pull({ ci: "none", score: "5/5" }) })).toBe("idle")
   })
 
-  test("Parked: its pull request is on the held list", () => {
+  test("Gated: idle on a pull request a pr:merge gate holds, each gate it fails named (#2499)", () => {
+    const held = pull({ gates: ["tester"], score: "5/5" })
+    expect(light({ pr: held })).toBe("gated")
+    expect(stateWords("gated", { pr: held })).toBe("Gated · tester")
+    expect(stateWords("gated", { pr: pull({ gates: ["review", "tester"] }) })).toBe(
+      "Gated · review, tester",
+    )
+    // a gate its worker must fix holds it too, named the same way, so a gate added to pr:merge needs no list here
+    const scored = pull({ gates: ["review"], score: "3/5" })
+    expect(light({ pr: scored })).toBe("gated")
+    expect(stateWords("gated", { pr: scored })).toBe("Gated · review")
+    expect(light({ pr: held, waits: ["checks"] })).toBe("waiting")
+    expect(light({ light: "working", pr: held })).toBe("working")
+  })
+
+  test("Parked: its pull request is on the held list, which pr:merge's held gate reads too", () => {
     expect(light({ parked: "held for the weekly reset" })).toBe("parked")
-    expect(light({ parked: "held", pr: pull({ score: "5/5" }) })).toBe("ready")
+    expect(light({ parked: "held", pr: pull({ gates: ["held"], score: "5/5" }) })).toBe("parked")
+    expect(light({ parked: "held", pr: pull({ gates: ["held", "tester"] }) })).toBe("parked")
+    expect(light({ parked: "held", pr: pull({ score: "5/5" }) })).toBe("parked")
   })
 
   test("Idle: nothing running and nothing waiting; a closed pull request is not work", () => {
@@ -337,17 +370,6 @@ describe("taskIcon", () => {
     for (const kind of ["dispatcher", "planner", "runner", "probe", "ops"] as const)
       expect(taskIcon(kind, "working")).toBeNull()
     expect(taskIcon(null, "working")).toBeNull()
-  })
-})
-
-describe("PROVIDER_ICONS", () => {
-  test("Anthropic draws Remix's Anthropic mark, and Z.ai ZeroSDK's Z, not Zhipu's badge", () => {
-    expect(PROVIDER_ICONS.anthropic).toBe(icons.RiAnthropicFill!)
-    expect(PROVIDER_ICONS.zai).not.toBe(icons.RiZhipuAiFill!)
-    const zai = html(PROVIDER_ICONS.zai, { className: "size-4" })
-    expect(zai).toContain('viewBox="0 0 40 40"')
-    expect(zai).toContain('d="M20.1312 7.50002L17.4088 11.1913H5.81625')
-    expect(zai).toContain('class="size-4"')
   })
 })
 

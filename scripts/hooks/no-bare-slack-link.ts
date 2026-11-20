@@ -1,4 +1,5 @@
 // PreToolUse hook, acting for a factory session alone (role.ts): refuses a Slack MCP chat_post_message or chat_update that holds an http(s) URL (in text, markdown_text, a text field of its blocks, or any string of an attachment but a link, url or icon field) with no link chip for it in blocks (a link element whose text is its URL without the scheme, truncated), or a link element in blocks that is not such a chip, labelled or url-only, since a link sent as words shows as a raw URL.
+import { input } from "./input"
 import { fromFactory } from "./role"
 
 const TOOL = /^mcp__(.+?)__(chat_post_message|chat_update)$/
@@ -91,7 +92,7 @@ export function check(raw: string): string | undefined {
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-bare-slack-link", "guard")
   const reason = (await fromFactory(raw)) ? check(raw) : undefined
   if (reason) {
     console.error(reason)

@@ -5,22 +5,25 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
+import { tmpdir, userInfo } from "node:os"
 import { dirname, join } from "node:path"
 
 import { setSessionNames } from "../../../../../packages/config/src/kinds"
+import { GH_HANGS, KEYRING_LOCKED } from "../../../../../packages/scripts/src/gh-read"
 import {
   autoEnd,
   BEATS,
   type Context,
   cronMatches,
   cycle,
+  ghAuth,
   idleCompact,
   leadOf,
   nextDue,
@@ -28,9 +31,11 @@ import {
   runSlotHold,
   runner,
   switchAccount,
+  TOKEN_INVALID,
   trashPurge,
 } from "../../../../../packages/scripts/src/ops-tick/tick"
 import { NO_CHECKOUT } from "../../../../../packages/scripts/src/playground/probe"
+import { procDir, withProc } from "../../../../scripts/fixtures/proc"
 import { storeWith } from "../../../../scripts/hooks/render-set"
 import { OLD, OLD_AS_NAMES, SEEDED_NAMES } from "../../../../session-names"
 import { watchTorn } from "../torn-reads"
@@ -323,7 +328,7 @@ describe("run-slot hold", () => {
 
 describe("tick", () => {
   const MARKS = [
-    "acme@example.com: week 91% (resets Tue 14:00Z), rate 1.2%/h; today 10% spent",
+    "acme@example.com: week 91% (resets Tue 14:00Z), rate 1.2%/h over 1h; today 10% spent",
     "ALERT 90 acme@example.com: week at 91%, past 90%",
     "ALERT 98 pride@example.com: week at 98%, past 98%",
   ].join("\n")
@@ -708,6 +713,33 @@ describe("sweep", () => {
     expect(existsSync(join(ops, "tick", "load-told"))).toBe(false)
   })
 
+  test("names no felled line for a merged or closed session, both a finished roster status", async () => {
+    const ops = scratch()
+    const now = at(13, 7)
+    writeFileSync(
+      join(ops, "..", "roster.json"),
+      JSON.stringify({
+        agents: [
+          { name: "worker-merged", status: "merged" },
+          { name: "worker-closed", status: "closed" },
+          { name: "worker-x", status: "working" },
+        ],
+      }),
+    )
+    const { ctx, sent } = fake(ops, now, {
+      ...QUIET_LOAD,
+      "--sessions": [
+        "/m/scripts/spawn.sh resume worker-merged /m 8888",
+        "/m/scripts/spawn.sh resume worker-closed /m 9999",
+        "/m/scripts/spawn.sh resume worker-x /m 1111",
+      ].join("\n"),
+    })
+    await beat("sweep").run(ctx)
+    expect(sent).toEqual([
+      { text: "Felled: /m/scripts/spawn.sh resume worker-x /m 1111", to: "builder" },
+    ])
+  })
+
   test("a quiet run sends nothing and runs no ops-up", async () => {
     const ops = scratch()
     const now = at(13, 37)
@@ -993,6 +1025,43 @@ describe("the beats that send no line", () => {
     const log = await Bun.file(join(ops, "log", "trash-purge.log")).text()
     expect(log).toContain("removed 1 (20261020T000000Z-s)")
     expect(log).not.toContain("left for load")
+  })
+
+  test("the trash purge passes a batch it cannot remove, names it once in its log and stays ok (#2918)", async () => {
+    const ops = scratch()
+    const trash = join(ops, "..", "trash")
+    const now = new Date("2026-11-02T12:17:00Z")
+    const item = join(trash, "20261019T000000Z-x", "1", "item")
+    mkdirSync(dirname(item), { recursive: true })
+    writeFileSync(item, "x")
+    mkdirSync(join(trash, "20261020T000000Z-s", "1"), { recursive: true })
+    const lock = (on: boolean) =>
+      process.platform === "darwin"
+        ? Bun.spawnSync(["chflags", on ? "uchg" : "nouchg", item])
+        : chmodSync(dirname(item), on ? 0o555 : 0o755)
+    lock(true)
+    try {
+      const { ctx, sent } = fake(ops, now)
+      await trashPurge(
+        undefined,
+        () => 100e9,
+        async () => {},
+      )(ctx)
+      await trashPurge(
+        undefined,
+        () => 100e9,
+        async () => {},
+      )(ctx)
+      expect(sent).toEqual([])
+      const log = (await Bun.file(join(ops, "log", "trash-purge.log")).text()).trim().split("\n")
+      expect(log).toHaveLength(2)
+      expect(log[0]).toMatch(
+        /removed 1 \(20261020T000000Z-s\), cannot remove 20261019T000000Z-x \(E[A-Z]+\)$/,
+      )
+      expect(log[1]).not.toContain("20261019T000000Z-x")
+    } finally {
+      lock(false)
+    }
   })
 
   test("the trash purge strips rebuildables from the batches it keeps", async () => {
@@ -1538,8 +1607,11 @@ describe("canary pull", () => {
 
 describe("relay watch", () => {
   const ID = "f167b6b9-f570-4f15-a4b4-eb15b8c4876f"
+  const DOWN = " Ops is down. Resolve it; post it to the owner's Inbox only if you cannot."
+  const LATE =
+    " Ops has not picked it up. Resolve it; post it to the owner's Inbox only if you cannot."
 
-  // The relay's outbox with its three cursors last moved at moved, and the ops manager in the roster, beside the relay's own row unless the machine has no relay. Every Inbox post below runs while Ops' waiter is down, the alerts-wait pid file absent, the one down sign the watch reads; a live wait is process.pid, which kill(pid, 0) reads live.
+  // The relay's outbox with its three cursors last moved at moved, and the ops manager in the roster, beside the relay's own row unless the machine has no relay. Ops' waiter is down unless a test starts it, the alerts-wait pid file absent, the one down sign the watch reads; a live wait is process.pid, which kill(pid, 0) reads live.
   const outbox = (ops: string, moved: Date, relay = true) => {
     mkdirSync(join(ops, "outbox"), { recursive: true })
     for (const file of ["cursor.json", "dm-cursor.json", "linear-cursor.json"]) {
@@ -1568,100 +1640,135 @@ describe("relay watch", () => {
           .map((l) => JSON.parse(l))
       : []
 
-  // A context whose runs answer bun run ask, recording each call with its stdin; a "pending" peek leaves a line in a queue past cursor.json's offset for drain.ts's peek to read, any other leaves none.
-  const watch = (ops: string, now: Date, peek: string, code = 0) => {
+  // The relay sending every queued line at moved, the late-stop line it queued among them: cursor.json at each queue's end, all three cursors moved.
+  const sentAll = (ops: string, moved: Date) => {
+    const queues = readdirSync(join(ops, "outbox")).filter((f) => /^ops-.+\.jsonl$/.test(f))
+    const ends = Object.fromEntries(
+      queues.map((f) => [f, readFileSync(join(ops, "outbox", f)).length]),
+    )
+    writeFileSync(join(ops, "outbox", "cursor.json"), JSON.stringify(ends))
+    for (const file of ["cursor.json", "dm-cursor.json", "linear-cursor.json"])
+      if (existsSync(join(ops, "outbox", file))) utimesSync(join(ops, "outbox", file), moved, moved)
+  }
+
+  // sysctl's line for a kern time, as measured: `{ sec = <s>, usec = <us> } <date>`, 0 for a wake the machine has not had.
+  const kern = (date?: Date) =>
+    `{ sec = ${date ? Math.floor(date.getTime() / 1000) : 0}, usec = ${date ? 147343 : 0} } Sat Nov 14 05:25:54 2026\n`
+
+  // procps's sysctl on Linux, which has no kern.boottime: it says so and exits 255.
+  const LINUX_BOOT = {
+    "kern.boottime": {
+      code: 255,
+      err: "sysctl: cannot stat /proc/sys/kern/boottime: No such file or directory\n",
+    },
+  }
+
+  // A context whose runs answer bun run ask and sysctl's boot and wake times (procps's refusal with linux), recording each ask call with its stdin; a "pending" peek leaves a line in a queue past cursor.json's offset for drain.ts's peek to read, any other leaves none.
+  const watch = (
+    ops: string,
+    now: Date,
+    peek: string,
+    code = 0,
+    up: { boot?: Date; linux?: boolean; wake?: Date } = {},
+  ) => {
     const queue = join(ops, "outbox", "ops-unstick.jsonl")
     if (peek.startsWith("pending")) writeFileSync(queue, `${JSON.stringify({ text: "x" })}\n`)
     else rmSync(queue, { force: true })
     const asks: { argv: string[]; stdin?: string }[] = []
     const { ctx, sent } = fake(ops, now)
-    const { run } = fakeRun({ ask: { code, out: `${ID}\n#i601\n` } })
+    const { run } = fakeRun({
+      ask: { code, out: `${ID}\n#i601\n` },
+      ...(up.boot ? { "kern.boottime": kern(up.boot) + kern(up.wake) } : {}),
+      ...(up.linux ? LINUX_BOOT : {}),
+    })
     ctx.run = async (argv, timeoutMs, stdin) => {
-      asks.push({ argv, stdin })
+      if (argv.includes("ask")) asks.push({ argv, stdin })
       return run(argv, timeoutMs, stdin)
     }
     return { asks, ctx, sent }
   }
 
-  test("posts one Inbox alert once Ops' waiter is down and a line has waited past two cycles with no relay cursor moving, and resolves it once a cursor moves", async () => {
+  const iso = (date: Date) => date.toISOString().replace(/\.\d{3}Z$/, "Z")
+
+  // The relay-watch state an Inbox alert posted before this route left behind: its item, its poster and when it posted.
+  const openAlert = (ops: string, posted: Date) => {
+    mkdirSync(join(ops, "tick"), { recursive: true })
+    writeFileSync(
+      join(ops, "tick", "relay-watch.json"),
+      JSON.stringify({ at: posted.toISOString(), by: OLD.ops, id: ID, pendingSince: posted }),
+    )
+  }
+
+  const resolveArgv = (note: string) => [
+    "bun",
+    "run",
+    "--silent",
+    "--cwd",
+    "/repo",
+    "ask",
+    "resolve",
+    ID,
+    "--by",
+    OLD.ops,
+    "--note",
+    note,
+  ]
+
+  const MOVED_ROUTE = "This alert goes to the dispatcher now, not the Inbox"
+
+  test("queues the stop for the dispatcher's waiter, and posts nothing to the Inbox, once Ops' waiter is down and a line has waited past two cycles with no relay cursor moving", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7))
-    const seen = watch(ops, at(14, 20), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(seen.ctx)
-    expect(seen.asks).toEqual([])
-    const waiting = watch(ops, at(14, 25), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(waiting.ctx)
-    expect(waiting.asks).toEqual([])
+    for (const minute of [20, 25]) {
+      const tick = watch(ops, at(14, minute), "pending: ops-unstick.jsonl")
+      await beat("relay-watch").run(tick.ctx)
+      expect(tick.asks).toEqual([])
+      expect(waiterLines(ops)).toEqual([])
+    }
     const first = watch(ops, at(14, 30), "pending: ops-unstick.jsonl")
     await beat("relay-watch").run(first.ctx)
-    expect(first.asks).toHaveLength(1)
-    expect(first.asks[0]!.argv).toEqual(["bun", "run", "--silent", "--cwd", "/repo", "ask", "new"])
-    expect(JSON.parse(first.asks[0]!.stdin!)).toEqual({
-      from: OLD.ops,
-      kind: "update",
-      preview: {
-        outcome: "alert",
-        text: "- 🔎 The relay's row is under AI Runners in the sidebar (runner-plain-relay on hover), and this Mac's state is on the [System page](/dashboard/system).",
-      },
-      title: `The ops relay is down: no ops line has gone out since ${at(14, 7)
-        .toISOString()
-        .replace(/\.\d{3}Z$/, "Z")}. Resume runner-plain-relay.`,
-    })
+    expect(first.asks).toEqual([])
     expect(first.sent).toEqual([])
+    expect(waiterLines(ops)).toEqual([
+      {
+        at: iso(at(14, 30)),
+        job: "stuck-alert",
+        text: `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.${DOWN}`,
+        to: OLD.dispatcher,
+      },
+    ])
     const still = watch(ops, at(14, 35), "pending: ops-unstick.jsonl")
     await beat("relay-watch").run(still.ctx)
     expect(still.asks).toEqual([])
-    outbox(ops, at(14, 38))
+    expect(waiterLines(ops)).toHaveLength(1)
+    sentAll(ops, at(14, 38))
     const back = watch(ops, at(14, 40), "timeout")
     await beat("relay-watch").run(back.ctx)
-    expect(back.asks.map((a) => a.argv)).toEqual([
-      [
-        "bun",
-        "run",
-        "--silent",
-        "--cwd",
-        "/repo",
-        "ask",
-        "resolve",
-        ID,
-        "--by",
-        OLD.ops,
-        "--note",
-        `The relay moved its cursor again at ${at(14, 38)
-          .toISOString()
-          .replace(/\.\d{3}Z$/, "Z")}`,
-      ],
-    ])
+    expect(back.asks).toEqual([])
     expect(existsSync(join(ops, "tick", "relay-watch.json"))).toBe(false)
   })
 
-  const iso = (date: Date) => date.toISOString().replace(/\.\d{3}Z$/, "Z")
-
-  test("a machine with no relay judges Ops' sweep: a line may wait two sweeps, then the alert names the sweep and no relay session", async () => {
+  test("a machine with no relay judges Ops' sweep: a line may wait two sweeps, then the dispatcher's line names the sweep and no relay session", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7), false)
-    const early: unknown[] = []
-    for (const minute of [20, 25, 35, 45]) {
-      const tick = watch(ops, at(14, minute), "pending: ops-session-resume.jsonl")
-      await beat("relay-watch").run(tick.ctx)
-      early.push(...tick.asks)
-    }
-    expect(early).toEqual([])
+    for (const minute of [20, 25, 35, 45])
+      await beat("relay-watch").run(
+        watch(ops, at(14, minute), "pending: ops-session-resume.jsonl").ctx,
+      )
+    expect(waiterLines(ops)).toEqual([])
     const late = watch(ops, at(14, 50), "pending: ops-session-resume.jsonl")
     await beat("relay-watch").run(late.ctx)
-    expect(late.asks).toHaveLength(1)
-    const { title } = JSON.parse(late.asks[0]!.stdin!)
-    expect(title).toBe(
-      `Ops' sweep is late: no ops line has gone out since ${iso(at(14, 7))}. Ops runs its sweep, whose step 2 runs ops:outbox.`,
-    )
-    expect(title).not.toContain("runner-plain-relay")
-    expect(JSON.parse(late.asks[0]!.stdin!).preview.text).toBe(
-      "- 🔎 Ops' row is under Orchestrators in the sidebar, since its sweep relays here, and this Mac's state is on the [System page](/dashboard/system).",
-    )
+    expect(late.asks).toEqual([])
     expect(late.sent).toEqual([])
+    expect(waiterLines(ops).map(({ text, to }) => ({ text, to }))).toEqual([
+      {
+        text: `Ops' sweep is late: no ops line has gone out since ${iso(at(14, 7))}. Ops runs its sweep, whose step 2 runs ops:outbox.${DOWN}`,
+        to: OLD.dispatcher,
+      },
+    ])
   })
 
-  test("a machine with no relay posts nothing while Ops' sweep drains within its cadence", async () => {
+  test("a machine with no relay queues nothing while Ops' sweep drains within its cadence", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7), false)
     const asks: unknown[] = []
@@ -1672,23 +1779,77 @@ describe("relay watch", () => {
       outbox(ops, at(14, minute + 2), false)
     }
     expect(asks).toEqual([])
+    expect(waiterLines(ops)).toEqual([])
   })
 
-  test("a resume record alone makes it a relay machine, whose alert names the relay as today", async () => {
+  test("a restart after a power-off times the wait from the boot, once ops-session-resume's window has passed, not from the line seen before it", async () => {
+    const ops = scratch()
+    outbox(ops, at(7, 0), false)
+    await beat("relay-watch").run(watch(ops, at(7, 5), "pending: ops-unstick.jsonl").ctx)
+    const boot = at(13, 35)
+    const held: unknown[] = []
+    for (const minute of [40, 45, 50, 55, 60, 65]) {
+      const tick = watch(ops, at(13, minute), "pending: ops-unstick.jsonl", 0, { boot })
+      await beat("relay-watch").run(tick.ctx)
+      held.push(...tick.asks, ...waiterLines(ops))
+    }
+    expect(held).toEqual([])
+    const due = watch(ops, at(14, 10), "pending: ops-unstick.jsonl", 0, { boot })
+    await beat("relay-watch").run(due.ctx)
+    expect(due.asks).toEqual([])
+    expect(waiterLines(ops).map(({ at: queued, to }) => ({ at: queued, to }))).toEqual([
+      { at: iso(at(14, 10)), to: OLD.dispatcher },
+    ])
+  })
+
+  test("on Linux the boot comes from /proc/stat's btime, so a restart there times the wait from the boot too", async () => {
+    const ops = scratch()
+    outbox(ops, at(7, 0), false)
+    const boot = at(13, 35)
+    await withProc(procDir({ boot: Math.floor(boot.getTime() / 1000) }), async () => {
+      const linux = { linux: true }
+      await beat("relay-watch").run(
+        watch(ops, at(7, 5), "pending: ops-unstick.jsonl", 0, linux).ctx,
+      )
+      const held: unknown[] = []
+      for (const minute of [40, 45, 50, 55, 60, 65]) {
+        const tick = watch(ops, at(13, minute), "pending: ops-unstick.jsonl", 0, linux)
+        await beat("relay-watch").run(tick.ctx)
+        held.push(...tick.asks, ...waiterLines(ops))
+      }
+      expect(held).toEqual([])
+      const due = watch(ops, at(14, 10), "pending: ops-unstick.jsonl", 0, linux)
+      await beat("relay-watch").run(due.ctx)
+      expect(waiterLines(ops).map((l) => l.to)).toEqual([OLD.dispatcher])
+    })
+  })
+
+  test("a wake from sleep after the boot times the wait from the wake", async () => {
+    const ops = scratch()
+    outbox(ops, at(7, 0))
+    await beat("relay-watch").run(watch(ops, at(7, 5), "pending: ops-unstick.jsonl").ctx)
+    const up = { boot: at(1, 0), wake: at(13, 30) }
+    const early = watch(ops, at(13, 40), "pending: ops-unstick.jsonl", 0, up)
+    await beat("relay-watch").run(early.ctx)
+    expect(waiterLines(ops)).toEqual([])
+    const due = watch(ops, at(13, 45), "pending: ops-unstick.jsonl", 0, up)
+    await beat("relay-watch").run(due.ctx)
+    expect(waiterLines(ops).map((l) => l.to)).toEqual([OLD.dispatcher])
+  })
+
+  test("a resume record alone makes it a relay machine, whose line names the relay as today", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7), false)
     mkdirSync(join(ops, "..", "resume"), { recursive: true })
     writeFileSync(join(ops, "..", "resume", "runner-plain-relay.sh"), "exit 0\n")
     await beat("relay-watch").run(watch(ops, at(14, 20), "pending: ops-session-resume.jsonl").ctx)
-    const due = watch(ops, at(14, 30), "pending: ops-session-resume.jsonl")
-    await beat("relay-watch").run(due.ctx)
-    expect(due.asks).toHaveLength(1)
-    expect(JSON.parse(due.asks[0]!.stdin!).title).toBe(
-      `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.`,
-    )
+    await beat("relay-watch").run(watch(ops, at(14, 30), "pending: ops-session-resume.jsonl").ctx)
+    expect(waiterLines(ops).map((l) => l.text)).toEqual([
+      `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.${DOWN}`,
+    ])
   })
 
-  test("a relay that has never run, with no cursor at all, alerts on the lines queued since the watch began, and a caught-up relay reads none", async () => {
+  test("a relay that has never run, with no cursor at all, judges the lines queued since the watch began, and a caught-up relay reads none", async () => {
     const ops = scratch()
     mkdirSync(join(ops, "outbox"), { recursive: true })
     writeFileSync(
@@ -1699,51 +1860,22 @@ describe("relay watch", () => {
     const line = (date: Date) =>
       `${JSON.stringify({ at: iso(date), job: "session-resume", text: "carry on", to: "w" })}\n`
     writeFileSync(queue, line(at(13, 0)))
-    const before = watch(ops, at(14, 0), "timeout")
-    await beat("relay-watch").run(before.ctx)
-    expect(before.asks).toEqual([])
+    await beat("relay-watch").run(watch(ops, at(14, 0), "timeout").ctx)
     appendFileSync(queue, line(at(14, 5)))
-    const quiet: unknown[] = []
-    for (const minute of [10, 25]) {
-      const tick = watch(ops, at(14, minute), "timeout")
-      await beat("relay-watch").run(tick.ctx)
-      quiet.push(...tick.asks)
-    }
-    expect(quiet).toEqual([])
+    for (const minute of [10, 25])
+      await beat("relay-watch").run(watch(ops, at(14, minute), "timeout").ctx)
+    expect(waiterLines(ops)).toEqual([])
     const due = watch(ops, at(14, 40), "timeout")
     await beat("relay-watch").run(due.ctx)
-    expect(due.asks).toHaveLength(1)
-    expect(JSON.parse(due.asks[0]!.stdin!).title).toBe(
-      "The outbox relay has never run: no ops line has gone out since the watch began, and this machine relays through Ops' sweep. Ops runs its sweep, whose step 2 runs ops:outbox.",
-    )
-    writeFileSync(
-      join(ops, "outbox", "cursor.json"),
-      JSON.stringify({ "ops-session-resume.jsonl": readFileSync(queue).length }),
-    )
-    utimesSync(join(ops, "outbox", "cursor.json"), at(14, 45), at(14, 45))
-    const resolved = watch(ops, at(14, 50), "timeout")
-    await beat("relay-watch").run(resolved.ctx)
-    expect(resolved.asks.map((a) => a.argv)).toEqual([
-      [
-        "bun",
-        "run",
-        "--silent",
-        "--cwd",
-        "/repo",
-        "ask",
-        "resolve",
-        ID,
-        "--by",
-        OLD.ops,
-        "--note",
-        `The relay moved its cursor again at ${at(14, 45)
-          .toISOString()
-          .replace(/\.\d{3}Z$/, "Z")}`,
-      ],
+    expect(due.asks).toEqual([])
+    expect(waiterLines(ops).map((l) => l.text)).toEqual([
+      `The outbox relay has never run: no ops line has gone out since the watch began, and this machine relays through Ops' sweep. Ops runs its sweep, whose step 2 runs ops:outbox.${DOWN}`,
     ])
-    const caughtUp = watch(ops, at(15, 30), "timeout")
-    await beat("relay-watch").run(caughtUp.ctx)
-    expect(caughtUp.asks).toEqual([])
+    sentAll(ops, at(14, 45))
+    await beat("relay-watch").run(watch(ops, at(14, 50), "timeout").ctx)
+    expect(existsSync(join(ops, "tick", "relay-watch.json"))).toBe(false)
+    await beat("relay-watch").run(watch(ops, at(15, 30), "timeout").ctx)
+    expect(waiterLines(ops)).toHaveLength(1)
     expect(existsSync(join(ops, "tick", "relay-watch-start"))).toBe(false)
   })
 
@@ -1763,39 +1895,26 @@ describe("relay watch", () => {
     const line = (date: Date) =>
       `${JSON.stringify({ at: iso(date), job: "session-resume", text: "carry on", to: "w" })}\n`
     writeFileSync(queue, line(at(13, 0)))
-    const old: unknown[] = []
-    for (const minute of [0, 10, 20, 30]) {
-      const tick = watch(ops, at(14, minute), "timeout")
-      await beat("relay-watch").run(tick.ctx)
-      old.push(...tick.asks)
-    }
-    expect(old).toEqual([])
+    for (const minute of [0, 10, 20, 30])
+      await beat("relay-watch").run(watch(ops, at(14, minute), "timeout").ctx)
+    expect(waiterLines(ops)).toEqual([])
     appendFileSync(queue, line(at(14, 35)))
     await beat("relay-watch").run(watch(ops, at(14, 40), "timeout").ctx)
-    const due = watch(ops, at(14, 50), "timeout")
-    await beat("relay-watch").run(due.ctx)
-    expect(due.asks).toHaveLength(1)
-    expect(JSON.parse(due.asks[0]!.stdin!).title).toBe(
-      "The ops relay has never run: no ops line has gone out since the watch began. Resume runner-plain-relay.",
-    )
+    await beat("relay-watch").run(watch(ops, at(14, 50), "timeout").ctx)
+    expect(waiterLines(ops).map((l) => l.text)).toEqual([
+      `The ops relay has never run: no ops line has gone out since the watch began. Resume runner-plain-relay.${DOWN}`,
+    ])
   })
 
-  test("posts nothing while nothing waits, and times the wait itself, not the cursors' age", async () => {
+  test("queues nothing while nothing waits, and times the wait itself, not the cursors' age", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7))
-    const quiet = watch(ops, at(15, 0), "timeout")
-    await beat("relay-watch").run(quiet.ctx)
-    expect(quiet.asks).toEqual([])
-    const lands = watch(ops, at(15, 5), "pending: ops-sweep.jsonl")
-    await beat("relay-watch").run(lands.ctx)
-    expect(lands.asks).toEqual([])
-    const gone = watch(ops, at(15, 10), "timeout")
-    await beat("relay-watch").run(gone.ctx)
-    const again = watch(ops, at(15, 15), "pending: ops-sweep.jsonl")
-    await beat("relay-watch").run(again.ctx)
-    const late = watch(ops, at(15, 20), "pending: ops-sweep.jsonl")
-    await beat("relay-watch").run(late.ctx)
-    expect([gone.asks, again.asks, late.asks]).toEqual([[], [], []])
+    await beat("relay-watch").run(watch(ops, at(15, 0), "timeout").ctx)
+    await beat("relay-watch").run(watch(ops, at(15, 5), "pending: ops-sweep.jsonl").ctx)
+    await beat("relay-watch").run(watch(ops, at(15, 10), "timeout").ctx)
+    await beat("relay-watch").run(watch(ops, at(15, 15), "pending: ops-sweep.jsonl").ctx)
+    await beat("relay-watch").run(watch(ops, at(15, 20), "pending: ops-sweep.jsonl").ctx)
+    expect(waiterLines(ops)).toEqual([])
   })
 
   test("a cursor that moves while a line waits starts the wait over", async () => {
@@ -1803,166 +1922,111 @@ describe("relay watch", () => {
     outbox(ops, at(14, 7))
     await beat("relay-watch").run(watch(ops, at(14, 20), "pending: a.jsonl").ctx)
     outbox(ops, at(14, 27))
-    const moved = watch(ops, at(14, 30), "pending: b.jsonl")
-    await beat("relay-watch").run(moved.ctx)
-    const early = watch(ops, at(14, 35), "pending: b.jsonl")
-    await beat("relay-watch").run(early.ctx)
-    expect([moved.asks, early.asks]).toEqual([[], []])
-    const due = watch(ops, at(14, 40), "pending: b.jsonl")
-    await beat("relay-watch").run(due.ctx)
-    expect(due.asks).toHaveLength(1)
+    await beat("relay-watch").run(watch(ops, at(14, 30), "pending: b.jsonl").ctx)
+    await beat("relay-watch").run(watch(ops, at(14, 35), "pending: b.jsonl").ctx)
+    expect(waiterLines(ops)).toEqual([])
+    await beat("relay-watch").run(watch(ops, at(14, 40), "pending: b.jsonl").ctx)
+    expect(waiterLines(ops)).toHaveLength(1)
   })
 
-  test("a post or a resolve that fails throws for the heartbeat and keeps its state, so the next cycle tries again", async () => {
+  test("an Inbox alert left open from before this route is resolved on the first cycle, and a later stop posts nothing to the Inbox", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7))
-    await beat("relay-watch").run(watch(ops, at(14, 20), "pending: ops-unstick.jsonl").ctx)
-    const refused = watch(ops, at(14, 30), "pending: ops-unstick.jsonl", 1)
-    await expect(beat("relay-watch").run(refused.ctx)).rejects.toThrow("bun run ask new")
-    expect(
-      JSON.parse(readFileSync(join(ops, "tick", "relay-watch.json"), "utf8")).id,
-    ).toBeUndefined()
-    const posted = watch(ops, at(14, 35), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(posted.ctx)
-    expect(posted.asks).toHaveLength(1)
-    outbox(ops, at(14, 38))
-    const stuck = watch(ops, at(14, 40), "timeout", 1)
-    await expect(beat("relay-watch").run(stuck.ctx)).rejects.toThrow(`bun run ask resolve ${ID}`)
-    expect(JSON.parse(readFileSync(join(ops, "tick", "relay-watch.json"), "utf8")).id).toBe(ID)
-  })
-
-  test("an alert whose item is gone counts as resolved, so the next outage is reported", async () => {
-    const ops = scratch()
-    outbox(ops, at(14, 7))
-    await beat("relay-watch").run(watch(ops, at(14, 20), "pending: ops-unstick.jsonl").ctx)
-    await beat("relay-watch").run(watch(ops, at(14, 30), "pending: ops-unstick.jsonl").ctx)
-    outbox(ops, at(14, 38))
-    const gone = watch(ops, at(14, 40), "timeout")
-    gone.ctx.run = fakeRun({ ask: { code: 1, err: `dashboard-ask: no inbox item ${ID}\n` } }).run
-    await beat("relay-watch").run(gone.ctx)
+    openAlert(ops, at(14, 30))
+    const first = watch(ops, at(14, 35), "pending: ops-unstick.jsonl")
+    await beat("relay-watch").run(first.ctx)
+    expect(first.asks.map((a) => a.argv)).toEqual([resolveArgv(MOVED_ROUTE)])
     expect(existsSync(join(ops, "tick", "relay-watch.json"))).toBe(false)
-    await beat("relay-watch").run(watch(ops, at(15, 0), "pending: ops-unstick.jsonl").ctx)
-    const next = watch(ops, at(15, 10), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(next.ctx)
-    expect(next.asks).toHaveLength(1)
-  })
-
-  test("queues the late-stop line for ops' waiter once a line has waited past two cycles, then the dispatcher's at the escalation window, and posts no Inbox alert while Ops' waiter is live", async () => {
-    const ops = scratch()
-    outbox(ops, at(14, 7))
-    waiterUp(ops, OLD.ops)
-    const ramp: unknown[][] = []
-    for (const minute of [20, 25]) {
+    const asks: unknown[] = []
+    for (const minute of [40, 45, 50, 55]) {
       const tick = watch(ops, at(14, minute), "pending: ops-unstick.jsonl")
       await beat("relay-watch").run(tick.ctx)
-      ramp.push(waiterLines(ops))
-      expect(tick.asks).toEqual([])
-      expect(tick.sent).toEqual([])
+      asks.push(...tick.asks)
     }
-    expect(ramp).toEqual([[], []])
-    const told = watch(ops, at(14, 30), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(told.ctx)
-    expect(waiterLines(ops)).toEqual([
-      {
-        at: iso(at(14, 30)),
-        job: "stuck-alert",
-        text: `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.`,
-        to: OLD.ops,
-      },
-    ])
-    expect(told.sent).toEqual([])
-    expect(told.asks).toEqual([])
-    const escalated = watch(ops, at(14, 35), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(escalated.ctx)
-    expect(waiterLines(ops)).toEqual([
-      {
-        at: iso(at(14, 30)),
-        job: "stuck-alert",
-        text: `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.`,
-        to: OLD.ops,
-      },
-      {
-        at: iso(at(14, 35)),
-        job: "stuck-alert",
-        text: `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay. Ops has not picked it up. Resolve it; post it to the owner's Inbox only if you cannot.`,
-        to: OLD.dispatcher,
-      },
-    ])
-    expect(escalated.asks).toEqual([])
-    const again = watch(ops, at(14, 40), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(again.ctx)
-    expect(waiterLines(ops)).toHaveLength(2)
-    expect(again.asks).toEqual([])
+    expect(asks).toEqual([])
+    expect(waiterLines(ops).map((l) => l.to)).toEqual([OLD.dispatcher])
   })
 
-  test("posts the Inbox alert once Ops has no live waiter, and never while its waiter runs", async () => {
+  test("an Inbox alert left open from before this route is resolved on the first cycle while a sweep hold stands", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7))
-    for (const minute of [20, 25])
-      await beat("relay-watch").run(watch(ops, at(14, minute), "pending: ops-unstick.jsonl").ctx)
-    const down = watch(ops, at(14, 30), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(down.ctx)
-    expect(waiterLines(ops)).toEqual([])
-    expect(down.asks).toHaveLength(1)
-    expect(JSON.parse(down.asks[0]!.stdin!).title).toBe(
-      `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.`,
-    )
-    const up = scratch()
-    outbox(up, at(14, 7))
-    waiterUp(up, OLD.ops)
-    for (const minute of [20, 25])
-      await beat("relay-watch").run(watch(up, at(14, minute), "pending: ops-unstick.jsonl").ctx)
-    const live = watch(up, at(14, 30), "pending: ops-unstick.jsonl")
-    await beat("relay-watch").run(live.ctx)
-    expect(live.asks).toEqual([])
-    expect(waiterLines(up).map((l) => l.to)).toEqual([OLD.ops])
-  })
-
-  test("a hold set over an open Inbox alert resolves the item before the watch goes quiet", async () => {
-    const ops = scratch()
-    outbox(ops, at(14, 7))
-    for (const minute of [20, 25])
-      await beat("relay-watch").run(watch(ops, at(14, minute), "pending: ops-unstick.jsonl").ctx)
-    await beat("relay-watch").run(watch(ops, at(14, 30), "pending: ops-unstick.jsonl").ctx)
+    openAlert(ops, at(14, 30))
     writeFileSync(join(ops, "sweep-hold-until"), `${iso(at(16, 0))}\n`)
     const held = watch(ops, at(14, 35), "pending: ops-unstick.jsonl")
     await beat("relay-watch").run(held.ctx)
-    expect(held.asks.map((a) => a.argv)).toEqual([
-      [
-        "bun",
-        "run",
-        "--silent",
-        "--cwd",
-        "/repo",
-        "ask",
-        "resolve",
-        ID,
-        "--by",
-        OLD.ops,
-        "--note",
-        "The sweep hold stands: Ops set ops/sweep-hold-until, and the watch stays quiet until it passes",
-      ],
-    ])
+    expect(held.asks.map((a) => a.argv)).toEqual([resolveArgv(MOVED_ROUTE)])
     expect(existsSync(join(ops, "tick", "relay-watch.json"))).toBe(false)
   })
 
-  test("posts nothing while ops/sweep-hold-until holds a future time, judges fresh once it passes, and reads an empty or unreadable hold as none", async () => {
+  test("a resolve that fails throws for the heartbeat and keeps its state, so the next cycle tries again, and an item already gone counts as resolved", async () => {
+    const ops = scratch()
+    outbox(ops, at(14, 7))
+    openAlert(ops, at(14, 30))
+    const stuck = watch(ops, at(14, 35), "pending: ops-unstick.jsonl", 1)
+    await expect(beat("relay-watch").run(stuck.ctx)).rejects.toThrow(`bun run ask resolve ${ID}`)
+    expect(JSON.parse(readFileSync(join(ops, "tick", "relay-watch.json"), "utf8")).id).toBe(ID)
+    const gone = watch(ops, at(14, 40), "pending: ops-unstick.jsonl")
+    gone.ctx.run = fakeRun({ ask: { code: 1, err: `dashboard-ask: no inbox item ${ID}\n` } }).run
+    await beat("relay-watch").run(gone.ctx)
+    expect(existsSync(join(ops, "tick", "relay-watch.json"))).toBe(false)
+  })
+
+  test("queues the late-stop line for ops' waiter once a line has waited past two cycles, then the dispatcher's at the escalation window, while Ops' waiter is live", async () => {
+    const ops = scratch()
+    outbox(ops, at(14, 7))
+    waiterUp(ops, OLD.ops)
+    for (const minute of [20, 25]) {
+      const tick = watch(ops, at(14, minute), "pending: ops-unstick.jsonl")
+      await beat("relay-watch").run(tick.ctx)
+      expect(waiterLines(ops)).toEqual([])
+      expect(tick.sent).toEqual([])
+    }
+    const line = `The ops relay is down: no ops line has gone out since ${iso(at(14, 7))}. Resume runner-plain-relay.`
+    const told = watch(ops, at(14, 30), "pending: ops-unstick.jsonl")
+    await beat("relay-watch").run(told.ctx)
+    expect(waiterLines(ops)).toEqual([
+      { at: iso(at(14, 30)), job: "stuck-alert", text: line, to: OLD.ops },
+    ])
+    expect(told.sent).toEqual([])
+    const escalated = watch(ops, at(14, 35), "pending: ops-unstick.jsonl")
+    await beat("relay-watch").run(escalated.ctx)
+    expect(waiterLines(ops)).toEqual([
+      { at: iso(at(14, 30)), job: "stuck-alert", text: line, to: OLD.ops },
+      { at: iso(at(14, 35)), job: "stuck-alert", text: `${line}${LATE}`, to: OLD.dispatcher },
+    ])
+    const again = watch(ops, at(14, 40), "pending: ops-unstick.jsonl")
+    await beat("relay-watch").run(again.ctx)
+    expect(waiterLines(ops)).toHaveLength(2)
+    expect([told.asks, escalated.asks, again.asks]).toEqual([[], [], []])
+  })
+
+  test("a dispatcher told while Ops was down is not told again once Ops' waiter comes back and gets its own line", async () => {
+    const ops = scratch()
+    outbox(ops, at(14, 7))
+    for (const minute of [20, 25, 30])
+      await beat("relay-watch").run(watch(ops, at(14, minute), "pending: ops-unstick.jsonl").ctx)
+    expect(waiterLines(ops).map((l) => l.to)).toEqual([OLD.dispatcher])
+    waiterUp(ops, OLD.ops)
+    for (const minute of [35, 40, 45, 50])
+      await beat("relay-watch").run(watch(ops, at(14, minute), "pending: ops-unstick.jsonl").ctx)
+    expect(waiterLines(ops).map((l) => l.to)).toEqual([OLD.dispatcher, OLD.ops])
+  })
+
+  test("queues nothing while ops/sweep-hold-until holds a future time, judges fresh once it passes, and reads an empty or unreadable hold as none", async () => {
     const ops = scratch()
     outbox(ops, at(14, 7))
     writeFileSync(join(ops, "sweep-hold-until"), `${iso(at(15, 0))}\n`)
-    const held: unknown[] = []
     for (const minute of [30, 40, 50]) {
       const tick = watch(ops, at(14, minute), "pending: ops-unstick.jsonl")
       await beat("relay-watch").run(tick.ctx)
-      held.push(...tick.asks)
+      expect(tick.asks).toEqual([])
       expect(waiterLines(ops)).toEqual([])
     }
-    expect(held).toEqual([])
     writeFileSync(join(ops, "sweep-hold-until"), `${iso(at(14, 45))}\n`)
     const fresh = watch(ops, at(14, 50), "pending: ops-unstick.jsonl")
     await beat("relay-watch").run(fresh.ctx)
     expect(fresh.sent).toEqual([])
-    expect(fresh.asks).toEqual([])
+    expect(waiterLines(ops)).toEqual([])
     writeFileSync(join(ops, "sweep-hold-until"), "")
     waiterUp(ops, OLD.ops)
     const due = watch(ops, at(15, 20), "pending: ops-unstick.jsonl")
@@ -2214,5 +2278,261 @@ describe("every script a beat runs", () => {
     expect(
       scripts.filter((path) => !existsSync(path)).map((path) => path.slice(REPO.length + 1)),
     ).toEqual([])
+  })
+})
+
+// Linux has no vm.loadavg: procps's sysctl says so and exits 255, so the load comes from /proc/loadavg, and with neither it is named, never read as 0 (#2201).
+describe("the load where sysctl has no vm.loadavg", () => {
+  const LINUX = {
+    "vm.loadavg": {
+      code: 255,
+      err: "sysctl: cannot stat /proc/sys/vm/loadavg: No such file or directory\n",
+    },
+  }
+  const saved = process.env.PLAYGROUND_PROC
+  afterAll(() => {
+    process.env.PLAYGROUND_PROC = saved
+  })
+
+  test("the tick beat reads /proc/loadavg's load5", async () => {
+    process.env.PLAYGROUND_PROC = procDir({ load1: 12, load5: 16.5 })
+    const { ctx, sent } = fake(scratch(), at(13, 3), { ...LINUX, "pcpu=": PS })
+    await beat("tick").run(ctx)
+    expect(sent).toEqual([
+      {
+        text: "load5 16.5: bun pid 4242: 300% CPU cmux pid 311: 90% CPU launchd pid 12: 10% CPU kernel_task pid 1: 0% CPU",
+        to: "builder",
+      },
+    ])
+  })
+
+  test.each([
+    ["sysctl exits non-zero and /proc/loadavg is missing", LINUX],
+    ["sysctl prints nothing and /proc/loadavg is missing", { "vm.loadavg": "" }],
+    ["sysctl prints no numbers and /proc/loadavg is missing", { "vm.loadavg": "{ x y z }\n" }],
+  ])("the tick beat names an unread load when %s", async (_, answers) => {
+    process.env.PLAYGROUND_PROC = procDir({}, ["loadavg"])
+    const { ctx, sent } = fake(scratch(), at(13, 3), answers)
+    await beat("tick").run(ctx)
+    expect(sent).toEqual([
+      { text: "load5 unread: neither sysctl vm.loadavg nor /proc/loadavg reads", to: "builder" },
+    ])
+  })
+
+  test("the sweep reads /proc/loadavg's load5 past 30, and names an unread load to ops", async () => {
+    const ops = scratch()
+    process.env.PLAYGROUND_PROC = procDir({ load1: 31, load5: 31 })
+    const high = fake(ops, at(13, 7), LINUX)
+    await beat("sweep").run(high.ctx)
+    expect(high.sent).toEqual([
+      { text: "load5 31 (passed 30); lanes drop to 12", to: "dispatcher" },
+      { text: "load5 31: lanes drop to 12", to: "ops" },
+    ])
+    process.env.PLAYGROUND_PROC = procDir({}, ["loadavg"])
+    const unread = fake(ops, at(13, 37), LINUX)
+    await beat("sweep").run(unread.ctx)
+    expect(unread.sent).toEqual([
+      {
+        text: "ops-tick sweep: load failed: load5 unread: neither sysctl vm.loadavg nor /proc/loadavg reads",
+        to: "ops",
+      },
+    ])
+  })
+})
+
+describe("other-logins", () => {
+  // A data folder whose policy lists two Claude rows and a GLM row, and stored-login.json naming the first Claude row, in another letter case than its row.
+  const logins = (ops: string) => {
+    storeWith(
+      join(ops, ".."),
+      {},
+      {
+        "usage.accounts": [
+          { email: "stored@example.test" },
+          { email: "other@example.test", provider: "claude" },
+          { label: "zai", provider: "glm" },
+        ],
+      },
+    )
+    mkdirSync(join(ops, "usage"), { recursive: true })
+    writeFileSync(
+      join(ops, "usage", "stored-login.json"),
+      JSON.stringify({ account: "Stored@example.test" }),
+    )
+  }
+  const watched = (runs: string[][]) =>
+    runs
+      .filter((argv) => argv.some((a) => a.endsWith("usage/account-watch.py")))
+      .map((a) => a.at(-1))
+
+  test("runs account-watch.py for each Claude row but the stored login, at 21 and 51 past, and logs its line", async () => {
+    const ops = scratch()
+    logins(ops)
+    const { ctx, runs, sent } = fake(ops, at(13, 21), {
+      "account-watch.py": "other@example.test: week 12% five-hour 3%",
+    })
+    await beat("other-logins").run(ctx)
+    expect(watched(runs)).toEqual(["other@example.test"])
+    expect(beat("other-logins").cron).toBe("21,51 * * * *")
+    expect(await Bun.file(join(ops, "log", "account-watch.log")).text()).toContain(
+      "other@example.test: week 12% five-hour 3%",
+    )
+    expect(sent).toEqual([])
+  })
+
+  test("a failed read throws, and the second in a row tells ops once, until a read passes", async () => {
+    const ops = scratch()
+    logins(ops)
+    const failing = { "account-watch.py": { code: 1, out: "other@example.test: token unread" } }
+    const first = fake(ops, at(13, 21), failing)
+    await expect(beat("other-logins").run(first.ctx)).rejects.toThrow(
+      "other@example.test: token unread",
+    )
+    expect(first.sent).toEqual([])
+    const second = fake(ops, at(13, 51), failing)
+    await expect(beat("other-logins").run(second.ctx)).rejects.toThrow()
+    expect(second.sent).toEqual([
+      {
+        text: "other-logins: other@example.test's usage read failed 2 times in a row, so spawn.sh skips the usage check for --account other@example.test: other@example.test: token unread",
+        to: "ops",
+      },
+    ])
+    const third = fake(ops, at(14, 21), failing)
+    await expect(beat("other-logins").run(third.ctx)).rejects.toThrow()
+    expect(third.sent).toEqual([])
+    await beat("other-logins").run(fake(ops, at(14, 51), { "account-watch.py": "ok" }).ctx)
+    await expect(beat("other-logins").run(fake(ops, at(15, 21), failing).ctx)).rejects.toThrow()
+    const again = fake(ops, at(15, 51), failing)
+    await expect(beat("other-logins").run(again.ctx)).rejects.toThrow()
+    expect(again.sent.map((m) => m.to)).toEqual(["ops"])
+  })
+})
+
+// gh's sign-in probe (#2526): a fake gh in a scratch folder first on PATH, run as the real run does, a hang stopped by its timeout.
+describe("gh-auth", () => {
+  const ID = "f167b6b9-f570-4f15-a4b4-eb15b8c4876f"
+  const ME = userInfo().username
+  const bin = mkdtempSync(join(tmpdir(), "gh-auth-bin-"))
+  dirs.push(bin)
+  const DAY_AGO = new Date(2026, 9, 18, 9, 0)
+  // gh auth status's lines for a token that does not read, as measured, its store in brackets
+  const failing = (store: string) =>
+    `echo "github.com" >&2; echo "  X Failed to log in to github.com account ${ME} (${store})" >&2; echo "  - The token in ${store} is invalid." >&2; exit 1`
+  const PASSING = `echo "  ✓ Logged in to github.com account ${ME} (keyring)"; exit 0`
+  const HANGING = "exec sleep 30"
+
+  const kernAt = (date: Date) =>
+    `{ sec = ${Math.floor(date.getTime() / 1000)}, usec = 0 } Sat Nov 14 05:25:54 2026\n`
+
+  // One beat run against a gh whose script is body, the machine up since boot; gh's calls are counted, and every other run answers by answers.
+  const probe = async (
+    ops: string,
+    now: Date,
+    body: string,
+    answers: Answers = {},
+    boot = DAY_AGO,
+  ) => {
+    writeFileSync(join(bin, "gh"), `#!/bin/sh\n${body}\n`)
+    chmodSync(join(bin, "gh"), 0o755)
+    const made = fake(ops, now, { ...ASKED, "kern.boottime": kernAt(boot), ...answers })
+    const others = made.ctx.run
+    let calls = 0
+    made.ctx.run = async (argv, timeoutMs, stdin) => {
+      if (argv[0] !== "gh") return others(argv, timeoutMs, stdin)
+      calls++
+      const proc = Bun.spawn(argv, {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        stderr: "pipe",
+        stdout: "pipe",
+        timeout: timeoutMs,
+      })
+      const [out, err] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      return { code: await proc.exited, out: out + err }
+    }
+    await ghAuth(300)(made.ctx)
+    return { ...made, calls }
+  }
+
+  const waiter = (ops: string): string[] =>
+    existsSync(join(ops, "outbox", "ops-stuck-alert.jsonl"))
+      ? readFileSync(join(ops, "outbox", "ops-stuck-alert.jsonl"), "utf8")
+          .trimEnd()
+          .split("\n")
+          .map((l) => JSON.parse(l).text)
+      : []
+  const result = (ops: string) =>
+    JSON.parse(readFileSync(join(ops, "tick", "gh-auth.json"), "utf8"))
+  const resolves = (runs: string[][]) => runs.filter((argv) => argv.includes("resolve"))
+
+  test("runs each minute as a beat", () => {
+    expect(beat("gh-auth").cron).toBe("* * * * *")
+  })
+
+  test("a failing gh, a hanging one, then a passing one raise one alert, then clear it", async () => {
+    const ops = scratch()
+    const failed = await probe(ops, at(10, 0), failing("/home/me/.config/gh/hosts.yml"))
+    expect(waiter(ops)).toEqual([`gh cannot read GitHub: ${TOKEN_INVALID}`])
+    expect(alertTitles(failed.inputs)).toEqual([`gh cannot read GitHub: ${TOKEN_INVALID}`])
+    expect(result(ops)).toMatchObject({ by: OLD.ops, id: ID, ok: false, reason: TOKEN_INVALID })
+
+    const hung = await probe(ops, at(10, 1), HANGING)
+    expect(hung.calls).toBe(1)
+    expect(waiter(ops)).toHaveLength(1)
+    expect(hung.inputs).toEqual([])
+    expect(result(ops)).toMatchObject({ id: ID, ok: false, reason: GH_HANGS })
+
+    const passed = await probe(ops, at(10, 2), PASSING)
+    expect(waiter(ops)).toEqual([
+      `gh cannot read GitHub: ${TOKEN_INVALID}`,
+      "gh reads GitHub again",
+    ])
+    expect(resolves(passed.runs)).toHaveLength(1)
+    expect(resolves(passed.runs)[0]).toContain(ID)
+    expect(result(ops)).toEqual({ at: at(10, 2).toISOString(), ok: true })
+  })
+
+  test("probes hourly while gh reads, and each minute in the first 10 after boot", async () => {
+    const ops = scratch()
+    await probe(ops, at(10, 0), PASSING)
+    expect((await probe(ops, at(10, 1), PASSING)).calls).toBe(0)
+    expect((await probe(ops, at(11, 0), PASSING)).calls).toBe(1)
+    expect((await probe(ops, at(11, 1), PASSING, {}, new Date(2026, 9, 19, 10, 55))).calls).toBe(1)
+  })
+
+  test("a failed probe that cannot post its alert posts it at the next one", async () => {
+    const ops = scratch()
+    const unposted = await probe(ops, at(10, 0), failing("keyring"), {
+      "ask new": { code: 1, err: "down\n" },
+    }).catch((error: Error) => error)
+    expect(unposted).toBeInstanceOf(Error)
+    expect(result(ops)).toMatchObject({ ok: false })
+    const posted = await probe(ops, at(10, 1), failing("keyring"))
+    expect(alertTitles(posted.inputs)).toHaveLength(1)
+    expect(waiter(ops)).toHaveLength(1)
+  })
+
+  test("a keyring store with no desktop session names the desktop sign-in, else the token", async () => {
+    const seated = JSON.stringify([{ seat: "seat0", user: ME }])
+    const greeter = JSON.stringify([
+      { seat: "seat0", user: "gdm" },
+      { seat: null, user: ME },
+    ])
+    const cases: [string, Answers, string][] = [
+      ["default", { loginctl: greeter }, KEYRING_LOCKED],
+      ["keyring", { loginctl: greeter }, KEYRING_LOCKED],
+      ["default", { loginctl: seated }, TOKEN_INVALID],
+      ["/home/me/.config/gh/hosts.yml", { loginctl: greeter }, TOKEN_INVALID],
+      ["default", { loginctl: { code: 99 }, who: `${ME} ttys001 Nov 17 09:00` }, KEYRING_LOCKED],
+      ["default", { loginctl: { code: 99 }, who: `${ME} console Nov 17 09:00` }, TOKEN_INVALID],
+      ["default", { loginctl: { code: 99 }, who: { code: 1 } }, TOKEN_INVALID],
+    ]
+    for (const [store, answers, reason] of cases) {
+      const ops = scratch()
+      await probe(ops, at(10, 0), failing(store), answers)
+      expect([store, result(ops).reason]).toEqual([store, reason])
+    }
   })
 })

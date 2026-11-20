@@ -105,10 +105,7 @@ describe("the hosted dashboard writes only what a paired key signs", () => {
     const writes: [string, string][] = [
       ["app-sidebar.tsx", "i === 0 && !muted && !config.hosted ? ("],
       ["app-sidebar.tsx", "!message || config.hosted) return null"],
-      [
-        "app-sidebar.tsx",
-        '{config.hosted ? (\n        <SidebarGroupLabel className="w-full pl-2.5" render={labelToggle(open, setOpen)}>',
-      ],
+      ["app-sidebar.tsx", "menu={\n          !config.hosted && (\n            <ContextMenuItem"],
       ["app-sidebar.tsx", ") : muted || config.hosted ? ("],
       ["app-sidebar.tsx", "{!config.hosted && (\n                <DropdownMenu>"],
       ["thread-view.tsx", "if (unread === 0 || config.hosted) return"],

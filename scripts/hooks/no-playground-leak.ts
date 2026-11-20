@@ -5,11 +5,15 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { basename, join } from "node:path"
 
 import { dataDir, dataDirOf } from "../../packages/env/src/data-dir"
+import { heldBy, pushRemote, withLiveBudget } from "../../packages/safe-delete/src/live-refs"
 import { guardedOrgs } from "../../packages/settings/src/ext"
 import { coreDir, readPolicy, readPolicySync } from "../../packages/settings/src/rendered"
 import { gatedSendsSchema } from "../../packages/settings/src/slack"
 import { implicitRepos, type Repo, remoteRepo, remotes, repoOf } from "./github"
+import { input } from "./input"
 import { guardList, isRecord, isStrings } from "./lists"
+import { check as prepareWrite } from "./no-prepare-write"
+import { check as protectedPush } from "./no-protected-push"
 import { readOnly } from "./read-only"
 import { fromFactory } from "./role"
 import {
@@ -49,15 +53,23 @@ import {
   type Word,
   type Xargs,
 } from "./shell"
+import { startingVariables } from "./steady"
 
 type Environment = Record<string, string | undefined>
 // Where a write lands: on a surface the guard guards, off it, or somewhere the hook cannot tell; `byText` marks one only the network or the run could place (a GraphQL node id, a URL the run computes), which anyWrite judges by its text alone.
 type Target = { byText?: true; label: string; where: "guarded" | "other" | "unknown" }
 // What a hit in a write's text is, and the plain-words fix its refusal names.
 export type Hit = { detail: string; fix: string }
-// What one guard guards, so another guard (no-public-leak, no-extension-repo-write) reads every write as this one does: the repositories it guards, what in a text it refuses, how its refusal reads, whether Linear and Slack (hosts) and git commits and pushes count, and whether any write that changes a guarded repository's git data or name is refused whatever its text (anyWrite).
+// A text a write publishes, with the place in the write it fills and that place's own fix, so a refusal names which text held the term.
+type Placed = Text & { where?: { fix?: string; name: string } }
+const withPlace = (text: Text, name: string, fix?: string): Placed => ({
+  ...text,
+  where: { fix, name },
+})
+// What one guard guards, so another guard (no-public-leak, no-extension-repo-write) reads every write as this one does: the repositories it guards, what in a text it refuses, how its refusal reads, whether Linear and Slack (hosts) and git commits and pushes count, and whether any write that changes a guarded repository's git data or name is refused whatever its text (anyWrite), a git push that writes only branches other than the default passing (branchPush).
 export type Policy = {
   anyWrite?: true
+  branchPush?: true
   find: (text: string) => Hit | undefined
   gates?: Gate[]
   git: boolean
@@ -240,6 +252,20 @@ const spec = (texts: string[], files: string[], others: string[] = []): Spec => 
   texts,
 })
 const BODY = ["-b", "--body"]
+// The place each gh text flag fills, by its long name, which a refusal names.
+const FLAG_PLACES: Record<string, string> = {
+  "--body": "its body",
+  "--body-file": "its body file",
+  "--comment": "its comment",
+  "--notes": "its notes",
+  "--notes-file": "its notes file",
+  "--title": "its title",
+}
+// A flag's long name in its write's spec, where each short flag sits just before its long one, so -F reads as --notes-file for a ship and --body-file for a pull request.
+function longName(name: string, flags: string[]): string {
+  const next = flags[flags.indexOf(name) + 1]
+  return name.startsWith("--") || !next?.startsWith("--") ? name : next
+}
 const BODY_FILE = ["-F", "--body-file"]
 const CLOSING = spec(["-c", "--comment"], [], ["-r", "--reason", "--duplicate-of"])
 const EDIT = [
@@ -464,7 +490,7 @@ function refuseAny(what: string, target: Target, fix = NOT_RUN): string {
 async function judge(
   what: string,
   target: Target,
-  texts: Text[],
+  texts: Placed[],
   env: Env,
   extras: Text[] = [],
 ): Promise<string | undefined> {
@@ -472,17 +498,22 @@ async function judge(
   if (state().policy.anyWrite && !target.byText) return refuseAny(what, target)
   const resolved = await Promise.all(texts.map((t) => resolveText(t, env)))
   const seen = (await Promise.all(extras.map((t) => resolveText(t, env)))).filter((t) => !t.unknown)
-  const hit = [...resolved, ...seen].map((t) => state().policy.find(t.value)).find(Boolean)
+  const hits = [...resolved, ...seen].map((t) => state().policy.find(t.value))
+  const at = hits.findIndex(Boolean)
+  const hit = hits[at]
+  const where = texts[at]?.where
+  const holds = hit && `${hit.detail}${where ? `, in ${where.name}` : ""}`
+  const fix = hit && (where?.fix ? `${hit.fix} ${where.fix}` : hit.fix)
   if (target.where === "unknown") {
     if (!hit) return
     return refuse(
       what,
       target,
-      `the hook cannot tell whether it writes to ${state().policy.place}, and its text holds ${hit.detail}`,
-      `Name where it goes by its literal value in a call of its own (gh -R <owner>/<repo>, the pull request number or URL, git -C /abs/checkout, the URL itself, or a REST endpoint naming the repository in place of a GraphQL node id), or ${lower(hit.fix)} ${NOT_RUN}`,
+      `the hook cannot tell whether it writes to ${state().policy.place}, and its text holds ${holds}`,
+      `Name where it goes by its literal value in a call of its own (gh -R <owner>/<repo>, the pull request number or URL, git -C /abs/checkout, the URL itself, or a REST endpoint naming the repository in place of a GraphQL node id), or ${lower(fix ?? "")} ${NOT_RUN}`,
     )
   }
-  if (hit) return refuse(what, target, `its text holds ${hit.detail}`, hit.fix)
+  if (hit) return refuse(what, target, `its text holds ${holds}`, fix ?? hit.fix)
   const hidden = resolved.find((t) => t.unknown)
   if (hidden) {
     return refuse(
@@ -611,18 +642,18 @@ async function gh(
   const found = GH_WRITES.get(key) ?? (state().policy.anyWrite ? ANY_GH_WRITES.get(key) : undefined)
   if (!found) return
   const { flags, positionals } = parseFlags(rest, found.takes)
-  const texts: Text[] = []
+  const texts: Placed[] = []
   for (const { name, value } of flags) {
     const posts = found.texts.includes(name) || found.files.includes(name)
+    const long = longName(name, found.texts.includes(name) ? found.texts : found.files)
+    const place = FLAG_PLACES[long] ?? `its ${long} value`
     if (!value) {
       if (posts) texts.push(unknown(`${name} with no value`))
-    } else if (found.texts.includes(name)) texts.push(value)
+    } else if (found.texts.includes(name)) texts.push(withPlace(value, place))
     else if (found.files.includes(name)) {
-      texts.push(
-        value.value === "-" && !value.unknown
-          ? await stdinOf(cmd, env)
-          : await readPath(value, env),
-      )
+      const file =
+        value.value === "-" && !value.unknown ? await stdinOf(cmd, env) : await readPath(value, env)
+      texts.push(withPlace(file, place))
     } else if (name === "-R" || name === "--repo") repos.push(value)
   }
   if (xargs && !xargs.replace) texts.push(unknown("the arguments xargs appends"))
@@ -645,7 +676,7 @@ async function gh(
     if (refused) return refused
   }
   const target = decide(named.length > 0 ? named : fallback)
-  if (key === "pr create" && target.where !== "other") texts.push(...prCreate(rest, env))
+  if (key === "pr create" && target.where !== "other") texts.push(...prCreate(rest, flags, env))
   return judge(
     `gh ${key}`,
     target,
@@ -737,29 +768,34 @@ function unplaced(what: string, source: (Repo | undefined)[], env: Env): string 
   )
 }
 
-// What `gh pr create` publishes beyond its flags: the branch it opens from and the commits it may push, and with --fill the messages it reads.
-function prCreate(rest: Word[], env: Env): Text[] {
+// What `gh pr create` publishes beyond its flags: with no --head, the branch it opens from and the commits it may push, those its branch's push remote holds no live branch of (heldBy) (with --head it opens from that branch, already pushed, and pushes nothing; gh keeps the last --head, and only a non-empty literal counts, so one empty, only whitespace, unreadable, or holding $, a backtick, a glob character or a quote reads as none), and with --fill the messages it reads.
+function prCreate(rest: Word[], flags: Flag[], env: Env): Placed[] {
   const values = rest.map((w) => w.value)
-  const texts = [
-    gitText(
-      env.cwd,
-      ["log", "--format=%B", "-n", "500", "HEAD", "--not", "--remotes"],
-      "the commits it may push",
-    ),
-  ]
-  if (!values.some((v) => /^(?:-H|--head)(?:=|$)/.test(v))) texts.push(branch(env.cwd))
+  const texts: Placed[] = []
+  const head = flags.findLast((f) => f.name === "-H" || f.name === "--head")?.value
+  if (!head || unreadable(head) || !head.value.trim() || /[$`*?[\]'"]/.test(head.value))
+    texts.push(
+      ...commitTexts(
+        env.cwd,
+        ["HEAD", "--not", ...(env.cwd ? heldBy(env.cwd, pushRemote(env.cwd)) : [])],
+        "the commits it may push",
+        ", which it may push",
+      ),
+      withPlace(branch(env.cwd), "the branch it opens from"),
+    )
   if (values.some((v) => v === "-f" || v.startsWith("--fill"))) {
     const at = values.findIndex((v) => /^(?:-B|--base)(?:=|$)/.test(v))
     const base =
       at === -1 ? "HEAD" : values[at].includes("=") ? values[at].split("=")[1] : values[at + 1]
     texts.push(
-      base && !base.includes(UNKNOWN)
-        ? gitText(
+      ...(base && !base.includes(UNKNOWN)
+        ? commitTexts(
             env.cwd,
-            ["log", "--format=%B", "-n", "500", `origin/${base}..HEAD`],
+            [`origin/${base}..HEAD`],
             "the commits --fill reads",
+            ", which --fill reads",
           )
-        : unknown("the base --fill reads from"),
+        : [unknown("the base --fill reads from")]),
     )
   }
   return texts
@@ -1059,6 +1095,25 @@ function clearedPost(
   return `no-playground-leak hook refused ${what} to ${name}: every post there ends with the line ${signature}, since it goes out through the owner's Slack account and must never read as the owner's own. Put that line last in its text, with no attachments or markdown_text; blocks pass only as rich_text sections of text and links whose last line is that signature as italic text, then run it again.`
 }
 
+const COMMIT_FIX =
+  "Reword that commit's message (git commit --amend for the newest one), then run it again."
+// The message of each commit a git log range reads, one text per commit named by its short sha, or the one unknown when the read fails; a piece that opens with no sha is a message's own 0x1e and its text, kept on the commit before it.
+function commitTexts(dir: string | undefined, range: string[], what: string, after = ""): Placed[] {
+  const log = gitText(dir, ["log", "--format=%h%x00%B%x1e", "-n", "500", ...range], what)
+  if (log.unknown) return [log]
+  const texts: Placed[] = []
+  for (const entry of log.value.split("\x1e")) {
+    const sha = /^\n?([\da-f]{4,64})\0/.exec(entry)
+    const last = texts.at(-1)
+    if (sha) {
+      const name = `the message of commit ${sha[1]}${after}`
+      texts.push(withPlace({ value: entry.slice(sha[0].length) }, name, COMMIT_FIX))
+    } else if (last) last.value += `\x1e${entry}`
+    else texts.push({ value: entry })
+  }
+  return texts
+}
+
 // The text of a git read in a checkout, or an unknown naming what it stood for when the read fails.
 function gitText(dir: string | undefined, args: string[], what: string): Text {
   if (!dir) return unknown(`${what}, in a checkout the hook cannot resolve`)
@@ -1171,7 +1226,9 @@ async function git(
           "it carries -c, --config-env, --git-dir or a GIT_ variable, which can change where it pushes",
           PLACE_FIX,
         )
-      return push(subtree ? rest.slice(1) : rest, here, [], subtree ? SUBTREE_TAKES : PUSH_TAKES)
+      return subtree
+        ? push(rest.slice(1), here, [], SUBTREE_TAKES)
+        : push(rest, here, [], PUSH_TAKES, sub === "push")
     }
   }
   if (sub !== "commit" && sub !== "push") return
@@ -1180,9 +1237,12 @@ async function git(
   // A checkout with no remote publishes nothing; one the hook cannot find may be a guarded org's.
   if (dir && checkout.length === 0) return
   if (state().policy.anyWrite) {
-    // A commit changes only the local clone, so under anyWrite it is refused only in a guarded repository's clone.
+    // A commit changes only the local clone, so under anyWrite it is refused only in a guarded repository's clone, and under branchPush it passes there on a branch the push rule lets through, while nothing in the call could move HEAD or where git writes first.
     const target = decide(dir ? checkout : [undefined])
-    return target.where === "guarded" ? judge("git commit", target, [], env) : undefined
+    if (target.where !== "guarded") return
+    const onBranch =
+      state().policy.branchPush && dir && !carried && !state().movedBefore && branchHead(dir)
+    return onBranch ? undefined : judge("git commit", target, [], env)
   }
   const { flags } = parseFlags(rest, COMMIT_TAKES)
   const texts: Text[] = [branch(dir)]
@@ -1300,28 +1360,130 @@ function pushTarget(remote: Word | undefined, dir: string | undefined): Target {
   return decide(urls(remote.value) ?? [literal(remote.value)])
 }
 
-// git push publishes the names of the refs it pushes and the messages of every commit the remote does not hold yet.
+// Under branchPush, the flags a push of branches may carry; any other (--all, --mirror, --tags, --delete, --repo, -o) leaves it refused.
+const BRANCH_PUSH_FLAGS = new Set([
+  "--dry-run",
+  "--force",
+  "--force-if-includes",
+  "--force-with-lease",
+  "--no-verify",
+  "--quiet",
+  "--set-upstream",
+  "--verbose",
+  "-f",
+  "-n",
+  "-q",
+  "-u",
+  "-v",
+])
+
+// Under branchPush, whether a push names its remote and writes only branches other than the default (main, master and the remote's HEAD), each refspec read as a literal: no HEAD or @ as the branch, glob, tag, other refs/ path, delete, or refspec remote.<name>.push could remap.
+function branchOnly(flags: Flag[], positionals: Word[], dir: string): boolean {
+  const [remote, ...specs] = positionals
+  if (!remote || specs.length === 0 || flags.some((f) => !BRANCH_PUSH_FLAGS.has(f.name)))
+    return false
+  const defaults = new Set(["main", "master"])
+  if (!/[:/]/.test(remote.value)) {
+    const config = gitText(dir, ["config", "--list"], "the checkout's git config")
+    if (
+      config.unknown ||
+      config.value.split("\n").some((line) => line.startsWith(`remote.${remote.value}.push=`))
+    )
+      return false
+    const head = gitText(
+      dir,
+      ["symbolic-ref", "--short", `refs/remotes/${remote.value}/HEAD`],
+      "the remote's default branch",
+    )
+    if (!head.unknown)
+      defaults.add(
+        head.value
+          .trim()
+          .slice(remote.value.length + 1)
+          .toLowerCase(),
+      )
+  }
+  return specs.every((spec) => {
+    if (unreadable(spec) || /[*?[\\\s]/.test(spec.value)) return false
+    const [source, destination, more] = spec.value.replace(/^\+/, "").split(":")
+    if (more !== undefined || !source || destination === "") return false
+    // With no destination, git pushes the local ref of that name, so a tag of that name pushes the tag.
+    if (destination === undefined) {
+      const tags = gitText(
+        dir,
+        ["for-each-ref", "--format=%(refname)", `refs/tags/${source}`],
+        "the tags of that name",
+      )
+      if (tags.unknown || tags.value.trim() !== "") return false
+    }
+    const name = (destination ?? source).replace(/^(?:refs\/)?heads\//, "")
+    return (
+      name !== "" && !/^(?:refs\/|@$|head$|tag$)/i.test(name) && !defaults.has(name.toLowerCase())
+    )
+  })
+}
+
+// Under branchPush, whether the checkout's HEAD, read before the call runs, is a named branch the push rule lets through: not main, master or any remote's HEAD branch.
+function branchHead(dir: string): boolean {
+  const head = gitText(dir, ["symbolic-ref", "--short", "-q", "HEAD"], "the checkout's branch")
+  const name = head.value.trim().toLowerCase()
+  if (head.unknown || name === "") return false
+  const remotes = gitText(dir, ["remote"], "the checkout's remotes")
+  if (remotes.unknown) return false
+  const defaults = new Set(["main", "master"])
+  for (const remote of remotes.value.split("\n").filter(Boolean)) {
+    const ref = gitText(
+      dir,
+      ["symbolic-ref", "--short", "-q", `refs/remotes/${remote}/HEAD`],
+      "the remote's default branch",
+    )
+    if (!ref.unknown)
+      defaults.add(
+        ref.value
+          .trim()
+          .slice(remote.length + 1)
+          .toLowerCase(),
+      )
+  }
+  return !defaults.has(name)
+}
+
+// git push publishes the names of the refs it pushes and the messages of every commit the remote it pushes to (the one it names, else git's push remote) holds no live branch of (heldBy), each one when that remote cannot be read.
 async function push(
   rest: Word[],
   env: Env,
   checkout: Repo[],
   takes = PUSH_TAKES,
+  plain = false,
 ): Promise<string | undefined> {
   const { flags, positionals } = parseFlags(rest, takes)
   if (state().policy.anyWrite) {
     const remote = positionals[0] ?? flags.findLast((f) => f.name === "--repo")?.value
-    return judge("git push", pushTarget(remote, env.cwd), [], env)
+    const target = pushTarget(remote, env.cwd)
+    if (
+      plain &&
+      state().policy.branchPush &&
+      target.where === "guarded" &&
+      env.cwd &&
+      branchOnly(flags, positionals, env.cwd)
+    )
+      return
+    return judge("git push", target, [], env)
   }
   const names = new Set(flags.map((f) => f.name))
   const [remote, ...refspecs] = positionals
   let target: Target
-  let remoteName: string | undefined
-  if (!remote) target = decide(env.cwd ? checkout : [undefined])
-  else if (remote.unknown || remote.reads?.length || remote.value.includes(UNKNOWN))
+  let pushTo: string | undefined
+  if (!remote) {
+    target = decide(env.cwd ? checkout : [undefined])
+    pushTo = env.cwd && pushRemote(env.cwd)
+  } else if (remote.unknown || remote.reads?.length || remote.value.includes(UNKNOWN))
     target = decide([undefined])
-  else if (/[:/]/.test(remote.value)) target = decide([remoteRepo(remote.value)])
-  else {
-    remoteName = remote.value
+  else if (/[:/]/.test(remote.value)) {
+    target = decide([remoteRepo(remote.value)])
+    pushTo = remote.value
+  } else {
+    pushTo = remote.value
     const url = gitText(
       env.cwd,
       ["remote", "get-url", remote.value],
@@ -1330,49 +1492,57 @@ async function push(
     target = decide([url.unknown ? undefined : remoteRepo(url.value)])
   }
   if (target.where === "other") return
-  const texts: Text[] = flags.flatMap((f) =>
-    f.value && (f.name === "-o" || f.name === "--push-option") ? [f.value] : [],
+  const texts: Placed[] = flags.flatMap((f) =>
+    f.value && (f.name === "-o" || f.name === "--push-option")
+      ? [withPlace(f.value, "a push option")]
+      : [],
   )
   const sources: string[] = []
   if (names.has("--all") || names.has("--branches") || names.has("--mirror")) {
     texts.push(
-      gitText(
-        env.cwd,
-        ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
-        "the branches it pushes",
+      withPlace(
+        gitText(
+          env.cwd,
+          ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+          "the branches it pushes",
+        ),
+        "the branch names it pushes",
       ),
     )
     sources.push("--branches")
   }
   if (names.has("--tags") || names.has("--follow-tags") || names.has("--mirror")) {
     texts.push(
-      gitText(
-        env.cwd,
-        ["for-each-ref", "--format=%(refname:short)%0a%(contents)", "refs/tags"],
+      withPlace(
+        gitText(
+          env.cwd,
+          ["for-each-ref", "--format=%(refname:short)%0a%(contents)", "refs/tags"],
+          "the tags it pushes",
+        ),
         "the tags it pushes",
       ),
     )
   }
   const deleting = names.has("--delete") || names.has("-d")
   for (const spec of refspecs) {
-    texts.push(spec)
+    texts.push(withPlace(spec, "a ref it pushes"))
     if (spec.unknown || spec.reads?.length || spec.value.includes(UNKNOWN)) continue
     const [source, destination] = spec.value.replace(/^\+/, "").split(":")
     // `git push origin HEAD` names the remote branch after the current one.
     if (destination === undefined && (source === "HEAD" || source === "@"))
-      texts.push(branch(env.cwd))
+      texts.push(withPlace(branch(env.cwd), "the branch name it pushes"))
     if (source !== "" && !deleting) sources.push(source)
   }
   if (refspecs.length === 0 && sources.length === 0) {
-    texts.push(branch(env.cwd))
+    texts.push(withPlace(branch(env.cwd), "the branch name it pushes"))
     sources.push("HEAD")
   }
   if (sources.length > 0) {
-    const not = remoteName ? `--remotes=${remoteName}` : "--remotes"
+    const held = env.cwd && pushTo ? heldBy(env.cwd, pushTo) : []
     texts.push(
-      gitText(
+      ...commitTexts(
         env.cwd,
-        ["log", "--format=%B", "-n", "500", ...sources, "--not", not],
+        [...sources, "--not", ...held],
         "the messages of the commits it pushes",
       ),
     )
@@ -1583,19 +1753,21 @@ export async function inspectAs(
   cleared: Cleared = {},
 ): Promise<string | undefined> {
   const call: Call = { changed: false, cleared, moved: false, movedBefore: false, policy: given }
-  return await calls.run(call, async () => {
-    try {
-      return await inspect(raw, environment)
-    } catch (error) {
-      const subject = subjectOf(raw)
-      // Under anyWrite a call that may write is refused whatever it names, since an error it caused may hide where it writes.
-      const writes = WRITE_CALL.test(subject) || (given.anyWrite && candidate(subject))
-      if (!writes || (!given.anyWrite && !given.find(subject))) return
-      if (given.anyWrite)
-        return `${given.guard} hook refused this call: it could not read it (${error}), so it cannot tell whether it is ${given.what}. Split it into plain commands and run them again.`
-      return `${given.guard} hook could not read this call (${error}), which may carry ${given.what} to ${given.place}, so it refuses it. Split it into plain commands and run them again.`
-    }
-  })
+  return await withLiveBudget(() =>
+    calls.run(call, async () => {
+      try {
+        return await inspect(raw, environment)
+      } catch (error) {
+        const subject = subjectOf(raw)
+        // Under anyWrite a call that may write is refused whatever it names, since an error it caused may hide where it writes.
+        const writes = WRITE_CALL.test(subject) || (given.anyWrite && candidate(subject))
+        if (!writes || (!given.anyWrite && !given.find(subject))) return
+        if (given.anyWrite)
+          return `${given.guard} hook refused this call: it could not read it (${error}), so it cannot tell whether it is ${given.what}. Split it into plain commands and run them again.`
+        return `${given.guard} hook could not read this call (${error}), which may carry ${given.what} to ${given.place}, so it refuses it. Split it into plain commands and run them again.`
+      }
+    }),
+  )
 }
 
 // What an error is judged by: the Bash command, or the tool's name and input, never its cwd.
@@ -1634,10 +1806,12 @@ async function inspect(raw: string, environment: Environment): Promise<string | 
     const command = input?.command
     if (typeof command !== "string" || !candidate(command)) return
     const directory = typeof cwd === "string" ? cwd : undefined
+    const own = knownVariables(command, environment, directory)
     const env: Env = {
       cwd: directory,
       files: new Map(),
-      known: knownVariables(command, environment, directory),
+      // a variable of the session's starting environment is read as its value, so `git -C "$PLAYGROUND_REPO" push` is placed by the clone it names
+      known: { ...own, ...startingVariables(command, environment, own) },
       process: environment,
       vars: new Map(),
     }
@@ -1647,8 +1821,11 @@ async function inspect(raw: string, environment: Environment): Promise<string | 
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
-  const reason = (await fromFactory(raw)) ? await check(raw) : undefined
+  const raw = await input("no-playground-leak", "guard")
+  // a prepare-only session's tracker, chat and pull request writes wait for its claim (no-prepare-write), and a GitHub tool's write to main or canary of the factory's repository is refused (no-protected-push), checked here since this hook's matcher takes those MCP tools
+  const reason = (await fromFactory(raw))
+    ? ((await prepareWrite(raw)) ?? (await protectedPush(raw)) ?? (await check(raw)))
+    : undefined
   if (reason) {
     console.error(reason)
     process.exit(2)

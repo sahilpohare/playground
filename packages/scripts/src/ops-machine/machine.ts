@@ -2,16 +2,36 @@ import { appendFile, mkdir, readdir } from "node:fs/promises"
 import { join } from "node:path"
 
 import { placedKindOf, ROSTER_ROLE_OF_KIND } from "@packages/config/kinds"
+import { HARNESSES } from "@packages/settings"
 
 import type { Run } from "../ops-tick/tick"
+import { procSource, type SysctlName, sysctlOf } from "./readings"
 
-// ops-machine: one line a minute of this machine's room to ops/machine.jsonl, for capacity reads and before-and-after comparisons. It reads sysctl, ps and Claude Code's session registry only, with no model call and no terminal call.
+// ops-machine: one line a minute of this machine's room to ops/machine.jsonl, for capacity reads and before-and-after comparisons. It reads sysctl (on Linux the /proc text that stands for each name, readings.ts), ps and Claude Code's session registry only, with no model call and no terminal call.
 
 const ROLES = new Set(["probe", "reviewer", "runner", "tester", "worker"])
 
+type ClaudeCodeBackend = Extract<
+  (typeof HARNESSES)[number],
+  { id: "claude-code" }
+>["backends"][number]
+
+// Claude Code's backends, as packages/settings' HARNESSES lists them, each counted in a sample.
+const BACKENDS = HARNESSES.filter((h) => h.id === "claude-code").flatMap(
+  (h) => h.backends,
+) as ClaudeCodeBackend[]
+
+// Pure: the backend a session's command line runs on: glm for a glm- model, local for the local model's served name (spawn.sh's --model local), else claude.
+const backendOf = (args: string): ClaudeCodeBackend =>
+  /--model[= ]'?glm-/.test(args)
+    ? "glm"
+    : /--model[= ]'?local(?=['\s]|$)/.test(args)
+      ? "local"
+      : "claude"
+
 export type Sample = {
   at: string
-  backends: { claude: number; glm: number }
+  backends: Record<ClaudeCodeBackend, number>
   cores: number
   freePct: number
   load1: number
@@ -31,7 +51,7 @@ export const roleOf = (name: string): string => {
   return kind && ROLES.has(kind) ? kind : "other"
 }
 
-// Pure: one sample from sysctl's answers, each live session's name and command line, and the run-slot waiters; a session runs on GLM when its command line asks for a glm- model.
+// Pure: one sample from sysctl's answers, each live session's name and command line, and the run-slot waiters, each session counted under its backend (backendOf).
 export const sampleOf = (input: {
   at: Date
   sessions: { args: string; name: string }[]
@@ -46,11 +66,11 @@ export const sampleOf = (input: {
     .map(Number)
   const swap = /used = ([\d.]+)M/.exec(sysctl["vm.swapusage"] ?? "")
   const roles: Record<string, number> = {}
-  const backends = { claude: 0, glm: 0 }
+  const backends = Object.fromEntries(BACKENDS.map((b) => [b, 0])) as Sample["backends"]
   for (const { args, name } of input.sessions) {
     const role = roleOf(name)
     roles[role] = (roles[role] ?? 0) + 1
-    backends[/--model[= ]'?glm-/.test(args) ? "glm" : "claude"]++
+    backends[backendOf(args)]++
   }
   return {
     at: input.at.toISOString().replace(/\.\d{3}Z$/, "Z"),
@@ -68,7 +88,7 @@ export const sampleOf = (input: {
   }
 }
 
-const SYSCTLS = [
+const SYSCTLS: SysctlName[] = [
   "hw.ncpu",
   "kern.memorystatus_level",
   "kern.memorystatus_vm_pressure_level",
@@ -85,9 +105,11 @@ export const readMachine = async (
 ): Promise<Sample> => {
   const sysctl: Record<string, string> = {}
   for (const name of SYSCTLS) {
-    const { code, out } = await run(["sysctl", "-n", name])
-    if (code !== 0) throw new Error(`sysctl ${name} exited ${code}`)
-    sysctl[name] = out.trim()
+    const answer = await run(["sysctl", "-n", name])
+    const text = sysctlOf(name, answer)
+    if (text === null)
+      throw new Error(`sysctl ${name} exited ${answer.code}, and ${procSource(name)} does not read`)
+    sysctl[name] = text
   }
   const args = new Map<number, string>()
   const pids = live.flatMap(({ pid }) => (pid === undefined ? [] : [pid]))

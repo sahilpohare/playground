@@ -56,8 +56,10 @@ describe("the gauges refresh under one lock", () => {
     const m = machine()
     expect(await slotsTogether(m)).toEqual(["4"])
     expect(existsSync(lock(m))).toBe(false)
-    // the last field is the reading before it, none here
-    expect(readFileSync(join(m.ops, "run-slot.gauges"), "utf8")).toMatch(/^\d+ 80 0 120 3\.50 -\n$/)
+    // the last two fields are the swap-ins and the idle share of the reading before it, none here
+    expect(readFileSync(join(m.ops, "run-slot.gauges"), "utf8")).toMatch(
+      /^\d+ 80 0 120 3\.50 - -\n$/,
+    )
   })
 
   test("a look that finds the lock held keeps the stale reading and runs no top", async () => {
@@ -127,7 +129,9 @@ describe("the gauges refresh under one lock", () => {
     const slots = looks.map((l) => l.slots)
     expect(slots).toContain("4")
     expect(tops(m)).toBeGreaterThanOrEqual(1)
-    expect(readFileSync(join(m.ops, "run-slot.gauges"), "utf8")).toMatch(/^\d+ 80 0 120 3\.50 0\n$/)
+    expect(readFileSync(join(m.ops, "run-slot.gauges"), "utf8")).toMatch(
+      /^\d+ 80 0 120 3\.50 0 30\n$/,
+    )
     expect(existsSync(lock(m))).toBe(false)
   })
 

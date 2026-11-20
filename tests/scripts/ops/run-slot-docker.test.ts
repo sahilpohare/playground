@@ -2,7 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { machine, runSlot, SCRIPT } from "./run-slot-fake"
+import { machine, runSlot, SCRIPT, spawn } from "./run-slot-fake"
 
 // a check waits on its run's exit or a line it prints, so the timeout only catches a hang
 setDefaultTimeout(60_000)
@@ -844,7 +844,7 @@ describe("run-slot runs one docker build at a time on the machine (#1083)", () =
     const run = async (script: string) => {
       const m = dockerMachine()
       const marker = join(m.root, "ran")
-      const p = Bun.spawn(["bash", SCRIPT, "worker-d", "--", "bash", "-c", script], {
+      const p = spawn(["bash", SCRIPT, "worker-d", "--", "bash", "-c", script], {
         cwd: m.root,
         env: m.env({ MARKER: marker }),
         stderr: "pipe",

@@ -2867,6 +2867,50 @@
       "startedAt": 1767266520000,
       "status": "busy"
     },
+    "sessions/900023.json": {
+      "cwd": "/fixture/playground/.claude/worktrees/merge-hints",
+      "kind": "interactive",
+      "messagingSocketPath": "/fixture/sockets/m5v8qd-worker.sock",
+      "name": "m5v8qd-worker",
+      "pid": 900023,
+      "procStart": "Thu Jan  1 08:00:00 2026",
+      "sessionId": "11111111-1111-4111-8111-00000000001d",
+      "startedAt": 1767266520000,
+      "status": "idle"
+    },
+    "sessions/900024.json": {
+      "cwd": "/fixture/playground/.claude/worktrees/ship-ready",
+      "kind": "interactive",
+      "messagingSocketPath": "/fixture/sockets/p4r7ya-worker.sock",
+      "name": "p4r7ya-worker",
+      "pid": 900024,
+      "procStart": "Thu Jan  1 08:00:00 2026",
+      "sessionId": "11111111-1111-4111-8111-0000000000b1",
+      "startedAt": 1767266520000,
+      "status": "idle"
+    },
+    "sessions/900025.json": {
+      "cwd": "/fixture/playground/.claude/worktrees/ship-gated",
+      "kind": "interactive",
+      "messagingSocketPath": "/fixture/sockets/t2g6hb-worker.sock",
+      "name": "t2g6hb-worker",
+      "pid": 900025,
+      "procStart": "Thu Jan  1 08:00:00 2026",
+      "sessionId": "11111111-1111-4111-8111-0000000000b2",
+      "startedAt": 1767266520000,
+      "status": "idle"
+    },
+    "sessions/900026.json": {
+      "cwd": "/fixture/playground/.claude/worktrees/ship-idle",
+      "kind": "interactive",
+      "messagingSocketPath": "/fixture/sockets/w9n3kc-worker.sock",
+      "name": "w9n3kc-worker",
+      "pid": 900026,
+      "procStart": "Thu Jan  1 08:00:00 2026",
+      "sessionId": "11111111-1111-4111-8111-0000000000b3",
+      "startedAt": 1767266520000,
+      "status": "idle"
+    },
     "sessions/900022.json": {
       "cwd": "/fixture/playground/.claude/worktrees/review-106",
       "kind": "interactive",
@@ -3564,6 +3608,66 @@
           "workspace": "workspace:21"
         },
         {
+          "branch": "feat/merge-hints",
+          "eta": "2026-01-01T12:40:00.000Z",
+          "kind": "worker",
+          "lastReport": "Fixture report: #108 is up for review",
+          "lastReportAt": "2026-01-01T11:55:00.000Z",
+          "name": "m5v8qd-worker",
+          "pr": "https://github.com/example/fixture/pull/108",
+          "repo": "example/fixture",
+          "role": "worker",
+          "status": "working",
+          "task": "Fixture task: a merge names the next step",
+          "title": "Merge hints",
+          "workspace": "workspace:24"
+        },
+        {
+          "branch": "feat/ship-ready",
+          "eta": "2026-01-01T12:40:00.000Z",
+          "kind": "worker",
+          "lastReport": "Fixture report: #109 is up for review",
+          "lastReportAt": "2026-01-01T11:55:00.000Z",
+          "name": "p4r7ya-worker",
+          "pr": "https://github.com/example/fixture/pull/109",
+          "repo": "example/fixture",
+          "role": "worker",
+          "status": "working",
+          "task": "Fixture task: a pull request every merge gate passes",
+          "title": "Ship ready",
+          "workspace": "workspace:25"
+        },
+        {
+          "branch": "feat/ship-gated",
+          "eta": "2026-01-01T12:40:00.000Z",
+          "kind": "worker",
+          "lastReport": "Fixture report: #110 is up for review",
+          "lastReportAt": "2026-01-01T11:55:00.000Z",
+          "name": "t2g6hb-worker",
+          "pr": "https://github.com/example/fixture/pull/110",
+          "repo": "example/fixture",
+          "role": "worker",
+          "status": "working",
+          "task": "Fixture task: a pull request the tester gate holds",
+          "title": "Ship gated",
+          "workspace": "workspace:26"
+        },
+        {
+          "branch": "feat/ship-idle",
+          "eta": "2026-01-01T12:40:00.000Z",
+          "kind": "worker",
+          "lastReport": "Fixture report: #111 is up for review",
+          "lastReportAt": "2026-01-01T11:55:00.000Z",
+          "name": "w9n3kc-worker",
+          "pr": "https://github.com/example/fixture/pull/111",
+          "repo": "example/fixture",
+          "role": "worker",
+          "status": "working",
+          "task": "Fixture task: a pull request no gate read covers at its head",
+          "title": "Ship idle",
+          "workspace": "workspace:27"
+        },
+        {
           "kind": "tester",
           "name": "r6t2dv-tester",
           "role": "worker",
@@ -3621,6 +3725,15 @@
           "task": "Fixture task: a worker running in Codex",
           "title": "Codex light",
           "workspace": "workspace:22"
+        },
+        {
+          "kind": "probe",
+          "name": "s8hk2v-probe",
+          "repo": "example/fixture",
+          "role": "worker",
+          "status": "working",
+          "task": "Fixture task: a probe whose claude runs on another machine over ssh",
+          "title": "Two machines"
         }
       ],
       "backlog": [
@@ -3799,13 +3912,6 @@
           "name": "nightly-digest",
           "schedule": {
             "cron": "0 6 * * *"
-          }
-        },
-        {
-          "heartbeat": "ops-awake",
-          "name": "ops-awake",
-          "schedule": {
-            "always": true
           }
         },
         {
@@ -4271,6 +4377,142 @@
         }
       }
     ],
+    "projects/-fixture-playground--claude-worktrees-merge-hints/11111111-1111-4111-8111-00000000001d.jsonl": [
+      {
+        "agentName": "m5v8qd-worker",
+        "sessionId": "11111111-1111-4111-8111-00000000001d",
+        "type": "agent-name"
+      },
+      {
+        "cwd": "/fixture/playground/.claude/worktrees/merge-hints",
+        "entrypoint": "cli",
+        "gitBranch": "feat/merge-hints",
+        "sessionId": "11111111-1111-4111-8111-00000000001d",
+        "timestamp": "2026-01-01T11:40:00.000Z",
+        "type": "user",
+        "uuid": "22222222-2222-4222-8222-000000000103",
+        "version": "2.1.0",
+        "message": {
+          "content": "<cross-session-message from=\"uds:/fixture/sockets/builder.sock\" from-name=\"builder\">\nFixture task: a merge names the next step.\n</cross-session-message>",
+          "role": "user"
+        },
+        "origin": {
+          "body": "Fixture task: a merge names the next step.",
+          "from": "uds:/fixture/sockets/builder.sock",
+          "kind": "peer",
+          "name": "builder"
+        }
+      },
+      {
+        "cwd": "/fixture/playground/.claude/worktrees/merge-hints",
+        "entrypoint": "cli",
+        "gitBranch": "feat/merge-hints",
+        "sessionId": "11111111-1111-4111-8111-00000000001d",
+        "timestamp": "2026-01-01T11:41:00.000Z",
+        "type": "assistant",
+        "uuid": "22222222-2222-4222-8222-000000000104",
+        "version": "2.1.0",
+        "effort": "high",
+        "message": {
+          "content": [
+            {
+              "text": "On the local model: the merge line now names the next step.",
+              "type": "text"
+            }
+          ],
+          "model": "local",
+          "role": "assistant",
+          "id": "msg_fixture_104",
+          "usage": {
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "input_tokens": 120,
+            "output_tokens": 40
+          }
+        }
+      }
+    ],
+    "projects/-fixture-playground--claude-worktrees-ship-ready/11111111-1111-4111-8111-0000000000b1.jsonl": [
+      {
+        "agentName": "p4r7ya-worker",
+        "sessionId": "11111111-1111-4111-8111-0000000000b1",
+        "type": "agent-name"
+      },
+      {
+        "cwd": "/fixture/playground/.claude/worktrees/ship-ready",
+        "entrypoint": "cli",
+        "gitBranch": "feat/ship-ready",
+        "sessionId": "11111111-1111-4111-8111-0000000000b1",
+        "timestamp": "2026-01-01T11:40:00.000Z",
+        "type": "user",
+        "uuid": "22222222-2222-4222-8222-000000000104",
+        "version": "2.1.0",
+        "message": {
+          "content": "<cross-session-message from=\"uds:/fixture/sockets/builder.sock\" from-name=\"builder\">\nFixture task: a pull request every merge gate passes.\n</cross-session-message>",
+          "role": "user"
+        },
+        "origin": {
+          "body": "Fixture task: a pull request every merge gate passes.",
+          "from": "uds:/fixture/sockets/builder.sock",
+          "kind": "peer",
+          "name": "builder"
+        }
+      }
+    ],
+    "projects/-fixture-playground--claude-worktrees-ship-gated/11111111-1111-4111-8111-0000000000b2.jsonl": [
+      {
+        "agentName": "t2g6hb-worker",
+        "sessionId": "11111111-1111-4111-8111-0000000000b2",
+        "type": "agent-name"
+      },
+      {
+        "cwd": "/fixture/playground/.claude/worktrees/ship-gated",
+        "entrypoint": "cli",
+        "gitBranch": "feat/ship-gated",
+        "sessionId": "11111111-1111-4111-8111-0000000000b2",
+        "timestamp": "2026-01-01T11:40:00.000Z",
+        "type": "user",
+        "uuid": "22222222-2222-4222-8222-000000000105",
+        "version": "2.1.0",
+        "message": {
+          "content": "<cross-session-message from=\"uds:/fixture/sockets/builder.sock\" from-name=\"builder\">\nFixture task: a pull request the tester gate holds.\n</cross-session-message>",
+          "role": "user"
+        },
+        "origin": {
+          "body": "Fixture task: a pull request the tester gate holds.",
+          "from": "uds:/fixture/sockets/builder.sock",
+          "kind": "peer",
+          "name": "builder"
+        }
+      }
+    ],
+    "projects/-fixture-playground--claude-worktrees-ship-idle/11111111-1111-4111-8111-0000000000b3.jsonl": [
+      {
+        "agentName": "w9n3kc-worker",
+        "sessionId": "11111111-1111-4111-8111-0000000000b3",
+        "type": "agent-name"
+      },
+      {
+        "cwd": "/fixture/playground/.claude/worktrees/ship-idle",
+        "entrypoint": "cli",
+        "gitBranch": "feat/ship-idle",
+        "sessionId": "11111111-1111-4111-8111-0000000000b3",
+        "timestamp": "2026-01-01T11:40:00.000Z",
+        "type": "user",
+        "uuid": "22222222-2222-4222-8222-000000000106",
+        "version": "2.1.0",
+        "message": {
+          "content": "<cross-session-message from=\"uds:/fixture/sockets/builder.sock\" from-name=\"builder\">\nFixture task: a pull request no gate read covers at its head.\n</cross-session-message>",
+          "role": "user"
+        },
+        "origin": {
+          "body": "Fixture task: a pull request no gate read covers at its head.",
+          "from": "uds:/fixture/sockets/builder.sock",
+          "kind": "peer",
+          "name": "builder"
+        }
+      }
+    ],
     "projects/-fixture-playground--claude-worktrees-review-106/11111111-1111-4111-8111-00000000001c.jsonl": [
       {
         "agentName": "q7w8f2-reviewer",
@@ -4446,14 +4688,6 @@
       "unreadable": [],
       "writtenAt": "2026-12-31T12:00:00.000Z"
     },
-    "playground/ops/ops-awake.json": {
-      "cycleSeconds": 3600,
-      "job": "ops-awake",
-      "lastBeatAt": "2026-01-01T11:59:00.000Z",
-      "lastResult": "ok",
-      "pid": 900040,
-      "startedAt": "2026-01-01T08:00:00.000Z"
-    },
     "playground/ops/ops-changelog.json": {
       "cycleSeconds": 3600,
       "job": "ops-changelog",
@@ -4469,6 +4703,17 @@
       "lastResult": "ok",
       "pid": 900044,
       "startedAt": "2026-01-01T08:00:00.000Z"
+    },
+    "playground/ops/merge-train/gates.json": {
+      "at": "2026-01-01T11:58:00.000Z",
+      "prs": {
+        "example/fixture#109": { "failed": [], "head": "d109d109d109d109d109d109d109d109d109d109" },
+        "example/fixture#110": {
+          "failed": ["tester"],
+          "head": "d110d110d110d110d110d110d110d110d110d110"
+        },
+        "example/fixture#111": { "failed": [], "head": "e111e111e111e111e111e111e111e111e111e111" }
+      }
     },
     "playground/ops/ops-merge-train.json": {
       "cycleSeconds": 3600,
@@ -4709,7 +4954,8 @@
       "state": "stuck"
     },
     "playground/backends/c4dx7n-worker": "codex openai\n",
-    "playground/resume/c4dx7n-worker.sh": "#!/bin/bash\nexec /fixture/playground/scripts/spawn.sh resume c4dx7n-worker /fixture/playground/.claude/worktrees/codex-light 0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2c\n"
+    "playground/resume/c4dx7n-worker.sh": "#!/bin/bash\nexec /fixture/playground/scripts/spawn.sh resume c4dx7n-worker /fixture/playground/.claude/worktrees/codex-light 0f9a1c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2c\n",
+    "playground/resume/s8hk2v-probe.sh": "#!/bin/bash\n# server: playground\nexec /fixture/playground/scripts/spawn.sh resume s8hk2v-probe /fixture/playground 11111111-1111-4111-8111-000000000056 --ssh fixture@10.0.0.2 --key /fixture/.ssh/spark\n"
   },
   "git": {
     "/fixture/playground": {
@@ -5106,6 +5352,94 @@
       {
         "agent_session": {
           "kind": "id",
+          "value": "11111111-1111-4111-8111-00000000001d"
+        },
+        "agent_status": "idle",
+        "pane_id": "wO:p1",
+        "processes": [
+          {
+            "argv": ["/usr/local/bin/claude", "-n", "m5v8qd-worker"],
+            "cwd": "/fixture/playground/.claude/worktrees/merge-hints",
+            "pid": 900023
+          }
+        ],
+        "scroll": {
+          "offset_from_bottom": 0
+        },
+        "session_id": "11111111-1111-4111-8111-00000000001d",
+        "terminal_id": "t-5f000000-0000-4000-8000-00000000001d",
+        "transcript_path": "$CONFIG/projects/-fixture-playground--claude-worktrees-merge-hints/11111111-1111-4111-8111-00000000001d.jsonl",
+        "workspace_id": "wO"
+      },
+      {
+        "agent_session": {
+          "kind": "id",
+          "value": "11111111-1111-4111-8111-0000000000b1"
+        },
+        "agent_status": "idle",
+        "pane_id": "wS:p1",
+        "processes": [
+          {
+            "argv": ["/usr/local/bin/claude", "-n", "p4r7ya-worker"],
+            "cwd": "/fixture/playground/.claude/worktrees/ship-ready",
+            "pid": 900024
+          }
+        ],
+        "scroll": {
+          "offset_from_bottom": 0
+        },
+        "session_id": "11111111-1111-4111-8111-0000000000b1",
+        "terminal_id": "t-5f000000-0000-4000-8000-0000000000b1",
+        "transcript_path": "$CONFIG/projects/-fixture-playground--claude-worktrees-ship-ready/11111111-1111-4111-8111-0000000000b1.jsonl",
+        "workspace_id": "wS"
+      },
+      {
+        "agent_session": {
+          "kind": "id",
+          "value": "11111111-1111-4111-8111-0000000000b2"
+        },
+        "agent_status": "idle",
+        "pane_id": "wQ:p1",
+        "processes": [
+          {
+            "argv": ["/usr/local/bin/claude", "-n", "t2g6hb-worker"],
+            "cwd": "/fixture/playground/.claude/worktrees/ship-gated",
+            "pid": 900025
+          }
+        ],
+        "scroll": {
+          "offset_from_bottom": 0
+        },
+        "session_id": "11111111-1111-4111-8111-0000000000b2",
+        "terminal_id": "t-5f000000-0000-4000-8000-0000000000b2",
+        "transcript_path": "$CONFIG/projects/-fixture-playground--claude-worktrees-ship-gated/11111111-1111-4111-8111-0000000000b2.jsonl",
+        "workspace_id": "wQ"
+      },
+      {
+        "agent_session": {
+          "kind": "id",
+          "value": "11111111-1111-4111-8111-0000000000b3"
+        },
+        "agent_status": "idle",
+        "pane_id": "wR:p1",
+        "processes": [
+          {
+            "argv": ["/usr/local/bin/claude", "-n", "w9n3kc-worker"],
+            "cwd": "/fixture/playground/.claude/worktrees/ship-idle",
+            "pid": 900026
+          }
+        ],
+        "scroll": {
+          "offset_from_bottom": 0
+        },
+        "session_id": "11111111-1111-4111-8111-0000000000b3",
+        "terminal_id": "t-5f000000-0000-4000-8000-0000000000b3",
+        "transcript_path": "$CONFIG/projects/-fixture-playground--claude-worktrees-ship-idle/11111111-1111-4111-8111-0000000000b3.jsonl",
+        "workspace_id": "wR"
+      },
+      {
+        "agent_session": {
+          "kind": "id",
           "value": "11111111-1111-4111-8111-00000000001c"
         },
         "agent_status": "blocked",
@@ -5256,6 +5590,34 @@
         },
         "terminal_id": "t-5f000000-0000-4000-8000-000000000054",
         "workspace_id": "wN"
+      },
+      {
+        "agent_status": "unknown",
+        "label": "s8hk2v-probe",
+        "pane_id": "wP:p1",
+        "processes": [
+          {
+            "argv": [
+              "ssh",
+              "-i",
+              "/fixture/.ssh/spark",
+              "-o",
+              "IdentitiesOnly=yes",
+              "-o",
+              "BatchMode=yes",
+              "-tt",
+              "fixture@10.0.0.2",
+              "cd /fixture/playground && claude"
+            ],
+            "cwd": "/fixture/playground",
+            "pid": 900056
+          }
+        ],
+        "scroll": {
+          "offset_from_bottom": 0
+        },
+        "terminal_id": "t-5f000000-0000-4000-8000-000000000056",
+        "workspace_id": "wP"
       }
     ],
     "prompts": {
@@ -5349,6 +5711,22 @@
         "workspace_id": "wI"
       },
       {
+        "label": "m5v8qd-worker",
+        "workspace_id": "wO"
+      },
+      {
+        "label": "p4r7ya-worker",
+        "workspace_id": "wS"
+      },
+      {
+        "label": "t2g6hb-worker",
+        "workspace_id": "wQ"
+      },
+      {
+        "label": "w9n3kc-worker",
+        "workspace_id": "wR"
+      },
+      {
         "label": "q7w8f2-reviewer",
         "workspace_id": "wJ"
       },
@@ -5363,9 +5741,14 @@
       {
         "label": "c4dx7n-worker",
         "workspace_id": "wN"
+      },
+      {
+        "label": "s8hk2v-probe",
+        "workspace_id": "wP"
       }
     ]
   },
+  "localModel": "ornith-ai/Ornith-1.5-122B-NVFP4",
   "merged": {
     "example/fixture": [
       {
@@ -5473,6 +5856,22 @@
       "command": "claude -n k3m9px-worker",
       "start": "Thu Jan  1 08:00:00 2026"
     },
+    "900023": {
+      "command": "claude -n m5v8qd-worker",
+      "start": "Thu Jan  1 08:00:00 2026"
+    },
+    "900024": {
+      "command": "claude -n p4r7ya-worker",
+      "start": "Thu Jan  1 08:00:00 2026"
+    },
+    "900025": {
+      "command": "claude -n t2g6hb-worker",
+      "start": "Thu Jan  1 08:00:00 2026"
+    },
+    "900026": {
+      "command": "claude -n w9n3kc-worker",
+      "start": "Thu Jan  1 08:00:00 2026"
+    },
     "900022": {
       "command": "claude -n q7w8f2-reviewer",
       "start": "Thu Jan  1 08:00:00 2026"
@@ -5495,10 +5894,6 @@
     },
     "900033": {
       "command": "python3 ops/loop.py ops-report",
-      "start": "Thu Jan  1 08:00:00 2026"
-    },
-    "900040": {
-      "command": "python3 ops/loop.py ops-awake",
       "start": "Thu Jan  1 08:00:00 2026"
     },
     "900041": {
@@ -5604,6 +5999,118 @@
       "title": "Tighten the sidebar's row spacing",
       "updatedAt": "2026-01-01T11:35:00.000Z",
       "url": "https://github.com/example/fixture/pull/102"
+    },
+    "https://github.com/example/fixture/pull/108": {
+      "comments": {
+        "nodes": []
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "statusCheckRollup": {
+                "state": "SUCCESS"
+              }
+            }
+          }
+        ]
+      },
+      "headRefOid": "d108d108d108d108d108d108d108d108d108d108",
+      "isDraft": false,
+      "mergeStateStatus": "DIRTY",
+      "mergeable": "CONFLICTING",
+      "number": 108,
+      "state": "OPEN",
+      "title": "Name the next step after a merge",
+      "updatedAt": "2026-01-01T11:40:00.000Z",
+      "url": "https://github.com/example/fixture/pull/108"
+    },
+    "https://github.com/example/fixture/pull/109": {
+      "comments": {
+        "nodes": [
+          {
+            "body": "## ReviewBot · round 1: 5/5 at d109d10 · 0 blocking, 0 should-fix, 0 nits"
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "statusCheckRollup": {
+                "state": "SUCCESS"
+              }
+            }
+          }
+        ]
+      },
+      "headRefOid": "d109d109d109d109d109d109d109d109d109d109",
+      "isDraft": false,
+      "mergeStateStatus": "CLEAN",
+      "mergeable": "MERGEABLE",
+      "number": 109,
+      "state": "OPEN",
+      "title": "Ship ready: a pull request every merge gate passes",
+      "updatedAt": "2026-01-01T11:40:00.000Z",
+      "url": "https://github.com/example/fixture/pull/109"
+    },
+    "https://github.com/example/fixture/pull/110": {
+      "comments": {
+        "nodes": [
+          {
+            "body": "## ReviewBot · round 1: 5/5 at d110d11 · 0 blocking, 0 should-fix, 0 nits"
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "statusCheckRollup": {
+                "state": "SUCCESS"
+              }
+            }
+          }
+        ]
+      },
+      "headRefOid": "d110d110d110d110d110d110d110d110d110d110",
+      "isDraft": false,
+      "mergeStateStatus": "CLEAN",
+      "mergeable": "MERGEABLE",
+      "number": 110,
+      "state": "OPEN",
+      "title": "Ship gated: a pull request the tester gate holds",
+      "updatedAt": "2026-01-01T11:40:00.000Z",
+      "url": "https://github.com/example/fixture/pull/110"
+    },
+    "https://github.com/example/fixture/pull/111": {
+      "comments": {
+        "nodes": [
+          {
+            "body": "## ReviewBot · round 1: 5/5 at d111d11 · 0 blocking, 0 should-fix, 0 nits"
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "statusCheckRollup": {
+                "state": "SUCCESS"
+              }
+            }
+          }
+        ]
+      },
+      "headRefOid": "d111d111d111d111d111d111d111d111d111d111",
+      "isDraft": false,
+      "mergeStateStatus": "CLEAN",
+      "mergeable": "MERGEABLE",
+      "number": 111,
+      "state": "OPEN",
+      "title": "Ship idle: a pull request no gate read covers at its head",
+      "updatedAt": "2026-01-01T11:40:00.000Z",
+      "url": "https://github.com/example/fixture/pull/111"
     },
     "https://github.com/example/fixture/pull/97": {
       "comments": {
@@ -5731,14 +6238,22 @@
       "freeBytes": 210000000000,
       "totalBytes": 994000000000
     },
+    "hostname": "machine-a",
     "load": [3.1, 3.4, 3.6],
+    "peers": [
+      {
+        "name": "machine-b",
+        "target": "you@10.0.0.2"
+      }
+    ],
     "probes": {
       "containerStats": "{\"ID\":\"f1x7ure0db01\",\"MemUsage\":\"48.2MiB / 7.6GiB\",\"Name\":\"playground-board-colours-db\"}\n",
       "containers": "{\"ID\":\"f1x7ure0db01\",\"Names\":\"playground-board-colours-db\",\"Ports\":\"127.0.0.1:54321->5432/tcp\"}\n",
       "cwds": "p900001\nfcwd\nn/fixture/playground\np900002\nfcwd\nn/fixture/playground\np900003\nfcwd\nn/fixture/playground\np900004\nfcwd\nn/fixture/playground/.claude/worktrees/sidebar-spacing\np900005\nfcwd\nn/fixture/playground/.claude/worktrees/board-colours\np900006\nfcwd\nn/fixture/playground/.claude/worktrees/composer-paste\np900007\nfcwd\nn/fixture/playground/.claude/worktrees/canary\np900008\nfcwd\nn/fixture/playground/.claude/worktrees/review-lust\np900009\nfcwd\nn/fixture/playground/.claude/worktrees/test-lust\np900010\nfcwd\nn/fixture/scratch\np900011\nfcwd\nn/fixture/playground/.claude/worktrees/old-ghost\np900012\nfcwd\nn/fixture/playground\np900050\nfcwd\nn/fixture/playground/.claude/worktrees/board-colours\np900051\nfcwd\nn/fixture/playground/.claude/worktrees/board-colours/api/hono\np900052\nfcwd\nn/fixture/playground/.claude/worktrees/board-colours/web/next\n",
       "dockerHost": "\"unix:///fixture/orbstack/docker.sock\"\n",
       "memory": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               61000.\nPages active:                            700000.\nAnonymous pages:                         880000.\nPages purgeable:                          24000.\nPages wired down:                        190000.\nPages occupied by compressor:            140000.\n",
-      "processes": "900100 1 40000 12:00.00\n900001 900100 390000 11:12.34\n900002 900100 400000 12:12.34\n900003 900100 410000 13:12.34\n900004 900100 420000 14:12.34\n900005 900100 430000 15:12.34\n900006 900100 440000 16:12.34\n900007 900100 450000 17:12.34\n900008 900100 460000 18:12.34\n900009 900100 470000 19:12.34\n900010 900100 480000 20:12.34\n900011 900100 490000 21:12.34\n900012 900100 380000 10:12.34\n900021 900100 490000 21:12.34\n900022 900100 500000 22:12.34\n900050 900005 60000 0:40.00\n900051 900050 210000 3:10.00\n900052 900050 640000 9:30.00\n900020 1 90000 1:00.00\n900090 1 1800000 40:00.00\n",
+      "peer you@10.0.0.2": "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/nvme0n1p2  976762584 664332584 312430000      69% /\n2.40 2.10 1.90 2/612 48211\nMemTotal:       33554432 kB\nMemFree:        20971520 kB\nMemAvailable:   25165824 kB\nSwapTotal:      8388608 kB\nSwapFree:       7340032 kB\ncpu  19950 0 34980 79890930 2690 0 2950 0 0 0\ncpu0 1995 0 3498 7989093 269 0 295 0 0 0\ncpu1 1995 0 3498 7989093 269 0 295 0 0 0\ncpu2 1995 0 3498 7989093 269 0 295 0 0 0\ncpu3 1995 0 3498 7989093 269 0 295 0 0 0\ncpu4 1995 0 3498 7989093 269 0 295 0 0 0\ncpu5 1995 0 3498 7989093 269 0 295 0 0 0\ncpu6 1995 0 3498 7989093 269 0 295 0 0 0\ncpu7 1995 0 3498 7989093 269 0 295 0 0 0\ncpu8 1995 0 3498 7989093 269 0 295 0 0 0\ncpu9 1995 0 3498 7989093 269 0 295 0 0 0\n",
+      "processes": "900100 1 40000 12:00.00\n900001 900100 390000 11:12.34\n900002 900100 400000 12:12.34\n900003 900100 410000 13:12.34\n900004 900100 420000 14:12.34\n900005 900100 430000 15:12.34\n900006 900100 440000 16:12.34\n900007 900100 450000 17:12.34\n900008 900100 460000 18:12.34\n900009 900100 470000 19:12.34\n900010 900100 480000 20:12.34\n900011 900100 490000 21:12.34\n900012 900100 380000 10:12.34\n900021 900100 490000 21:12.34\n900022 900100 500000 22:12.34\n900023 900100 510000 23:12.34\n900024 900100 510000 23:12.34\n900025 900100 510000 23:12.34\n900026 900100 510000 23:12.34\n900050 900005 60000 0:40.00\n900051 900050 210000 3:10.00\n900052 900050 640000 9:30.00\n900020 1 90000 1:00.00\n900090 1 1800000 40:00.00\n",
       "socketHolder": "p900090\n",
       "sockets": "p900051\nf20\nn127.0.0.1:4101\nf21\nn127.0.0.1:60001->127.0.0.1:54321\np900052\nf22\nn127.0.0.1:3101\n",
       "sysctl": "kern.memorystatus_level: 41\nkern.memorystatus_vm_pressure_level: 1\nvm.swapusage: total = 2048.00M  used = 640.00M  free = 1408.00M  (encrypted)\n"

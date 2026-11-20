@@ -72,7 +72,7 @@ describe("ask whatsapp takes ops-wa's own file alone", () => {
 
   test("a file that is no answer is deleted and answers nothing", async () => {
     const { data, write } = scratch()
-    const path = write({ action: "send", id: ID })
+    const path = write({ action: "discard", id: ID })
     expect(await whatsappAnswer(NO_DB, path, { data })).toEqual({
       message: "the answer file is not an answer ops-wa writes",
       ok: false,
@@ -142,10 +142,20 @@ describe.skipIf(!dockerUp())("an answer from WhatsApp, on the inbox store", () =
       Bun.spawnSync(["docker", "rm", "-f", "-v", container], { stderr: "ignore", stdout: "ignore" })
   })
 
-  const post = async (preview: object) => {
-    const posted = await store.postItem(db, { from: "builder", preview, title: "Merge tonight?" })
+  const post = async (preview: object, kind?: "draft") => {
+    const posted = await store.postItem(db, {
+      from: "builder",
+      ...(kind && { kind }),
+      preview,
+      title: "Merge tonight?",
+    })
     if (!posted.ok) throw new Error(posted.message)
     return posted.item
+  }
+  const DRAFT = {
+    link: "https://linear.app/acme/issue/MADEDUNE-2186/x",
+    text: "on it, a fix lands tonight",
+    to: "a colleague's thread",
   }
   // a delivery adapter that records what it would type and to whom
   const typed: { text: string; to: string }[] = []
@@ -199,5 +209,88 @@ describe.skipIf(!dockerUp())("an answer from WhatsApp, on the inbox store", () =
       ok: false,
     })
     expect((await store.getItem(db, item.id))?.status).toBe("open")
+  })
+
+  // PG-2873: an org-scoped draft reaches the owner's own WhatsApp, and a reply there sends it through the Inbox's own Send
+  test("a draft's send from WhatsApp sends it as written, through the Inbox's route, once", async () => {
+    const item = await post(DRAFT, "draft")
+    const { data, write } = scratch()
+    const path = write({ action: "send", id: item.id })
+    expect(await whatsappAnswer(db, path, { data, deliver })).toEqual({
+      line: `answered #i${item.ref} from WhatsApp`,
+      ok: true,
+    })
+    const read = await store.getItem(db, item.id)
+    expect(read?.status).toBe("sent")
+    expect(read?.answer).toMatchObject({ choice: "send", via: "whatsapp" })
+    expect(read?.answer).not.toHaveProperty("editedText")
+    expect(typed.at(-1)?.to).toBe("builder")
+  })
+
+  test("a draft's send with the owner's words sends those in its place", async () => {
+    const item = await post(DRAFT, "draft")
+    const { data, write } = scratch()
+    await whatsappAnswer(db, write({ action: "send", id: item.id, text: "done, thanks" }), {
+      data,
+      deliver,
+    })
+    expect((await store.getItem(db, item.id))?.answer).toMatchObject({
+      choice: "send",
+      editedText: "done, thanks",
+    })
+  })
+
+  test("a draft already sent in the Inbox takes no second send from WhatsApp", async () => {
+    const item = await post(DRAFT, "draft")
+    await store.answerItem(db, item.id, { action: "send" }, { actor: { label: "Inbox" }, deliver })
+    const { data, write } = scratch()
+    expect(
+      await whatsappAnswer(db, write({ action: "send", id: item.id }), { data, deliver }),
+    ).toMatchObject({ ok: false })
+  })
+
+  test("a draft its poster changed after it went to WhatsApp takes no send naming the old words, and one naming the new", async () => {
+    const item = await post(DRAFT, "draft")
+    const edited = await store.editItem(db, item.id, {
+      from: "builder",
+      kind: "draft",
+      preview: { ...DRAFT, text: "a fix lands tomorrow" },
+      title: "Merge tonight?",
+    })
+    if (!edited.ok) throw new Error(edited.message)
+    const { data, write } = scratch()
+    expect(
+      await whatsappAnswer(db, write({ action: "send", id: item.id, seen: item.updatedAt }), {
+        data,
+        deliver,
+      }),
+    ).toEqual({ message: "This item changed since you read it; read it again", ok: false })
+    expect((await store.getItem(db, item.id))?.status).toBe("open")
+    await whatsappAnswer(
+      db,
+      write({ action: "send", id: item.id, seen: edited.item.updatedAt }, "b.json"),
+      {
+        data,
+        deliver,
+      },
+    )
+    expect((await store.getItem(db, item.id))?.status).toBe("sent")
+  })
+
+  test("a send takes no decision, and an approve takes no draft", async () => {
+    const decision = await post({ scope: "factory", text: "Merge the fix?", type: "ask" })
+    const draft = await post(DRAFT, "draft")
+    const { data, write } = scratch()
+    expect(
+      await whatsappAnswer(db, write({ action: "send", id: decision.id }), { data, deliver }),
+    ).toEqual({ message: "only a draft is sent from WhatsApp", ok: false })
+    expect(
+      await whatsappAnswer(db, write({ action: "approve", id: draft.id }, "b.json"), {
+        data,
+        deliver,
+      }),
+    ).toMatchObject({ ok: false })
+    expect((await store.getItem(db, decision.id))?.status).toBe("open")
+    expect((await store.getItem(db, draft.id))?.status).toBe("open")
   })
 })

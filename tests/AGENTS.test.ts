@@ -154,8 +154,15 @@ describe("AGENTS.md", () => {
     expect(hooks.filter((hook) => !agents.includes(`\`${hook}\``))).toEqual([])
   })
 
-  test("Shipping step 1 settles docs, skills and the body before the review's round 1 (#2205)", async () => {
+  // Shipping step 1's body and pre-review pass live in .agents/shipping.md (#2514), which step 1 points to at both moments.
+  test("Shipping step 1 points to .agents/shipping.md before the body and before the review's round 1 (#2514)", async () => {
     expect(await Bun.file(join(ROOT, "AGENTS.md")).text()).toContain(
+      "Read [.agents/shipping.md](./.agents/shipping.md) before you write its body and again before the review's round 1",
+    )
+  })
+
+  test("Shipping step 1 settles docs, skills and the body before the review's round 1 (#2205)", async () => {
+    expect(await Bun.file(join(ROOT, ".agents/shipping.md")).text()).toContain(
       "settle in your own pass what a round should never spend its turn on",
     )
   })
@@ -179,7 +186,7 @@ describe("AGENTS.md", () => {
   })
 
   test("a canary merge runs the changed-term grep for what the incoming commits changed, with its measured case", async () => {
-    const lines = (await Bun.file(join(ROOT, "AGENTS.md")).text()).split("\n")
+    const lines = (await Bun.file(join(ROOT, ".agents/shipping.md")).text()).split("\n")
     const at = lines.findIndex((l) => l.includes("After you merge `canary` into the branch"))
     const line = `${lines[at]}\n${lines[at + 1]}`
     expect(

@@ -15,7 +15,7 @@ Start each task with the `codebase-map` skill to orient, then load the task skil
   The `db-migration` skill's step 0 holds both whole, with the shape to show first.
 - ALWAYS: Point local database work at a disposable container of the worktree's own, published on loopback alone: `docker run -d --name playground-<worktree>-db -e POSTGRES_PASSWORD=<pw> -p 127.0.0.1::5432 postgres:alpine`, then `docker port playground-<worktree>-db 5432` for its port.
   Never point it at the live dashboard's database, whose local Postgres holds every real session and transcript, so a migration or a rename applied there breaks the running dashboard; seed fake rows, since real rows never reach a screenshot or a PR.
-  The `db-migration` skill's step 3 holds the rest whole: the two exceptions (first run's pglaunch database and a Vibeground's copy), the worktree's `.env`, the removal with `docker rm -fv`, and the merge lock's Redis container.
+  The `db-migration` skill's step 3 holds the rest whole: the two exceptions (first run's container and a Vibeground's copy), the worktree's `.env`, the removal with `docker rm -fv`, and the merge lock's Redis container.
 - ALWAYS: Keep documentation in sync with every change.
   Whenever code, structure, conventions, or tooling change, update the matching docs in the same change (e.g. `web/next/content/docs/`, `README.md`, the `llms.txt`/`llms-full.txt` context routes, skill docs under `skills/`, and these agent guides `AGENTS.md`/`CLAUDE.md`).
   Docs must never drift.
@@ -108,7 +108,7 @@ ZeroStarter's rules above govern Playground too; this section adds its own.
 - ALWAYS: Call the Skill tool with "writing-for-agents" before you write or edit any agent-facing doc, and follow it (playbook's **writing** rule, which puts it at the core of every agent-facing doc):
   a `SKILL.md` and its sibling files, `AGENTS.md` and `CLAUDE.md`, an `.agents/dashboard` rule, `scripts/README.md` and `scripts/hooks/README.md`, a docs page, a handoff and a brief.
   That means a lean document, reference disclosed into sibling files, a completion criterion on every step, positive phrasing, and leading words.
-  A PR body is written for the owner, in the pr skill's template (Shipping step 1), so it is outside this rule.
+  A PR body is written for the owner, in the pr skill's template ([.agents/shipping.md](./.agents/shipping.md)), so it is outside this rule.
 - ALWAYS: Land everything you learn in this repo, as a PR or a line to your lead (playbook's **memory** rule), so every session works better from what one learned.
   Claude Code's auto-memory stays off in both shared settings files, which `tests/scripts/factory-settings.test.ts` holds, and spawn.sh turns it on for the trial's sessions in the data folder's `memory/<role>/` ([ADR 0022](./.agents/adr/0022-auto-memory-runs-as-a-reviewed-trial.md)).
 - ALWAYS: Track Playground's work as GitHub issues on the repo `factory.repo` names, so every item carries a number: an item's ID is `PG-<issue number>`, its branch `PG-<n>-<slug>`, its PR scope `(PG-<n>)`, and the issue stays open until the PR that says `Closes #<n>` merges.
@@ -121,17 +121,17 @@ ZeroStarter's rules above govern Playground too; this section adds its own.
 - ALWAYS: Keep app copy generic, so anyone can run the app: the app speaks to the signed-in owner as you and names no person, and an org-specific value (a GitHub org, a Linear team, a Slack channel, the dispatcher's name, a path) comes from config with a sensible default.
   The skills stay the owner's own.
 - A new worktree takes a full `bun install` through run-slot, 2 to 4 s on the warm cache, and clones a sibling's `node_modules` only on a cold cache ([scripts/README.md](./scripts/README.md#a-worktrees-node_modules)).
-  Remove worktrees one at a time, never in parallel, and keep one review worktree across a PR's rounds.
+  Remove worktrees one at a time, and keep one review worktree across a PR's rounds.
 - Every worktree of a checkout shares one `git stash` list, so a pop can take another worker's entry: set work aside with a commit, and take a before-shot from a separate worktree on `origin/canary`.
 - Commit before a red-first swap, a chain stopping if it fails (`git commit ... || exit 1`), and restore with `git checkout HEAD -- <file>` ([.agents/testing.md](./.agents/testing.md#traps)); squash by the `gh-commit` skill's Notes.
 - When the owner asks to see a draft, a tree or a restructure, show it in chat and change no file until told to apply it.
-- Run inscope as `npx -y inscope@latest <command>`; it is not on `PATH`.
+- Run inscope as `npx -y inscope@0.18.0 <command>`; it is not on `PATH`.
 - Format with `bun run format` (oxfmt, `.oxfmtrc.jsonc`), not prettier, whose semicolons and 80-column wraps survive an oxfmt pass.
 - `scripts/link-skills.sh` installs the home skill set and links the factory's settings, its brief templates, the `playground` command and the ops scripts into the main checkout, so a pull there updates them.
   Re-run it after adding, renaming or removing a skill ([scripts/README.md](./scripts/README.md#link-skillssh-and-rerere)).
 - The main checkout stays clean, since every installed skill follows it; each worktree keeps its own turbo cache ([scripts/README.md](./scripts/README.md#shared-git-hooks-and-the-turbo-cache)).
 - A worktree commits, pushes or merges once it has run its own `bun install`, since each shared git hook runs the committing worktree's own lefthook; one that stops on `error: Script not found "node_modules/.bin/lefthook"` needs it ([scripts/README.md](./scripts/README.md#shared-git-hooks-and-the-turbo-cache)).
-- Run `bun run test:skills`, CI's `auto-test.yml` steps, before pushing a change to a hook, a script, a skill's frontmatter, or a command that starts a database or stops a process ([scripts/README.md](./scripts/README.md#bun-run-testskills)).
+- Pre-push runs `bun run test:skills`, CI's `auto-test.yml` steps, when a push changes a file on its glob; run it yourself before pushing a command that starts a database or stops a process ([scripts/README.md](./scripts/README.md#bun-run-testskills)).
 - The em-dash rule above has one exception: an output format the user specified, such as linear's table, where `—` marks an empty cell.
   `scripts/check-em-dashes.sh` skips inline code and table cells that hold only an em-dash.
 - ALWAYS: In every comment and review body on a repo whose owner `release-owners.json` lists, write "ship" or "publish step" where "release" (any case) would go, since an owner comment holding the word publishes to npm; `no-release-comment` refuses such a comment ([scripts/hooks/README.md](./scripts/hooks/README.md)).
@@ -141,11 +141,11 @@ ZeroStarter's rules above govern Playground too; this section adds its own.
 - ALWAYS: Feed a row of `tests/scripts/hooks/fixtures/refused-forms/` to a guard only as `check()` input, whatever HOME or folder is set, since each row is a command that does what it says and can name a path outside HOME; `tests/scripts/hooks/fixtures-are-data.test.ts` holds the fixture's importers to it.
 - A factory session starts another only through `scripts/spawn.sh`, whose capacity gate, backends, models, runtimes, resume and restore are in [scripts/README.md](./scripts/README.md#spawnsh): read it before you change spawn.sh or when it refuses a start you did not expect;
   `no-raw-spawn` refuses every cmux call but its help or version, and every herdr call but a read or one to a scratch world of the session's own.
-- The herdr servers belong to one ops job, `bun run ops:herdr`, on the binary and config its `pin.json` names ([scripts/README.md](./scripts/README.md#the-herdr-servers)), read before you change that job or herdr's pinned binary or config.
-- The factory's hooks: read a hook's section of [scripts/hooks/README.md](./scripts/hooks/README.md) before you change it, its tests or its registration, and when it refuses a call you did not expect, since the README holds each one in full and its reason names the fix.
+- The herdr servers belong to one ops job, `bun run ops:herdr`, on the binary and config its `pin.json` names ([scripts/README.md](./scripts/README.md#the-herdr-servers)), read before you change that job or its pin.
+- The factory's hooks: read a hook's section of [scripts/hooks/README.md](./scripts/hooks/README.md) before you change it, its tests or its registration, and when it refuses a call you did not expect.
   Five have their own lines above (`no-bare-slack-link`, `no-linear-ticket`, `no-playground-leak`, `no-raw-spawn`, `no-release-comment`);
   the rest are `after-compact`, `after-resume`, `guards`, `no-chat-question`, `no-desktop-owner-app`, `no-env-dump`, `no-extension-repo-write`, `no-extensions-write`, `no-false-green`, `no-glm-heavy-path`, `no-headless-login`,
-  `no-kill-by-name`, `no-mac-web-build`, `no-main-checkout`, `no-off-palette-label`, `no-ours-merge`, `no-prompt-stop`, `no-public-leak`, `no-raw-delete`, `no-raw-wa`, `no-stash`, `no-unslotted-run`, `rules`, `session-state` and `writing-first`.
+  `no-hidden-program`, `no-kill-by-name`, `no-live-sign-in`, `no-mac-web-build`, `no-main-checkout`, `no-off-palette-label`, `no-ours-merge`, `no-outside-pr-code`, `no-prompt-stop`, `no-protected-push`, `no-public-leak`, `no-raw-delete`, `no-raw-vercel`, `no-raw-wa`, `no-stash`, `no-unslotted-run`, `rules`, `session-state` and `writing-first`.
 
 ### The factory
 
@@ -154,9 +154,9 @@ Playground's sessions run as a factory: the dispatcher manages, the Builder lead
 - ALWAYS: Load [playbook](./extensions/core/skills/playbook/SKILL.md) when you are one of those sessions, or before you spawn, brief, rename or end a session.
   Its roles, chain, lifecycle, sweep and standing rules bind every session in the factory.
 - ALWAYS: Signal only processes you started; never select pids by name or pattern.
-  A pattern matches the live dashboard and every worker's stack.
-  A port is no narrower: whoever holds portless's proxy port is the proxy every worktree routes through, the live dashboard's included.
-  Stop a background task with `TaskStop`, a dev stack whose starting session has gone with `bun run dev:stop` (it signals only the process groups of the launcher its checkout recorded), and a child you spawned through its own pid or process group; every brief you write carries this rule.
+  A name, pattern or port also matches the live dashboard, the proxy every worktree routes through and every worker's stack.
+  Stop a background task with `TaskStop`, a dev stack whose starting session has gone with `bun run dev:stop`, and a child you spawned through its own pid or process group; every brief you write carries this rule.
+  A factory script's orphan (adopted, its worktree or test sandbox gone) is the nightly clean's to end by its pid (`packages/scripts/src/ops-tick/orphans.ts`).
   The `no-kill-by-name` hook refuses a kill by name, pattern or port in a factory session's command, and `tests/test_kill_by_name.py` fails on one anywhere in the repo's text.
 
 ### The dashboard app
@@ -167,14 +167,14 @@ Its rules live in one file per topic under `.agents/dashboard/`, and a change to
 Each topic below names when to read its file, and each ALWAYS line is that file's rule in short: the file holds it whole, with its reasons.
 When a dashboard rule's meaning changes, its ALWAYS line here changes with it.
 
-- Stack: read `.agents/dashboard/stack.md` before you change how `bun run dev` starts, which machine a stack reads, the fixture (`api/hono/src/fixtures/dashboard.json`), the dashboard's data folder, the organisation's config (`packages/config/src/org.ts`), the hosted build or the `claude_*` tables.
+- Stack: read `.agents/dashboard/stack.md` before you change how `bun run dev` starts, which machine a stack reads, the fixture, the dashboard's data folder, the organisation's config (`packages/config/src/org.ts`), the hosted build or the `claude_*` tables.
   - ALWAYS: Start it (`bun run dev`) as a process of a herdr pane, or as a background task of an agent session in one, never detached with `( … &)` or `nohup`.
-  - ALWAYS: Serve first run's setup with none of the app's database or auth code loaded: with `POSTGRES_URL` empty, `api/hono/src/main.ts` serves `firstRun()`'s setup routes, `GET /api/v1/onboard/checks`, the first run's fix routes and a `setup: true` `GET /api/health` alone until Start a local container (pglaunch's as is) or Start without Docker (PGlite) finishes.
+  - ALWAYS: Serve first run's setup with none of the app's database or auth code loaded: with `POSTGRES_URL` empty, `api/hono/src/main.ts` serves `firstRun()`'s setup routes, `GET /api/v1/onboard/checks`, the first run's fix routes and a `setup: true` `GET /api/health` alone until Start a local container (first run's container as is) or Start without Docker (PGlite) finishes.
   - ALWAYS: A person's stack reads their own machine, while factory, test and `PLAYGROUND_FIXTURE` stacks read the fixture, the live dashboard's checkout reads the live machine and a hosted build reads none, as `dashboardSource()` in `api/hono/src/lib/dashboard/fixture.ts` decides.
   - ALWAYS: Keep it on loopback: the API, `next dev` and the live dashboard's built next server bind 127.0.0.1, and the dashboard is never deployed.
     The hosted build is the one exception (stack.md's hosted rule): it deploys, mounting only sign-in, health and Yard's routes.
   - ALWAYS: Keep the hosted build to its allowlist: `api/hono/src/index.ts` imports `hosted.ts` under `PLAYGROUND_HOSTED=1` and `local.ts` otherwise, and fails closed: `hosted.ts` without the flag, and a local build on Vercel, refuse to start.
-  - ALWAYS: Carry only the GETs on `RELAY_GETS` and the POSTs on `RELAY_WRITES` that the paired key signs (`api/hono/src/lib/relay/protocol.ts`) through the relay.
+  - ALWAYS: Carry only the GETs on `RELAY_GETS` and the POSTs on `RELAY_WRITES` the paired key signs through the relay, and `BOT_GETS` alone for a bot on `yard.logReaders` (`api/hono/src/lib/relay/protocol.ts`).
   - ALWAYS: Stop `bun run dev` before running `bun run build`, `bun run check-types` or `bun run test`, or committing, in the same worktree.
   - ALWAYS: Keep the dashboard on the owner rung: every route and the WebSocket pass `requireConsoleRole("owner")`, but first run's setup routes, which serve before any user exists.
     Under `PLAYGROUND_HOSTED=1` Yard's routes take the `member` rung or the one their route names (stack.md's hosted rule).
@@ -204,7 +204,7 @@ When a dashboard rule's meaning changes, its ALWAYS line here changes with it.
 - Dashboard: read `.agents/dashboard/dashboard.md` before you change `/dashboard`'s chat, an agent's view with its Pages tab, the System or Settings page, or `GET /api/v1/agents` and `GET /api/v1/system`.
 - Roster: read `.agents/dashboard/roster.md` before you change the roster's shape or its reader, `api/hono/src/lib/dashboard/roster.ts`.
 - Ingest: read `.agents/dashboard/ingest.md` before you change `bun run ingest`, and before you start or restart its follower.
-- Live: read `.agents/dashboard/live.md` before you change how the live dashboard rolls onto `canary`.
+- Live: read `.agents/dashboard/live.md` before you change how the live dashboard rolls to a new head.
 - Sessions: read `.agents/dashboard/sessions.md` before you change the Sessions pages.
 
 ### Shipping a Playground PR
@@ -212,20 +212,9 @@ When a dashboard rule's meaning changes, its ALWAYS line here changes with it.
 The owner does not review Playground PRs: the review loop is the gate ([ADR 0004](./.agents/adr/0004-an-independent-reviewer-is-the-gate.md)), inside ZeroStarter's flow.
 
 1. Make the change on a branch from `origin/canary` in `.claude/worktrees/`, with a test or a red-first check when behaviour changes, and open it as a draft into `canary` whose body paraphrases its ask.
-   The body is written with the [pr](./extensions/core/skills/pr/SKILL.md) skill, called through the Skill tool: a `## TL;DR` of two sentences or more on top, then its Summary, Evidence and Merge Danger, then `## Links` last.
-   Its TL;DR is in plain words: what the owner sees or can do now, in words a person uses, with no factory or code jargon such as pane, slot or jsonb.
-   The body gate (`packages/scripts/src/pr-merge/body.ts`, read by Checks, `pr:merge`, merge-on-ready and the train) takes the template, its TL;DR free of `Outcome:` label lines, and its Evidence an `A/B:` line.
-   The Changelog (`api/hono/src/plugins/changelog/sources.ts`) reads a body's `Outcome:` line, else the TL;DR's first bullet or a prose TL;DR's first sentence.
-   Before the review's round 1, settle in your own pass what a round should never spend its turn on (most late findings were docs, skill, body and wording ones): run doc-sync over the change, give each touched doc and skill a writing-for-agents read (a completion criterion on every step, positive phrasing, reference disclosed into sibling files, one meaning in one place),
-   and fill the template above; the reviewer still judges everything.
-   When the diff adds a member to an enumerated kind (a status, a type, a choice, a button), grep the repo for the wording of every list that names that kind's members (`git grep -n "Later, Archive"`) and update each hit: one such grep once found what six rounds had found.
-   As part of that doc-sync pass, run the changed-term grep for each term whose meaning the diff changes (a behaviour, a rule, what a command does): `git grep -l <term>` over the agent-facing and web docs, then update every hit still describing the old meaning, since one PR took 7 rounds, each finding one more doc that did.
-   After you merge `canary` into the branch, run that grep for what the incoming commits changed: list each term whose meaning they changed (`git log -p HEAD^1..HEAD^2` while the merge commit is `HEAD`), grep the PR's own changed docs for each,
-   and fix every line still describing the old meaning in a commit after the merge before you ask for the next round, since stale lines from a merge once cost two docs-only rounds; done when no line of the PR's docs describes a meaning those commits changed.
-   When the PR moves text out of a file, run `git grep -n <old file name>` over the whole repo too, code comments, `scripts/hooks/README.md` and `.agents/dashboard/` included, and check each hit against the moved text at the old base, since one PR's greps kept to one folder and missed 7 hits, which cost two rounds.
-   Done when the body's Evidence names each touched doc and skill by its full repo path with its check, doc-sync's result and each list grep and changed-term grep with its hits, the moved-text grep's included, before the review's round 1 opens.
-2. Have a reviewer agent other than its author (a session started for the review, working in its own scratch clone, whose brief carries the signal rule from The factory, above) score it out of 5 through the [code-review-loop](./extensions/core/skills/code-review-loop/SKILL.md) skill, and fix what it finds, until it scores 5/5 on the latest head,
-   GitHub Actions' `Audit, Lint, and Build` and `test` are green there, and only nits are left (SESSIONS.md, Fix pushes and nits).
+   Read [.agents/shipping.md](./.agents/shipping.md) before you write its body and again before the review's round 1: it holds the body's template and its gate, and the pass that settles docs, skills and the body first.
+2. Have a reviewer agent other than its author (a session started for the review, in its own scratch clone, its brief carrying The factory's signal rule, above) score it out of 5 through the [code-review-loop](./extensions/core/skills/code-review-loop/SKILL.md) skill, and fix what it finds, until it scores 5/5 on the latest head,
+   every check there is green (`Audit, Lint, and Build`, `test` and, on `factory.repo`, `GitGuardian`), each PASS pr:merge asks holds there, and only nits are left (SESSIONS.md, Fix pushes and nits).
 3. Mark it ready at 5/5 and merge it with `bun run pr:merge <n>` bare and unpiped, or let merge-on-ready land it (`bun run pr:train ready`): the only ways a Playground PR reaches `canary`.
    Their gates, the merge lock and the merge queue are written in [packages/scripts/src/pr-merge/README.md](./packages/scripts/src/pr-merge/README.md); read it before a merge or gate ruling.
 4. `main`, which the main checkout and so every installed skill follows, moves only through the `release` skill, run by Ops on the owner's standing go-ahead (playbook's **release** rule), whose step 5 then brings the main checkout up to it; say what landed.

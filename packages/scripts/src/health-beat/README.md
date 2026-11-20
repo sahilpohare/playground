@@ -1,6 +1,6 @@
 # health-beat
 
-`bun run health-beat` prints the owner's health beat as text: a header at the time in `clock.ownerZone`, then one line each for the main checkout, the Dashboard, the Mac's load and CPU idle share, its memory, the sessions of the last 2 hours by state, the ops jobs by heartbeat, and the battery.
+`bun run health-beat` prints the owner's health beat as text: a header at the time in `clock.ownerZone`, then one line each for the main checkout, the Dashboard, the Mac's load and CPU idle share, its memory, the sessions of the last 2 hours by state, and the ops jobs by heartbeat.
 It posts nothing: the session that runs the beat posts the text, and keeps its channel and token outside the repo.
 
 The two lines under the header say what this install runs, each naming the place it describes and the version it carries, as `running.ts` reads it:
@@ -22,8 +22,8 @@ The two lines under the header say what this install runs, each naming the place
 
 Each read leaves the machine as it was: up to four git reads of the main checkout or the Dashboard's, portless's `routes.json`, one `ps`, `lsof` reads of the web's port and of up to 3 working folders up its process chain, a `git branch` in each and one GET, with no process signalled or selected for any action.
 
-The memory line reads what spawn.sh's memory gate reads, through ops-machine's `readMachine`: the pressure level (`kern.memorystatus_vm_pressure_level`) first, then the free share (`kern.memorystatus_level`).
+The memory line reads what spawn.sh's memory gate reads, through ops-machine's `readMachine`: the pressure level (`kern.memorystatus_vm_pressure_level`, on Linux PSI's `/proc/pressure/memory`) first, then the free share (`kern.memorystatus_level`, on Linux `/proc/meminfo`), each from `packages/scripts/src/ops-machine/readings.ts`, which also reads the CPU idle share from `top` or two `/proc/stat` reads.
 It warns only when that gate would refuse every Claude start (a GLM start takes a stricter gate, and a fresh worker also waits while the machine pages, which this line does not read): a level other than 1 or 2, or a free share under the `gates.memoryFreeMin` setting (8% by default).
-Reading the gate's own two figures keeps its warning in step with every start those two figures refuse, where `memory_pressure`'s free percentage and the System panel's `vm_stat` figure each count memory their own way.
+Reading the gate's own two figures keeps its warning in step with every start those two figures refuse, where `memory_pressure`'s free percentage and the System panel's `vm_stat` figure (on Linux `MemTotal` less `MemAvailable`) each count memory their own way.
 
 The ops jobs line leaves out a job `jobs.json` marks `disabled: true`, a pause on purpose, and calls a job down when its heartbeat file is missing, does not parse or holds no `lastBeatAt`, as the Dashboard's Ops list does, so a job meant to run that never started warns.

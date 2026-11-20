@@ -6,6 +6,7 @@ const { dispatcherRouter } = await import("../../../../../api/hono/src/routers/d
 const { dispatcherSwitch } =
   await import("../../../../../api/hono/src/lib/dashboard/dispatcher-switch")
 const { env } = await import("../../../../../packages/env/dist/api-hono.mjs")
+const { refuseAgentOffFixture } = await import("../../../../../api/hono/src/middlewares/agent")
 
 const origins: unknown = env.HONO_TRUSTED_ORIGINS
 const TRUSTED = Array.isArray(origins) ? String(origins[0]) : String(origins).split(",")[0]!.trim()
@@ -35,5 +36,12 @@ describe("POST /switch, Settings' Switch Alpha (#1835)", () => {
   test("from a trusted origin over loopback it still needs the owner's session", async () => {
     expect((await post(TRUSTED)).status).toBe(401)
     expect(dispatcherSwitch.read().state).toBe("idle")
+  })
+})
+
+describe("the dispatcher's writes refuse the agent sign-in off a fixture stack", () => {
+  test("the router carries refuseAgentOffFixture on every path", () => {
+    const handlers = dispatcherRouter.routes.filter((r) => r.path === "/*").map((r) => r.handler)
+    expect(handlers).toContain(refuseAgentOffFixture)
   })
 })

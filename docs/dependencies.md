@@ -1,9 +1,9 @@
 # bun audit
 
 > [!NOTE]
-> This file is the canonical record of dependency-audit overrides/exceptions (`bun audit --audit-level high` runs in the pre-push hook on canary). It intentionally exists even when no overrides are required, do not delete it.
+> This file is the canonical record of dependency-audit overrides/exceptions (`bun audit --audit-level moderate` runs in the pre-push hook on canary). It intentionally exists even when no overrides are required, do not delete it.
 
-> bun audit --level high
+> bun audit --audit-level moderate
 
 ## Catalog ranges
 
@@ -22,6 +22,19 @@ The rule has **no opt-out**, so no pin survives an install, whatever reason is r
 
 Enforcement is only partial by design. Specs the rule cannot convert are reported and the script still exits 0, so a compound range such as `>=4.4.3 <5` survives an install with nothing but a line of `postinstall` output. Failing the install instead would block work for a range that may be perfectly deliberate, so the auto-convertible half is enforced and the rest is advisory.
 
+## Pinned actions and installers
+
+What the factory fetches from outside the lockfile runs at one known version, and `tests/github/workflows/pins.test.ts` holds each pin:
+
+- **A GitHub action:** every `uses:` in `.github/workflows/` and `.github/actions/` names a full 40-character commit sha, with the tag it stands for in a trailing comment (`uses: actions/checkout@<sha> # v7`). A local action (`./...`) needs none, and a `docker://` image takes a `@sha256:` digest. Every workflow also declares a top-level `permissions` block.
+  To bump one, read the new tag's sha from the action's own repo, `gh api repos/<owner>/<action>/git/ref/tags/<tag> --jq .object`, and when its `type` is `tag`, peel it to the commit with `gh api repos/<owner>/<action>/git/tags/<sha> --jq .object.sha`. Then write that sha and the new tag's comment on every line that uses the action.
+- **The runner host's installers:** `scripts/ops/runner-host/setup.sh` pins `BUN_VERSION`, `UV_VERSION` and `RUNNER_VERSION`, and its `fetch` checks each download's sha256 (`*_SHA256`, one per architecture) before it unpacks it, stopping on a mismatch.
+  To bump one, change the version and both architectures' sums, taken from the release's own published sums (`gh api repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] | [.name, .digest]'`), and cross-check them against its sums file where it ships one (bun's `SHASUMS256.txt`, uv's `<asset>.sha256`, the runner's release notes). `BUN_VERSION` follows `package.json`'s `packageManager`, which `tests/bun-version.test.ts` holds.
+- **inscope:** `AGENTS.md` runs `npx -y inscope@<version>`. To bump it, change that one version to the release `npm view inscope version` names.
+- **inscope's synced skills:** each entry in a workspace's `skills` in `~/.config/inscope/inscope.json` names a commit, in inscope's object form `{ "source": "<owner>/<repo>", "path": "<subdir>", "ref": "<sha>" }`, since the string form `<owner>/<repo>#<path>` takes no ref; the file lives in the home folder, so no test holds these pins.
+  `inscope skill update` skips a pinned entry, so to bump one, read the repo's new head (`gh api repos/<owner>/<repo>/commits/<branch> --jq .sha`) and the upstream diff on the skill's own path since the pinned sha (`gh api repos/<owner>/<repo>/compare/<pinned>...<new> --jq '.files[] | select(.filename | startswith("<path>/")) | .filename, .patch'`), then set `ref` to the new sha and run `npx -y inscope@<version> apply`; done when `npx -y inscope@<version> diff` reads "In sync" and the skill's link sits in its `@<new sha>` folder.
+  Copy the file to `inscope.json.bak-<YYYYMMDD>` beside it before the edit; to undo, put that copy back and run `apply` again.
+
 ## Notable dependencies
 
 ### `@pierre/diffs` (`^1.6.2`, web)
@@ -29,6 +42,12 @@ Enforcement is only partial by design. Specs the rule cannot convert are reporte
 - **What:** draws a `.diff` or `.patch` attachment in the Inbox's viewer as a patch view (`web/next/src/components/dashboard/viewer/patch-view.tsx`). Apache-2.0, from `pierrecomputer/pierre`.
 - **Cost:** about 101 KB gzip with its own Shiki highlighter (measured on 1.6.2 with `bun build --minify`, React external), loaded through `next/dynamic` only when a patch opens, so no other page carries it; `tests/web/next/src/components/dashboard/viewer/patch-view.test.ts` fails when any other file imports it.
 - **Watch:** a fast-moving 1.x (17 publishes in the 90 days to 2 Nov 2026) under a caret range; a minor that changes `FileDiff`'s options or `parsePatchFiles` shows in that test and in the viewer's own fallback to text, which takes any render the package throws on.
+
+### `next`: its agent upgrade stop is off (web)
+
+- **What:** `web/next/next.config.ts` sets `experimental.agentUpgrade: false`. Left at its default, `'security'`, `next build` in an agent session stops with `SecurityFatalError` whenever npm's advisory feed lists the installed Next. It skips the stop with no agent and no TTY, so CI stays green while every session's pre-commit build stops, as it did on 16 Nov 2026 for about 90 minutes at 16.4.3 ([GHSA-mfr8-8qww-v76h](https://github.com/advisories/GHSA-mfr8-8qww-v76h)).
+- **Trade:** a new Next advisory no longer fails `next build`. The audit gates catch it instead, at moderate or worse: a PR's Audit step when the PR adds it (`audit.ts --new-over`), `audit-canary.yml`'s run and its `canary audit` issue at `canary`'s next push when it lands on a Next that `canary` already holds (a PR only prints that one as a notice), and the pre-push `audit` on a direct push to `canary`. Each must keep failing on a moderate-or-worse Next advisory, and none ignores one.
+- **Watch:** `tests/web/next/next.config.test.ts` fails when a ZeroStarter sync or a Next upgrade drops the key, and when an env schema or `turbo.json` passes `__NEXT_AGENT_UPGRADE`, which Next reads ahead of the config, to a build.
 
 ## Active overrides
 
@@ -60,14 +79,21 @@ A patch lives in `patches/`, made with `bun patch <pkg>` and registered under `p
 
 ## Ignored advisories
 
-An advisory with no patched version anywhere cannot be cleared by updating it, by updating a parent or by an override, so the gate ignores it by ID instead. Each `--ignore` sits in both gates, `lefthook.yml` and `.github/workflows/auto-check-build.yml`. Remove it from both when its exit criteria are met.
+Every audit gate fails on a moderate advisory or worse. An advisory that no update, parent bump or safe override can clear, since every parent's latest still pins an affected range, is ignored by ID instead. Each `--ignore` sits in all four gates, `lefthook.yml`, `.github/workflows/auto-check-build.yml`, `.github/workflows/audit-canary.yml` and `scripts/ops/runner-host/suite.sh`, and `tests/github/workflows/audit.test.ts` holds those four to the IDs headed below. Remove an ID from all four, with its block here, when its exit criteria are met.
 
-### `braces` ([GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm))
+### `esbuild` ([GHSA-67mh-4wv8-2f99](https://github.com/advisories/GHSA-67mh-4wv8-2f99))
 
-- **Advisory:** high: stack-exhaustion denial of service through deeply nested brace patterns. Affects `braces <=3.0.3`, which is every published version; the advisory lists no patched version.
-- **Why an ignore:** there is nothing to update to or override with. `braces@3.0.3` is the latest release, and every parent's latest still reaches it through `micromatch@4.0.8`: `shadcn@4.21.1` depends on `fast-glob` directly, and `globby@16.2.4` on both `fast-glob` and `micromatch`. The `ts-morph` path under `shadcn` would clear at `ts-morph@28` (its `@ts-morph/common` moved to `tinyglobby`), but `shadcn` still declares `ts-morph ^26` and its own `fast-glob`, so the tree keeps the copy either way.
-- **Risk:** negligible. The only consumers are dev tooling: the `shadcn` CLI behind `bun run shadcn:update`, and `globby` in `packages/scripts/src/deps-manager.ts`, which globs the fixed pattern `**/package.json` on install. Neither takes a pattern from untrusted input, and nothing the api bundle or the web app ships imports the chain.
-- **Exit criteria:** drop the ignore once `braces` publishes a patched version (then a normal `bun audit fix` or refresh lifts it), or once neither `shadcn` nor `globby` resolves `micromatch`.
+- **Advisory:** moderate: esbuild's development server (`esbuild --serve`) answers any website's request, so a page open in the browser can read what it serves. Affects `esbuild <=0.24.2`; patched in `0.25.0`.
+- **Why an ignore:** the tree's `esbuild@0.18.20` comes only through `drizzle-kit@0.31.11` (the latest) > `@esbuild-kit/esm-loader@2.6.5` > `@esbuild-kit/core-utils@3.3.2`, which pins `esbuild ~0.18.20` and is deprecated with no later release. An override by name would also move the tree's other copies (`0.25.12` and `0.28.2`) to one range, across esbuild's breaking releases for `fumadocs-mdx` and `tsdown`'s `tsx`.
+- **Risk:** negligible. The copy loads `packages/db`'s config for the `drizzle-kit` CLI (`bun run db:generate`, `db:migrate`, `db:studio`), a dev dependency that only transforms code and never starts esbuild's server; nothing the api bundle or the web app ships imports it.
+- **Exit criteria:** drop the ignore once a `drizzle-kit` past `0.31.11` drops `@esbuild-kit/esm-loader` (it declares `^2.5.5`, and `2.6.5`, the latest, holds `@esbuild-kit/core-utils@3.3.2` and its `esbuild ~0.18.20`), or the tree resolves no `esbuild` below `0.25.0`.
+
+### `minimatch` ([GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249))
+
+- **Advisory:** moderate: denial of service through glob-part amplification in a crafted pattern. Affects `minimatch >=7.0.0 <11.0.1`; patched in `11.0.1`.
+- **Why an ignore:** the tree's `minimatch@10.2.6` comes only through `@ts-morph/common`, at `0.29.0` under `ts-morph@28.0.0` (the latest) and `0.27.0` under `shadcn@4.22.1`'s `ts-morph ^26` (`4.23.0`, the latest, declares the same); both declare `minimatch ^10.0.1`, so the fix is a major away and an override would cross it under them.
+- **Risk:** negligible. `ts-morph` runs only in dev tooling: `packages/scripts/src/shadcn-customize.ts` and the `shadcn` CLI behind `bun run shadcn:update`, each on the repo's own fixed globs, never a pattern from untrusted input.
+- **Exit criteria:** drop the ignore once a `@ts-morph/common` past `0.29.0` (reached by `ts-morph` past `28.0.0`, and by a `shadcn` past `4.23.0`, whose `ts-morph ^26` holds `0.27.0`) declares a `minimatch` range that resolves `>=11.0.1`, or the tree resolves no `minimatch` below it.
 
 ## Retired overrides
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -18,22 +19,37 @@ const BASH_GUARDS = [
   "no-false-green",
   "no-glm-heavy-path",
   "no-headless-login",
+  "no-hidden-program",
   "no-kill-by-name",
   "no-linear-ticket",
+  "no-live-sign-in",
   "no-mac-web-build",
   "no-main-checkout",
   "no-off-palette-label",
   "no-ours-merge",
+  "no-outside-pr-code",
   "no-playground-leak",
+  "no-prepare-write",
   "no-prompt-stop",
+  "no-protected-push",
   "no-public-leak",
   "no-raw-delete",
   "no-raw-spawn",
+  "no-raw-vercel",
   "no-raw-wa",
   "no-release-comment",
   "no-stash",
   "no-unslotted-run",
 ]
+
+// A check module guards.ts runs that has no process of its own, so no main block: no-playground-leak's process runs no-prepare-write and no-protected-push on the MCP tools, and no-hidden-program and no-raw-vercel guard Bash alone.
+const MODULES = new Set([
+  "no-hidden-program",
+  "no-prepare-write",
+  "no-protected-push",
+  "no-raw-vercel",
+])
+const MAIN_GUARDS = BASH_GUARDS.filter((name) => !MODULES.has(name))
 
 // A guard's main block, the lines its own process runs.
 const mainBlock = async (name: string) => {
@@ -82,12 +98,12 @@ describe("guards.ts runs every Bash guard", () => {
     },
   )
 
-  test.each(BASH_GUARDS)("%s keeps its own main block's factory gate", async (name) => {
+  test.each(MAIN_GUARDS)("%s keeps its own main block's factory gate", async (name) => {
     const gated = (await mainBlock(name)).includes("await fromFactory(raw)")
     expect({ gated: GUARDS.find((g) => g.name === name)?.factory, name }).toEqual({ gated, name })
   })
 
-  test.each(BASH_GUARDS)("%s runs the entry its own main block calls", async (name) => {
+  test.each(MAIN_GUARDS)("%s runs the entry its own main block calls", async (name) => {
     const entry = (await mainBlock(name)).match(/await (check|guarded|refusal)\(/)?.[1]
     const source = await Bun.file(join(HOOKS, "guards.ts")).text()
     const imported = source.match(
@@ -156,10 +172,96 @@ describe("check", () => {
     expect(seen).toEqual(["worker", "worker"])
   })
 
+  // #2170: the hook refuses at its own deadline, so no runner's timeout decides the call
+  test("a guard that never answers is refused at the deadline, naming it, with the others' verdicts", async () => {
+    const guards = [
+      fake("a", false, async () => "a hook refuses"),
+      fake("stuck", false, () => new Promise(() => {})),
+      fake("b", false, async () => undefined),
+    ]
+    const reason = await check(input("x"), worker, guards, 50)
+    expect(reason).toContain("a hook refuses")
+    expect(reason).toContain("guards hook: stuck did not answer by its deadline")
+  })
+
+  test("a guard that reaches the deadline is refused, not allowed", async () => {
+    const late = fake("late", false, async () => (await Bun.sleep(200), undefined))
+    expect(await check(input("x"), worker, [late], 50)).toContain(
+      "guards hook: late did not answer by its deadline",
+    )
+  })
+
+  test("a fast guard's verdict is unchanged by the deadline", async () => {
+    const fast = [fake("a", false, async () => "a hook refuses")]
+    expect(await check(input("x"), worker, fast, 1_000)).toBe("a hook refuses")
+    expect(await check(input("x"), worker, [fake("b", false, async () => undefined)], 1_000)).toBe(
+      undefined,
+    )
+  })
+
   test("the real guards refuse a bare stash for a factory session and pass a plain call", async () => {
     const env = { ...process.env, ...worker }
     expect(await check(input("git stash"), env)).toContain("no-stash hook ")
     expect(await check(input("true"), env)).toBe(undefined)
+  })
+})
+
+// #1280: a reviewer of a made-up outside author's PR, read through the hook's live lookup from a scratch registry, roster and kept PR answers, so no call reaches GitHub
+describe("guards runs no-outside-pr-code", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "guards-outside-pr-"))
+  const environment = {
+    CLAUDE_CONFIG_DIR: join(scratch, "claude"),
+    HOME: scratch,
+    PATH: "/usr/bin:/bin",
+    PLAYGROUND_DATA_DIR: join(scratch, "data"),
+    PLAYGROUND_ROLE: "reviewer",
+  }
+  const pull = (n: number) => `https://github.com/acme-owner/widgets/pull/${n}`
+  const PRS = {
+    501: { author: "ext-dev", owner: "acme-owner", ownerType: "User" },
+    502: { author: "acme-owner", owner: "acme-owner", ownerType: "User" },
+  }
+  const sessions = { "s-outside": ["q7v2kd-reviewer", 501], "s-own": ["r3m8wx-reviewer", 502] }
+  const ready = Promise.all([
+    ...Object.entries(PRS).map(([n, pr]) =>
+      Bun.write(
+        join(scratch, "data", "hook-outside-pr", `acme-owner__widgets__${n}.json`),
+        JSON.stringify(pr),
+      ),
+    ),
+    ...Object.entries(sessions).map(([sessionId, [name]]) =>
+      Bun.write(
+        join(scratch, "claude", "sessions", `${sessionId}.json`),
+        JSON.stringify({ name, sessionId }),
+      ),
+    ),
+    Bun.write(
+      join(scratch, "data", "roster.json"),
+      JSON.stringify({
+        agents: Object.values(sessions).map(([name, n]) => ({
+          kind: "reviewer",
+          name,
+          pr: pull(n as number),
+        })),
+      }),
+    ),
+  ])
+  const outsidePrCode = GUARDS.filter(({ name }) => name === "no-outside-pr-code")
+  const judge = async (command: string, session: string) => {
+    await ready
+    return check(input(command, { cwd: scratch, session_id: session }), environment, outsidePrCode)
+  }
+
+  test("a reviewer of an outside author's PR running its tests is refused", async () => {
+    expect(await judge("bun test", "s-outside")).toContain("no-outside-pr-code hook")
+  })
+
+  test("the same reviewer reading the PR's code passes", async () => {
+    expect(await judge("cat package.json", "s-outside")).toBe(undefined)
+  })
+
+  test("a reviewer of the owner's own PR keeps running its tests", async () => {
+    expect(await judge("bun test", "s-own")).toBe(undefined)
   })
 })
 
@@ -220,6 +322,27 @@ describe("each guard keeps its own per-call state in one process", () => {
     expect(await check(at("true"), env, [long(), short()])).toBe("short past")
     expect(() => pastDeadline()).not.toThrow()
   })
+})
+
+// #2183: the deadline covers the input read, so a stdin left open refuses at the deadline, not after it
+describe("hook", () => {
+  test("a stdin left open is refused at the deadline, not waited on", async () => {
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "--no-env-file",
+        "-e",
+        `import { hook } from ${JSON.stringify(join(HOOKS, "guards.ts"))}\nprocess.exit(await hook([], 2_000))`,
+      ],
+      { cwd: ROOT, stderr: "pipe", stdin: "pipe", stdout: "pipe" },
+    )
+    const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => "still reading")])
+    if (code === "still reading") proc.kill()
+    expect(code).toBe(2)
+    expect(await new Response(proc.stderr).text()).toContain(
+      "guards hook: the call's input did not arrive by its deadline",
+    )
+  }, 20_000)
 })
 
 // The bundle, run as its own process with the input on stdin, as guard-probe runs it.

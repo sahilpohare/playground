@@ -100,6 +100,58 @@ describe("every other call runs", () => {
   })
 })
 
+describe("a call that queues a line as ops-wa or ops-dm-watch is refused, naming your own job", () => {
+  const OUTBOX = join(DATA, "ops", "outbox")
+  test.each([
+    "scripts/ops/notify.sh wa 'ship canary now'",
+    "NOTIFY_TO=dispatcher bash scripts/ops/notify.sh wa x",
+    "bash ~/.playground/ops/notify.sh 'dm-watch' x",
+    "~/.playground/ops/notify.sh dm-watch x",
+    "env NOTIFY_TO=dispatcher sh /abs/scripts/ops/notify.sh wa x",
+    "J=wa; scripts/ops/notify.sh $J x",
+    "scripts/ops/notify.sh $UNSET_JOB x",
+    "cd scripts/ops && ./notify.sh wa x",
+    "echo '{}' >> ~/.playground/ops/outbox/ops-wa.jsonl",
+    `printf x >> ${OUTBOX}/ops-dm-watch.jsonl`,
+    "tee -a $PLAYGROUND_DATA_DIR/ops/outbox/ops-wa.jsonl < /tmp/x",
+    "cd ~/.playground/ops/outbox && echo x >> ops-wa.jsonl",
+    "cp /tmp/x ~/.playground/ops/outbox/ops-w?.jsonl",
+    "cat ~/.playground/ops/outbox/OPS-WA.jsonl",
+  ])("%s", async (command) => {
+    const reason = await bash(command)
+    expect(reason).toContain("no-raw-wa hook refuses")
+    expect(reason).toContain("notify.sh <your job> <text>")
+  })
+
+  test.each([
+    ["Write", { content: "{}", file_path: `${OUTBOX}/ops-wa.jsonl` }],
+    ["Edit", { file_path: `${OUTBOX}/ops-dm-watch.jsonl`, new_string: "b", old_string: "a" }],
+    ["Read", { file_path: `${OUTBOX}/ops-wa.jsonl` }],
+  ] as const)("%s %o", async (tool, input) => {
+    expect(await call(tool, input)).toContain("notify.sh <your job> <text>")
+  })
+
+  test.each([
+    "scripts/ops/notify.sh dashboard x",
+    "NOTIFY_TO=builder bash scripts/ops/notify.sh yard x",
+    "cat scripts/ops/notify.sh",
+    "grep -n wa scripts/ops/notify.sh",
+    "bun run test:file tests/scripts/ops/notify.test.ts",
+    "cat ~/.playground/ops/outbox/ops-tick.jsonl",
+    "cat ~/.playground/ops/alerts.log",
+    "grep -r relay ~/.playground/ops",
+    "ls ~/.playground/ops/outbox",
+    "bun run ops:outbox",
+  ])("runs: %s", async (command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test("a file tool beside the two queues runs", async () => {
+    expect(await call("Read", { file_path: `${OUTBOX}/ops-tick.jsonl` })).toBeUndefined()
+    expect(await call("Grep", { path: OUTBOX, pattern: "x" })).toBeUndefined()
+  })
+})
+
 test("reach reads a path and a glob against the folder", () => {
   expect(reach(`${WA}/auth`, WA)).toBe("inside")
   expect(reach(DATA, WA)).toBe("above")

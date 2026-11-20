@@ -1,6 +1,6 @@
 #!/usr/bin/env -S bun --no-env-file
 import { existsSync, realpathSync } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, loadavg } from "node:os"
 import { join } from "node:path"
 
 import { getSessionNames, type NamedKind, setSessionNames } from "@packages/config/kinds"
@@ -9,18 +9,22 @@ import { modelSettings, readPolicyOrDefaults, readSessionNames } from "@packages
 
 import { livePair } from "../../../../api/hono/src/lib/dev/live-dashboard"
 import { accountsIo, runAccounts } from "./accounts"
+import { refreshBriefs, type Send } from "./brief-refresh"
 import { type Docker, ensureDatabase } from "./database"
 import { doctor, report } from "./doctor"
 import { pinHere } from "./herdr-pin"
 import { orgsCommand, orgsIo } from "./orgs"
-import { keepPage, pageArgs } from "./page"
+import { keepPage, pageArgs, removePage } from "./page"
 import {
   addCommand,
+  aliasFailure,
   extraWordRefusal,
   HELP,
   leftLines,
   planStart,
   rollOutcome,
+  type RollOutcome,
+  rollTimedOut,
   runStart,
   runStatus,
   startFailure,
@@ -29,11 +33,12 @@ import {
   VERBS,
   verbArgv,
   VIEW_SERVER,
+  waitingLine,
   waitOutcome,
   wantsHelp,
 } from "./plan"
 import {
-  apiUp,
+  apiRead,
   dashboardBeat,
   cutDashboardCheckout,
   dashboardCheckout,
@@ -43,8 +48,10 @@ import {
   liveSessions,
   NO_CHECKOUT,
   opsDashboard,
+  prebuildQueued,
   probe,
   supervisorRunning,
+  upHolds,
 } from "./probe"
 import { dispatcherOptions, runSpawn, startDispatcher } from "./spawn"
 import { runStore, terminalIo } from "./store"
@@ -69,18 +76,23 @@ const briefExists = (brief: string): boolean => existsSync(join(HOME_DATA, brief
 
 // The managers a playground verb starts: the named kinds, and the optimizer, whose name is its kind.
 type ManagerVerb = NamedKind | "optimizer"
+const nameOf = (kind: ManagerVerb) => (kind === "optimizer" ? kind : getSessionNames().names[kind])
+// A held brief diff reaches its manager through the ops outbox's relay, since a script cannot SendMessage (ADR 0010); job.ts loads only when a diff is held, as its imports reach the ops jobs' whole tree.
+const sendBrief: Send = async (to, text) =>
+  (await import("../ops-job/job")).sendAs("brief")(to, text)
 
 // playground dispatcher, planner, builder, ops or optimizer, and the bare start's dispatcher step: 0 started, 3 already running, 1 refused with spawn.sh's reason.
 const manager = async (
   kind: ManagerVerb,
   options: { brief?: string; harness?: "codex" } = {},
 ): Promise<{ code: number; message: string }> => {
-  const name = kind === "optimizer" ? kind : getSessionNames().names[kind]
+  const name = nameOf(kind)
   const result = await startDispatcher({
     ...options,
     data: HOME_DATA,
     live: liveSessions((live) => live === name).map((d) => d.name),
     name,
+    send: sendBrief,
     spawn: SPAWN,
     template: join(REPO, "scripts", "briefs", `${kind}.md`),
   })
@@ -124,8 +136,13 @@ const stepFailed = async (argv: string[], first: "stderr" | "stdout"): Promise<s
     : last(first === "stdout" ? stdout : stderr) || last(second) || `${argv.at(-1)} exited ${code}`
 }
 
-// The files install's linking step puts in the state folder that a dispatcher's start reads: spawn.sh builds every session's settings from factory-settings.json, and the sessions it starts run heavy work through run-slot.sh and brief their workers from the templates.
-const LINKED = ["factory-settings.json", "handoffs/new-worker.md", "ops/run-slot.sh"]
+// The files install's linking step puts in the state folder that a dispatcher's start needs: the hosted session reads factory-settings.json, and the sessions it starts run heavy work through run-slot.sh and brief their workers from the templates.
+const LINKED = [
+  "factory-settings.json",
+  "handoffs/new-research-worker.md",
+  "handoffs/new-worker.md",
+  "ops/run-slot.sh",
+]
 
 // playground dispatcher's setup, which install and the bare start give a machine and Start <dispatcher> on a fresh install has not: install's linking step when a file it links is missing, the pinned herdr installed as install.sh installs it, which downloads nothing when the copy is already pinned, then one pass of ops-herdr's start, which writes the pin and config and brings the servers up, since spawn.sh starts none; null once each is in place, else the line that says why not.
 const setUp = async (): Promise<string | null> => {
@@ -151,15 +168,24 @@ const managerAlone = async (kind: ManagerVerb, words: string[]): Promise<number>
   return 1
 }
 
-// Loaded only for sweep, since sweep.ts reaches past this folder into ops-tick; its holds read through gh and the Dashboard's checkout.
+// Loaded only for sweep, since sweep.ts reaches past this folder into ops-tick; its holds read through gh and the Dashboard's checkout, and the Builder's open PRs through one gh call.
 const sweep = async (lead: string): Promise<number> => {
-  const { readHold, runSweep } = await import("./sweep")
+  const { readHold, readOpenPrs, runSweep } = await import("./sweep")
   const { factoryRepoOf } = await import("./setting")
   try {
-    // with no factory.repo to read, each issue or PR hold reads as unreadable rather than stopping the sweep
+    // with no factory.repo to read, each issue or PR hold reads as unreadable and the open PRs as unread, rather than stopping the sweep
     const factory = await factoryRepoOf().catch(() => "")
     console.log(
-      (await runSweep(lead, dataDir(), undefined, undefined, readHold(REPO, factory))).join("\n"),
+      (
+        await runSweep(
+          lead,
+          dataDir(),
+          undefined,
+          undefined,
+          readHold(REPO, factory),
+          readOpenPrs(factory),
+        )
+      ).join("\n"),
     )
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error))
@@ -223,17 +249,26 @@ const dashboard = async (): Promise<number> => {
       const started = await manager("dispatcher")
       if (started.code !== 0) failed.push(`The dispatcher didn't start: ${started.message}`)
     } else if (step === "wait") {
-      const ready = urls ?? dashboardUrls(checkout)
       const started = Date.now()
       const state = { shownAt: started, startedAt: started }
       for (;;) {
-        const api = await apiUp(ready)
+        // read afresh each poll, as the supervisor's wait_dashboard does: the stack's API may start portless's 1355 proxy, with its own scheme, after the first read
+        const health = await apiRead(dashboardUrls(checkout))
         const now = Date.now()
-        const failure = startFailure(
-          await linesSince(logs.results, from.results),
-          await linesSince(logs.log, from.log),
+        const results = await linesSince(logs.results, from.results)
+        const failure = startFailure(results, await linesSince(logs.log, from.log))
+        const outcome = waitOutcome(
+          {
+            alias: aliasFailure(results),
+            api: health.up,
+            beat: dashboardBeat(now),
+            failure,
+            now,
+            redirect: health.redirect,
+            upHolds: upHolds(now),
+          },
+          state,
         )
-        const outcome = waitOutcome({ api, beat: dashboardBeat(now), failure, now }, state)
         if ("done" in outcome) {
           if (!outcome.ok) {
             failed.push(`The Dashboard didn't come up: ${outcome.done}`)
@@ -249,7 +284,8 @@ const dashboard = async (): Promise<number> => {
         await pause(2000)
       }
     } else {
-      const ready = urls ?? dashboardUrls(checkout)
+      // read again for the same reason as the wait's polls: the URLs read at the run's start can name an idle ~/.portless's
+      const ready = dashboardUrls(checkout)
       if (!ready) {
         failed.push("The Dashboard didn't open: portless gives no URL for it")
         return close()
@@ -287,32 +323,66 @@ const roll = async (): Promise<number> => {
   const from = { log: Bun.file(log).size, results: Bun.file(results).size }
   await Bun.write(join(state, "roll-now"), "")
   console.log("Building…")
-  let shown = "building"
+  let shown = "Building"
+  let outcome: RollOutcome = { phase: "building" }
+  const end = (done: { done: string; ok: boolean }) => {
+    ;(done.ok ? console.log : console.error)(done.done)
+    return done.ok ? 0 : 1
+  }
   const until = Date.now() + ROLL_MS
   while (Date.now() < until) {
-    const outcome = rollOutcome(
-      await linesSince(log, from.log),
-      await linesSince(results, from.results),
-    )
-    if ("done" in outcome) {
-      ;(outcome.ok ? console.log : console.error)(outcome.done)
-      return outcome.ok ? 0 : 1
-    }
-    if (outcome.phase !== shown) {
-      shown = outcome.phase
-      console.log(outcome.phase === "switching" ? "Switching…" : "Going back…")
+    outcome = rollOutcome(await linesSince(log, from.log), await linesSince(results, from.results))
+    if ("done" in outcome) return end(outcome)
+    const line =
+      outcome.phase === "waiting"
+        ? waitingLine(outcome.why, loadavg()[1]!)
+        : { building: "Building", "going back": "Going back", switching: "Switching" }[
+            outcome.phase
+          ]
+    // a waiting line whose load figure alone moved is the same wait, so it prints once
+    if (line.replace(/load5 is [\d.]+/, "") !== shown.replace(/load5 is [\d.]+/, "")) {
+      shown = line
+      console.log(`${line}…`)
     }
     await pause(2000)
   }
-  console.error("Failed: no roll result within 30 minutes; see ops/dashboard/supervisor.log")
-  return 1
+  return end(rollTimedOut(outcome, loadavg()[1]!, prebuildQueued()))
 }
 
-// playground update [--to <tag>]: the release skill's step 5 on this checkout (update.ts), then the roll.
+// playground update [--to <tag>]: the release skill's step 5 on this checkout (update.ts), each peer's clone to the same commit by the Dashboard's .env, which names the peers the System panel reads, at the main checkout's place under home whichever worktree runs it (peer-sync.ts), then the roll.
 const update = (to?: string): Promise<number> =>
-  runUpdate(REPO, spawnRun, roll, console.log, to, join(dataDir(), "ops", "update-head"))
+  runUpdate(
+    REPO,
+    spawnRun,
+    roll,
+    console.log,
+    to,
+    join(dataDir(), "ops", "update-head"),
+    (old) =>
+      refreshBriefs({
+        data: HOME_DATA,
+        live: (name) => liveSessions((live) => live === name).length > 0,
+        log: console.log,
+        managers: MANAGERS.map((kind) => ({ kind, name: nameOf(kind) })),
+        old,
+        repo: REPO,
+        send: sendBrief,
+      }),
+    // loaded only here, since the bare start and every other command need neither
+    async (sha) => {
+      const [{ cloneOf, syncPeers }, { mainCheckout }] = await Promise.all([
+        import("./peer-sync"),
+        import("../main-checkout"),
+      ])
+      await syncPeers(
+        join(dashboardCheckout(REPO) ?? REPO, ".env"),
+        sha,
+        cloneOf(mainCheckout(REPO), homedir()),
+      )
+    },
+  )
 
-// playground uninstall: the install's links, LaunchAgents and the Dashboard's stack (uninstall.ts); --purge, after asking, also the database, and moves the data folder aside.
+// playground uninstall: the install's links, LaunchAgents (on Linux the systemd user units) and the Dashboard's stack (uninstall.ts); --purge, after asking, also the database, and moves the data folder aside.
 const uninstallAll = async (purge: boolean): Promise<number> => {
   const { database } = livePair()
   const checkout = dashboardCheckout(REPO)
@@ -353,10 +423,22 @@ const add = async (args: string[]): Promise<number> => {
   return 0
 }
 
-// playground page: the page kept in the data folder the dashboard reads (PLAYGROUND_DATA_DIR's when set, so a test stack's fixture folder can be named), and never opened: it reaches the owner as an Inbox card's html attachment.
-const page = (args: string[]): number => {
+// playground page: the page kept in the data folder the dashboard reads (PLAYGROUND_DATA_DIR's when set, so a test stack's fixture folder can be named), and never opened: it reaches the owner as an Inbox card's html attachment. With --remove, one kept page leaves the Pages tab and its files go to the trash, each by the id it prints.
+const page = async (args: string[]): Promise<number> => {
   const parsed = pageArgs(args)
   if ("error" in parsed) return fail(parsed.error)
+  if ("remove" in parsed) {
+    const { machineRoots, sessionName } = await import("../trash")
+    const removed = removePage(parsed.remove, dataDir(), {
+      roots: machineRoots(),
+      session: await sessionName(),
+    })
+    if ("error" in removed) return fail(removed.error)
+    console.log(`Removed ${removed.moved[0]!.file} from the Pages tab; its files are in the trash:`)
+    for (const { file, id } of removed.moved) console.log(`  ${id}  ${file}`)
+    console.log("playground rm --restore <id> brings one back")
+    return 0
+  }
   const kept = keepPage(parsed, dataDir())
   if ("error" in kept) return fail(kept.error)
   console.log(`Kept ${kept.path}`)
@@ -371,11 +453,39 @@ const picker = async (args: string[]): Promise<number> => {
   return code
 }
 
-// playground alerts-wait: blocks until the next alert for a manager, a stuck session's or the relay watch's late-stop line (alerts-wait.ts), then prints it.
+// playground alerts-wait: blocks until the next outbox line for a manager, a stuck session's alert, the relay watch's late-stop line or any job's line addressed to it (alerts-wait.ts), then prints it.
 const alertsWaitFor = async (name: string): Promise<number> => {
   const { alertsWait } = await import("./alerts-wait")
   console.log(await alertsWait(name, join(dataDir(), "ops", "outbox")))
   return 0
+}
+
+// playground send: one line for a session on the other machine, queued in the outbox's ops-peer.jsonl for ops-peer-relay to copy there (send.ts).
+const sendTo = async ([to, ...words]: string[]): Promise<number> => {
+  const { peerLine, sendPeer } = await import("./send")
+  const { sessionName } = await import("../trash")
+  const line = peerLine(to!, words.join(" "), await sessionName(), new Date(), crypto.randomUUID())
+  if ("error" in line) {
+    console.error(`playground: ${line.error}`)
+    return 2
+  }
+  await sendPeer(join(dataDir(), "ops", "outbox"), line)
+  console.log(`queued ${line.id} for ${line.to}`)
+  return 0
+}
+
+// playground ci-wait: blocks until the PR's required checks exist at its head and conclude (ci-wait.ts), loaded only for this command.
+const ciWaitFor = async (words: string[]): Promise<number> => {
+  const { machineGh, runCiWait } = await import("./ci-wait")
+  const { factoryRepoOf } = await import("./setting")
+  return runCiWait(words, {
+    err: console.error,
+    gh: machineGh,
+    now: Date.now,
+    out: console.log,
+    repo: () => factoryRepoOf(),
+    sleep: (seconds) => Bun.sleep(seconds * 1000),
+  })
 }
 
 // playground focus's reads and writes: the data folder, held-prs.json, the clock and this checkout's run-slot.sh, loaded only for this command.
@@ -405,6 +515,12 @@ const priorityDeps = async () => {
 const rm = async (words: string[]): Promise<number> => {
   const { rmDeps, runRm } = await import("./rm")
   return runRm(words, rmDeps(REPO))
+}
+
+// playground record: the machine record (machine-record/cli.ts), loaded only for this command.
+const record = async (words: string[]): Promise<number> => {
+  const { recordIo, runRecord } = await import("../machine-record/cli")
+  return runRecord(words, recordIo())
 }
 
 // playground migrate: the switch's one-time move (migrate.ts), loaded only for this command.
@@ -444,68 +560,81 @@ const code =
             : MANAGERS.includes(command as ManagerVerb)
               ? await managerAlone(command as ManagerVerb, rest)
               : command === "page"
-                ? page(rest)
+                ? await page(rest)
                 : command === "view"
                   ? await view()
                   : command === "picker"
                     ? await picker(rest)
                     : command === "alerts-wait"
                       ? await alertsWaitFor(rest[0]!)
-                      : command === "doctor"
-                        ? report(await doctor(REPO, homedir(), HOME_DATA))
-                        : command === "version"
-                          ? (console.log(version(REPO, HOME_DATA).join("\n")), 0)
-                          : command === "uninstall"
-                            ? await uninstallAll(rest[0] === "--purge")
-                            : command === "ext" || command === "settings"
-                              ? await runStore(command, rest, await terminalIo(), console.error)
-                              : command === "rules"
-                                ? // loaded only here, since it reads the rules hook and the settings package, which the bare dispatcher's start needs neither of
-                                  await (
-                                    await import("./rules")
-                                  ).runRules(
-                                    rest,
-                                    process.cwd(),
-                                    process.env,
-                                    console.log,
-                                    console.error,
-                                  )
-                                : command === "migrate"
-                                  ? await migrateMachine(rest)
-                                  : command === "orgs"
-                                    ? await orgsCommand(rest, orgsIo(REPO, dataDir()))
-                                    : command === "accounts"
-                                      ? await runAccounts(rest, accountsIo(dataDir()))
-                                      : command === "focus"
-                                        ? await (
-                                            await import("./focus")
-                                          ).runFocus(rest, await focusDeps())
-                                        : command === "priority"
+                      : command === "send"
+                        ? await sendTo(rest)
+                        : command === "doctor"
+                          ? report(await doctor(REPO, homedir(), HOME_DATA))
+                          : command === "version"
+                            ? (console.log(version(REPO, HOME_DATA).join("\n")), 0)
+                            : command === "uninstall"
+                              ? await uninstallAll(rest[0] === "--purge")
+                              : command === "ext" || command === "settings"
+                                ? await runStore(command, rest, await terminalIo(), console.error)
+                                : command === "rules"
+                                  ? // loaded only here, since it reads the rules hook and the settings package, which the bare dispatcher's start needs neither of
+                                    await (
+                                      await import("./rules")
+                                    ).runRules(
+                                      rest,
+                                      process.cwd(),
+                                      process.env,
+                                      console.log,
+                                      console.error,
+                                    )
+                                  : command === "migrate"
+                                    ? await migrateMachine(rest)
+                                    : command === "orgs"
+                                      ? await orgsCommand(rest, orgsIo(REPO, dataDir()))
+                                      : command === "accounts"
+                                        ? await runAccounts(rest, accountsIo(dataDir()))
+                                        : command === "focus"
                                           ? await (
-                                              await import("./priority")
-                                            ).runPriority(rest, await priorityDeps())
-                                          : command === "rm"
-                                            ? await rm(rest)
-                                            : command === "yard"
-                                              ? await (
-                                                  await import("./yard")
-                                                ).runYard(
-                                                  rest,
-                                                  await (
-                                                    await import("./yard")
-                                                  ).yardIo(REPO, accountsIo(dataDir()).readSecret),
-                                                )
-                                              : command === "herdr" && rest[0] === "stop"
-                                                ? (await opsHerdr(["stop-all"]).exited) === 0
-                                                  ? 0
-                                                  : 1
-                                                : command === "herdr" && rest[0] === "pin"
+                                              await import("./focus")
+                                            ).runFocus(rest, await focusDeps())
+                                          : command === "priority"
+                                            ? await (
+                                                await import("./priority")
+                                              ).runPriority(rest, await priorityDeps())
+                                            : command === "record"
+                                              ? await record(rest)
+                                              : command === "rm"
+                                                ? await rm(rest)
+                                                : command === "yard"
                                                   ? await (
-                                                      await import("./herdr-pin")
-                                                    ).runHerdrPin(rest.slice(1))
-                                                  : VERBS.includes(command)
-                                                    ? await verb(command, rest)
-                                                    : fail(
-                                                        `no command ${command}; playground --help lists them`,
-                                                      )
+                                                      await import("./yard")
+                                                    ).runYard(
+                                                      rest,
+                                                      await (
+                                                        await import("./yard")
+                                                      ).yardIo(
+                                                        REPO,
+                                                        accountsIo(dataDir()).readSecret,
+                                                      ),
+                                                    )
+                                                  : command === "herdr" && rest[0] === "stop"
+                                                    ? (await opsHerdr(["stop-all"]).exited) === 0
+                                                      ? 0
+                                                      : 1
+                                                    : command === "herdr" && rest[0] === "pin"
+                                                      ? await (
+                                                          await import("./herdr-pin")
+                                                        ).runHerdrPin(rest.slice(1))
+                                                      : VERBS.includes(command)
+                                                        ? await verb(command, rest)
+                                                        : command === "ci-wait"
+                                                          ? await ciWaitFor(rest)
+                                                          : command === "model"
+                                                            ? await (
+                                                                await import("../local-model/live")
+                                                              ).runModel(rest)
+                                                            : fail(
+                                                                `no command ${command}; playground --help lists them`,
+                                                              )
 process.exit(code)

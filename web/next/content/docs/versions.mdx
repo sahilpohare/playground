@@ -22,7 +22,7 @@ A change to a contract or a piece of content never edits it in place: the old ve
 
 ```bash
 playground ext why <scope> <kind> <key>                 # every version, newest first, each with its reason
-playground ext show <scope> <kind> <key> --rev <sha>    # one version, in the state it was written in; without --rev, the item's state now
+playground ext show <scope> <kind> <key> --rev <sha>    # one version, in the state it was written in, or accepted once an accept landed it; without --rev, the item's state now
 playground ext diff <scope> <kind> <key> --from <sha> --to <sha>
 ```
 

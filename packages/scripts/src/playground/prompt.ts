@@ -4,19 +4,26 @@ import { basename } from "node:path"
 import { configDirOf } from "../../../env/src/data-dir"
 import { callKey, pendingCalls, pickerLines, transcriptOf } from "../stuck-alert"
 
-// A permission prompt as Claude Code draws it (2.1, read off a herdr pane on 26 Oct): a full rule, its title, then the command between two dashed rules, any warning, its question and the cursor on its first option, Yes.
+// A permission prompt as Claude Code draws it (2.1, read off a herdr pane on 26 Oct): a full rule, its title, then the command between two dashed rules, any warning (a hook's confirmation prompt puts its reason here), its question and the cursor on its first option, Yes; one taller than the pane is clipped from its top (13 Nov).
 const QUESTION = /Do you want to (proceed|make this edit|create|allow|run|fetch|use|overwrite)/i
 const FIRST_YES = /^\s*[│ ]*❯\s*1\.\s+Yes\b/m
 const RULE = /^\s*─{3,}\s*$/
 const DASHES = /^\s*╌{3,}\s*$/
 
-// Pure: the permission dialog at a pane's foot, from below its top rule to its question, or null when the pane shows none.
-function dialogOf(screen: string): string[] | null {
+// A dialog's lines, and whether Claude Code clipped it: then its lines are the rows of its command box left on screen alone.
+type Dialog = { clipped: boolean; lines: string[] }
+
+// Pure: the permission dialog at a pane's foot, from below its top rule to its question; when no top rule shows but a dashed rule does, the box's rows above that last dashed rule, from the screen's top or the box's top dashed rule, since Claude Code clips a prompt taller than the pane from its top; else null.
+function dialogOf(screen: string): Dialog | null {
   const lines = screen.trimEnd().split("\n")
   const question = lines.findLastIndex((line) => QUESTION.test(line))
   if (question < lines.length - 15 || !FIRST_YES.test(lines.slice(question).join("\n"))) return null
   const top = lines.slice(0, question).findLastIndex((line) => RULE.test(line))
-  return top < 0 ? null : lines.slice(top + 1, question + 1)
+  if (top >= 0) return { clipped: false, lines: lines.slice(top + 1, question + 1) }
+  const box = lines.slice(0, question).findLastIndex((line) => DASHES.test(line))
+  if (box < 0) return null
+  const from = lines.slice(0, box).findLastIndex((line) => DASHES.test(line))
+  return { clipped: true, lines: lines.slice(from + 1, box) }
 }
 
 // The tools whose child raises its own prompts while the call waits on it: a subagent (Agent, Task), a forked skill (Skill), a workflow's agents (Workflow); so a waiting call of one is never the prompt's own.
@@ -30,10 +37,17 @@ const judgeable = (input: Record<string, unknown>): boolean =>
 const herdrRoute = (name: string): string =>
   `close the session with spawn.sh close ${name}, then run the spawn.sh resume line ~/.playground/resume/${name}.sh holds with --brief <a file under ~/.playground of the reason and the simpler shape> added, and a reviewer's or tester's --pr <the PRs its roster row lists>, so it resumes under its name by its session id and the prompted call never runs`
 
-// Pure: how a dialog matches the call, with whitespace and box borders dropped, since the pane wraps a long one: "strong" when the command is the whole text between its dashed rules, "weak" when the command or URL sits whole in a dialog with no such box or the file's name sits in it, else null.
-function matchOf(dialog: string[], input: Record<string, unknown>): "strong" | "weak" | null {
+// Pure: how a dialog matches the call, with whitespace and box borders dropped, since the pane wraps a long one: on a clipped dialog "weak" when its rows end the command, else null; otherwise "strong" when the command is the whole text between its dashed rules, "weak" when the command or URL sits whole in a dialog with no such box or the file's name sits in it, else null.
+function matchOf(
+  { clipped, lines: dialog }: Dialog,
+  input: Record<string, unknown>,
+): "strong" | "weak" | null {
   const flat = (text: string) => text.replace(/[\s│]+/g, "")
   const text = flat(dialog.join(""))
+  if (clipped)
+    return typeof input.command === "string" && text && flat(input.command).endsWith(text)
+      ? "weak"
+      : null
   if (typeof input.command === "string") {
     const [from, to] = dialog.flatMap((line, i) => (DASHES.test(line) ? [i] : []))
     if (from !== undefined && to !== undefined)

@@ -1,10 +1,24 @@
 import { afterAll, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { setSetting, type Who } from "../../../../packages/settings/src"
-import { judgeItem, putItem, showItem } from "../../../../packages/settings/src/items"
+import {
+  extensionsDir,
+  mustGit,
+  rootLocked,
+  scopeDir,
+  setRootLock,
+  setSetting,
+  type Who,
+} from "../../../../packages/settings/src"
+import {
+  exportTo,
+  importFrom,
+  judgeItem,
+  putItem,
+  showItem,
+} from "../../../../packages/settings/src/items"
 
 process.env.PLAYGROUND_LOGIN = "made-up-me"
 const ME = "made-up-me"
@@ -53,6 +67,16 @@ test("show --rev prints the revision's own files and state, a proposal beside an
   expect(showItem(scratch, { ...ref, key: "other" }, v2)).toBeNull()
 })
 
+// PG-1892: show reads the stored bytes whole, so a body's final newline survives --rev and plain alike
+test("show keeps a body's final newline by --rev and plain alike", () => {
+  const doc = { ...ref, key: "newline", kind: "doc" as const }
+  const body = { attachments: [], body: "made-up line\n", files: null, value: null }
+  setSetting(scratch, { key: "clock.ownerZone", scope: ME, value: "Europe/Lisbon" }, OWNER)
+  const rev = revOf(putItem(scratch, doc, body, OWNER, true))
+  expect(showItem(scratch, doc, rev)?.content.body).toBe("made-up line\n")
+  expect(showItem(scratch, doc)?.content.body).toBe("made-up line\n")
+})
+
 // guards that a revision written for another item reads this item from that tree as it stood, its accepted copy first, never from the other item's trailers
 test("show --rev of a revision that wrote another item prints this item as that revision's tree held it", () => {
   const mine = { ...ref, key: "mine" }
@@ -66,6 +90,43 @@ test("show --rev of a revision that wrote another item prints this item as that 
     files: files("mine accepted").files,
     state: "accepted",
   })
+})
+
+// PG-1907: a proposal that has since landed reads accepted under --rev, the same state bare show reads, while a live proposal still reads proposed
+test("show --rev reads a proposal that has since landed as accepted, a live proposal still as proposed", () => {
+  const gate = { ...ref, key: "gate", kind: "rule" as const }
+  const text = (body: string) => ({ attachments: [], body, files: null, value: null })
+  setSetting(scratch, { key: "clock.ownerZone", scope: ME, value: "Europe/Lisbon" }, OWNER)
+  const proposal = revOf(putItem(scratch, gate, text("Gate one.\n"), WORKER, false))
+  expect(showItem(scratch, gate, proposal)?.state).toBe("proposed")
+  const accepted = revOf(judgeItem(scratch, gate, proposal, { kind: "score", score: 5 }, REVIEWER))
+  expect(showItem(scratch, gate, accepted)?.state).toBe("accepted")
+  expect(showItem(scratch, gate, proposal)?.state).toBe("accepted")
+  expect(showItem(scratch, gate)?.state).toBe("accepted")
+  const newer = revOf(putItem(scratch, gate, text("Gate two.\n"), WORKER, false))
+  expect(showItem(scratch, gate, newer)?.state).toBe("proposed")
+  expect(showItem(scratch, gate, proposal)?.state).toBe("accepted")
+})
+
+// PG-1907: a proposal's state follows the commit that next changed proposed/, so an accept a later accept replaced still reads accepted, and a pending or rejected proposal keeps its state however its text compares
+test("show --rev reads a proposal by the commit that next changed its proposed copy", () => {
+  const walk = { ...ref, key: "walk", kind: "rule" as const }
+  const text = (body: string) => ({ attachments: [], body, files: null, value: null })
+  setSetting(scratch, { key: "clock.ownerZone", scope: ME, value: "Europe/Lisbon" }, OWNER)
+  const p1 = revOf(putItem(scratch, walk, text("Walk one.\n"), WORKER, false))
+  revOf(judgeItem(scratch, walk, p1, { kind: "score", score: 5 }, REVIEWER))
+  const p2 = revOf(putItem(scratch, walk, text("Walk two.\n"), WORKER, false))
+  revOf(judgeItem(scratch, walk, p2, { kind: "score", score: 5 }, REVIEWER))
+  expect(showItem(scratch, walk, p1)?.state).toBe("accepted")
+  expect(showItem(scratch, walk, p2)?.state).toBe("accepted")
+  const pending = revOf(putItem(scratch, walk, text("Walk two.\n"), WORKER, false))
+  expect(showItem(scratch, walk, pending)?.state).toBe("proposed")
+  const doomed = { ...ref, key: "doomed", kind: "rule" as const }
+  const rejected = revOf(putItem(scratch, doomed, text("Doomed.\n"), WORKER, false))
+  revOf(judgeItem(scratch, doomed, rejected, { kind: "reject" }, REVIEWER))
+  const landed = revOf(putItem(scratch, doomed, text("Doomed.\n"), WORKER, false))
+  revOf(judgeItem(scratch, doomed, landed, { kind: "score", score: 5 }, REVIEWER))
+  expect(showItem(scratch, doomed, rejected)?.state).toBe("proposed")
 })
 
 // PG-1377: put chmods each executable name, so a name the item does not hold, such as ../x, is refused before it reaches chmodSync
@@ -94,3 +155,57 @@ test("put refuses an executable name the item does not hold", () => {
     ),
   ).toEqual(refusal)
 })
+
+// PG-1924: an import carries a source script's executable bit, and never strips a stored script's own
+test("import stores a source folder's 755 script as 100755 and keeps the stored bit on a re-import", () => {
+  const from = join(scratch, "import-src", "made-up-new")
+  mkdirSync(join(from, "scripts"), { recursive: true })
+  const source = join(from, "scripts", "run.sh")
+  writeFileSync(source, "#!/bin/sh\necho made-up\n")
+  writeFileSync(join(from, "readme.md"), "made-up note\n")
+  chmodSync(source, 0o755)
+  expect(importFrom(scratch, join(scratch, "import-src"), false, OWNER).ok).toBe(true)
+  const dir = scopeDir(scratch, "made-up-new")
+  const at = join(dir, "scripts", "run.sh")
+  expect(mustGit(dir, ["ls-files", "-s", "scripts/run.sh"])).toContain("100755")
+  expect(statSync(at).mode & 0o777).toBe(0o755)
+  expect(mustGit(dir, ["ls-files", "-s", "readme.md"])).toContain("100644")
+  chmodSync(source, 0o644)
+  expect(importFrom(scratch, join(scratch, "import-src"), false, OWNER).ok).toBe(true)
+  expect(mustGit(dir, ["ls-files", "-s", "scripts/run.sh"])).toContain("100755")
+  expect(statSync(at).mode & 0o777).toBe(0o755)
+})
+
+// The root's file lock: an import's fetch runs under withLock, which lifts that scope's folder of a locked root for it, so an export that carries the scope's history on still fast-forwards.
+test.skipIf(!Bun.which("chflags"))(
+  "an import into a locked root fast-forwards a scope and leaves the root locked",
+  () => {
+    const data = join(scratch, "locked-import")
+    revOf(putItem(data, ref, files("v1"), OWNER, true))
+    const out = join(scratch, "locked-export")
+    exportTo(data, out)
+    writeFileSync(join(out, ME, "later.md"), "made-up later note\n")
+    mustGit(join(out, ME), ["add", "-A"])
+    mustGit(join(out, ME), [
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-q",
+      "-m",
+      "later",
+    ])
+    setRootLock(data, true)
+    try {
+      const done = importFrom(data, out, false, OWNER)
+      expect(done.ok && done.lines[0]).toBe(`~ ${ME}: fast-forward`)
+      expect(mustGit(scopeDir(data, ME), ["rev-parse", "HEAD"])).toBe(
+        mustGit(join(out, ME), ["rev-parse", "HEAD"]),
+      )
+      expect(rootLocked(extensionsDir(data))).toBe(true)
+    } finally {
+      setRootLock(data, false)
+    }
+  },
+)

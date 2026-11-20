@@ -1,5 +1,5 @@
 #!/usr/bin/env -S bun --no-env-file
-// playground herdr pin: download the pinned herdr's release asset for this Mac, check its SHA-256, and only then put it at the data folder's bin/herdr; --check reads the copy alone, --asset installs from a file. Imports no workspace package, so install.sh runs it before `bun install`.
+// playground herdr pin: download the pinned herdr's release asset for this machine (macOS or Linux, on arm64 or x64), check its SHA-256, and only then put it at the data folder's bin/herdr; --check reads the copy alone, --asset installs from a file. Imports no workspace package, so install.sh runs it before `bun install`.
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs"
 import { dirname } from "node:path"
 
@@ -39,7 +39,7 @@ export async function pinHerdr(opts: {
   if (!asset)
     return {
       code: 3,
-      line: `herdr-pin: Playground pins herdr only for macOS on arm64 or x64, not ${process.platform} ${process.arch}`,
+      line: `herdr-pin: Playground pins herdr only for macOS or Linux, on arm64 or x64, not ${process.platform} ${process.arch}`,
     }
   if (sumAt(path) === opts.sha256)
     return { code: 0, line: `herdr ${version} already pinned at ${path}` }

@@ -31,7 +31,7 @@ test("--data names the folder, the live dashboard's checkout reads the real one,
   expect(engineDataOf(["--data"], repo("work"), env)).toEqual({ refusal: "--data needs a folder" })
 })
 
-test.each(["ops-awake", "ops-machine"])(
+test.each(["ops-machine"])(
   "%s run by hand from a worktree with no --data exits 2 before it writes anything",
   (job) => {
     const run = Bun.spawnSync(

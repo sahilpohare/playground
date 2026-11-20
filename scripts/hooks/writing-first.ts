@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { dataDirOf } from "../../packages/env/src/data-dir"
 import { UPSTREAM_SKILLS } from "../../packages/scripts/src/vendor-upstream/stage"
 import { guardInputs } from "./codex"
+import { input } from "./input"
 import { writeTargets } from "./no-main-checkout"
 import { fromFactory } from "./role"
 import {
@@ -40,8 +41,8 @@ type Input = {
 const WRITES = new Set(["Edit", "MultiEdit", "Write"])
 const ID = /^[\w-]+$/
 // the bare name, or a plugin's or a folder's scoped copy (`ws-home:writing-for-agents`)
-const LOADS = new RegExp(`^(?:[\\w./-]+:)?${SKILL}$`)
-const TYPED = new RegExp(`^\\s*/(?:[\\w./-]+:)?${SKILL}(?:\\s|$)`)
+export const LOADS = new RegExp(`^(?:[\\w./-]+:)?${SKILL}$`)
+export const TYPED = new RegExp(`^\\s*/(?:[\\w./-]+:)?${SKILL}(?:\\s|$)`)
 // Codex has no Skill tool, so a Codex session loads the skill by reading its SKILL.md in the shell
 const READS = new RegExp(
   `(?:^|[\\n;&|(])\\s*(?:bat|cat|head|less|more|nl|sed|tail)\\s[^\\n;&|]*${SKILL}/SKILL\\.md(?![\\w.])`,
@@ -59,7 +60,7 @@ const configDir = (env: Environment) =>
 const marks = (env: Environment) => join(dataDirOf(env), "writing-first")
 
 // One mark per session, and per subagent within it: a subagent's hook input carries its parent's session id beside its own agent id (measured on Claude Code 2.1.296, 13 Oct), so a parent's load would otherwise let an unloaded subagent write.
-function markOf(input: Input, env: Environment): string | undefined {
+export function markOf(input: Input, env: Environment): string | undefined {
   const session = typeof input.session_id === "string" ? input.session_id : ""
   const agent = typeof input.agent_id === "string" ? input.agent_id : ""
   if (!ID.test(session) || (agent && !ID.test(agent))) return
@@ -418,7 +419,7 @@ async function toolCheck(input: Input, env: Environment): Promise<string | undef
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("writing-first", "recorder")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

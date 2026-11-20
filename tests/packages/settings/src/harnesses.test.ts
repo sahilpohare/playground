@@ -12,6 +12,10 @@ describe("a backend pin", () => {
         })
   })
 
+  test("reads the local model's pin as Claude Code on local", () => {
+    expect(readPin("claude-code local\n")).toEqual({ backend: "local", harness: "claude-code" })
+  })
+
   test("reads a pin written before the harness split, its backend alone, as Claude Code", () => {
     expect(readPin("glm\n")).toEqual({ backend: "glm", harness: "claude-code" })
     expect(readPin("claude")).toEqual({ backend: "claude", harness: "claude-code" })

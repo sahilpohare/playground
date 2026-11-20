@@ -67,6 +67,25 @@ describe("the hosted Yard client", () => {
     ])
   })
 
+  test("a swap posts the new secret with the old token as its bearer to the swap route", async () => {
+    const swap = yardClient(base, "yard_old", (url, init) => {
+      seen.push({
+        auth: new Headers(init.headers).get("authorization"),
+        body: String(init.body),
+        method: init.method ?? "GET",
+        path: new URL(url).pathname,
+      })
+      return Promise.resolve(Response.json({ data: { token: { id: "t1", name: "mac" } } }))
+    })
+    expect(await swap.swapToken("yard_new")).toEqual({ token: { id: "t1", name: "mac" } })
+    expect(seen.at(-1)).toEqual({
+      auth: "Bearer yard_old",
+      body: '{"secret":"yard_new"}',
+      method: "POST",
+      path: "/api/v1/yard/tokens/swap",
+    })
+  })
+
   test("an answer in a shape it does not read is refused, never passed on", async () => {
     const odd = yardClient(base, "yard_mac", (_, init) => fetch(`${base}/odd`, init))
     expect(((await odd.channels().catch((e: unknown) => e)) as YardError).status).toBe(502)

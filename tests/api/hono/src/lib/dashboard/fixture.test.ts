@@ -25,6 +25,7 @@ import {
   type Fixture,
   fixtureDir,
   fixtureHerdrInput,
+  fixtureHerdrScreen,
   launcherRuns,
   loadFixture,
   markLaunched,
@@ -34,6 +35,7 @@ import {
 import { parseLines } from "../../../../../../api/hono/src/lib/dashboard/transcript"
 import { livePair } from "../../../../../../api/hono/src/lib/dev/live-dashboard"
 import { priceOf } from "../../../../../../api/hono/src/lib/usage/prices"
+import { LOCAL_SERVED } from "../../../../../../packages/config/src/console"
 import { listTrash } from "../../../../../../packages/safe-delete/src"
 import {
   cleanGitShims,
@@ -686,6 +688,39 @@ describe("writeFixture", () => {
     )
   })
 
+  // the model menu's switch on a fixture stack, as Claude Code 2.1.325 does it mid-conversation: /model draws its confirm over the box, its Yes switches the model the status line names, and No keeps it
+  test("a /model prompt draws the switch confirm, its Enter switches the status line's model, and No keeps it", () => {
+    const dir = join(scratch("fixture-model"), "fixture")
+    writeFixture(shipped(), dir, ROOTS)
+    const pane = readFixtureHerdr(dir).panes.find((p) => p.transcript_path)?.pane_id ?? ""
+    const status = () => fixtureHerdrScreen(pane, dir).split("\n").at(-1) ?? ""
+    fixtureHerdrInput(pane, { prompt: "/model sonnet" }, dir)
+    expect(fixtureHerdrScreen(pane, dir)).toContain("1. Yes, switch to Sonnet")
+    fixtureHerdrInput(pane, { keys: ["enter"] }, dir)
+    expect(fixtureHerdrScreen(pane, dir)).not.toContain("Switch model?")
+    expect(status()).toContain("Sonnet")
+    fixtureHerdrInput(pane, { prompt: "/model haiku" }, dir)
+    fixtureHerdrInput(pane, { keys: ["2"] }, dir)
+    expect(fixtureHerdrScreen(pane, dir)).not.toContain("Switch model?")
+    expect(status()).toContain("Sonnet")
+  })
+
+  // a sent message's turn ends on its own, since no made-up session replies, so a later model pick does not read the pane as busy
+  test("a message sets the pane working until its turn ends, and a /model after it still draws the confirm", () => {
+    const dir = join(scratch("fixture-turn"), "fixture")
+    writeFixture(shipped(), dir, ROOTS)
+    const pane = readFixtureHerdr(dir).panes.find((p) => p.transcript_path)?.pane_id ?? ""
+    const sentAt = new Date()
+    const later = new Date(sentAt.getTime() + 60_000)
+    const status = (at: Date) =>
+      readFixtureHerdr(dir, at).panes.find((p) => p.pane_id === pane)?.agent_status
+    fixtureHerdrInput(pane, { prompt: "hello" }, dir, sentAt)
+    expect(status(sentAt)).toBe("working")
+    expect(status(later)).toBe("idle")
+    fixtureHerdrInput(pane, { prompt: "/model sonnet" }, dir, later)
+    expect(fixtureHerdrScreen(pane, dir)).toContain("1. Yes, switch to Sonnet")
+  })
+
   test("types into no transcript outside its own folder, whatever its scratch state names", () => {
     const dir = join(scratch("fixture-outside"), "fixture")
     writeFixture(shipped(), dir, ROOTS)
@@ -766,6 +801,18 @@ describe("writeFixture", () => {
     expect(roster.find((agent) => agent.name === "q7w8f2-reviewer")?.worker).toBe("k3m9px-worker")
   })
 
+  test("the shipped fixture holds an idle worker whose open pull request conflicts, so its row reads Conflicts (#2457)", () => {
+    const { files, herdr, pulls } = shipped()
+    const pane = herdr.panes.find((p) =>
+      ((p.processes[0]?.argv ?? []) as string[]).includes("m5v8qd-worker"),
+    )
+    expect(pane?.agent_status).toBe("idle")
+    const roster = (files["playground/roster.json"] as { agents: { name: string; pr?: string }[] })
+      .agents
+    const url = roster.find((agent) => agent.name === "m5v8qd-worker")?.pr ?? ""
+    expect(pulls[url]).toMatchObject({ mergeable: "CONFLICTING", state: "OPEN" })
+  })
+
   test("the shipped fixture's 7 threads span 2 pages, one pinned and one archived, each message a line of its own session's transcript, their times moved with the rest", () => {
     const { threads = [], files } = shipped()
     expect(threads).toHaveLength(7)
@@ -802,7 +849,7 @@ describe("writeFixture", () => {
     expect(raw).toContain('"email": "merritt@example.com"')
   })
 
-  test("every model the shipped fixture's assistant lines name is priced", () => {
+  test("every model the shipped fixture's assistant lines name is priced, but the local model, which runs on this machine and has no API price", () => {
     const models = new Set<string>()
     for (const [path, content] of Object.entries(shipped().files)) {
       if (!path.endsWith(".jsonl") || !Array.isArray(content)) continue
@@ -814,7 +861,8 @@ describe("writeFixture", () => {
     }
     expect(models.size).toBeGreaterThan(0)
     expect(models).toContain("glm-5.3-flash[1m]")
-    expect([...models].filter((model) => !priceOf(model))).toEqual([])
+    expect(models).toContain(LOCAL_SERVED)
+    expect([...models].filter((model) => model !== LOCAL_SERVED && !priceOf(model))).toEqual([])
   })
 })
 
@@ -889,10 +937,24 @@ const answered = await answerFeed(
   { ...answerDeps, approvals: false, record: async (_event, replying) => replying(), settle: { attempts: 3, delayMs: 20 } },
 )
 const transcript = await Bun.file(live.transcripts.get(sloth.sessionId)).text()
+const { restartSession } = await import(\`\${API}/lib/dashboard/restart\`)
+const probe = named("s8hk2v-probe")
+const restartRuns = []
+const remote = {
+  delivered: await deliver({ actor, text: "hi", to: probe.name }, { ...deliverDeps, record: async (_event, typing) => typing() }),
+  flag: probe.remote ?? null,
+  restarted: await restartSession(
+    { cwd: probe.cwd, name: probe.name, ...(probe.remote && { remote: probe.remote }), sessionId: probe.sessionId },
+    { live: true, root: "/nowhere", run: async (argv) => (restartRuns.push(argv), { code: 0, stderr: "", stdout: "" }) },
+  ),
+  restartRuns,
+  transcript: live.transcripts.get(probe.sessionId) ?? null,
+}
 console.log(JSON.stringify({
   account: readings.account,
   answered,
   board: board.agents.map((a) => [a.name, a.state]),
+  gates: board.agents.filter((a) => ["p4r7ya-worker", "t2g6hb-worker", "w9n3kc-worker"].includes(a.name)).map((a) => [a.name, a.pr?.gates ?? null]),
   rosterPath: board.roster.path,
   delivered,
   skills,
@@ -910,6 +972,7 @@ console.log(JSON.stringify({
   picker: picker.requestId,
   problems: readings.problems,
   pulls: readings.pulls,
+  remote,
   screen,
   sent: transcript.trim().split("\\n").at(-1),
   update: readings.update,
@@ -995,9 +1058,22 @@ describe.skipIf(onLiveDashboard())("a fixture stack", () => {
     expect(out.home).toBe(home)
     expect(dashboard()).toEqual(before)
 
-    // every read answered from the fixture, the id-named pair and the Codex worker live with the rest
-    expect(out.workers).toBe(22)
+    // every read answered from the fixture, the id-named pair, the Codex worker, the conflicting worker and the --ssh probe live with the rest
+    expect(out.workers).toBe(27)
     expect(out.names).toContain("c4dx7n-worker")
+    expect(out.names).toContain("m5v8qd-worker")
+    expect(out.names).toContain("s8hk2v-probe")
+    // the --ssh probe's row is remote, with no transcript here; a message to it and a restart are refused, nothing typed and spawn.sh never run
+    expect(out.remote).toMatchObject({
+      delivered: { code: "NOT_FOUND", ok: false },
+      flag: true,
+      restarted: { status: "refused" },
+      restartRuns: [],
+      transcript: null,
+    })
+    expect((out.remote as { delivered: { reason: string } }).delivered.reason).toContain(
+      "runs on another machine over ssh",
+    )
     // the stale record, whose pid another process holds now, is no session
     expect(out.names).not.toContain("gluttony")
     expect(out.frame).toBe(out.workers)
@@ -1018,16 +1094,21 @@ describe.skipIf(onLiveDashboard())("a fixture stack", () => {
     expect(newestAge).toBeGreaterThan(60 * 60 * 1000)
     expect(newestAge).toBeLessThan(2 * 60 * 60 * 1000)
     expect(out.board).toContainEqual(["worker-wrath", "down"])
+    // #2499: the merge train's gates.json reads Ready (#109, no gate failing at its head), Gated (#110, the tester's) and no read (#111, taken at an older head)
+    expect(out.gates).toEqual([
+      ["p4r7ya-worker", []],
+      ["t2g6hb-worker", ["tester"]],
+      ["w9n3kc-worker", null],
+    ])
     // ops-unstick's state, written a year ahead so it never reads stale, holds planner on the usage limit alone, so it reads paused, not stuck
     expect(out.paused).toEqual({ resets: "3pm (UTC)", resetsAt: null })
     // the Usage app's merged PRs, which a live stack asks GitHub for
     expect(out.merged).toEqual([[97, 2]])
     expect(out.mergedProblems).toEqual([])
     // the ops jobs, whose heartbeats and pids a live stack reads from the config folder and ps
-    // 20 scripts: 12 running (nightly-digest, an org's job without the ops- prefix, among them), ops-wa waiting on its pairing code, ops-report and ops-sweep failing, and 5 paused with no heartbeat, so the Scripts label counts the 15 it lists
+    // 19 scripts: 11 running (nightly-digest, an org's job without the ops- prefix, among them), ops-wa waiting on its pairing code, ops-report and ops-sweep failing, and 5 paused with no heartbeat, so the Scripts label counts the 14 it lists
     expect(out.ops).toEqual([
       ["nightly-digest", "running"],
-      ["ops-awake", "running"],
       ["ops-changelog", "running"],
       ["ops-checks", "running"],
       ["ops-consultant", "down"],
@@ -1050,7 +1131,6 @@ describe.skipIf(onLiveDashboard())("a fixture stack", () => {
     // a stack that has run a while: its heartbeats were set once, when the fixture was written, and ops-slack-watch's 5-minute cycle is long past
     expect(out.opsLater).toEqual([
       ["nightly-digest", "running"],
-      ["ops-awake", "running"],
       ["ops-changelog", "running"],
       ["ops-checks", "running"],
       ["ops-consultant", "down"],

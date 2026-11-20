@@ -19,6 +19,7 @@ A second dispatcher runs only when you start one (`playground add --dispatcher`,
 The Assistant has a chat and a box of its own too, opened from its **Assistant** row under Orchestrators, whatever its session is named.
 Each dispatcher's chat and its box are named by its label, such as Message Alpha; the model its newest reply ran shows in its sidebar row's tooltip.
 A menu directly left of the box's send button, such as **Opus · High**, shows the model and effort the dispatcher's newest reply ran with, and a pick types `/model` or `/effort` into it for you; the row shows the new one from its next reply.
+A model pick answers Claude Code's switch confirm for you when it shows one, and reads done once the session's status line names the new model; otherwise its message says what the session shows.
 On a first run the chat starts with **Let's check this Mac**, each check marked there or missing with the button that fixes it, then **Continue**, which makes you this Mac's owner ([Where to start](/docs#where-to-start)).
 Once every check has passed, it shows one line, **This Mac has everything Playground needs**, over the steps left, each ticked once done: GitHub, Settings (**Set up settings**), Harness, a Claude account (**Add a Claude account**, for Claude Code alone) and **Start** with the dispatcher's name.
 Harness shows a card each for Claude Code and Codex ([Pick what Alpha runs on](/docs/install#pick-what-alpha-runs-on)).
@@ -108,8 +109,15 @@ Scroll to end shows in the bar while there is more below you, and takes you to t
 
 `probe-sdk` is a throwaway session the Dashboard runs itself on the Claude Agent SDK, when `PLAYGROUND_SDK_PROBE_DIR` names its folder.
 Its view has a box too: your message goes straight into it, and its questions, permission requests and plans show as cards in its view.
-A menu beside its attach button shows its permission mode (Default, Accept edits, Plan or Bypass permissions) and changes it while approvals are on (`PLAYGROUND_APPROVALS_ENABLED`), and the model and effort menu directly left of send sets those through the Agent SDK, its row showing the value set.
+A menu beside its attach button shows its permission mode (Default, Accept edits, Plan or Bypass permissions) and changes it while approvals are on (`PLAYGROUND_APPROVALS_ENABLED`), and the model and effort menu directly left of send sets those through the Agent SDK, its row showing the value set;
+on a local model it shows the model's name alone, since a local model's chat template reads no effort.
 It shows no `/` list yet, since it cannot run a skill.
+
+With local models named in `PLAYGROUND_LOCAL_MODELS` (a comma list of `label=model-id`), its model menu lists them under **Local model**, below the cloud models.
+Picking one restarts the session on that model's server, `PLAYGROUND_LOCAL_MODEL_URL` (`http://127.0.0.1:18000` by default), and the conversation carries on there; picking a cloud model brings it back.
+The switch waits for a quiet moment: while the session is answering, the menu says so and changes nothing.
+When the server has another model loaded, the menu says which, and the chat stays as it was.
+When the server is not answering, picking the model starts the one its machine keeps up (`playground model use`), and a line in the message box says it is loading, about 10 minutes; the chat switches once the model answers, or the line says why it could not.
 
 ## Sidebar
 
@@ -140,13 +148,16 @@ Click the sidebar's right edge, or press Cmd+B (Ctrl+B), to collapse or expand i
 
 Below the header are your threads, then the live sessions in groups.
 Click a group's label to close or open it: the sidebar keeps each group as you left it across reloads, and a closed group still shows a session waiting on you or open in the view.
+Every group below your threads moves into any place: drag its label, or focus the label and press Space, the arrows and Space, or use Move up and Move down in its menu (a right click, or Shift+F10).
+This browser keeps the order for your account across reloads, and a new group joins at the end.
 
-- **Channels** and **Direct messages**: your Yard channels and DMs, above Orchestrators, each with its unread count, shown while this Mac reaches Yard (`YARD_API_URL` set and a token from `playground yard login`, in [the playground command](/docs/cli#yard-playground-yard)) and the group has a row.
+- **Channels** and **Direct messages**: your Yard channels and DMs, above Orchestrators until you move them, each with its unread count, shown while this Mac reaches Yard (`YARD_API_URL` set and a token from `playground yard login`, in [the playground command](/docs/cli#yard-playground-yard)) and the group has a row.
 - **Orchestrators**: the sessions that lead the others, each by its role (Builder, Ops, Planner, Optimizer, Assistant, Orchestrator), A to Z by title until you drag them into an order of your own.
   Drag a row, or focus it and press Space, the arrows and Space, or use Move up and Move down in its menu (a right click, a long press, or Shift+F10).
   Reset order to A to Z, in the Orchestrators label's own menu, brings the default back.
+- **AI Runners**: the `runner-` sessions, right under Orchestrators, each row with a second line saying what the runner last did: its latest report to Ops or the dispatcher, else its task.
+  Hover it for the whole text and how long ago it came.
 - **Subagents**: the `worker-` sessions, with each reviewer and tester under the worker it checks.
-- **AI Runners**: the `runner-` sessions.
 - **Scripts**: the background jobs that run with no Claude session, collapsed until you click its label.
 - **Other**: test sessions and sessions outside these groups, shown only while one is live, collapsed until you click its label.
 
@@ -159,7 +170,7 @@ Each live usage reading's hover, and the System page's usage line, say how long 
 With several Claude accounts, every list of them, in the hover, on the System page and in the Usage app, puts the account whose week resets soonest first.
 
 Each group's label ends with how many sessions it holds, at its right, the reviewers and testers nested in it included; Scripts counts the jobs it lists.
-Subagents, AI Runners and Other list the most urgent state first, then go by ticket, pull request number and title.
+AI Runners, Subagents and Other list the most urgent state first, then go by ticket, pull request number and title.
 What each row shows, and what its icon means, is on [Agents](/docs/agents).
 
 Scripts lists the background jobs.
@@ -187,7 +198,7 @@ A row's menu marks it read or unread, renames, pins or archives it.
 ### The red dot
 
 The browser tab reads Playground on every page, and its icon wears a red dot only when something is new for you: a Changelog entry you have not read, or an Inbox item that came after you last looked at the Inbox.
-While a session has focus (`playground focus on`), what comes into the Inbox waits quietly, marked Quiet and left out of the dot and the counts; an alert, such as the low battery one, still shows at once.
+While a session has focus (`playground focus on`), what comes into the Inbox waits quietly, marked Quiet and left out of the dot and the counts; an alert, such as a failed ship, still shows at once.
 When focus ends, one Inbox card says how many runs queued meanwhile and how long they waited, and the quiet items count again.
 That card moves to Done by itself once everything that came in meanwhile is answered.
 Each of these is also marked where it lives: the Inbox square and the Changelog square show their count inside a red dot at their top right.
@@ -219,11 +230,11 @@ Click the volume button to mute, or hover it a moment to drag the volume up or d
 
 Signed in to the hosted Yard as its owner, you land on `/dashboard` there, this Mac's own Dashboard read from anywhere, the same pages with the same data.
 A Yard channel or DM opens there beside your sessions, as it does on this Mac, and its unread counts update live; Yard's own pages keep a Dashboard item in their footer menu to come back.
-This Mac dials out to Yard, so nothing here listens beyond this machine: it holds the connection while its Dashboard reads your own machine, `YARD_API_URL` is set and `playground yard login` has put a token in the Keychain ([the playground command](/docs/cli#yard-playground-yard)).
+This Mac dials out to Yard, so nothing here listens beyond this machine: it holds the connection while its Dashboard reads your own machine, `YARD_API_URL` is set and `playground yard login` has put a token made with its Relay switch on in the Keychain ([the playground command](/docs/cli#yard-playground-yard)); a token made with the switch off only reads, and holds no connection.
 Yard keeps nothing this Mac sends, and only the owner reaches the page; anyone else gets the 404.
 The board refreshes every 5 seconds there, and the Inbox's Preview row shows no preview.
 From a browser you paired under Settings' [Remote](/docs/settings#remote), you can send a message, its words alone, and answer an Inbox card, with its comment, Later and Done: each one is signed in that browser, and this Mac runs it only once the signature checks out.
-A card this Mac carries out itself (an extension accept, an apps change, a permission grant, a guard setting, an own account change), a delete and a secret say "Answer it on the Mac", and this Mac refuses their answer, Later and Done from Yard, and a message that names one (`re #iN`).
+A card this Mac carries out itself (an extension accept, an extensions clone, an apps change, a permission grant, a guard setting, an own account change, a root step), a delete and a secret say "Answer it on the Mac", and this Mac refuses their answer, Later and Done from Yard, and a message that names one (`re #iN`).
 Reply, the read ticks, Retry, the shelf buttons, files and the mode and model menus wait for the Mac too.
 A browser you have not paired, or whose pairing you revoked, says so on its first send.
 Until you pair one, the page changes nothing: "Read-only on Yard: send from your Mac" stands in the message box's place, at the top of the Inbox and on Settings, which keeps only Remote there, and a message the page still held is dropped with that reason, never sent.
@@ -234,6 +245,12 @@ After a drop, or a try Yard leaves unanswered for 30 seconds, this Mac connects 
 ## The System page
 
 `/dashboard/system`, opened by the system icons, shows a status table of every agent, then Next up (the work queued for the next free agent, fixes first, then what you asked for), then Needs you (what waits on your answer), then System (the room this machine has for more sessions), then Paused (the background jobs paused on purpose, when there are any).
+
+With other machines named in `PLAYGROUND_PEERS` (a comma list of `name=user@host`, each name once in any case, read over ssh with the key `PLAYGROUND_PEER_KEY` names), System sums memory, CPU load, swap and disk free across them all, and hovering a figure shows each machine's part, such as `machine-a 3.1 on 20 + machine-b 0.4 on 20 cores`.
+`playground update` also moves each of those machines' Playground copy to the commit it reached, over the same ssh and key ([CLI](/docs/cli)).
+A machine that does not answer is left out of the sums and marks each figure `1 of 2 machines`, and the hover says why and since when.
+The sidebar's icons sum the same way, each hover naming every machine, and a warning names the machine that set it.
+With no other machines named, System says `This machine only`.
 
 ## Apps
 

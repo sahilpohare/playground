@@ -1,6 +1,6 @@
 "use client"
 
-import { RiRefreshLine, RiRobot2Line } from "@remixicon/react"
+import { RiRefreshLine, RiTerminalBoxLine } from "@remixicon/react"
 import { cn } from "cn"
 import * as React from "react"
 
@@ -115,7 +115,10 @@ export function SystemHome({ storedRows: stored = null }: { storedRows?: number 
           ) : loading.agents === "spinner" ? (
             <Spinner />
           ) : agents && agents.length === 0 ? (
-            <SetupEmpty icon={RiRobot2Line} setup={sessionsSetup(problem, data?.liveProblem)} />
+            <SetupEmpty
+              icon={RiTerminalBoxLine}
+              setup={sessionsSetup(problem, data?.liveProblem)}
+            />
           ) : (
             agents && <StatusTable agents={agents} onRows={keepRows} actions={refreshButton} />
           )}

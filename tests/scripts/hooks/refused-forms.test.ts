@@ -22,11 +22,13 @@ import { check as extensionRepoWrite } from "../../../scripts/hooks/no-extension
 import { check as extensionsWrite } from "../../../scripts/hooks/no-extensions-write"
 import { check as glmHeavyPath } from "../../../scripts/hooks/no-glm-heavy-path"
 import { check as headlessLogin } from "../../../scripts/hooks/no-headless-login"
+import { check as hiddenProgram } from "../../../scripts/hooks/no-hidden-program"
 import { check as killByName } from "../../../scripts/hooks/no-kill-by-name"
 import { check as linearTicket } from "../../../scripts/hooks/no-linear-ticket"
 import { check as mainCheckout } from "../../../scripts/hooks/no-main-checkout"
 import { check as outsidePrCode, live } from "../../../scripts/hooks/no-outside-pr-code"
 import { check as playgroundLeak } from "../../../scripts/hooks/no-playground-leak"
+import { check as protectedPush } from "../../../scripts/hooks/no-protected-push"
 import { check as publicLeak } from "../../../scripts/hooks/no-public-leak"
 import { check as rawDelete } from "../../../scripts/hooks/no-raw-delete"
 import { check as rawSpawn } from "../../../scripts/hooks/no-raw-spawn"
@@ -42,6 +44,7 @@ import {
   NEVER_MADE,
   REFUSED_FORMS,
 } from "./fixtures/refused-forms"
+import { pinPlatform } from "./platform"
 import { storeWith } from "./render-set"
 import { git } from "./scratch-git"
 
@@ -49,6 +52,8 @@ const CHECKOUT = join(import.meta.dir, "..", "..", "..")
 // where it lands, since no-outside-pr-code judges a skill script's path past this Mac's /var link
 const SCRATCH = realpathSync(mkdtempSync(join(tmpdir(), "refused-forms-")))
 afterAll(() => rmSync(SCRATCH, { force: true, recursive: true }))
+// every row holds macOS's reading of a bare build, which no-extensions-write reads as GNU's on Linux
+pinPlatform("darwin")
 
 // A home whose data folder holds an extensions root, its links and files, as the guards' own tests build it.
 const HOME = join(SCRATCH, "home")
@@ -56,6 +61,26 @@ const DATA = join(HOME, ".playground")
 const ROOT = join(DATA, "extensions")
 const SCOPE = join(ROOT, "login")
 const OTHER = join(SCRATCH, "other")
+// One fixed listing of / that no-extensions-write judges a glob in / against, a Linux machine's, so a row reads the same on a Mac, whose / holds Applications, Library and Users
+const ROOT_NAMES = [
+  "bin",
+  "boot",
+  "dev",
+  "etc",
+  "home",
+  "lib",
+  "mnt",
+  "opt",
+  "proc",
+  "root",
+  "run",
+  "sbin",
+  "srv",
+  "sys",
+  "tmp",
+  "usr",
+  "var",
+]
 const PATHS: Paths = {
   BARE: join(SCRATCH, "bare"),
   CLI_DIR: join(CHECKOUT, "packages", "scripts", "src", "playground"),
@@ -79,6 +104,7 @@ for (const dir of [
   join(ROOT, "hooks", "~+"),
   join(DATA, "handoffs"),
   join(PATHS.WORK, "playground"),
+  join(HOME, ".bun", "bin"),
   join(PATHS.MAIN, ".claude", "worktrees", "a"),
   PATHS.BARE,
 ])
@@ -87,6 +113,22 @@ writeFileSync(PATHS.LIST, '["Slack"]\n')
 writeFileSync(join(ROOT, "policy.json"), "{}\n")
 writeFileSync(join(SCOPE, "lists", "release-owners.json"), "[]\n")
 writeFileSync(PATHS.WORDS, "y ".repeat(400_000))
+// a script ssh feeds a remote shell: a listing of the data folder, and its twin writing under the root
+writeFileSync(join(HOME, "peer-check.sh"), `ls ${DATA}\n`)
+writeFileSync(join(HOME, "peer-write.sh"), `touch ${ROOT}/x\n`)
+// a runner's scripts ssh feeds a remote shell, for #2579's rows: an awk program whose * multiplies, a loop whose variable names a folder outside the root, and one that writes a script with sed and runs it
+writeFileSync(
+  join(HOME, "stats.sh"),
+  `awk '\n/accept/ { acc[++n] = $2 }\n/draft/ { dr[++m] = $2 }\nEND { if (dr[2] - dr[1] > 0) printf " mtp_accept=%.1f%%", 100 * (acc[2] - acc[1]) / (dr[2] - dr[1]) }\n' /var/log/serve.log\n`,
+)
+writeFileSync(
+  join(HOME, "dl.sh"),
+  "for r in a b; do\n  d=/srv/models/hf/hub/models--$r\n  find $d/blobs -name '*.incomplete'\ndone\n",
+)
+writeFileSync(
+  join(HOME, "serve.sh"),
+  "sed 's/PORT/8080/' serve.tmpl > serve-mb.sh\nbash serve-mb.sh\n",
+)
 symlinkSync(ROOT, PATHS.LINK)
 // the main checkout's worktree a, by its .git file, holding a link into the main checkout, and a plain folder beside it that no worktree holds, for #1663's rows
 writeFileSync(join(PATHS.MAIN, ".claude", "worktrees", "a", ".git"), "gitdir: x\n")
@@ -95,8 +137,30 @@ mkdirSync(join(PATHS.MAIN, ".claude", "worktrees", "plain"))
 symlinkSync(ROOT, join(DATA, "store"))
 symlinkSync(DATA, join(HOME, "pg"))
 symlinkSync(join(PATHS.CLI_DIR, "cli.ts"), join(HOME, "pc"))
+// the CLI linked by its name in bun's bin folder, beside a work folder that holds one of that name, for #2098's rows
+symlinkSync(join(PATHS.CLI_DIR, "cli.ts"), join(HOME, ".bun", "bin", "playground"))
 git(SCRATCH, "init", "-q", OTHER)
 git(OTHER, "remote", "add", "origin", "https://github.com/acme-labs/demo.git")
+// Two clones of the synced extension repository, one on the default branch and one on another, for #2004's commit rows.
+const EXT_CLONE = join(SCRATCH, "ext-clone")
+const EXT_BRANCH = join(SCRATCH, "ext-branch")
+git(SCRATCH, "init", "-q", "-b", "main", EXT_CLONE)
+git(SCRATCH, "init", "-q", "-b", "feature", EXT_BRANCH)
+for (const clone of [EXT_CLONE, EXT_BRANCH])
+  git(clone, "remote", "add", "origin", "https://github.com/quillco/acme-skills.git")
+// The session's starting environment that no-extensions-write and the leak engine read variables from, for #2456's rows: PLAYGROUND_REPO and W a plain clone, ROOT_DIR the extensions root, EXT_DIR an extension clone, and names never read from it (zsh's tied FPATH, MANPATH and MODULE_PATH among them)
+const STARTING = {
+  CLAUDE_PROJECT_DIR: OTHER,
+  EXT_DIR: EXT_CLONE,
+  FPATH: OTHER,
+  MANPATH: OTHER,
+  MODULE_PATH: OTHER,
+  OLDPWD: OTHER,
+  PLAYGROUND_REPO: OTHER,
+  ROOT_DIR: ROOT,
+  W: OTHER,
+  path: OTHER,
+}
 // Another repository and two worktrees it lists, whose .git file and admin gitdir point at each other, for #1653's rows: one outside the main checkout and one under its .claude/worktrees.
 const FOREIGN = join(SCRATCH, "foreign")
 git(SCRATCH, "init", "-q", "-b", "canary", FOREIGN)
@@ -128,6 +192,12 @@ git(GLM_ORG_REPO, "remote", "add", "origin", "https://github.com/acme-blue/demo.
 // A file of the org's checkout, and a link to it from the session's own checkout, for the read rows a glob or a link reaches it through.
 writeFileSync(join(GLM_ORG_REPO, "README.md"), "demo\n")
 symlinkSync(join("..", "glm-org-repo", "README.md"), join(GLM_REPO, "org-link.md"))
+// An org checkout two folders below glm-nest, which a ** glob reaches and a one-level glob does not, and a psql script in the session's own checkout that connects off this machine, for #1449's and #1450's rows.
+const GLM_NESTED = join(SCRATCH, "glm-nest", "acme", "demo")
+mkdirSync(dirname(GLM_NESTED), { recursive: true })
+git(SCRATCH, "init", "-q", GLM_NESTED)
+git(GLM_NESTED, "remote", "add", "origin", "https://github.com/acme-blue/nested.git")
+writeFileSync(join(GLM_REPO, "connect.sql"), "\\c host=db.example.com dbname=app\nselect 1;\n")
 // The leak guard's lists as core holds them, with ext.links guarding a made-up org's repositories, as its own test sets them.
 const LISTS = join(CHECKOUT, "extensions", "core", "lists")
 const LEAK = join(SCRATCH, "leak")
@@ -144,6 +214,8 @@ storeWith(
 // A data folder whose extensions root lacks no-public-leak's list, which core never ships, so its rows pin the writes that refusal still refuses.
 const LISTLESS = storeWith(join(SCRATCH, "listless"), {})
 const OWNED = storeWith(join(SCRATCH, "owned"), { "release-owners.json": '["qmarsh"]' })
+// A data folder whose factory.repo is the made-up acme-labs/demo, the checkout folder's origin.
+const FACTORY = storeWith(join(SCRATCH, "factory"), {}, { "factory.repo": "acme-labs/demo" })
 const DESKTOP = storeWith(join(SCRATCH, "desktop"), { "desktop-owner-apps.json": '["Slack"]' })
 // A data folder whose scope acme syncs with the made-up extension repo quillco/acme-skills.
 const SYNCED = storeWith(
@@ -190,10 +262,13 @@ const CHECK_NAMES = [
   "extensionsWrite",
   "glmHeavyPath",
   "headlessLogin",
+  "hiddenProgram",
   "killByName",
   "linearTicket",
   "mainCheckout",
+  "outsidePrCode",
   "playgroundLeak",
+  "protectedPush",
   "publicLeak",
   "rawDelete",
   "rawSpawn",
@@ -208,10 +283,13 @@ const SOURCE: Checks = {
   extensionsWrite,
   glmHeavyPath,
   headlessLogin,
+  hiddenProgram,
   killByName,
   linearTicket,
   mainCheckout,
+  outsidePrCode,
   playgroundLeak,
+  protectedPush,
   publicLeak,
   rawDelete,
   rawSpawn,
@@ -226,10 +304,13 @@ const GUARD_OF: Record<(typeof CHECK_NAMES)[number], Guard> = {
   extensionsWrite: "no-extensions-write",
   glmHeavyPath: "no-glm-heavy-path",
   headlessLogin: "no-headless-login",
+  hiddenProgram: "no-hidden-program",
   killByName: "no-kill-by-name",
   linearTicket: "no-linear-ticket",
   mainCheckout: "no-main-checkout",
+  outsidePrCode: "no-outside-pr-code",
   playgroundLeak: "no-playground-leak",
+  protectedPush: "no-protected-push",
   publicLeak: "no-public-leak",
   rawDelete: "no-raw-delete",
   rawSpawn: "no-raw-spawn",
@@ -345,9 +426,14 @@ const guardsOf = (
   },
   "no-env-dump": { folders: { checkout: [CHECKOUT, HOME] }, run: (raw) => c.envDump(raw) },
   "no-extension-repo-write": {
-    folders: { checkout: [OTHER, HOME] },
+    folders: {
+      checkout: [OTHER, HOME],
+      "extension clone": [EXT_CLONE, HOME],
+      "extension clone on a branch": [EXT_BRANCH, HOME],
+    },
     run: (raw, home) =>
       c.extensionRepoWrite(raw, {
+        ...STARTING,
         HOME: home,
         PLAYGROUND_DATA_DIR: SYNCED,
         PLAYGROUND_ROLE: "worker",
@@ -367,7 +453,8 @@ const guardsOf = (
       "process worktree": [join(homedir(), "x", ".claude", "worktrees", "y"), homedir()],
       tmp: ["/tmp", HOME],
     },
-    run: (raw, home) => c.extensionsWrite(raw, { HOME: home }),
+    run: (raw, home) =>
+      c.extensionsWrite(raw, { ...STARTING, HOME: home }, undefined, () => ROOT_NAMES),
   },
   "no-glm-heavy-path": {
     folders: { "glm org repo": [GLM_ORG_REPO, HOME], "glm repo": [GLM_REPO, HOME] },
@@ -390,7 +477,22 @@ const guardsOf = (
         PLAYGROUND_ROLE: "worker",
       }),
   },
-  "no-kill-by-name": { folders: { checkout: [CHECKOUT, HOME] }, run: (raw) => c.killByName(raw) },
+  "no-hidden-program": {
+    folders: {
+      checkout: [CHECKOUT, HOME],
+      "process home": [homedir(), homedir()],
+      "system bin": ["/bin", homedir()],
+    },
+    run: (raw) => c.hiddenProgram(raw, {}),
+  },
+  "no-kill-by-name": {
+    folders: {
+      checkout: [CHECKOUT, HOME],
+      home: [HOME, HOME],
+      "system usr bin": ["/usr/bin", HOME],
+    },
+    run: (raw) => c.killByName(raw),
+  },
   "no-linear-ticket": {
     folders: { checkout: [CHECKOUT, HOME], "data folder": [DATA, HOME] },
     run: (raw, home) =>
@@ -409,7 +511,6 @@ const guardsOf = (
     },
     run: (raw, home) => c.mainCheckout(raw, { HOME: home }, PATHS.MAIN),
   },
-  // run from its source alone, since this guard has no bundle
   "no-outside-pr-code": {
     folders: {
       "main checkout": [PATHS.MAIN, HOME],
@@ -425,11 +526,15 @@ const guardsOf = (
     },
     run: (raw, home) => {
       const environment = { HOME: home, PATH: "/usr/bin:/bin", PLAYGROUND_ROLE: "reviewer" }
-      return outsidePrCode(raw, environment, {
+      return c.outsidePrCode(raw, environment, {
         ...live(environment),
         author: async () => OUTSIDE_PR,
         main: PATHS.MAIN,
         prsOf: async () => ["https://github.com/acme-owner/widgets/pull/501"],
+        // the made-up main checkout is no git repo, so the core skills' scripts it writes stand for the tracked and unchanged files of the real one
+        tracked: (script: string) =>
+          script.startsWith(join(PATHS.MAIN, "extensions", "core", "skills") + "/") &&
+          existsSync(script),
       })
     },
   },
@@ -443,6 +548,10 @@ const guardsOf = (
         LISTS,
       ),
   },
+  "no-protected-push": {
+    folders: { checkout: [OTHER, HOME] },
+    run: (raw) => c.protectedPush(raw, { PLAYGROUND_DATA_DIR: FACTORY, PLAYGROUND_ROLE: "worker" }),
+  },
   "no-public-leak": {
     folders: { checkout: [CHECKOUT, HOME], home: [HOME, HOME] },
     run: (raw) => c.publicLeak(raw, { CLAUDE_CONFIG_DIR: SCRATCH, PLAYGROUND_DATA_DIR: LISTLESS }),
@@ -453,6 +562,7 @@ const guardsOf = (
       "process data folder": [join(homedir(), ".playground"), homedir()],
       "process home": [homedir(), homedir()],
       "process worktree": [join(homedir(), "x", ".claude", "worktrees", "y"), homedir()],
+      "system bin": ["/bin", homedir()],
     },
     run: (raw) => c.rawDelete(raw),
   },
@@ -462,7 +572,12 @@ const guardsOf = (
     run: (raw) => c.releaseComment(raw, { PLAYGROUND_DATA_DIR: OWNED }),
   },
   "no-stash": {
-    folders: { checkout: [CHECKOUT, HOME], "data folder": [DATA, HOME], home: [HOME, HOME] },
+    folders: {
+      checkout: [CHECKOUT, HOME],
+      "data folder": [DATA, HOME],
+      home: [HOME, HOME],
+      "system usr bin": ["/usr/bin", HOME],
+    },
     run: (raw) => c.stash(raw, {}),
   },
   "no-unslotted-run": {
@@ -662,13 +777,16 @@ const added = (text: string) =>
     .split("\n")
     .map((line) => `+${line}`)
     .join("\n")
-// The patch Codex sends for an edit row: a Write adds its file, every other edit updates it.
+// The patch Codex sends for an edit row: a Write adds its file, every other edit updates it, a MultiEdit by its first edit.
 const patchOf = ({ input }: { input: Record<string, unknown> }) => {
   const path = String(input.file_path ?? input.notebook_path)
+  const edit = Array.isArray(input.edits)
+    ? ((input.edits[0] ?? input) as Record<string, unknown>)
+    : input
   const body =
     typeof input.content === "string"
       ? `*** Add File: ${path}\n${added(input.content)}`
-      : `*** Update File: ${path}\n@@\n-${String(input.old_string ?? "x")}\n${added(String(input.new_string ?? "y"))}`
+      : `*** Update File: ${path}\n@@\n-${String(edit.old_string ?? "x")}\n${added(String(edit.new_string ?? "y"))}`
   return `*** Begin Patch\n${body}\n*** End Patch`
 }
 type Shape = { input: Record<string, unknown>; shape: string; tool: string }
@@ -696,7 +814,12 @@ const codexInput = ({ input, tool }: Shape, cwd: string) =>
     tool_name: tool,
   })
 const CODEX_CASES = CASES.flatMap((c) =>
-  codexShapes(c.call).map((shape) => ({ ...c, codex: shape, key: `${c.key} | ${shape.shape}` })),
+  codexShapes(c.call).map((shape) => ({
+    ...c,
+    base: c.key,
+    codex: shape,
+    key: `${c.key} | ${shape.shape}`,
+  })),
 )
 
 describe("every refused form stays refused in its Codex shape", () => {
@@ -705,7 +828,8 @@ describe("every refused form stays refused in its Codex shape", () => {
     async (_, c) => {
       const at = GUARDS[c.guard].folders[c.folder] as [string, string]
       const reason = await GUARDS[c.guard].run(codexInput(c.codex, at[0]), at[1])
-      if (allowed(c)) expect(reason).toBeUndefined()
+      // a case the allow list names in one folder runs there in every shape
+      if (allowed(c) || ALLOWED.includes(c.base)) expect(reason).toBeUndefined()
       else expect(reason).toContain(`${c.guard} hook `)
     },
     60_000,
@@ -761,10 +885,13 @@ const realOf = (path: string, physical = false) => {
 // Each row and path flag that keeps its single spelling, with why: the row moves folders (cd, pushd, popd), or the flag names no folder; the pinned list below shows a row that stops being spelt
 const UNSPELT = new Set<string>()
 
+// cd, pushd or popd as a word of its own, so a folder name that holds one (PG-1-unread-cd-writers, x.cd) moves nothing
+const movesFolders = (call: string) => /(?<![\w.-])(?:cd|pushd|popd)(?=[\s;&|)]|$)/.test(call)
+
 // Each other spelling of one path flag's folder in a case's call: its other joins, the folder relative from the case's own folder, a ./ hop, an <x>/../<x> hop and a link made in a scratch folder, each kept only where it names the folder the row's does, by its real path.
 function spellingsOf(call: Call, cwd: string, id: string): { spelling: string; text: string }[] {
   if (typeof call !== "string" || !isAbsolute(cwd)) return []
-  const moves = /\b(?:cd|pushd|popd)\b/.test(call)
+  const moves = movesFolders(call)
   const found: { spelling: string; text: string }[] = []
   for (const pathFlag of PATH_FLAGS)
     for (const m of call.matchAll(flagIn(pathFlag))) {
@@ -839,16 +966,96 @@ describe("every spelling of a row's path flag keeps the row's verdict", () => {
 
   test("the rows whose path flag keeps its single spelling are the ones pinned here", () => {
     expect([...UNSPELT].sort()).toEqual([
+      // the folder the row's git -C names is the one its own copy makes, so no spelling finds it before the line runs
+      "#1280 a copy that makes a repository git then reads | git -C, no folder",
+      // the row's cd moves the shell, and the -C is a value tar's own option takes, so no spelling of it names a folder tar uses
+      "#1340 tar whose --exclude value is a -C after a cd to a variable | tar -C, it moves folders",
+      "#1340 tar whose --include value is a -C after a cd to a variable | tar -C, it moves folders",
+      "#1340 tar whose --newer-mtime value is a -C after a cd to a variable | tar -C, it moves folders",
+      "#1340 tar whose --options value is a -C after a cd to a variable | tar -C, it moves folders",
+      "#1340 tar whose --uid value is a -C after a cd to a variable | tar -C, it moves folders",
+      "#1340 tar whose -f value looks like -C after a cd to a variable | tar -C, it moves folders",
       // a `..` after a link, which the kernel reads from the link's target
       "#1663 a commit by one -C that climbs out of a link | git -C, it climbs out of a link",
       // the row's cd moves the shell, so its --cwd is read from a folder no spelling knows
       "#1663 turbo by bunx --cwd that runs only when the cd before its || failed | bunx --cwd, it moves folders",
-      // bunx's spelling takes the row's last --cwd, which bun reads from the --cwd=/ before it, so the row's own folder holds none
+      // a spelling takes one of the row's --cwd alone, which bun reads from the --cwd before it, so the row's own folder holds none
       "#1732 a runner --cwd read from the one before it | bunx --cwd, no folder",
       "#1732 turbo's relative --cwd read from the runner's | bunx --cwd, no folder",
       "#1747 bunx running a commit in a --cwd read from the one before | bunx --cwd, no folder",
       "#1747 bunx running bun's build in a --cwd in a worktree read from the one before | bunx --cwd, no folder",
       "#1747 bunx running bun's build in a --cwd read from the one before | bunx --cwd, no folder",
+      "#1747 ext add by a bun run that bunx starts, its --cwd read from the runner's | bun --cwd, no folder",
+      "#1747 ext add by a bun run that bunx starts, its --cwd read from the runner's | bunx --cwd, no folder",
+      "#1747 ext add by a bun that bun x starts, its --cwd read from bun's own | bun --cwd, no folder",
+      "#1747 ext add by a bun x that bunx starts, its --cwd read from the runner's | bun --cwd, no folder",
+      "#1747 ext add by a bun x that bunx starts, its --cwd read from the runner's | bunx --cwd, no folder",
+      "#1747 ext add by a bunx that bunx starts, its --cwd read from the runner's | bunx --cwd, no folder",
+      "#1747 ext add by bun x bun in a runner --cwd read from bun's own | bun --cwd, no folder",
+      "#1747 ext add by bunx bun in a --cwd read from the one before | bunx --cwd, no folder",
+      "#1747 ext put by a bun that bunx starts, its --cwd read from the runner's | bun --cwd, no folder",
+      "#1747 ext put by a bun that bunx starts, its --cwd read from the runner's | bunx --cwd, no folder",
+      // the row's -C is git's own, and its message, which git never runs, holds the cd, so no spelling of it moves a folder git uses
+      "#1887 a commit by -C into a clone in the root whose message holds a folder change | git -C, it moves folders",
+      "#1887 a commit by -C to another folder whose message holds a folder change | git -C, it moves folders",
+      "#1887 a commit by -c whose message holds a folder change into the root | git -C, it moves folders",
+      // the row's cd moves the shell to a folder the hook cannot read, so no spelling of its git folder flag is read from a folder the hook knows
+      "#2097 ext add by a relative bun --cwd behind arch under bunx's --cwd | bun --cwd, no folder",
+      "#2097 ext add by a relative bun --cwd behind arch under bunx's --cwd | bunx --cwd, no folder",
+      "#2097 ext add by bun under env that bunx starts in a --cwd above the CLI's | bun --cwd, no folder",
+      "#2097 ext add by bun under env that bunx starts in a --cwd above the CLI's | bunx --cwd, no folder",
+      "#2098 ext add by bun of a CLI link in its --cwd | bun --cwd, it moves folders",
+      "#2098 ext add by bun x bun of a CLI link in its --cwd | bun --cwd, it moves folders",
+      "#2098 ext add by bunx bun of a CLI link in its --cwd | bunx --cwd, it moves folders",
+      "#2104 a recursive git rm with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 a recursive git rm with a git folder and a work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 a recursive git rm with a git folder and a work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 a recursive git rm with a work tree alone after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git -C a relative folder after a cd to a variable | git -C, it moves folders",
+      "#2104 git apply with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git clean with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git mv with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git rm with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git rm with a git folder and the filesystem root as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git rm with a git folder and the filesystem root as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git rm with a work tree alone after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git stash with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and /private as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and /private as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and /var as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and /var as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and a work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and a work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and an unread work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and home as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and home as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and the filesystem root as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and the filesystem root as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and the folder above home as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and the folder above home as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and the root as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and the root as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and the root spelt by a climb as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and the root spelt by a climb as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and the root spelt with a dot as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and the root spelt with a dot as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a git folder and the root spelt with two slashes as its work tree after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a git folder and the root spelt with two slashes as its work tree after a cd to a variable | git --work-tree, it moves folders",
+      "#2104 git with a spaced git folder alone after a cd to a variable | git --git-dir, it moves folders",
+      "#2104 git with a work tree alone after a cd to a variable | git --work-tree, it moves folders",
+      "#2106 a write under env with two -C options, the second relative | env -C, no folder",
+      "#2198 an unslotted build by a program xargs puts in place of a typed word, read from --arg-file's file in env --chdir's folder | env --chdir, no folder",
+      "#2198 an unslotted build by a program xargs puts in place of a typed word, read from -a's file in env --chdir='s folder | env --chdir, no folder",
+      "#2198 an unslotted build by a program xargs puts in place of a typed word, read from -a's file in env -C's attached folder | env -C, no folder",
+      "#2198 an unslotted build by a program xargs puts in place of a typed word, read from -a's file in env -C's folder | env -C, no folder",
+      "#2198 ext add by a program xargs puts in place of a typed word, read from --arg-file's file in env --chdir's folder | env --chdir, no folder",
+      "#2198 ext add by a program xargs puts in place of a typed word, read from -a's file in env --chdir='s folder | env --chdir, no folder",
+      "#2198 ext add by a program xargs puts in place of a typed word, read from -a's file in env -C's attached folder | env -C, no folder",
+      "#2198 ext add by a program xargs puts in place of a typed word, read from -a's file in env -C's folder | env -C, no folder",
+      // each row's --cwd names a folder the scratch checkout lacks, so no spelling of it finds one
+      "#2397 a kill by name in bun exec's script after bun's folder | bun --cwd, no folder",
+      "#2397 bun run running a script in a folder | bun --cwd, no folder",
       "#466 git --work-tree with a subcommand for its value | git --work-tree, no folder",
       "#466 git -C with a subcommand for its value | git -C, no folder",
     ])
@@ -878,6 +1085,18 @@ describe("every spelling of a row's path flag keeps the row's verdict", () => {
       "#1173 GNU mv to the shell's folder attached to its target option in a cluster after a cd to a variable | -ft",
       "#1173 GNU mv to the shell's folder by its long target option after a cd to a variable | --target-directory",
       "#1173 GNU mv to the shell's folder by its shortened long target option after a cd to a variable | --target",
+      // xargs' -d delimiter, a character xargs splits stdin at, never a folder it writes to
+      '#1204 every option: cd "$X" && printf /.no-such-folder | xargs --del / rm -r | --del',
+      '#1204 every option: cd "$X" && printf /.no-such-folder | xargs --delimiter=/ rm -r | --delimiter',
+      '#1204 every option: cd "$X" && printf /.no-such-folder | xargs -d / rm -r | -d',
+      "#1204 rm under GNU xargs --delimiter by its gnubin path | --delimiter",
+      "#1204 rm under GNU xargs -d by its gnubin path | -d",
+      "#1204 rm under gxargs --delimiter with its value as the next word | --delimiter",
+      "#1204 rm under gxargs -d after an -E value spelled like the program | -d",
+      "#1204 rm under gxargs -d fed a relative part after a cd to a variable | -d",
+      "#1204 rm under gxargs with -d in a flag cluster, which splits stdin where the hook cannot see | -rd",
+      // grep's -r, which takes no value: the folder name after it is the search's pattern
+      "#1448 grep -r whose pattern names a folder in its own folder | -r",
       // cd's -P, alone or among its other options, which take no value: the folder after it is the cd's own operand
       "#1663 a commit after a cd whose -P comes before -L | -PL",
       "#1663 a commit after a physical cd into a link, then a climb | -P",
@@ -890,13 +1109,38 @@ describe("every spelling of a row's path flag keeps the row's verdict", () => {
       // turbo's own --cwd, which no path flag spells
       "#1663 turbo by its --cwd in a plain folder of the worktrees folder | --cwd",
       "#1663 turbo by its --cwd in the worktrees folder | --cwd",
-      // the --cwd=/ that bunx's spelling passes over for the row's last --cwd, read from it
+      // a --cwd that a spelling passes over for a later one, which bun reads from it or runs past
       "#1732 a runner --cwd read from the one before it | --cwd",
       "#1732 turbo's relative --cwd read from the runner's | --cwd",
       "#1747 bunx running a commit in a --cwd read from the one before | --cwd",
       "#1747 bunx running bun's build in a --cwd in a worktree read from the one before | --cwd",
       "#1747 bunx running bun's build in a --cwd read from the one before | --cwd",
+      "#1747 ext add by a bun run that bunx starts, its --cwd read from the runner's | --cwd",
+      "#1747 ext add by a bun that bun x starts, its --cwd read from bun's own | --cwd",
+      "#1747 ext add by a bun that bunx starts in its own --cwd past the runner's | --cwd",
+      "#1747 ext add by a bun x that bunx starts, its --cwd read from the runner's | --cwd",
+      "#1747 ext add by a bunx that bunx starts, its --cwd read from the runner's | --cwd",
+      "#1747 ext add by bun x bun in a runner --cwd read from bun's own | --cwd",
+      "#1747 ext add by bunx bun in a --cwd read from the one before | --cwd",
+      "#1747 ext put by a bun that bunx starts, its --cwd read from the runner's | --cwd",
       // an option that takes no value, followed by an operand
+      "#2097 ext add by a relative bun --cwd behind arch under bunx's --cwd | --cwd",
+      "#2097 ext add by bun under env that bunx starts in a --cwd above the CLI's | --cwd",
+      "#2103 turbo's build by npx past a user config option's value | --cwd",
+      "#2103 turbo's build by npx started by npx | --cwd",
+      "#2103 turbo's build by npx started by npx, both past an unlisted option's value | --cwd",
+      "#2103 turbo's build by runners nested past the readings' cap | --cwd",
+      "#2103 turbo's build in the main checkout by npx past a user config option's value | --cwd",
+      "#2103 turbo's build in the main checkout by npx started by npx past a user config option's value | --cwd",
+      "#2103 turbo's build in the main checkout by npx started by npx | --cwd",
+      "#2103 turbo's build in the main checkout by npx started by npx, both past an unlisted option's value | --cwd",
+      "#2104 a recursive git rm with a git folder alone after a cd to a variable | -r",
+      "#2104 a recursive git rm with a git folder and a work tree after a cd to a variable | -r",
+      "#2104 a recursive git rm with a work tree alone after a cd to a variable | -r",
+      // df's -h prints sizes for people, never a folder
+      "#2320 a disk check of another machine's homes over ssh | -h",
+      "#2320 a disk check of the folder that holds the homes | -h",
+      "#2320 a disk check over ssh after its own options | -h",
       "#356 a link to the data folder made in the same call | -s",
       "#356 a write after a word with an unbalanced quote | -rf",
       "#356 many variables ahead of a write | -rf",
@@ -913,6 +1157,20 @@ describe("every spelling of a row's path flag keeps the row's verdict", () => {
       "#533 a removal echoed to sudo's shell, its chdir value a path attached in the cluster | -sD",
       "#716 a recursive delete echoed to sudo's shell in a quoted env's split string after an abbreviated chdir | --ch",
     ])
+  })
+
+  test("a row moves folders by its own cd, pushd or popd, never by a folder name that holds one", () => {
+    const under = (folder: string) =>
+      Object.fromEntries(Object.entries(PATHS).map(([k, v]) => [k, join(folder, v)])) as Paths
+    const read = (folder: string) =>
+      REFUSED_FORMS.flatMap(({ rows, source }) =>
+        rows(under(folder)).flatMap(([what, call]) =>
+          typeof call === "string" ? [`${source} ${what}: ${movesFolders(call)}`] : [],
+        ),
+      )
+    const plain = read("/tmp/x/PG-1-unread-writers")
+    expect(plain.filter((row) => row.endsWith(": true")).length).toBeGreaterThan(0)
+    expect(read("/tmp/x/PG-1-unread-cd-writers")).toEqual(plain)
   })
 
   test("each path flag is listed once, and each is spelt again on some row", () => {
