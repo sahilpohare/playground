@@ -151,3 +151,13 @@ export const saveJobConfig = async (job: JobRow, config: Record<string, unknown>
   const { error } = await unwrap(apiClient.v1.settings[":key"].$put(jobConfigWrite(job, config)))
   if (error) throw new Error(error.message)
 }
+
+// The job whose row in Settings > Jobs carries Restore now.
+export const RESTORE_JOB = "ops-restore"
+
+// Restore now: ops-restore's steps run once by the API on the checkout its server names; a refusal throws its reason, and the answer says what it restored or why not.
+export const restoreCheckout = async () => {
+  const { data, error } = await unwrap(apiClient.v1.ops.restore.$post())
+  if (error) throw new Error(error.message)
+  return data
+}

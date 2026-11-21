@@ -1,8 +1,17 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { dirname, join } from "node:path"
 
 import { sourceIn, SOURCES } from "../glm-refused-sources"
+import { machineTest, zshMissing } from "../machine"
 import { OLD } from "../session-names"
 import {
   FACTORY_SETTINGS,
@@ -10,6 +19,7 @@ import {
   paneRun,
   placing,
   root,
+  scratch,
   script,
   spawn,
   TOKEN,
@@ -31,7 +41,7 @@ describe("--backend glm runs the session on Z.ai's GLM through Claude Code", () 
     expect(cmd.indexOf('[ -n "$tk" ]')).toBeLessThan(cmd.indexOf(" claude "))
   })
 
-  test("an empty key ends the launch before claude runs", async () => {
+  machineTest(zshMissing(), "an empty key ends the launch before claude runs", async () => {
     const r = await spawn(["worker", "worker-brave-otter", "b.md", "--backend", "glm"], [], {
       FAKE_EMPTY_TOKEN: "1",
     })
@@ -141,9 +151,25 @@ describe("--backend glm runs the session on Z.ai's GLM through Claude Code", () 
   ])(
     "with no factory settings to build from, %s is refused before herdr runs",
     async (_, extra) => {
-      const r = await spawn(["worker", "worker-brave-otter", "b.md", ...extra], [], {
-        NO_FACTORY_SETTINGS: "1",
-      })
+      // a scratch checkout holding spawn.sh, run-slot.sh, its data-folder resolver and its scripts package, with no scripts/factory-settings.json beside them
+      const checkout = mkdtempSync(join(scratch, "no-settings-"))
+      mkdirSync(join(checkout, "scripts", "ops"), { recursive: true })
+      writeFileSync(join(checkout, "scripts", "spawn.sh"), readFileSync(script))
+      for (const file of [
+        join("scripts", "ops", "run-slot.sh"),
+        ...["aliases.ts", "data-dir.ts"].map((f) => join("packages", "env", "src", f)),
+      ]) {
+        mkdirSync(dirname(join(checkout, file)), { recursive: true })
+        writeFileSync(join(checkout, file), readFileSync(join(root, file)))
+      }
+      // a GLM start reads the guarded orgs through the checkout's own setting.ts
+      symlinkSync(join(root, "packages", "scripts"), join(checkout, "packages", "scripts"))
+      const r = await spawn(
+        ["worker", "worker-brave-otter", "b.md", ...extra],
+        [],
+        { NO_FACTORY_SETTINGS: "1" },
+        join(checkout, "scripts", "spawn.sh"),
+      )
       expect(r.code).toBe(1)
       expect(placing(r)).toEqual([])
       expect(r.err).toContain("it cannot build")

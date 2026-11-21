@@ -49,11 +49,12 @@ const PROVIDERS = (["claude", "glm"] as const).map((value) => ({
   label: PROVIDER_NAMES[value],
   value,
 }))
-const GLM_HINT = "Your Z.ai API key. It goes to this Mac's Keychain and is never shown again."
+const GLM_HINT =
+  "Your Z.ai API key. It goes to this computer's secret store and is never shown again."
 
 const EMPTY: AccountForm = { email: "", label: "", provider: "claude", token: "" }
 
-// Add account: a Claude account by its sign-in's code, or a GLM key, each kept in this Mac's Keychain; Settings > Accounts and the home's checklist open this one dialog, each with its own trigger.
+// Add account: a Claude account by its sign-in's code, or a GLM key, each kept in this computer's secret store (the Keychain on a Mac); Settings > Accounts and the home's checklist open this one dialog, each with its own trigger.
 export function AddAccountDialog({
   children = "Add account",
   disabled,
@@ -343,8 +344,8 @@ export function AddAccountDialog({
                   </ol>
                   <p className="text-muted-foreground flex items-center gap-2 text-xs">
                     <RiLockLine className="size-3 shrink-0" />
-                    The token goes to your Mac&apos;s Keychain. It is never shown, logged or sent
-                    anywhere else.
+                    The token goes to your computer&apos;s secret store. It is never shown, logged
+                    or sent anywhere else.
                   </p>
                 </>
               ) : (

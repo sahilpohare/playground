@@ -9,6 +9,8 @@ set -euo pipefail
 REPO_URL=https://github.com/$1
 LABELS=playground
 BUN_VERSION=1.4.4
+UV_VERSION=0.13.8
+RUNNER_VERSION=2.338.2
 HOME_DIR=/home/runner
 # sized from the host itself: a runner per 2 cores and 6 GB, so 4 cores and 16 GB run two PRs' gates at once (dispatcher, 18 Oct)
 CORES=$(nproc)
@@ -19,8 +21,31 @@ SWAP=$([ "$RAM_GB" -ge 8 ] && echo 2G || echo 4G)
 
 say() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { say "setup.sh: $*" >&2; exit 1; }
+# fetch <url> <sha256> <file>: downloads url to file, and stops the script, removing the file, unless its sha256 is the pinned one
+fetch() {
+  curl -fsSL -o "$3" "$1" || die "could not download $1"
+  local sum
+  sum=$(sha256sum "$3" | cut -d' ' -f1)
+  [ "$sum" = "$2" ] || { rm -f "$3"; die "$1 has sha256 $sum, not the pinned $2"; }
+}
 
 [ "$(id -u)" = 0 ] || die "run it as root"
+# each download's sha256, from the release's own published sums
+case "$(uname -m)" in
+  x86_64)
+    ARCH=x64 BUN_ASSET=bun-linux-x64 UV_ASSET=uv-x86_64-unknown-linux-gnu
+    BUN_SHA256=bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c
+    UV_SHA256=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
+    RUNNER_SHA256=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
+    ;;
+  aarch64 | arm64)
+    ARCH=arm64 BUN_ASSET=bun-linux-aarch64 UV_ASSET=uv-aarch64-unknown-linux-gnu
+    BUN_SHA256=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e
+    UV_SHA256=74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585
+    RUNNER_SHA256=670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
+    ;;
+  *) die "no runner for $(uname -m)" ;;
+esac
 . /etc/os-release
 case "${ID:-}" in ubuntu | debian) ;; *) die "only Ubuntu or Debian, not ${ID:-unknown}" ;; esac
 # the token is read before anything changes, so a missing one stops the run with nothing done
@@ -34,7 +59,7 @@ say "sizing: $CORES cores and $RAM_GB GB give $RUNNERS runners and $SWAP of swap
 export DEBIAN_FRONTEND=noninteractive
 say "packages"
 apt-get update -q
-apt-get install -yq ca-certificates curl docker.io git golang-go jq ruby tar ufw unattended-upgrades unzip zsh
+apt-get install -yq ca-certificates curl docker.io git golang-go jq tar ufw unattended-upgrades unzip zsh
 
 say "swap"
 if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
@@ -52,27 +77,38 @@ for g in sudo admin wheel; do gpasswd -d runner "$g" > /dev/null 2>&1 || true; d
 rm -f /etc/sudoers.d/runner
 systemctl enable --now docker
 
-say "bun $BUN_VERSION"
-[ "$(su - runner -c '~/.bun/bin/bun --version' 2>/dev/null)" = "$BUN_VERSION" ] ||
-  su - runner -c "curl -fsSL https://bun.sh/install | bash -s bun-v$BUN_VERSION"
-# node is bun, as `bun run` makes it for a script, so a tool whose shebang asks for node (turbo) runs outside a script too
-su - runner -c 'mkdir -p ~/.local/bin && ln -sfn ~/.bun/bin/bun ~/.local/bin/node'
-# uv runs test:skills' Python steps under 3.13, as local CI does on the Mac
-say "uv"
-su - runner -c 'command -v ~/.local/bin/uv > /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh'
+# every download lands here, as root, and only a checked one is unpacked, its files alone, so the exit removes files and the empty folder
+TMP=$(mktemp -d)
+trap 'rm -f "$TMP"/*; rmdir "$TMP"' EXIT
+su - runner -c 'mkdir -p ~/.bun/bin ~/.local/bin'
 
-say "the actions runners"
-case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64 | arm64) ARCH=arm64 ;; *) die "no runner for $(uname -m)" ;; esac
-VERSION=""
+say "bun $BUN_VERSION"
+if [ "$(su - runner -c '~/.bun/bin/bun --version' 2>/dev/null)" != "$BUN_VERSION" ]; then
+  fetch "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$BUN_ASSET.zip" "$BUN_SHA256" "$TMP/bun.zip"
+  unzip -joq "$TMP/bun.zip" "$BUN_ASSET/bun" -d "$TMP"
+  install -o runner -g runner -m 755 "$TMP/bun" "$HOME_DIR/.bun/bin/bun"
+  su - runner -c 'ln -sfn bun ~/.bun/bin/bunx'
+fi
+# node is bun, as `bun run` makes it for a script, so a tool whose shebang asks for node (turbo) runs outside a script too
+su - runner -c 'ln -sfn ~/.bun/bin/bun ~/.local/bin/node'
+# uv runs test:skills' Python steps under 3.13, as local CI does on the Mac
+say "uv $UV_VERSION"
+if [ "$(su - runner -c '~/.local/bin/uv --version' 2>/dev/null | cut -d' ' -f2)" != "$UV_VERSION" ]; then
+  fetch "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_ASSET.tar.gz" "$UV_SHA256" "$TMP/uv.tar.gz"
+  tar -xzf "$TMP/uv.tar.gz" -C "$TMP" --strip-components=1 "$UV_ASSET/uv" "$UV_ASSET/uvx"
+  for t in uv uvx; do install -o runner -g runner -m 755 "$TMP/$t" "$HOME_DIR/.local/bin/$t"; done
+fi
+
+say "the actions runners $RUNNER_VERSION"
+RUNNER_TAR=$TMP/actions-runner.tar.gz
 for i in $(seq 1 "$RUNNERS"); do
   DIR=$HOME_DIR/runner-$i
   if [ ! -x "$DIR/config.sh" ]; then
-    if [ -z "$VERSION" ]; then
-      VERSION=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name)
-      VERSION=${VERSION#v}
-      [ -n "$VERSION" ] && [ "$VERSION" != null ] || die "could not read the runner's latest version"
-    fi
-    su - runner -c "mkdir -p $DIR && curl -fsSL https://github.com/actions/runner/releases/download/v$VERSION/actions-runner-linux-$ARCH-$VERSION.tar.gz | tar -xz -C $DIR"
+    [ -f "$RUNNER_TAR" ] ||
+      fetch "https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-$ARCH-$RUNNER_VERSION.tar.gz" "$RUNNER_SHA256" "$RUNNER_TAR"
+    mkdir -p "$DIR"
+    tar -xzf "$RUNNER_TAR" -C "$DIR"
+    chown -R runner: "$DIR"
     "$DIR/bin/installdependencies.sh"
   fi
   if [ ! -f "$DIR/.runner" ]; then
@@ -112,6 +148,6 @@ EOF
 systemctl enable --now unattended-upgrades
 
 for i in $(seq 1 "$RUNNERS"); do say "runner-$i: $(systemctl is-active "$(cat "$HOME_DIR/runner-$i/.service")")"; done
-# what ci.sh's runs need, as the runner user sees it: tools.sh names each one missing and exits 1
+# what suite.sh's steps need, as this VPS's runner user sees it: tools.sh names each one missing and exits 1
 bash "$(dirname "$0")/tools.sh" || die "a tool the suite needs is missing"
 

@@ -13,6 +13,8 @@ import {
   ThreadsGroup,
 } from "../../../../../../web/next/src/components/dashboard/app-sidebar"
 import { SidebarMenu, SidebarProvider } from "../../../../../../web/next/src/components/ui/sidebar"
+import { drawingOf, keepMakerIcon } from "../../../../../../web/next/src/lib/model-icons"
+import { groupOrder } from "../../../../../../web/next/src/lib/sidebar-groups"
 import { iconTone, STATES, statusIcon } from "../../../../../../web/next/src/lib/status-icons"
 import { tipsOf } from "../../tooltips"
 
@@ -26,11 +28,19 @@ const { createElement } = (await import(Bun.resolveSync("react", web))) as {
 const { renderToStaticMarkup } = (await import(Bun.resolveSync("react-dom/server", web))) as {
   renderToStaticMarkup: (node: Node) => string
 }
-const { RiAnthropicFill, RiHammerFill, RiSignalCellular3Fill, RiSkull2Fill, RiZhipuAiFill } =
+const { RiCircleLine, RiHammerFill, RiRobot2Line, RiSignalCellular3Fill, RiSkull2Fill } =
   (await import(Bun.resolveSync("@remixicon/react", web))) as Record<
-    "RiAnthropicFill" | "RiHammerFill" | "RiSignalCellular3Fill" | "RiSkull2Fill" | "RiZhipuAiFill",
+    "RiCircleLine" | "RiHammerFill" | "RiRobot2Line" | "RiSignalCellular3Fill" | "RiSkull2Fill",
     unknown
   >
+
+// Each maker's icon as the API would serve it, kept as read, so a row draws it; Ornith's a full-colour image.
+const logoOf = (id: string) =>
+  id === "ornith-ai"
+    ? "data:image/png;base64,iVBORw0KGgo="
+    : `data:image/svg+xml;base64,${Buffer.from(`<svg data-maker="${id}"><path fill="currentColor" d="M0 0"/></svg>`).toString("base64")}`
+for (const id of ["anthropic", "ornith-ai", "zai"]) keepMakerIcon(id, drawingOf(logoOf(id)))
+const ANTHROPIC = logoOf("anthropic")
 
 type Worker = Parameters<typeof SessionRow>[0]["worker"]
 
@@ -478,7 +488,7 @@ describe("SessionRow", () => {
       model: "claude-opus-5-5",
     })
     const button = /<a[^>]*data-sidebar="menu-button"[^>]*>([\s\S]*?)<\/a>/.exec(html)?.[1] ?? ""
-    const logo = button.indexOf(pathOf(RiAnthropicFill))
+    const logo = button.indexOf(ANTHROPIC)
     const effort = button.indexOf(pathOf(RiSignalCellular3Fill))
     expect(logo).toBeGreaterThan(button.indexOf("Message dispatcher from the dashboard"))
     expect(effort).toBeGreaterThan(logo)
@@ -489,14 +499,113 @@ describe("SessionRow", () => {
     ])
     expect(shownText(html)).toBe("Message dispatcher from the dashboard")
     expect(shape(html)).toEqual(stock)
-    // a GLM model draws Z.ai's own Z, ZeroSDK's mark, and a row with no model or effort draws neither
+    // a GLM model draws Z.ai's logo, a local org/repo model its org's image, a bare id or a maker none knows its name's initials in a chip and never the robot, a maker still read an empty place, and a row with no model or effort draws neither
     const glm = row("worker-greed", "worker", [], { model: "glm-5.3-flash" })
-    expect(glm).toContain('d="M20.1312 7.50002L17.4088')
-    expect(glm).not.toContain(pathOf(RiZhipuAiFill))
+    expect(glm).toContain(logoOf("zai"))
     expect(tipsOf(glm)).toContain("GLM 5.3 Flash")
+    const ornith = row("worker-greed", "worker", [], { model: "ornith-ai/Ornith-1.5-122B-NVFP4" })
+    expect(ornith).toContain(logoOf("ornith-ai"))
+    expect(ornith).toContain("<clipPath")
+    expect(tipsOf(ornith)).toContain("ornith-ai/Ornith-1.5-122B-NVFP4")
+    const bareLocal = row("worker-greed", "worker", [], { model: "Ornith-1.5-122B-NVFP4" })
+    expect(bareLocal).toContain('data-initials="Or"')
+    expect(bareLocal).not.toContain(pathOf(RiRobot2Line))
+    const reading = row("worker-greed", "worker", [], { model: "NotReadYet/Model-1" })
+    expect(reading).not.toContain(pathOf(RiRobot2Line))
+    expect(reading).not.toContain("<image")
+    const unknown = row("worker-greed", "worker", [], { model: "gpt-9" })
+    expect(unknown).toContain('data-initials="Gp"')
+    expect(unknown).not.toContain(pathOf(RiRobot2Line))
+    expect(tipsOf(unknown)).toContain("gpt-9")
     const bare = row("worker-greed", "worker")
-    expect(bare).not.toContain(pathOf(RiAnthropicFill))
+    expect(bare).not.toContain(ANTHROPIC)
+    expect(bare).not.toContain(pathOf(RiRobot2Line))
     expect(tipsOf(bare)).toHaveLength(1)
+  })
+
+  test("a local session's row draws its served model's maker and names its level, high: Ornith 122B, thinking, where a Claude row draws its effort; with no served repo known, its initials chip (PG-2642)", () => {
+    const local = row("worker-greed", "worker", [], {
+      effort: "high",
+      localModel: "ornith-ai/Ornith-1.5-122B-NVFP4",
+      model: "local",
+    })
+    expect(local).toContain(logoOf("ornith-ai"))
+    expect(local).toContain(pathOf(RiSignalCellular3Fill))
+    expect(local).not.toContain(pathOf(RiCircleLine))
+    expect(local).not.toContain(pathOf(RiRobot2Line))
+    expect(tipsOf(local)).toEqual([
+      "worker-greed\nMessage dispatcher from the dashboard\nhigh: Ornith 122B, thinking · Working",
+      "high: Ornith 122B, thinking",
+      "high",
+    ])
+    expect(shape(local)).toEqual(stock)
+    for (const [effort, words] of [
+      ["low", "low: Ornith 122B, no thinking"],
+      ["medium", "medium: Ornith 122B, thinking capped"],
+    ]) {
+      const level = row("worker-greed", "worker", [], {
+        effort,
+        localModel: "ornith-ai/Ornith-1.5-122B-NVFP4",
+        model: "local",
+      })
+      expect(tipsOf(level)).toContain(words)
+    }
+    const unknown = row("worker-greed", "worker", [], { effort: "high", model: "local" })
+    expect(unknown).toContain('data-initials="Lo"')
+    expect(unknown).toContain(pathOf(RiSignalCellular3Fill))
+    expect(unknown).not.toContain(pathOf(RiRobot2Line))
+    expect(tipsOf(unknown)).toContain("high: local, thinking")
+    const claude = row("worker-greed", "worker", [], { effort: "high", model: "claude-opus-5-5" })
+    expect(claude).toContain(pathOf(RiSignalCellular3Fill))
+  })
+
+  test("a local row with no effort set draws a plain circle in the effort's place, named No effort set, and one with its effort set draws that effort's bars as a Claude row does", () => {
+    const none = row("worker-greed", "worker", [], {
+      effort: null,
+      localModel: "ornith-ai/Ornith-1.5-122B-NVFP4",
+      model: "local",
+    })
+    expect(none).toContain(pathOf(RiCircleLine))
+    expect(none).not.toContain(pathOf(RiSignalCellular3Fill))
+    expect(tipsOf(none)).toContain("No effort set")
+    const set = row("worker-greed", "worker", [], {
+      effort: "high",
+      localModel: "ornith-ai/Ornith-1.5-122B-NVFP4",
+      model: "local",
+    })
+    expect(set).toContain(pathOf(RiSignalCellular3Fill))
+    expect(set).not.toContain(pathOf(RiCircleLine))
+    expect(tipsOf(set)).toContain("high")
+    const picked = row("worker-greed", "worker", [], {
+      effort: "high",
+      localModels: [{ id: "ornith-1.5-122b-nvfp4", label: "Ornith 122B" }],
+      model: "ornith-1.5-122b-nvfp4",
+    })
+    expect(picked).toContain(pathOf(RiCircleLine))
+    expect(tipsOf(picked)).toContain("No effort set")
+    const claude = row("worker-greed", "worker", [], { effort: "high", model: "claude-opus-5-5" })
+    expect(claude).toContain(pathOf(RiSignalCellular3Fill))
+    expect(claude).not.toContain(pathOf(RiCircleLine))
+    expect(row("worker-greed", "worker", [], { effort: null, model: null })).not.toContain(
+      pathOf(RiCircleLine),
+    )
+  })
+
+  test("the hosted session's row on a local model it picked, which reports that model's id, draws no effort bars and its tooltip names no effort (PG-2651)", () => {
+    const localModels = [{ id: "ornith-1.5-122b-nvfp4", label: "Ornith 122B" }]
+    const picked = row("worker-greed", "worker", [], {
+      effort: "high",
+      localModels,
+      model: "ornith-1.5-122b-nvfp4",
+    })
+    expect(picked).not.toContain(pathOf(RiSignalCellular3Fill))
+    expect(tipsOf(picked).join("\n")).not.toContain("high")
+    const claude = row("worker-greed", "worker", [], {
+      effort: "high",
+      localModels,
+      model: "claude-opus-5-5",
+    })
+    expect(claude).toContain(pathOf(RiSignalCellular3Fill))
   })
 
   for (const [name, role] of [
@@ -506,7 +615,7 @@ describe("SessionRow", () => {
   ] as const) {
     test(`a ${role} row that opens nothing keeps the effort's place with no effort, so its logo lines up with a row that has one`, () => {
       const html = row(name, role, [], { model: "claude-opus-5-5" })
-      const logo = html.indexOf(pathOf(RiAnthropicFill))
+      const logo = html.indexOf(ANTHROPIC)
       expect(logo).toBeGreaterThan(-1)
       expect(
         html.indexOf(
@@ -778,7 +887,10 @@ describe("SessionRow's dropdown and group", () => {
   const pull = (fields: Partial<Pull> = {}): Pull => ({
     approvals: 0,
     ci: "passing",
+    conflicts: false,
     draft: false,
+    gates: null,
+    head: "",
     number: 197,
     queued: false,
     reviewed: true,
@@ -849,9 +961,7 @@ describe("SessionRow's dropdown and group", () => {
       ""
     expect(link).not.toContain("text-2xs")
     expect(shownText(link)).toBe("Message dispatcher from the dashboard")
-    expect(link.indexOf(pathOf(RiSignalCellular3Fill))).toBeGreaterThan(
-      link.indexOf(pathOf(RiAnthropicFill)),
-    )
+    expect(link.indexOf(pathOf(RiSignalCellular3Fill))).toBeGreaterThan(link.indexOf(ANTHROPIC))
     const button = openTag(html, /<a[^>]*href="\/dashboard\?worker=s-reviewer-greed"[^>]*>/)
     expect([...classesOf(button)].filter((c) => /^(h|min-h)-/.test(c))).toEqual(["h-7"])
     // its name and both lines are its tooltip, a line each (a reviewer: a reviewer and a tester otherwise read the same), and a screen reader hears them as one line
@@ -962,7 +1072,10 @@ describe("SessionRow's dropdown and group", () => {
   })
 
   test(`its line leads with the ticket and the pull request joined (PG-12#173), and its tooltip says the rest`, () => {
-    const html = render({ agent: agent({ state: "idle" }) }, { light: "idle" })
+    const html = render(
+      { agent: agent({ pr: pull({ gates: [] }), state: "idle" }) },
+      { light: "idle" },
+    )
     expect(textOf(html, openTag(html, /<span class="[^"]*text-xs[^"]*">/))).toBe(
       "MADECEDAR-1234#197 Message dispatcher from the dashboard",
     )
@@ -1047,6 +1160,13 @@ describe("SessionRow's dropdown and group", () => {
     ["fixing", { pr: pull({ score: "3/5" }) }, {}, "fixing", "text-caution"],
     ["working", { pr: null }, {}, "working", "text-info"],
     [
+      "conflicts",
+      { pr: pull({ conflicts: true }), state: "idle" },
+      { light: "idle" },
+      "conflicts",
+      "text-destructive",
+    ],
+    [
       "waiting",
       { pr: pull({ ci: "pending", score: null }), state: "idle" },
       { light: "idle" },
@@ -1067,7 +1187,22 @@ describe("SessionRow's dropdown and group", () => {
       "approvals",
       "text-caution",
     ],
-    ["ready", { state: "idle" }, { light: "idle" }, "ready", "text-success"],
+    [
+      "ready",
+      { pr: pull({ gates: [] }), state: "idle" },
+      { light: "idle" },
+      "ready",
+      "text-success",
+    ],
+    [
+      "gated",
+      { pr: pull({ gates: ["tester"] }), state: "idle" },
+      { light: "idle" },
+      "gated",
+      "text-caution",
+    ],
+    // a 5/5 with green CI the merge train has not read at its head is no Ready
+    ["unread", { state: "idle" }, { light: "idle" }, "idle", "text-inactive"],
     [
       "parked",
       { parked: "held for the reset", pr: null, state: "idle" },
@@ -1281,22 +1416,34 @@ describe("ThreadsGroup", () => {
   const badges = (html: string) =>
     [...html.matchAll(/data-sidebar="menu-badge"[^>]*>([^<]*)</g)].map(([, text]) => text)
 
-  // the dispatchers' rows sit in the header, so Threads leads the nav, and Yard's Channels and Direct messages follow it, above Orchestrators
-  test("is the nav's first group once the threads are read, and is left out before; Yard's groups next; no Dispatchers group", () => {
-    expect(navGroups(true, []).map(({ label }) => label)).toEqual([
+  // the dispatchers' rows sit in the header, so Threads leads the nav, and Yard's Channels and Direct messages follow it while each has rows, above Orchestrators
+  test("is the nav's first group once the threads are read, and is left out before; Yard's groups next while each has rows; no Dispatchers group", () => {
+    expect(navGroups(true, [], ["Channels", "Direct messages"]).map(({ label }) => label)).toEqual([
       "Threads",
-      "Yard",
+      "Channels",
+      "Direct messages",
       "Orchestrators",
-      "Subagents",
       "AI Runners",
+      "Subagents",
       "Scripts",
     ])
     expect(navGroups(false, []).map(({ label }) => label)).toEqual([
-      "Yard",
       "Orchestrators",
-      "Subagents",
       "AI Runners",
+      "Subagents",
       "Scripts",
+    ])
+  })
+
+  test("draws the other groups in the order you left them, Threads still first", () => {
+    const order = groupOrder(JSON.stringify(["Scripts", "Subagents", "Channels"]))
+    expect(navGroups(true, [], ["Channels"], order).map(({ label }) => label)).toEqual([
+      "Threads",
+      "Scripts",
+      "Subagents",
+      "Channels",
+      "Orchestrators",
+      "AI Runners",
     ])
   })
 
@@ -1431,7 +1578,7 @@ describe("Alpha's effort icon is the original effort symbol", () => {
       model: "claude-opus-5-5",
     })
     expect(alphaRow).toContain(pathOf(RiSignalCellular3Fill))
-    expect(alphaRow).toContain(pathOf(RiAnthropicFill))
+    expect(alphaRow).toContain(ANTHROPIC)
     expect(alphaRow).not.toContain(pathOf(RiSkull2Fill))
     expect(tipsOf(alphaRow)).toContain("high")
     const maxRow = row("dispatcher", "dispatcher", [], { effort: "max", model: "claude-opus-5-5" })

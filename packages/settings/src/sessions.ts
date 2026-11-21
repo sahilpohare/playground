@@ -2,7 +2,7 @@ import type { RosterKind } from "@packages/config/kinds"
 import { z } from "zod"
 
 import { type Account, accountKey, accountsOf } from "@/accounts"
-import { type Backend, GLM_MODEL } from "@/harnesses"
+import { type Backend, GLM_MODEL, LOCAL_MODEL } from "@/harnesses"
 import { readPolicyOrDefaults } from "@/rendered"
 import { defineSettings, type Refusal } from "@/settings"
 
@@ -28,7 +28,7 @@ export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
 // A brief is one file's name, under the data folder or scripts/briefs, so no template reaches outside either.
 export const BRIEF_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-// One template the sidebar's plus starts a session from: every value checked here, so none reaches spawn.sh's argv unread. account is a usage.accounts email, Claude alone; none takes the first account that is not this machine's own login, for a second dispatcher, which spawn.sh never starts on the first's. harness is the one it runs in, and model a Claude id, or glm for models.glm.
+// One template the sidebar's plus starts a session from: every value checked here, so none reaches spawn.sh's argv unread. account is a usage.accounts email, Claude alone; none takes the first account that is not this machine's own login, for a second dispatcher, which spawn.sh never starts on the first's. harness is the one it runs in, and model a Claude id, glm for models.glm, or local for this machine's local model.
 export const sessionTemplate = z
   .strictObject({
     account: z.string().email().optional(),
@@ -51,12 +51,20 @@ export const sessionTemplate = z
     message:
       "a GLM template runs on models.glm and its first GLM row, so it takes no account or effort",
   })
+  .refine((t) => t.model !== LOCAL_MODEL || t.account === undefined, {
+    message: "a local template runs on this machine's local model, so it takes no account",
+    path: ["account"],
+  })
+  .refine((t) => t.model !== LOCAL_MODEL || (t.kind !== "dispatcher" && t.kind !== "planner"), {
+    message: "a dispatcher or a planner plans on Claude, so it takes no local model",
+    path: ["kind"],
+  })
 
 export type SessionTemplate = z.infer<typeof sessionTemplate>
 
-// Pure: the backend spawn.sh's --backend takes for a template: glm for a GLM model, else claude.
+// Pure: the backend spawn.sh's --backend takes for a template: glm for a GLM model, local for the local one, else claude.
 export const templateBackend = (template: { model?: string }): Backend =>
-  template.model === GLM_MODEL ? "glm" : "claude"
+  template.model === GLM_MODEL ? "glm" : template.model === LOCAL_MODEL ? "local" : "claude"
 
 // Pure: a stored list as it reads now: a row saved before the harness split names a backend, which reads as Claude Code with glm as its model on GLM; a Claude row that named glm as its model, which spawn.sh refused, reads with that model dropped, so it never reads as GLM and the rest of the list still reads; a row naming another backend keeps it for the schema to refuse.
 export const storedTemplates = (value: unknown): unknown =>

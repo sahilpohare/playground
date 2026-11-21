@@ -67,6 +67,7 @@ describe("docs:wrap", () => {
     writeFileSync(join(dir, "docs/playground/pr.md"), "One.\n")
     expect(await files(dir)).toEqual([
       ".agents/dashboard/a.md",
+      ".agents/shipping.md",
       ".agents/skill-trial.md",
       ".agents/testing.md",
       "AGENTS.md",

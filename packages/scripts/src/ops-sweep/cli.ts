@@ -3,7 +3,10 @@ import { join } from "node:path"
 
 import { configDirOf, dataDirOf } from "@packages/env/data-dir"
 
+import { ghSkipped } from "../gh-read"
 import { mainCheckout } from "../main-checkout"
+import { herdrDir, serverEnv } from "../ops-herdr/herdr"
+import { herdrPath } from "../ops-herdr/pin"
 import { loadSessionNames } from "../playground/setting"
 import { beat, type Context, forecast, pass, type Run } from "./sweep"
 
@@ -14,8 +17,10 @@ const ops = join(data, "ops")
 loadSessionNames()
 const main = mainCheckout()
 
-// stdout and stderr apart, in the folder and env given; one past its time is killed by its own handle, and one that cannot start reads as exit 127.
+// stdout and stderr apart, in the folder and env given; one past its time is killed by its own handle, one that cannot start reads as exit 127, and gh is skipped while ghSkipped names why, so a broken gh is never flooded.
 const run: Run = async (argv, { cwd, env, timeoutMs = 120_000 } = {}) => {
+  const skipped = argv[0] === "gh" ? ghSkipped() : null
+  if (skipped) return { code: 1, err: skipped, out: "" }
   try {
     const proc = Bun.spawn(argv, {
       cwd,
@@ -39,6 +44,13 @@ const ctx: Context = {
   cfg,
   data,
   dashboard: join(main, ".claude", "worktrees", "desk"),
+  herdr: async (server, args) =>
+    (
+      await run([process.env.HERDR_BIN_PATH || herdrPath(process.env), ...args], {
+        env: serverEnv(process.env, herdrDir(process.env), server),
+        timeoutMs: 30_000,
+      })
+    ).out,
   load: () => loadavg()[0] ?? 0,
   main,
   now: () => Date.now(),

@@ -15,7 +15,7 @@ export const livePair = (
   }
 }
 
-// The live dashboard's database: the live.container name, or the one first run's pglaunch starts under it on the live checkout, which adds a dash and 4 letters or digits.
+// The live dashboard's database: the live.container name, or the one first run's startLocal starts under it on the live checkout, which adds a dash and 4 letters or digits.
 export const isLiveDatabase = (container: string, liveDashboard: LiveDashboard): boolean =>
   container === liveDashboard.database ||
   (container.startsWith(`${liveDashboard.database}-`) &&
@@ -35,7 +35,7 @@ export const containersOf = (listed: string): Container[] =>
       return { name: name.trim(), state: state.trim() }
     })
 
-// The live dashboard's database where setup cannot reuse it: pglaunch reuses only a running container it named, so the unsuffixed live.container, or a suffixed one not running, would sit beside a new empty one; a running suffixed one is the container Try again reuses.
+// The live dashboard's database where setup cannot reuse it: startLocal reuses only a running container it named, so the unsuffixed live.container, or a suffixed one not running, would sit beside a new empty one; a running suffixed one is the container Try again reuses.
 export const unreusedLiveDatabase = (
   containers: Container[],
   liveDashboard: LiveDashboard,
@@ -46,6 +46,6 @@ export const unreusedLiveDatabase = (
       (name === liveDashboard.database || state !== "running"),
   )?.name
 
-// Why setup refuses on the live checkout while its database exists: pglaunch reuses only a running container it named, so a new one would sit empty beside it.
+// Why setup refuses on the live checkout while its database exists: startLocal reuses only a running container it named, so a new one would sit empty beside it.
 export const liveDatabaseHeld = (container: string): string =>
   `${container} holds the live dashboard's database, so setup would start an empty one beside it; point POSTGRES_URL at it: \`docker start ${container}\`, then \`docker port ${container} 5432\` for its port`

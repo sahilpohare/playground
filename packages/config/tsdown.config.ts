@@ -10,6 +10,7 @@ export default defineConfig({
     "src/schedule.ts",
     "src/session-state.ts",
     "src/site.ts",
+    "src/ssh-probe.ts",
     "src/threads.ts",
     "src/verdicts.ts",
   ],

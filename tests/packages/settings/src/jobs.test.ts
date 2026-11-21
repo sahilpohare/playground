@@ -9,6 +9,7 @@ import {
   orgJobs,
   plistProgram,
   renderJobs,
+  RETIRED,
   settingFields,
   settingsFor,
 } from "../../../../packages/settings/src"
@@ -21,10 +22,10 @@ const fill = {
   path: "/usr/bin:/bin",
 }
 
-const ON_BY_DEFAULT = ["ops-dashboard", "ops-usage"]
+const ON_BY_DEFAULT = ["ops-dashboard", "ops-keep-awake", "ops-usage"]
 
 describe("the job registry", () => {
-  test("each shipped job is a jobs.<camelName> setting, off by default but the Dashboard's and the usage read", () => {
+  test("each shipped job is a jobs.<camelName> setting, off by default but the Dashboard's, the usage read and, on a Mac, keep-awake", () => {
     expect(jobKey("ops-merge-train")).toBe("jobs.opsMergeTrain")
     const keys = settingFields().map(({ key }) => key)
     for (const [name, job] of Object.entries(JOBS)) {
@@ -34,8 +35,9 @@ describe("the job registry", () => {
     expect(Object.keys(JOBS)).toEqual([...Object.keys(JOBS)].sort())
   })
 
-  test("a fresh install renders every job paused but the Dashboard's and the usage read, with its placeholders filled", () => {
-    const { jobs, plists } = renderJobs({}, [], fill)
+  test("a fresh install renders every job paused but the Dashboard's, the usage read and, on a Mac, keep-awake, with its placeholders filled", () => {
+    // on macOS, which renders every registry job, a macOS-alone one too
+    const { jobs, plists } = renderJobs({}, [], fill, {}, "darwin")
     expect(jobs.map((job) => job.name)).toEqual(Object.keys(JOBS))
     expect(jobs.filter((job) => job.disabled !== true).map((job) => job.name)).toEqual(
       ON_BY_DEFAULT,
@@ -45,6 +47,24 @@ describe("the job registry", () => {
       cwd: "/c",
     })
     expect(plists.size).toBe(0)
+  })
+
+  test("the tunnel job renders beside the other ops jobs, off until its host is set, held always in a terminal (PG-2207)", () => {
+    const { jobs } = renderJobs({}, [], fill)
+    const names = jobs.map((job) => job.name)
+    expect(names.slice(names.indexOf("ops-tick"), names.indexOf("ops-tick") + 3)).toEqual([
+      "ops-tick",
+      "ops-tunnel",
+      "ops-unstick",
+    ])
+    expect(jobs.find((job) => job.name === "ops-tunnel")).toMatchObject({
+      command: "/b/bun --no-env-file /c/packages/scripts/src/ops-tunnel/cli.ts --data /d",
+      config: { host: "" },
+      cwd: "/c",
+      disabled: true,
+      runtime: "herdr",
+      schedule: { always: true },
+    })
   })
 
   test("the Dashboard's job runs its own checkout's run.sh from that checkout, the one its supervisor rolls", () => {
@@ -92,6 +112,65 @@ describe("the job registry", () => {
     expect(plist).toContain("<string>/c/desk/packages/scripts/src/ops-restore/cli.ts</string>")
     expect(plist).toContain("<string>--main</string><string>/c</string></array>")
     expect(plist).toContain("<key>WorkingDirectory</key><string>/c/desk</string>")
+  })
+
+  // #2203: Linux has no launchd, so each launchd job also renders a systemd user unit that runs what its plist runs
+  describe("each launchd job's systemd user unit", () => {
+    const fields = (unit: string) =>
+      Object.fromEntries(
+        unit
+          .split("\n")
+          .filter((line) => /^\w+=/.test(line))
+          .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+      )
+    const words = (value: string) =>
+      [...value.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) =>
+        match[1]!.replace(/\\(.)/g, "$1").replaceAll("%%", "%").replaceAll("$$", "$"),
+      )
+    const launchdJobs = Object.entries(JOBS).filter(([, job]) => job.launchd)
+
+    test.each(launchdJobs)(
+      "%s runs its plist's program from its folder, logs where it logs, and restarts always",
+      (name, job) => {
+        const { plists, units } = renderJobs(
+          { [jobKey(name)]: { ...job, enabled: true } },
+          [],
+          fill,
+        )
+        const plist = plists.get(job.launchd!)!
+        const unit = fields(units.get(job.launchd!)!)
+        const log = /<key>StandardOutPath<\/key><string>([^<]*)</.exec(plist)![1]
+        expect(words(unit.ExecStart!)).toEqual(plistProgram(plist)!.program)
+        expect(unit.WorkingDirectory).toBe(plistProgram(plist)!.cwd!)
+        expect([unit.StandardOutput, unit.StandardError]).toEqual([
+          `append:${log}`,
+          `append:${log}`,
+        ])
+        expect(unit.Restart).toBe("always")
+        expect(unit.KillMode).toBe("process")
+        expect(unit.WantedBy).toBe("default.target")
+        expect(words(unit.Environment!)).toEqual([`PATH=%h/.bun/bin:${fill.path}`])
+        expect([...units.keys()]).toEqual([...plists.keys()])
+      },
+    )
+
+    test("a job turned off renders no unit", () => {
+      expect(renderJobs({}, [], fill).units.size).toBe(0)
+    })
+
+    test("a path holding a space, a quote, a % or a $ reaches systemd as written", () => {
+      const odd = { ...fill, checkout: '/c d/"q"%h$X' }
+      const tick = { ...JOBS["ops-tick"]!, enabled: true }
+      const unit = renderJobs({ [jobKey("ops-tick")]: tick }, [], odd).units.get(
+        "com.playground.ops-tick",
+      )!
+      expect(words(fields(unit).ExecStart!)).toEqual([
+        "/b/bun",
+        "--no-env-file",
+        '/c d/"q"%h$X/packages/scripts/src/ops-tick/cli.ts',
+      ])
+      expect(fields(unit).WorkingDirectory).toBe('/c d/"q"%%h$X')
+    })
   })
 
   test("a value its schema refuses falls back to the default, and a job the registry does not know is kept as it stands", () => {
@@ -142,6 +221,54 @@ describe("the job registry", () => {
     }
     expect(renderJobs({}, [kept], fill).jobs.find((job) => job.name === "ops-company")).toEqual(
       kept,
+    )
+  })
+
+  test("a retired job's row turns off, so its teardown stops it, and its stored row is no org's job (#2313)", () => {
+    expect(RETIRED).toEqual([...RETIRED].sort())
+    for (const name of RETIRED) {
+      expect(JOBS[name]).toBeUndefined()
+      const old = { heartbeat: name, launchd: `com.playground.${name}`, name }
+      expect(renderJobs({}, [old], fill).jobs.find((job) => job.name === name)).toEqual({
+        ...old,
+        disabled: true,
+      })
+      expect(
+        orgJobs([{ key: jobKey(name), scope: "tester", value: { enabled: true } }], "tester", {}),
+      ).toEqual({ jobs: {}, refused: [] })
+    }
+  })
+
+  test("the keep-awake job renders on macOS alone, holding caffeinate in a terminal, and on any other platform is no job (#2906)", () => {
+    const on = { [jobKey("ops-keep-awake")]: { ...JOBS["ops-keep-awake"]!, enabled: true } }
+    const awake = (platform: string) =>
+      renderJobs(on, [], fill, {}, platform).jobs.find((job) => job.name === "ops-keep-awake")
+    expect(awake("darwin")).toEqual({
+      callsModel: false,
+      command: "/b/bun --no-env-file /c/packages/scripts/src/ops-keep-awake/cli.ts --data /d",
+      cwd: "/c",
+      description: expect.any(String),
+      heartbeat: "ops-keep-awake",
+      name: "ops-keep-awake",
+      runtime: "herdr",
+      schedule: { always: true },
+    })
+    expect(awake("linux")).toBeUndefined()
+    // on by default on a Mac, with no setting, and off by its own setting, as any job; on Linux no row either way
+    const fresh = (platform: string, values = {}) =>
+      renderJobs(values, [], fill, {}, platform).jobs.find((job) => job.name === "ops-keep-awake")
+    expect(fresh("darwin")).toMatchObject({ name: "ops-keep-awake" })
+    expect(fresh("darwin")).not.toHaveProperty("disabled")
+    const off = settingsFor(
+      [{ key: jobKey("ops-keep-awake"), scope: "me", value: { enabled: false } }],
+      "me",
+    ).values
+    expect(fresh("darwin", off)).toMatchObject({ disabled: true })
+    expect(fresh("linux")).toBeUndefined()
+    // a row an older pass left is dropped too, so up.py has nothing to start there
+    const left = { heartbeat: "ops-keep-awake", name: "ops-keep-awake" }
+    expect(renderJobs(on, [left], fill, {}, "linux").jobs.map((job) => job.name)).not.toContain(
+      "ops-keep-awake",
     )
   })
 

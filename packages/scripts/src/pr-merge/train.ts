@@ -2,8 +2,10 @@
 import { join } from "node:path"
 
 import { BASE, gatesOf, withReadyDraft, type PrFacts } from "./gates"
+import { gatesPath, type GateRead } from "./gates-file"
 import {
   factsOf,
+  fetchHead,
   gateOptions,
   gh,
   lockRootOf,
@@ -108,9 +110,10 @@ export async function chainOf(
 
 export type TrainOptions = { repo?: string }
 
-// What runs outside GitHub: git in this checkout, the folder the lock lives in, the merge queue, and how a PR's facts are read (factsOf, unless a test hands its own).
+// What runs outside GitHub: git in this checkout, the folder the lock lives in, the merge queue, the gates file merge-on-ready writes, and how a PR's facts are read (factsOf, unless a test hands its own).
 export type TrainLocal = {
   facts?: (run: Run, repo: string, n: number) => Promise<PrFacts>
+  gates?: string
   git?: Run
   lockRoot?: string
   queue?: string
@@ -129,6 +132,8 @@ export function resolve(local: TrainLocal, main = Bun.main) {
   return {
     cli,
     facts: local.facts ?? ((run: Run, repo: string, n: number) => factsOf(run, repo, n, git)),
+    // a test writes the gates file only where it names one
+    gates: local.gates ?? (cli ? gatesPath() : null),
     git,
     lockRoot,
     queue: local.queue ?? queuePath(),
@@ -162,8 +167,10 @@ async function openPrs(run: Run, repo: string, drafts = false): Promise<number[]
     .map((pr) => pr.n)
 }
 
-async function fetchHeads(git: Run, ns: number[]) {
-  await git1(git, ["fetch", "--quiet", "origin", BASE, ...ns.map((n) => `refs/pull/${n}/head`)])
+// canary now, after fetching it and each PR's head (fetchHead: its pull ref, else its branch at that head).
+async function fetchHeads(git: Run, heads: Head[]) {
+  await git1(git, ["fetch", "--quiet", "origin", BASE])
+  for (const { branch, head, n } of heads) await fetchHead(git, n, head, branch)
   return git1(git, ["rev-parse", `origin/${BASE}`])
 }
 
@@ -173,8 +180,14 @@ export const sortByQueue = (ns: number[], queue: number[]): number[] => {
   return [...ns].sort((a, b) => place(a) - place(b))
 }
 
-const headOf = async (run: Run, repo: string, n: number) =>
-  gh(run, ["pr", "view", String(n), "-R", repo, "--json", "headRefOid", "--jq", ".headRefOid"])
+type Head = { branch: string; head: string; n: number }
+
+const headOf = async (run: Run, repo: string, n: number): Promise<Head> => {
+  const view = JSON.parse(
+    await gh(run, ["pr", "view", String(n), "-R", repo, "--json", "headRefName,headRefOid"]),
+  ) as { headRefName: string; headRefOid: string }
+  return { branch: view.headRefName, head: view.headRefOid, n }
+}
 
 export type Forecast = { canary: string; conflicts: Drop[]; order: number[] }
 
@@ -187,22 +200,23 @@ export async function forecast(
   const { git, queue } = resolve(local)
   const name = await repoOf(run, repo)
   const order = sortByQueue(await openPrs(run, name, true), await readQueue(queue))
-  const canary = await fetchHeads(git, order)
-  const picks = await Promise.all(order.map(async (n) => ({ head: await headOf(run, name, n), n })))
+  const picks = await Promise.all(order.map((n) => headOf(run, name, n)))
+  const canary = await fetchHeads(git, picks)
   const { dropped } = await chainOf(git, canary, picks, "forecast")
   return { canary, conflicts: dropped, order }
 }
 
-// The owner's open PRs whose every pr:merge gate passes at their head, in merge-queue order, a draft that passes but for ready included, and why each other one is held: a PR whose facts cannot be read (a failed fetch, a pr template the head cannot show) is held with that error, so one such PR never ends the pass.
+// The owner's open PRs whose every pr:merge gate passes at their head, in merge-queue order, a draft that passes but for ready included, why each other one is held, and each read PR's failing gates at its head (reads, which gates.json keeps): a PR whose facts cannot be read (a failed fetch, a pr template the head cannot show) is held with that error and has no read, so one such PR never ends the pass.
 export async function gatedOf(
   run: Run,
   name: string,
   facts: (run: Run, repo: string, n: number) => Promise<PrFacts>,
   queue: string,
-): Promise<{ held: { n: number; why: string }[]; order: Candidate[] }> {
+): Promise<{ held: { n: number; why: string }[]; order: Candidate[]; reads: GateRead[] }> {
   const options = await gateOptions(name)
   const held: { n: number; why: string }[] = []
   const order: Candidate[] = []
+  const reads: GateRead[] = []
   for (const n of sortByQueue(await openPrs(run, name, true), await readQueue(queue))) {
     let read: PrFacts
     try {
@@ -215,6 +229,7 @@ export async function gatedOf(
       continue
     }
     const failed = withReadyDraft(read, gatesOf(read, options), MARKED).filter((gate) => !gate.ok)
+    reads.push({ failed: failed.map((gate) => gate.name), head: read.head, n })
     if (failed.length === 0) order.push({ facts: read, n })
     else
       held.push({
@@ -222,5 +237,5 @@ export async function gatedOf(
         why: `not gated: ${failed.map((gate) => (gate.name === "held" ? `held (${gate.detail})` : gate.name)).join(", ")}`,
       })
   }
-  return { held, order }
+  return { held, order, reads }
 }

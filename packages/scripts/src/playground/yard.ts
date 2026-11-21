@@ -1,16 +1,37 @@
-import { approvePath, type Channel, MESSAGE_KINDS } from "@packages/message"
+import { dataDir } from "@packages/env/data-dir"
+import {
+  approvePath,
+  botLogin,
+  botNameSchema,
+  type Channel,
+  MESSAGE_KINDS,
+} from "@packages/message"
+import { loginOf, readPolicyOrDefaults, setSetting, yardSettings } from "@packages/settings"
 
 import { type YardClient, YardError, yardClient } from "../../../../api/hono/src/lib/yard/client"
-import { type Keychain, keychain } from "../../../../api/hono/src/lib/yard/keychain"
+import {
+  botKeychain,
+  botService,
+  type Keychain,
+  keychain,
+} from "../../../../api/hono/src/lib/yard/keychain"
 import { dashboardCheckout } from "./probe"
+import { terminalIo } from "./store"
 
 // playground yard: this Mac's Yard from the terminal, with the token the Keychain keeps, the same token and hosted Yard the local Dashboard reads.
 
 export type YardIo = {
   api: string | undefined
+  // a bot's own Keychain item, playground-yard-bot-<name>
+  botKeychain: (name: string) => Keychain
   client: (base: string, token: string) => YardClient
   err: (line: string) => void
   keychain: Keychain
+  // this Mac's yard.logReaders, the bots whose read of the dispatcher's log it answers, each login to the DM it was made with
+  logReaders: {
+    add: (login: string, dm: string) => Promise<void>
+    remove: (login: string) => Promise<void>
+  }
   out: (line: string) => void
   // one line read with no echo when stdin is a terminal, else stdin's first line
   readSecret: (prompt: string) => Promise<string>
@@ -18,7 +39,7 @@ export type YardIo = {
 }
 
 const USAGE =
-  "usage: playground yard login | logout | channels | read <channel> | post <channel> <text> [--kind <kind>]"
+  "usage: playground yard login | logout | channels | read <channel> | post <channel> <text> [--kind <kind>] | bot add <name> [--log] | bot revoke <name>"
 
 // A channel by its id, its name with or without #, or a DM by @login.
 const find = (channels: Channel[], name: string): Channel | undefined =>
@@ -59,6 +80,7 @@ export async function runYard(words: string[], io: YardIo): Promise<number> {
       return 1
     }
     const client = io.client(api, token)
+    if (verb === "bot") return await bot(rest, client, io)
     if (verb === "channels") {
       for (const c of await client.channels())
         io.out(`${label(c)}\t${c.unread} unread\t${c.mentions} mentions\t${c.id}`)
@@ -117,8 +139,55 @@ export async function runYard(words: string[], io: YardIo): Promise<number> {
   return 2
 }
 
-// YARD_API_URL and YARD_WEB_URL from the environment, else from the live dashboard checkout's .env, the checkout live.branch names, as the local API reads its settings. The main checkout keeps no .env, so the checkout the command runs from is never read.
-const setting = async (name: string, live: string | null): Promise<string | undefined> => {
+// bot add makes a bot on Yard and writes its token straight to its own Keychain item, printing only the item's name, so the token never reaches a terminal, a log or a chat; with --log it also puts the bot on this Mac's yard.logReaders, and Yard lets it read the dispatcher's log once the owner turns its switch on from the browser; bot revoke cuts it on Yard, takes it off the list and deletes the item.
+async function bot(words: string[], client: YardClient, io: YardIo): Promise<number> {
+  const [action, name, flag] = words
+  const log = flag === "--log"
+  if (
+    words.length !== (action === "add" && log ? 3 : 2) ||
+    (action !== "add" && action !== "revoke") ||
+    !botNameSchema.safeParse(name).success
+  ) {
+    io.err(USAGE)
+    return 2
+  }
+  const item = io.botKeychain(name!)
+  if (action === "add") {
+    const { bot, secret } = await client.addBot(name!)
+    try {
+      await item.write(secret)
+      if (log) await io.logReaders.add(bot.login, bot.dm)
+    } catch (error) {
+      // a bot whose token no Keychain keeps could never be handed on, so it goes at once
+      await client.revokeBot(name!).catch(() => {})
+      throw error
+    }
+    io.out(
+      `Made @${bot.login}, its DM ${bot.dm}; its token is in the Keychain item ${botService(name!)}`,
+    )
+    if (log)
+      io.out(
+        `@${bot.login} reads the dispatcher's log through this Mac, every secret hidden, once the owner turns its log switch on in Yard's Account page`,
+      )
+    io.out(
+      `Next: a reveal card for ${botService(name!)}, so the owner copies the token into the bot`,
+    )
+    return 0
+  }
+  try {
+    await client.revokeBot(name!)
+  } catch (error) {
+    // revoked on Yard's web already: the Keychain item still goes
+    if (!(error instanceof YardError && error.status === 404)) throw error
+  }
+  await io.logReaders.remove(botLogin(name!))
+  await item.remove()
+  io.out(`Revoked the bot ${name} on Yard and deleted the Keychain item ${botService(name!)}`)
+  return 0
+}
+
+// A setting (the Yard hosts, and ship:yard's Vercel ids) from the environment, else from the live dashboard checkout's .env, the checkout live.branch names, as the local API reads its settings. The main checkout keeps no .env, so the checkout the command runs from is never read.
+export const setting = async (name: string, live: string | null): Promise<string | undefined> => {
   if (process.env[name]) return process.env[name]
   if (!live) return undefined
   const file = Bun.file(`${live}/.env`)
@@ -132,13 +201,48 @@ const setting = async (name: string, live: string | null): Promise<string | unde
   )
 }
 
-export const yardIo = async (repo: string, readSecret: YardIo["readSecret"]): Promise<YardIo> => {
+// yard.logReaders at the login's scope, one commit per change: a login set to its bot's DM, or taken off when it is there, written as the command line by the calling session, never as the owner.
+const logReaders = (data: string, author: string): YardIo["logReaders"] => {
+  const change = async (login: string, dm: string | null) => {
+    const read = readPolicyOrDefaults(data)
+    if (read.refusal !== undefined) throw new Error(read.refusal)
+    const now = yardSettings.get(read.settings, "yard.logReaders")
+    if ((now[login] ?? null) === dm) return
+    const { [login]: _, ...rest } = now
+    const set = setSetting(
+      data,
+      {
+        key: "yard.logReaders",
+        scope: loginOf(data),
+        value: dm === null ? rest : { ...rest, [login]: dm },
+      },
+      {
+        actor: "cli",
+        author,
+        inboxRef: null,
+        reason: `playground yard bot ${dm === null ? "revoke" : "add --log"} ${login}`,
+      },
+    )
+    if (!set.ok) throw new Error(set.message)
+  }
+  return { add: (login, dm) => change(login, dm), remove: (login) => change(login, null) }
+}
+
+export const yardIo = async (
+  repo: string,
+  readSecret: YardIo["readSecret"],
+  data = dataDir(),
+  env: Record<string, string | undefined> = process.env,
+): Promise<YardIo> => {
   const live = dashboardCheckout(repo)
+  const caller = await terminalIo(env)
   return {
     api: await setting("YARD_API_URL", live),
+    botKeychain: (name) => botKeychain(name),
     client: yardClient,
     err: console.error,
     keychain: keychain(),
+    logReaders: logReaders(data, caller.name ?? caller.role ?? "cli"),
     out: console.log,
     readSecret,
     web: await setting("YARD_WEB_URL", live),

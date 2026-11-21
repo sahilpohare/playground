@@ -183,6 +183,8 @@ async function callsTail(configDir: string, record: SessionState): Promise<strin
 
 // a stuck session its manager has not answered in unstick.escalateMinutes goes to the primary dispatcher, who posts to the owner's Inbox only when it cannot resolve it; a session reading working whose transcript has not moved in QUIET_MS (no tool call) goes to its manager.
 const QUIET_MS = 15 * 60_000
+// /metrics counts requests, not sessions, so the local model's busy read holds a quiet local session's line back this long at most, and a stuck one is still flagged while others are served.
+const SERVED_MS = 45 * 60_000
 
 // A permission prompt's escalation carries its waiting call and the call's key, so the dispatcher can answer it with playground picker.
 export const stuckEscalation = (
@@ -332,6 +334,8 @@ const rosterAgents = async (ops: string) => {
 export async function cycle(options: {
   configDir: string
   live: () => Promise<Map<string, LiveSession>>
+  // whether the local model serves the session and reads busy, so its quiet flag is held back
+  localBusy?: (name: string) => Promise<boolean>
   now?: Date
 }): Promise<{ result: string; resumed: number }> {
   const { configDir, now = new Date() } = options
@@ -419,6 +423,8 @@ export async function cycle(options: {
       const path = await transcriptPathOf(configDir, record.sessionId)
       const moved = path ? await newestWrite(path) : undefined
       if (moved === undefined || now.getTime() - moved < QUIET_MS) continue
+      // held back while localBusy reads true, for the first 45 minutes of quiet only (SERVED_MS)
+      if (now.getTime() - moved < SERVED_MS && (await options.localBusy?.(session.name))) continue
       const key = `${record.sessionId} quiet ${new Date(moved).toISOString()}`
       quiet.add(key)
       const tail = await transcriptTail(configDir, record.sessionId)

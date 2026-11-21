@@ -3,48 +3,9 @@ set -euo pipefail
 
 # Spawns a factory session in herdr, the one way a factory session starts one
 # (the no-raw-spawn hook refuses the rest). A capacity gate refuses, failing
-# closed, unless four gates pass in order,
-# the first failure naming its gate and its reading, every pass and refusal
-# logged as one JSON line in ~/.playground/ops/capacity.jsonl, where the
-# load gate reads the starts of the last 5 minutes back, with each slots.peers folder's own log's. No count of live sessions holds a spawn, so
-# the gates cap nothing but the machine's own room:
-#   1. load, max(load1, load5) plus those starts under the core count (sysctl
-#      hw.ncpu) times PLAYGROUND_LOAD_MULT (default 1.0), each start weighing
-#      half its item's load units (small 1, medium 2, big 3: --size, else small
-#      for a reviewer or tester, else what `ops/run-slot.sh size <name>` reads),
-#      and a quarter of that cap kept for small items, so a big plan never blocks a small one,
-#      a small worker keeping an eighth in its place for the reviewers and testers; a load at or over
-#      that line refuses whatever the CPU's idle share, so the load stays under the cores, but for a
-#      --priority start while a priority file stands (PRIORITY_FILE), logged as readings.priority,
-#      and a resume within 15 minutes of close ending a row that read live (JUST_CLOSED), logged as
-#      readings.just_closed
-#   2. memory, pressure level 1 or 2 (kern.memorystatus_vm_pressure_level) and
-#      free at 8% or more (kern.memorystatus_level); a fresh worker start also needs swap-ins
-#      under 100/s (vm_stat -c 2 1, gates.glmSwapinsMax), since free memory counts compressible
-#      pages and read 62% on 7 Nov while 150 pages swapped in a second; every other start keeps
-#      its pass, as at the slots gate
-#   A GLM session takes its own load and memory gate in place of both:
-#   load5 under 30, pressure level 1 and swap-ins under 100/s (vm_stat -c 2 1)
-#   Under Claude Code's sandbox the load comes from uptime, and a refused pressure level leaves the swap-ins to decide (scripts/README.md)
-#   3. slots, for a fresh worker start alone (a reviewer, tester or resume skips it, so work
-#      already admitted finishes): `ops/run-slot.sh room`, refusing while runs wait in its queue and no
-#      lane is free with the load units for a run (but for a --priority start while a priority file
-#      stands, PRIORITY_FILE, logged as readings.priority), or when room gives no reading
-#   4. usage, the launching backend's own window: Claude reads usage.json
-#      (5-hour under 90%, the week within 14.3 points a day of pace, floored at one day's share, readings
-#      no older than 15 minutes; one never written, as on a fresh install before ops-usage first runs, passes,
-#      its row reading it unread; a missing 5-hour window is an account with no 5-hour limit, read as none) and each other login's
-#      usage-<name>.json or reading in login-flip.json's seen (the same checks, readings no older than 60 minutes); with no --account it
-#      starts on the passing login next in the account split, else the one with the lowest week, naming it, and refuses
-#      only when every login is over, its pick kept off the resume record's exec line so a restore picks afresh; a login whose usage.accounts
-#      row is parked (parkedUntil a later time) counts as over, and an --account naming it is refused; --account skips the usage
-#      check, since the other login's usage is not this machine's, but refuses a week a reading names at 100%; an --account naming
-#      this machine's own login starts there, the split skipped, judged and refused as that login is in a bare start; GLM reads zai-usage.json
-#      (the 5-hour window under 95% of its credits, with no week check, and no empty balance (its `balance`), valid only
-#      while the zai usage job's last beat is ok and within 3 cycles)
-#   The first dispatcher starts past every gate, by a manager start or a resume, so the owner always has one: the gates still read, a failure
-#   logs a skipped row naming its gate and reading (which the load gate counts as a start) and prints it, and the
-#   pass picks its login as for any start; every other manager start, an orchestrator's included, takes them all
+# closed, unless its gates pass in order, the first failure naming its gate and
+# its reading, each pass and refusal one JSON line in ~/.playground/ops/capacity.jsonl;
+# playbook's SPAWN.md, Capacity gate, holds each gate and its rule (gate_capacity below).
 # It also refuses a name a live session holds, since Claude Code would start the
 # new one under a generated name. Every launch is in bypass mode, and drops
 # inscope's own CLAUDE_CONFIG_DIR where inscope exports one.
@@ -57,32 +18,39 @@ set -euo pipefail
 #   spawn.sh probe     <name> <reports-to> <brief>     in herdr alone: its own workspace, this checkout, for a server with no pane to split beside
 #   spawn.sh manager   <dispatcher|second dispatcher|optimizer|builder|ops|planner|orchestrator> <brief>   its own workspace in the main checkout's .claude/worktrees/leads: the first dispatcher (sessions.names' dispatcher), which works with the owner and reports to no session; the second dispatcher (Inbox #i520), sessions.names' dispatcher with -2 or an <id>-dispatcher it records as slot=2, on --backend glm or --account <a second account>; the optimizer (optimizer, an <id>-optimizer, or a session the roster gives the optimizer kind) and the builder, ops and planner (playground <manager> starts each), leads; these report to the first dispatcher; an orchestrator, a session whose roster row holds a manager kind of kinds.ts (ROSTER_ROLE_OF_KIND) and reportsTo, set first with roster.ts set <name> kind=<kind> reportsTo=<session>, a lead reporting to that session
 #   spawn.sh resume    <name> <dir> [session-id]        reopens a closed session: in herdr in the pane herdr kept under its label while that pane holds no agent, else in a workspace of its own; with no session id, only in a folder it ran in; a <dir> in the Desktop folder resumes in the same tree under the code root, its transcript copied there when a session id is given; with no code root it resumes in the Desktop folder itself
-#   spawn.sh restore                                    resumes every herdr session whose resume record (~/.playground/resume) names it on the server PLAYGROUND_HERDR_SESSION names (playground by default) and whose roster row is not done, ended, parked or paused, read again once its resume finds the session gone so a session closed mid-run stays down, each through `spawn.sh resume` and its gate with the --account its start was given, the --model it started with, for a reviewer or tester --pr with the PRs its roster row serves, and an --effort other than high; a live one is skipped, each record it passes over and each resume that fails is named with its reason, and one restore runs at a time; the first dispatcher's record runs first, a resume a gate's falling reading or focus holds prints as waiting (restore_waits), and a restore whose only misses wait exits 0, since a later restore brings them back
-#   spawn.sh close     <name>                           closes the herdr pane spawn.sh opened for <name>, by the label it set, on the server its resume record names; it refuses any other pane and your own, and ends its roster row just before the pane closes, putting its status back when herdr refuses the close
-#   --size <small|medium|big>  with any mode but restore or close, anywhere among its words: the item's size the load gate counts, in place of small for a reviewer or tester and the one ops/run-slot.sh size reads from the roster and plan.json for the rest
-#   --check            with any mode but restore or close, anywhere among its words: run every check and gate but the live-name one, print "ok: <name> can start" and start or close nothing
-#   --priority         with any mode but restore or close, anywhere among its words: the start passes the load gate and the slots gate's full queue (the memory gate and an unread room still hold it) while a priority file stands in the data folder (priority.json, an urgent window, an org's own priority-<name>.json, its own urgent window, a session's own window that playground priority on opens, or priority-start.json, a job's own starts), and focus's refusal while any does; it is refused while none does.
+#   spawn.sh restore                                    resumes every herdr session whose resume record (~/.playground/resume) names it on the server PLAYGROUND_HERDR_SESSION names (playground by default) and whose roster row is not done, ended, parked or paused, read again once its resume finds the session gone so a session closed mid-run stays down, each through `spawn.sh resume` and its gate with the --account its start was given, the --model it started with, for a reviewer or tester --pr with the PRs its roster row serves, else the --pr its record names, and an --effort other than high; a live one is skipped, each record it passes over and each resume that fails is named with its reason, and one restore runs at a time; the first dispatcher's record runs first, then every other manager's, then the rest, a resume a gate's falling reading or focus holds prints as waiting (restore_waits), and a restore whose only misses wait exits 0, since a later restore brings them back
+#   spawn.sh close     <name> [session-id]              closes the herdr pane spawn.sh opened for <name>, by the label it set, on the server its resume record names; a session whose start stopped before its runtime pin closes too while its record stands and one pane carries its label, the pin written first; it refuses any other pane and your own, and ends its roster row just before the pane closes, putting its status back when herdr refuses the close; with a session id, it closes the one labelled pane whose claude runs that session, so one of two panes under the name closes, the row and its close time left to the other while it stands
+#   spawn.sh read      <name> [session-id]              prints the last 200 lines of the herdr pane spawn.sh opened for <name>, found as close finds it, on the server its resume record names, playground-probes included, and writes nothing
+#   --size <small|medium|big>  with any mode but restore, close or read, anywhere among its words: the item's size the load gate counts, in place of small for a reviewer or tester and the one ops/run-slot.sh size reads from the roster and plan.json for the rest
+#   --check            with any mode but restore, close or read, anywhere among its words: run every check and gate but the live-name one, print "ok: <name> can start" and start or close nothing
+#   --priority         with any mode but restore, close or read, anywhere among its words: the start passes the gates playbook's SPAWN.md, Capacity gate, names for a priority start, its roster row marked priority=1 so it counts against no later start, while a priority file stands in the data folder (priority.json, an urgent window, an org's own priority-<name>.json, its own urgent window, a session's own window that playground priority on opens, for that session's own start alone until off or the lapse moves it aside as .lifted-<ts>, or priority-start.json, a job's own starts), and focus's refusal while any does; it is refused while none does, and a priority*.json that is no JSON object passes none.
+#   --sandbox          with worker, probe or a reviewer's or probe's column alone, anywhere among its words: the session runs its shell commands in the closed sandbox, a probe's sandbox that also closes loopback, Keychain reads and the data folder's secret files, holds outbound hosts to the ones a worker's loop needs, and a worker or reviewer with no --in starts in a detached worktree made for it (review-<n> for this checkout's PR n, else <name>), whose folder, git entry and the main checkout's FETCH_HEAD, objects, refs and logs it writes, canary's, main's and live.branch's refs left shut; its roster row records sandbox=on, which a resume keeps and a start without it clears
+#   --reads-only       with worker alone, anywhere among its words: the worker only reads (research, a fetch, an investigation) and runs nothing through run-slot, which its brief bars, so its start passes the slots gate while the other gates still hold it (playbook's SPAWN.md, Capacity gate)
+#   --remote-control <name>  with probe alone, anywhere among its words: the probe's claude starts with Claude Code's --remote-control <name>, a name of lowercase words joined by hyphens; it warns on a start that runs on a token (an --account one, or an --ssh one whose machine holds no ~/.claude/.credentials.json), where Remote Control forms no link; restore leaves a probe started with it down
+#   --ssh <user@host> --key <file>  with probe alone, anywhere among its words, each needing the other: the probe's claude runs on that machine under ssh -tt from its pane here, a plain user@host and an absolute path to a readable key file, both checked before any pane opens; the pane first copies the launch's settings file, skill plugin and brief into one new folder on that machine, the probe's temp folder, which the remote claude reads them from, and the other machine's own shell runs the launch with its own $HOME/.bun/bin put on PATH and reads an --account token from its own store; the load and memory gates read that machine through the System view's peer read, the other gates this one, and the roster row and spawn.sh close stay as a probe's, and restore leaves it down
+#   --force            with resume alone, anywhere among its words: brings back a session whose roster row reads done, or ended with an endReason (an auto-end's), which a resume refuses without it, naming the reason; a row a plain close ended carries none, so a close then a resume needs no --force
 #   --brief <file>     with resume alone, anywhere among its words: the resumed session's first prompt has it read ~/.playground/<file>; without it, a resume's first prompt has it act on the after-resume hook's instruction
-#   --account <email>  with any mode but restore or close, anywhere among its words: the session logs in as that Claude account, its token read from the Keychain (the service usage.keychainService names) by the new pane's own shell, which stops on an empty one before claude runs; this machine's own login starts on its config with no token, past the account split, its usage judged as a bare start's; with --backend glm it takes a GLM row's label instead
-#   --backend glm      with any mode but restore, close or a reviewer's or a tester's, outside a checkout of an org ext.links guards and on a brief naming no word of the glm-refused-sources list, anywhere among its words: the session runs on Z.ai's GLM (models.glm, glm-5.3-flash by default) through Claude Code, its key read from the Keychain (the service models.glmKeychainService names, the account its usage.accounts row's label names: --account's, else the first GLM row's) by the new pane's own shell, which stops on an empty one before claude runs
+#   --account <email>  with any mode but restore, close or read, anywhere among its words, and on a worker's, reviewer's or tester's Claude start while usage.accounts lists a Claude row, which the refusal lists in order: the session logs in as that Claude account, its token read from the Keychain (the service usage.keychainService names) by the new pane's own shell, which stops on an empty one before claude runs; this machine's own login starts on its config with no token, past the account split, its usage judged as a bare start's; with --backend glm it takes a GLM row's label instead
+#   --backend glm      with any mode but restore, close, read or a reviewer's or a tester's, outside a checkout of an org ext.links guards and on a brief naming no word of the glm-refused-sources list, anywhere among its words: the session runs on Z.ai's GLM (models.glm, glm-5.3-flash by default) through Claude Code, its key read from the Keychain (the service models.glmKeychainService names, the account its usage.accounts row's label names: --account's, else the first GLM row's) by the new pane's own shell, which stops on an empty one before claude runs
+#   --backend local    the places glm takes but a planner's or a researcher's, and with no --account, --model or --ssh: the session runs on this machine's local model (K) through Claude Code, at http://127.0.0.1:8000, under the served name local with a placeholder token, in the window its server card declares (max_model_len less 8192, else 120000), its --effort set as thinking and named on the launch line, since the model's chat template reads no effort: low turns thinking off, medium caps it at 8192 tokens, and high, xhigh and max leave it uncapped; refused while that port lists no served name local, and while this machine's maxSessions local sessions are live (models/state.json, else 6)
 #   --backend claude   the same places: the session runs on Claude (the default; named to set its pin on a fresh start)
 #   --harness codex    with the first dispatcher's manager start or its resume alone, on a scratch data folder (PLAYGROUND_DATA_DIR naming one) until phase 3 lifts that, and no --backend, --account, --model or --effort: the session runs in Codex (the codex on PATH), its CODEX_HOME the data folder's codex/, whose config.toml, hooks.json (the factory's guards and the beat) and app-server-daemon/settings.json each launch writes; its hooks always run trusted (--dangerously-bypass-hook-trust), and it fails closed: a session whose SessionStart hook writes no beat within 60 seconds has its pane closed and the start refused, with no new pin, record or roster row (a resume keeps its earlier ones), and a pane herdr will not close is named for you to close; a Codex start also stops when PowerShell is installed (a pwsh or powershell on PATH, or /usr/local/bin/pwsh), which the beat names. The beat names its thread, which takes the session's name through codex app-server's thread/name/set.
 #   --harness claude-code  the default: the session runs in Claude Code.
-#     The harness and backend are recorded at the start in ~/.playground/backends/<name> (claude-code glm, codex openai), and carried on its resume, which also reads a pin of the backend alone: a resume takes no --backend or --harness while a pin stands, and refuses with no pin and none given, or with a pin that reads as none of those.
-#   --model <id>       with any mode but restore or close, anywhere among its words: the Claude model, one of models.claude (claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5 and claude-haiku-5-5 by default), else models.default (claude-opus-5-5); never on GLM, which maps every model itself, and a reviewer or a tester runs on models.checker (claude-opus-5-5) alone. Nothing records it: a resume takes it afresh, so a resume with no --model runs on models.default.
-#   --effort <level>   with any mode but restore or close, anywhere among its words: the session's effort, one of low, medium, high, xhigh or max, high by default; the resume record keeps one other than high, so a restore runs at the same effort, and a resume with none runs at high.
+#     The harness and backend are recorded at the start in ~/.playground/backends/<name> (claude-code glm, claude-code local, codex openai), and carried on its resume, which also reads a pin of the backend alone: a resume takes no --backend or --harness while a pin stands, and refuses with no pin and none given, or with a pin that reads as none of those.
+#   --model <id>       with any mode but restore, close or read, anywhere among its words: the Claude model, one of models.claude (claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5 and claude-haiku-5-5 by default), else models.default (claude-opus-5-5); never on GLM or the local model, which map every model themselves, and a reviewer or a tester runs on models.checker (claude-opus-5-5) alone. Nothing records it: a resume takes it afresh, so a resume with no --model runs on models.default.
+#   --effort <level>   with any mode but restore, close or read, anywhere among its words: the session's effort, one of low, medium, high, xhigh or max, high by default; the resume record keeps one other than high, so a restore runs at the same effort, and a resume with none runs at high.
 #   --title "<title>"  with worker or a reviewer's or tester's column, anywhere among its words: the plain title the sidebar reads the session by, up to 40 characters; a worker needs one, and a checker with none takes "Review: " or "Test: " before its worker's roster title
 #   --pr <url>[,<url>]  with resume or a reviewer's or tester's column, anywhere among its words: the PRs the checker serves, each by its URL or its number alone, with an issue's URL beside a pull request for a PR not yet opened, or an extension item it scores as <scope>/<kind>/<key>; a reviewer's or tester's start is refused unless it names a pull request or an extension item, and its roster row records it before the pane opens; on an ended roster row it replaces the row's prs, and its pr with the first pull request named; on a live row, or none, it joins them and gives a row with no pr the first pull request named
 #   --reports-to <session>  with worker alone, anywhere among its words: the session it reports to, named in its first prompt in place of the builder
 #   --in <dir>         with worker alone, anywhere among its words: the folder the worker runs in, in place of this checkout: an existing folder under the code root (paths.codeRoot) or under ~/<org> for an org ext.links guards, any other refused
-#   --memory <dir>     with any mode but restore or close, anywhere among its words: the launch runs with Claude Code's auto-memory on, writing to <dir>, an absolute folder: its built settings file, one of its own (factory-settings-...-memory-<name>.json), sets autoMemoryEnabled and autoMemoryDirectory, while every other launch's file stays as it is, for the auto-memory trial; --memory off launches with memory off on the shared file, whatever arm the role or the row would take
-#   --runtime herdr    with any mode but restore or close, anywhere among its words: the session opens in herdr, on the playground server of ~/.playground/herdr (PLAYGROUND_HERDR_DIR and PLAYGROUND_HERDR_SESSION move it), by the binary its pin.json names alone; a column's anchor is then a herdr pane id (w1:p2, or lettered as wN:p1A), its spawner's own being $HERDR_PANE_ID. The session's name is at most 32 characters, herdr's limit for an agent's name.
+#   --memory <dir>     with any mode but restore, close or read, anywhere among its words: the launch runs with Claude Code's auto-memory on, writing to <dir>, an absolute folder: its built settings file, one of its own (factory-settings-...-memory-<name>.json), sets autoMemoryEnabled and autoMemoryDirectory, while every other launch's file stays as it is, for the auto-memory trial; --memory off launches with memory off on the shared file, whatever arm the role or the row would take
+#   --runtime herdr    with any mode but restore, close or read, anywhere among its words: the session opens in herdr, on the playground server of ~/.playground/herdr (PLAYGROUND_HERDR_DIR and PLAYGROUND_HERDR_SESSION move it), by the binary its pin.json names alone; a column's anchor is then a herdr pane id (w1:p2, or lettered as wN:p1A), its spawner's own being $HERDR_PANE_ID. The session's name is at most 32 characters, herdr's limit for an agent's name.
 #     With no --runtime, every start and resume opens in herdr, whatever terminal its spawner runs in.
 #     The runtime is recorded at every start and resume in ~/.playground/runtimes/<name>, a resume rewriting whatever word the pin held.
 #
 # <name> is lowercase words joined by hyphens that give its kind: a new one from `bun run name <kind>` (<id>-<kind>), an old `<kind>-<words>` one, or a manager's own; the mode gives the kind, and a name that gives none or another is refused, but on a resume.
 # <brief> is a file under ~/.playground. Every session runs at high effort unless --effort names another,
-# on models.default unless --model names another of models.claude, or on models.glm with --backend glm. The first dispatcher reports to no one: its <reports-to> is the lead that briefs it.
+# on models.default unless --model names another of models.claude, on models.glm with --backend glm, or on the local model with --backend local. The first dispatcher reports to no one: its <reports-to> is the lead that briefs it.
 # Each start lands in the roster.
 
 REPO="$(cd -P "$(dirname "$0")/.." && pwd -P)"
@@ -105,16 +73,34 @@ fi
 DATA=$(cd / && env $UNSET "$BUN" --no-env-file -e "import { dataDir } from '$REPO/packages/env/src/data-dir.ts'; console.log(dataDir())") || { echo "spawn.sh: bun could not resolve the data folder" >&2; exit 1; }
 # The roster's manager kinds (kinds.ts' ROSTER_ROLE_OF_KIND), so a kind role_of_kind does not list runs as a lead: an orchestrator. A read that fails leaves the named kinds alone, so an orchestrator is refused rather than guessed.
 MANAGER_KINDS=$(cd / && env $UNSET "$BUN" --no-env-file -e "import { ROSTER_ROLE_OF_KIND as r } from '$REPO/packages/config/src/kinds.ts'; console.log(Object.keys(r).filter((k) => r[k] === 'manager').join(' '))" 2>/dev/null) || MANAGER_KINDS=
-# The priority file standing in the data folder, exit 1 when none does, its content unread: every priority*.json (priority.json, an org's own priority-<name>.json, a session's from playground priority, or a job's own start file, priority-start.json, each writer keeping its own) passes the load and slots gates and focus.
+# PRIORITY_FILE, the first priority*.json in the data folder that passes this start's --priority, exit 1 when none does, PRIORITY_KEPT then naming each that stands and why it passes none: a JSON object with no session key (priority.json, an org's own priority-<name>.json, a job's own start file, priority-start.json) passes any start, a session's own window, from playground priority on, passes only the start it names as run-slot.sh window reads it, and a file that is no JSON object passes none, since a window cut short mid-write reads as one.
 priority_file() {
-  local f
+  local f kind s
+  PRIORITY_FILE= PRIORITY_KEPT=
   for f in "$DATA"/priority*.json; do
-    [ -e "$f" ] && { echo "$f"; return 0; }
+    [ -f "$f" ] || continue
+    kind=$(python3 -I -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = None
+print("window" if isinstance(d, dict) and "session" in d else "shared" if isinstance(d, dict) else "bad")' "$f" 2>/dev/null)
+    case $kind in
+      shared) PRIORITY_FILE=$f; return 0 ;;
+      window)
+        s=$(bash "$REPO/scripts/ops/run-slot.sh" window "$f" 2>/dev/null) || s=
+        [ -n "$s" ] && [ "$s" = "$NAME" ] && { PRIORITY_FILE=$f; return 0; }
+        if [ -n "$s" ]; then PRIORITY_KEPT+="${PRIORITY_KEPT:+, }${f##*/} is $s's own window"
+        else PRIORITY_KEPT+="${PRIORITY_KEPT:+, }${f##*/} names a session but is no window in playground priority on's shape"; fi
+        ;;
+      *) PRIORITY_KEPT+="${PRIORITY_KEPT:+, }${f##*/} is no JSON object" ;;
+    esac
   done
   return 1
 }
 [[ $DATA == "$HOME"/* ]] && SHOWN="~${DATA#"$HOME"}" || SHOWN=$DATA
-SETTINGS="$DATA/factory-settings.json"
+# The factory's settings by their real path in this checkout, never through the data folder's link, which any session can repoint at settings of its own.
+SETTINGS="$REPO/scripts/factory-settings.json"
 HERDR_DIR=${PLAYGROUND_HERDR_DIR:-${DESK_HERDR_DIR:-$DATA/herdr}}
 PINS="$DATA/backends"
 RESUME_DIR="$DATA/resume"
@@ -221,7 +207,7 @@ restore_waits() {
   [[ $1 =~ $wait_re ]] && ! [[ $1 =~ $fault_re ]]
 }
 
-# The live sessions: a registry file whose pid is alive with the start time the file records, as the Dashboard reads them, but for a `claude -p` run (entrypoint sdk-cli), which holds no name. It prints a line, tab-separated pid, session id, folder and process start ("-" for a field the file lacks), for each live session named $1, the lowest pid first.
+# The live sessions: a registry file whose pid is alive with the start time the file records, in the form it records it, as the Dashboard reads them, but for a `claude -p` run (entrypoint sdk-cli), which holds no name. It prints a line, tab-separated pid, session id, folder and process start ("-" for a field the file lacks), for each live session named $1, the lowest pid first.
 live_holders() {
   python3 - "$REGISTRY" "$1" "$REPO" <<'PY'
 import json, os, subprocess, sys
@@ -268,26 +254,38 @@ if me not in starts:
     sys.exit("neither ps nor the kernel's process table listed this process")
 def field(value):
     return " ".join(value.split()) if isinstance(value, str) and value.strip() else "-"
+# A procStart of digits alone is Linux's, clock ticks since boot, so its pid's start is field 22 of /proc/<pid>/stat, as api/hono/src/lib/sessions/proc-start.ts reads it; PROC is PLAYGROUND_PROC under the test sandbox's marker alone, else /proc.
+PROC = (os.environ.get("TEST_SANDBOX_HOME") and os.environ.get("PLAYGROUND_PROC")) or "/proc"
+def ticks(pid):
+    try:
+        with open(os.path.join(PROC, str(pid), "stat")) as handle:
+            return handle.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
 for pid, data in sorted(entries.items()):
     start = data.get("procStart")
-    if pid not in starts or (isinstance(start, str) and " ".join(start.split()) != starts[pid]):
+    now = ticks(pid) if isinstance(start, str) and start.isascii() and start.isdigit() else starts.get(pid)
+    if now is None or (isinstance(start, str) and " ".join(start.split()) != now):
         continue
     if data.get("name") == wanted and data.get("entrypoint") != "sdk-cli":
-        print(pid, field(data.get("sessionId")), field(data.get("cwd")), starts[pid], sep="\t")
+        print(pid, field(data.get("sessionId")), field(data.get("cwd")), now, sep="\t")
 PY
 }
-# The capacity gate: four gates in order (load, memory, slots for a fresh worker start, usage), the first failure naming its gate and its reading (a first dispatcher's failures each kept as a skip, the gates after it still read), every pass and refusal, and a first dispatcher's skipped start, one JSON line in ~/.playground/ops/capacity.jsonl naming its session (the load gate reads the last 5 minutes of starts back; a refusal's carries its printed words as detail); python exits 0 printing a past line for each skip and then ok, or the refusal for refuse() to print.
+# The capacity gate, whose gates and rules playbook's SPAWN.md, Capacity gate, holds in order; python exits 0 printing a past line for each skip and then ok, or the refusal for refuse() to print.
 # The login a launch runs on with no --account, from Claude Code's config, which the launch reads from ~ when it drops inscope's folder.
 own_config() { if [ -n "$UNSET" ]; then echo "$HOME/.claude.json"; else echo "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; fi; }
 gate_capacity() {
-  # run-slot's room, for the slots gate (the header's gate 3)
+  # run-slot's room, for the slots gate (SPAWN.md's gate 3)
   room=
   if [ "$MODE" = worker ]; then
     room=$(RUN_SLOT_OPS="$DATA/ops" bash "$REPO/scripts/ops/run-slot.sh" room 2>/dev/null) || room=
     [ -n "$room" ] || room=unread
   fi
+  # an --ssh start's load and memory gates read its target, through the System view's peer read
+  target=
+  [ -z "$SSH_HOST" ] || target=$("$BUN" --no-env-file "$REPO/packages/scripts/src/spawn/peer-gate.ts" "$SSH_HOST" "$SSH_KEY") || target="{\"problem\": \"peer-gate.ts failed\"}"
   verdict=$(
-    python3 -I - "$DATA" "$ACCOUNT" "$BACKEND" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$(own_config)" "${CHECK:+check}" "$GATES" $ITEM "$ROLE" "$room" "${FIRST:+first}" "${PRIORITY_FILE:-}" "${JUST_CLOSED:-}" "$NAME" "$OWN_LOGIN" <<'PY'
+    KEYCHAIN_SERVICE="$KEYCHAIN" python3 -I - "$DATA" "$ACCOUNT" "$BACKEND" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$(own_config)" "${CHECK:+check}" "$GATES" $ITEM "$ROLE" "$room" "${FIRST:+first}" "${PRIORITY_FILE:-}" "${JUST_CLOSED:-}" "$NAME" "$OWN_LOGIN" "${READS_ONLY:+reads-only}" "$ROSTER_JSON" "$MODE" "$SSH_HOST" "$target" "${LOCAL_CAP:-}" <<'PY'
 import datetime as dt
 import glob
 import json
@@ -297,12 +295,21 @@ import re
 import subprocess
 import sys
 
-data_dir, account, backend, config_dir, own_config, check, gates, size, units, role, room, first, priority, just_closed, session, own_pick = sys.argv[1:17]
+data_dir, account, backend, config_dir, own_config, check, gates, size, units, role, room, first, priority, just_closed, session, own_pick, reads_only, roster_path, mode, host, target, local_cap = sys.argv[1:23]
 log_path = os.path.join(data_dir, "ops", "capacity.jsonl")
 units = int(units)
 gates = json.loads(gates)
 now = dt.datetime.now(dt.timezone.utc)
 readings = {}
+on_seat = False  # an --account start on the own login that seat_start moves onto its seat token
+if host:
+    readings["host"] = host
+    try:
+        target = json.loads(target)
+    except ValueError:
+        target = {"problem": target}
+    if not isinstance(target, dict):
+        target = {"problem": "peer-gate.ts printed no reading"}
 
 # The first dispatcher starts past a failing gate, so the owner always has one: the skip is kept and the gates after it still read, its login pick included.
 skips = []
@@ -343,25 +350,122 @@ def sysctl_int(name):
 def sandbox_refuses(name):
     return "not permitted" in subprocess.run(["sysctl", "-n", name], capture_output=True, text=True).stderr
 
-# (load1, load5) from sysctl, else from uptime, since Claude Code's sandbox refuses the sysctl command's name lookup; None when neither reads
-def loadavg():
-    words = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout.strip(" {}\n").split()
-    if len(words) < 2:
-        out = subprocess.run(["uptime"], capture_output=True, text=True, env=dict(os.environ, LC_ALL="C")).stdout
-        words = out.rpartition("load average")[2].lstrip("s:").replace(",", " ").split()
+# Each reading takes macOS's command first and, where it does not read, Linux's /proc text (packages/scripts/src/ops-machine/readings.ts takes the same sources), and is None when neither reads, never 0; source names where each gate's reading came from, for its lines.
+# PROC is the folder that text comes from: PLAYGROUND_PROC under the test sandbox's marker alone (TEST_SANDBOX_HOME), where a test points it at recorded text, so a session that sets it cannot feed a gate a reading; else /proc.
+PROC = (os.environ.get("TEST_SANDBOX_HOME") and os.environ.get("PLAYGROUND_PROC")) or "/proc"
+source = {"cpu_idle": "top -l 2 -n 0", "free": "sysctl kern.memorystatus_level", "load5": "sysctl vm.loadavg", "pressure": "sysctl kern.memorystatus_vm_pressure_level", "swapins": "vm_stat"}
+
+def proc_text(name):
+    try:
+        with open(os.path.join(PROC, name)) as f:
+            return f.read()
+    except OSError:
+        return None
+
+# name's text now and once the sleep program has slept a second (a program, so a test's fake can move the second read's text in), or None when either does not read
+def proc_pair(name):
+    first = proc_text(name)
+    if first is None:
+        return None
+    subprocess.run(["sleep", "1"])
+    second = proc_text(name)
+    return None if second is None else (first, second)
+
+def loads_of(text):
+    words = text.replace("{", " ").replace("}", " ").replace(",", " ").split()
     try:
         return float(words[0]), float(words[1])
     except (IndexError, ValueError):
         return None
 
-# the last second's swap-ins, from vm_stat's last row under a header naming each column, or None when it cannot be read
+# (load1, load5) from sysctl, else Linux's /proc/loadavg, else uptime, since Claude Code's sandbox refuses the sysctl command's name lookup; None when none reads
+def loadavg():
+    loads = loads_of(subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout)
+    if loads is None:
+        loads = loads_of(proc_text("loadavg") or "")
+        if loads is not None:
+            source["load5"] = "/proc/loadavg"
+    if loads is None:
+        out = subprocess.run(["uptime"], capture_output=True, text=True, env=dict(os.environ, LC_ALL="C")).stdout
+        loads = loads_of(out.rpartition("load average")[2].lstrip("s:"))
+    return loads
+
+# the core count: sysctl's hw.ncpu, else the cpu<n> lines of Linux's /proc/stat, else Python's count
+def cores_count():
+    n = sysctl_int("hw.ncpu") or len(re.findall(r"^cpu\d+ ", proc_text("stat") or "", re.M))
+    return n or os.cpu_count()
+
+# the memory pressure level: sysctl's, else Linux's PSI in /proc/pressure/memory on macOS's scale, 4 (critical) once full avg10 is 10% or more, 2 (warn) once some avg10 is, else 1 (the 10% lines are estimated, from Android's lmkd, which acts on memory stalls of 70 to 100 ms a second)
+def pressure_level():
+    level = sysctl_int("kern.memorystatus_vm_pressure_level")
+    if level is not None:
+        return level
+    avg = dict(re.findall(r"^(some|full) avg10=([0-9.]+)", proc_text("pressure/memory") or "", re.M))
+    if len(avg) < 2:
+        return None
+    source["pressure"] = "/proc/pressure/memory"
+    return 4 if float(avg["full"]) >= 10 else 2 if float(avg["some"]) >= 10 else 1
+
+# the free share: sysctl's, else MemAvailable's whole share of MemTotal in Linux's /proc/meminfo
+def free_share():
+    free = sysctl_int("kern.memorystatus_level")
+    if free is not None:
+        return free
+    kb = dict(re.findall(r"^(MemTotal|MemAvailable):\s+(\d+) kB", proc_text("meminfo") or "", re.M))
+    if len(kb) < 2 or int(kb["MemTotal"]) == 0:
+        return None
+    source["free"] = "/proc/meminfo"
+    return int(kb["MemAvailable"]) * 100 // int(kb["MemTotal"])
+
+# the CPU's idle share from top's second sample, as run-slot's gauges read it (the first reads since boot), else idle and iowait's share of every field over two of Linux's /proc/stat reads a second apart, or None when neither reads
+def cpu_idle():
+    try:
+        out = subprocess.run(["top", "-l", "2", "-n", "0"], capture_output=True, text=True, timeout=10).stdout
+        shares = re.findall(r"^CPU usage:.* ([0-9.]+)% idle", out, re.M)
+        if len(shares) == 2:
+            return float(shares[1])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    pair = proc_pair("stat")
+    try:
+        # user, nice, system, idle, iowait, irq, softirq, steal (guest time is counted in user already)
+        a, b = ([int(n) for n in re.search(r"^cpu\s+(.*)$", text, re.M).group(1).split()[:8]] for text in pair)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    total = sum(b) - sum(a)
+    if total <= 0:
+        return None
+    source["cpu_idle"] = "/proc/stat"
+    return round((b[3] + b[4] - a[3] - a[4]) * 100 / total, 2)
+
+# the swap-ins a second as the median of 3 one-second samples, so one burst (a page-in that spikes a single second) holds no start while a sustained rate does: vm_stat -c 4 1's three rows after its since-boot row under a header naming each column, else pswpin's rises over 3 seconds in Linux's /proc/vmstat, or None when neither reads
+SWAPIN_SAMPLES = 3
+
 def swapins():
     try:
-        rows = [line.split() for line in subprocess.run(["vm_stat", "-c", "2", "1"], capture_output=True, text=True, timeout=10, check=True).stdout.splitlines()]
-        column = next(row for row in rows if "swapins" in row).index("swapins")
-        return int(rows[-1][column])
+        rows = [line.split() for line in subprocess.run(["vm_stat", "-c", str(SWAPIN_SAMPLES + 1), "1"], capture_output=True, text=True, timeout=10 + SWAPIN_SAMPLES, check=True).stdout.splitlines()]
+        header = next(i for i, row in enumerate(rows) if "swapins" in row)
+        column = rows[header].index("swapins")
+        samples = [int(row[column]) for row in rows[header + 2:]]
+        if len(samples) == SWAPIN_SAMPLES:
+            return sorted(samples)[SWAPIN_SAMPLES // 2]
     except (IndexError, OSError, StopIteration, subprocess.SubprocessError, ValueError):
+        pass
+    texts = [proc_text("vmstat")]
+    for _ in range(SWAPIN_SAMPLES):
+        if texts[-1] is None:
+            return None
+        subprocess.run(["sleep", "1"])
+        texts.append(proc_text("vmstat"))
+    try:
+        counts = [int(re.search(r"^pswpin (\d+)$", text, re.M).group(1)) for text in texts]
+    except (AttributeError, TypeError):
         return None
+    rises = [b - a for a, b in zip(counts, counts[1:])]
+    if min(rises) < 0:
+        return None
+    source["swapins"] = "/proc/vmstat"
+    return sorted(rises)[SWAPIN_SAMPLES // 2]
 
 def load(name):
     path = os.path.join(data_dir, name)
@@ -385,39 +489,56 @@ def pct(part, whole):
 def fmt(x):
     return f"{x:g}"
 
-if backend == "glm":
+# a manager (spawn.sh's dispatcher and lead roles) over the load line passes while the CPU reads MANAGER_IDLE_MIN% idle or more, run-slot's default bar for slots 2 to 4 (after a reboot load5 still carries the boot's spike and every settled start still counts, so the line held the managers' restore at 63% idle)
+MANAGER_ROLES = ("dispatcher", "lead")
+MANAGER_IDLE_MIN = 40
+
+def manager_room():
+    if role not in MANAGER_ROLES:
+        return False
+    readings["cpu_idle"] = cpu_idle()
+    return readings["cpu_idle"] is not None and readings["cpu_idle"] >= MANAGER_IDLE_MIN
+
+if backend in ("glm", "local") and not host:
+    starts = "a GLM session" if backend == "glm" else "a local session"
     try:
-        # a GLM session draws no Claude usage, so it has its own gate: load5 under gates.glmLoad5Max, memory pressure 1 and swap-ins under gates.glmSwapinsMax a second
+        # a GLM or local session draws no Claude usage, so it has its own gate: load5 under gates.glmLoad5Max, memory pressure 1 and swap-ins under gates.glmSwapinsMax a second (swapins(), the median of 3 seconds), here; an --ssh one takes the target's load and memory gates below
         loads = loadavg()
         if loads is None:
-            refuse("load", "it cannot read the load average (sysctl vm.loadavg or uptime)")
+            refuse("load", "it cannot read the load average (sysctl vm.loadavg or uptime), nor Linux's /proc/loadavg")
         readings["load5"] = loads[1]
         if readings["load5"] >= gates["glmLoad5Max"]:
-            refuse("load", f"load5 is {readings['load5']:.2f} (sysctl vm.loadavg), and a GLM session starts under {fmt(gates['glmLoad5Max'])}")
-        readings["pressure"] = sysctl_int("kern.memorystatus_vm_pressure_level")
+            refuse("load", f"load5 is {readings['load5']:.2f} ({source['load5']}), and {starts} starts under {fmt(gates['glmLoad5Max'])}")
+        readings["pressure"] = pressure_level()
         if readings["pressure"] is None and sandbox_refuses("kern.memorystatus_vm_pressure_level"):
             readings["memory"] = "pressure level refused by the sandbox, so the swap-ins alone decide"
         elif readings["pressure"] is None:
-            refuse("memory", "it cannot read the pressure level (sysctl kern.memorystatus_vm_pressure_level)")
+            refuse("memory", "it cannot read the pressure level (sysctl kern.memorystatus_vm_pressure_level), nor Linux's /proc/pressure/memory")
         elif readings["pressure"] != 1:
-            refuse("memory", f"pressure level is {readings['pressure']} (sysctl kern.memorystatus_vm_pressure_level), and a GLM session starts at 1 alone")
+            refuse("memory", f"pressure level is {readings['pressure']} ({source['pressure']}), and {starts} starts at 1 alone")
         readings["swapins"] = swapins()
         if readings["swapins"] is None:
-            refuse("memory", "it cannot read the swap-ins (vm_stat -c 2 1)")
+            refuse("memory", "it cannot read the swap-ins (vm_stat -c 4 1), nor Linux's /proc/vmstat")
         if readings["swapins"] >= gates["glmSwapinsMax"]:
-            refuse("memory", f"swap-ins are {readings['swapins']}/s (vm_stat), and a GLM session starts under {fmt(gates['glmSwapinsMax'])}/s")
+            refuse("memory", f"swap-ins are {readings['swapins']}/s ({source['swapins']}), and {starts} starts under {fmt(gates['glmSwapinsMax'])}/s")
     except Skip:
         pass
 else:
     try:
-        # 1 load: max(load1, load5) plus the starts the log holds from the last gates.startsWindow seconds
-        loads = loadavg()
-        if loads is None:
-            refuse("load", "it cannot read the load average (sysctl vm.loadavg or uptime)")
-        load1, load5 = loads
-        cores = sysctl_int("hw.ncpu") or os.cpu_count()
-        if cores is None:
-            refuse("load", "it cannot read the core count (sysctl hw.ncpu)")
+        # 1 load: max(load1, load5) plus the starts the log holds from the last gates.startsWindow seconds, on the --ssh target for a start there and on this machine otherwise
+        if host:
+            if "problem" in target or not all(isinstance(target.get(k), (int, float)) for k in ("cores", "load1", "load5")):
+                refuse("load", f"it cannot read {host}'s load and memory over ssh ({target.get('problem', 'no reading')})")
+            load1, load5, cores = target["load1"], target["load5"], target["cores"]
+            source["load5"] = f"{host}'s /proc/loadavg"
+        else:
+            loads = loadavg()
+            if loads is None:
+                refuse("load", "it cannot read the load average (sysctl vm.loadavg or uptime), nor Linux's /proc/loadavg")
+            load1, load5 = loads
+            cores = cores_count()
+            if cores is None:
+                refuse("load", "it cannot read the core count (sysctl hw.ncpu), nor Linux's /proc/stat")
         readings["cores"] = cores
         mult = 1.0
         raw_mult = os.environ.get("PLAYGROUND_LOAD_MULT")
@@ -435,7 +556,7 @@ else:
         readings["load_mult"] = mult
         cap = cores * mult
         starts = 0
-        # this factory's starts (a pass row, or a first dispatcher's skipped one), then each peer's (slots.peers) from its own log, read only, since the load average lags a start on either side
+        # this factory's starts (a pass row, or a first dispatcher's skipped one), then each peer's (slots.peers) from its own log, read only, since the load average lags a start on either side; a row counts only on the machine it ran on, its readings' host or this one
         for path in [log_path] + [os.path.join(p, "capacity.jsonl") for p in gates["peers"] if isinstance(p, str)]:
             try:
                 with open(path) as f:
@@ -445,6 +566,8 @@ else:
                         except ValueError:
                             continue
                         if not isinstance(row, dict) or row.get("verdict") not in ("pass", "skipped"):
+                            continue
+                        if ((row.get("readings") or {}).get("host") if isinstance(row.get("readings"), dict) else None) != (host or None):
                             continue
                         try:
                             if (now - from_iso(row["at"])).total_seconds() <= gates["startsWindow"]:
@@ -459,56 +582,68 @@ else:
         share = (gates["reviewReserve"] if role == "worker" else 0) if size == "small" else gates["smallReserve"]
         keep = cap * share
         readings["reserve"] = keep
-        # the owner's rule keeps the load under the cores, so a worker or two can be closed to make room: a load at or over the line refuses whatever the CPU's idle share, but a --priority start passes while a priority file stands (PRIORITY_FILE), since priority work comes first, and a resume of a row spawn.sh closed live in the last 15 minutes passes (JUST_CLOSED), since that session already counts in the load; the memory gate still reads both
+        # the owner's rule keeps the load under the cores, so a worker or two can be closed to make room: a load at or over the line refuses whatever the CPU's idle share, but a --priority start passes while a priority file passes it (PRIORITY_FILE), since priority work comes first, a resume of a row spawn.sh closed live in the last 15 minutes passes (JUST_CLOSED), since that session already counts in the load, and a manager passes while the CPU reads idle (manager_room); the memory gate still reads all three
         if priority:
             readings["priority"] = priority
         elif just_closed:
             readings["just_closed"] = just_closed
-        elif readings["load5"] + starts >= cap - keep:
+        elif readings["load5"] + starts >= cap - keep and not manager_room():
             at = (
                 f"{cap:g}, the {cores} cores at PLAYGROUND_LOAD_MULT {mult:g}"
                 if mult != 1
                 else f"the {cores} cores"
             )
+            at = f"{at} on {host}" if host else at
             at = f"at or over {at}" if not keep else f"at or over {cap - keep:g}: {at}, less the {keep:g} kept for {'checkers (gates.reviewReserve; this start is a small worker)' if size == 'small' else f'small items (this start is {size})'}"
-            refuse("load", f"max(load1, load5) is {readings['load5']:.2f} and {starts:g} started in the last {fmt(gates['startsWindow'] / 60)} minutes, {at}. Wait for it to fall, or close a session that is done, and run it again.")
+            idle = "" if role not in MANAGER_ROLES else f", and the CPU's idle share, which passes a manager at {MANAGER_IDLE_MIN}% or more, does not read (top -l 2 -n 0), nor Linux's /proc/stat" if readings["cpu_idle"] is None else f", and the CPU reads {readings['cpu_idle']:g}% idle ({source['cpu_idle']}), under the {MANAGER_IDLE_MIN}% a manager needs to pass it"
+            refuse("load", f"max(load1, load5) is {readings['load5']:.2f} and {starts:g} started in the last {fmt(gates['startsWindow'] / 60)} minutes, {at}{idle}. Wait for it to fall, or close a session that is done, and run it again.")
     except Skip:
         pass
 
     try:
-        # 2 memory; where Claude Code's sandbox refuses the pressure level and free share, the swap-ins stand in, under GLM's line
-        readings["pressure"] = sysctl_int("kern.memorystatus_vm_pressure_level")
-        if readings["pressure"] is None and sandbox_refuses("kern.memorystatus_vm_pressure_level"):
+        # 2 memory; on an --ssh target its free share alone, which the peer read gives; where Claude Code's sandbox refuses the pressure level and free share, the swap-ins stand in, under GLM's line
+        if not host:
+            readings["pressure"] = pressure_level()
+        if host:
+            readings["free"] = target.get("free")
+            if not isinstance(readings["free"], int):
+                refuse("memory", f"it cannot read {host}'s free share over ssh ({target.get('problem', 'no MemAvailable in its /proc/meminfo')})")
+            if readings["free"] < gates["memoryFreeMin"]:
+                refuse("memory", f"free is {readings['free']}% ({host}'s /proc/meminfo), {gates['memoryFreeMin']}% is the floor. Close a session there or wait for its memory to free, and run it again.")
+        elif readings["pressure"] is None and sandbox_refuses("kern.memorystatus_vm_pressure_level"):
             readings["memory"] = "pressure level and free share refused by the sandbox"
             readings["swapins"] = swapins()
             if readings["swapins"] is None:
-                refuse("memory", "the sandbox refuses the pressure level, and it cannot read the swap-ins (vm_stat -c 2 1)")
+                refuse("memory", "the sandbox refuses the pressure level, and it cannot read the swap-ins (vm_stat -c 4 1), nor Linux's /proc/vmstat")
             if readings["swapins"] >= gates["glmSwapinsMax"]:
-                refuse("memory", f"the sandbox refuses the pressure level, and swap-ins are {readings['swapins']}/s (vm_stat), {fmt(gates['glmSwapinsMax'])}/s is the line. Close a session or wait for the pressure to pass, and run it again.")
+                refuse("memory", f"the sandbox refuses the pressure level, and swap-ins are {readings['swapins']}/s ({source['swapins']}), {fmt(gates['glmSwapinsMax'])}/s is the line. Close a session or wait for the pressure to pass, and run it again.")
         else:
             if readings["pressure"] is None:
-                refuse("memory", "it cannot read the pressure level (sysctl kern.memorystatus_vm_pressure_level)")
+                refuse("memory", "it cannot read the pressure level (sysctl kern.memorystatus_vm_pressure_level), nor Linux's /proc/pressure/memory")
             if readings["pressure"] not in (1, 2):
-                refuse("memory", f"pressure level is {readings['pressure']} (sysctl kern.memorystatus_vm_pressure_level), 1 or 2 passes")
-            readings["free"] = sysctl_int("kern.memorystatus_level")
+                refuse("memory", f"pressure level is {readings['pressure']} ({source['pressure']}), 1 or 2 passes")
+            readings["free"] = free_share()
             if readings["free"] is None:
-                refuse("memory", "it cannot read the free share (sysctl kern.memorystatus_level)")
+                refuse("memory", "it cannot read the free share (sysctl kern.memorystatus_level), nor Linux's /proc/meminfo")
             if readings["free"] < gates["memoryFreeMin"]:
-                refuse("memory", f"free is {readings['free']}% (sysctl kern.memorystatus_level), {gates['memoryFreeMin']}% is the floor. Close a session or wait for the pressure to pass, and run it again.")
+                refuse("memory", f"free is {readings['free']}% ({source['free']}), {gates['memoryFreeMin']}% is the floor. Close a session or wait for the pressure to pass, and run it again.")
         # paging, for a fresh worker start alone (room is read for one), since free memory counts compressible pages
         if room and "swapins" not in readings:
             readings["swapins"] = swapins()
             if readings["swapins"] is None:
-                refuse("memory", "it cannot read the swap-ins (vm_stat -c 2 1)")
+                refuse("memory", "it cannot read the swap-ins (vm_stat -c 4 1), nor Linux's /proc/vmstat")
             if readings["swapins"] >= gates["glmSwapinsMax"]:
-                free = f", while free reads {readings['free']}% (sysctl kern.memorystatus_level), which counts compressible pages" if "free" in readings else ""
-                refuse("memory", f"swap-ins are {readings['swapins']}/s (vm_stat), {fmt(gates['glmSwapinsMax'])}/s is the line{free}. Close a session or wait for the paging to pass, and run it again.")
+                free = f", while free reads {readings['free']}% ({source['free']}), which counts compressible pages" if "free" in readings else ""
+                refuse("memory", f"swap-ins are {readings['swapins']}/s ({source['swapins']}), {fmt(gates['glmSwapinsMax'])}/s is the line{free}. Close a session or wait for the paging to pass, and run it again.")
     except Skip:
         pass
 
-# 3 slots (the header's gate 3)
+# 3 slots (SPAWN.md's gate 3)
 try:
-    if room:
+    # a reads-only worker runs nothing through run-slot, so its room never holds it
+    if room and reads_only:
+        readings["reads_only"] = True
+    elif room:
         try:
             lanes, held, free, waiters = (int(n) for n in room.split())
         except ValueError:
@@ -523,7 +658,45 @@ try:
 except Skip:
     pass
 
-# 4 usage: the launching backend's own window
+# 4 sessions (SPAWN.md's gate 4)
+CAPPED = re.compile(r"(worker|reviewer|tester)-.+|.+-(worker|reviewer|tester)")
+LIVE = ("starting", "waiting", "working")
+
+# The roster's named rows, [] with no roster, None when it does not read.
+def roster_rows():
+    try:
+        with open(roster_path) as f:
+            agents = json.load(f).get("agents") or []
+    except FileNotFoundError:
+        agents = []
+    except (OSError, ValueError, AttributeError):
+        return None
+    return [a for a in agents if isinstance(a, dict) and isinstance(a.get("name"), str)] if isinstance(agents, list) else []
+
+# A resume of the session's own live row, or of one spawn.sh closed live in the last 15 minutes (JUST_CLOSED), brings back work already running.
+def resumes_live(rows):
+    own = next((a for a in rows if a["name"] == session), {})
+    return mode == "resume" and (own.get("status") in LIVE or bool(just_closed))
+
+try:
+    cap = gates["sessionCap"]
+    if cap and role in ("worker", "reviewer", "tester"):
+        rows = roster_rows()
+        if rows is None:
+            refuse("sessions", f"it cannot read {roster_path} (does not read)")
+        live = sorted(a["name"] for a in rows if a["name"] != session and a.get("status") in LIVE and a.get("priority") != "1" and CAPPED.fullmatch(a["name"]))
+        readings.update(session_cap=cap, sessions=len(live))
+        # priority work comes first, as at the load and slots gates, and a live resume (resumes_live) brings back a session the count held
+        if priority:
+            readings["priority"] = priority
+        elif resumes_live(rows):
+            readings["counted"] = True
+        elif len(live) >= cap:
+            refuse("sessions", f"{len(live)} live {'worker or checker' if len(live) == 1 else 'workers and checkers'} in the roster ({', '.join(live)}), and gates.sessionCap is {cap}. Wait for one to end, or close a session that is done, and run it again.")
+except Skip:
+    pass
+
+# 5 usage: the launching backend's own window
 try:
     readings["backend"] = backend or "claude"
     # usage.accounts' rows parked until a later time (parkedUntil), by email: no new session starts on one, picked or named
@@ -534,6 +707,64 @@ try:
                 parked[row["email"].lower()] = row["parkedUntil"]
         except (KeyError, TypeError, ValueError, AttributeError):
             pass
+    # The pace override (#i509): while ~/.playground/usage-pace-off-until holds a future ISO 8601 time with its zone,
+    # the week-pace check is off and a 98% sanity backup holds instead; anything else leaves the pace on (fail closed).
+    pace_off = None
+    try:
+        with open(os.path.join(data_dir, "usage-pace-off-until")) as f:
+            until = dt.datetime.fromisoformat(f.read().strip().replace("Z", "+00:00"))
+        if until.tzinfo is not None and until > now:
+            pace_off = until.astimezone(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (OSError, ValueError):
+        pass
+    # A live resume (resumes_live) adds no work, so the 98% backstop holds it in place of the pace line; a roster that does not read leaves the pace on.
+    resumed = resumes_live(roster_rows() or [])
+    pace_skip = f"skipped until {pace_off} (usage-pace-off-until)" if pace_off else "skipped (a resume of a live session: the 98% backstop alone)" if resumed else None
+
+    # One login's reading: what it read, and why it is over the gate (None when it passes).
+    def judge(name, usage, limit, writer):
+        seen = {}
+        try:
+            written = from_iso(usage["writtenAt"])
+        except (KeyError, TypeError, ValueError):
+            return seen, f"it cannot read {name} (does not read)"
+        age = int((now - written).total_seconds() // 60)
+        if age >= limit:
+            return seen, f"{name} was written {age} minutes ago (writtenAt), {limit} is its limit. {writer}"
+        rate = usage.get("rate_limits")
+        if not isinstance(rate, dict):
+            return seen, f"{name} holds no rate_limits (does not read)"
+        try:
+            week = rate["seven_day"]
+            resets = from_iso(week["resets_at"])
+            week_pct = week["used_percentage"]
+            if isinstance(week_pct, bool) or not isinstance(week_pct, (int, float)):
+                raise TypeError
+        except (KeyError, TypeError, ValueError):
+            return seen, f"{name} holds no week share (seven_day.used_percentage with seven_day.resets_at)"
+        five = rate.get("five_hour")
+        five_hour = five.get("used_percentage") if isinstance(five, dict) else None
+        if isinstance(five_hour, bool) or not isinstance(five_hour, (int, float)):
+            five_hour = None  # no 5-hour window: an account Anthropic gives no 5-hour limit, so none, never 0%
+        seen["fiveHour"] = "none" if five_hour is None else five_hour
+        if five_hour is not None and five_hour >= 90:
+            try:
+                reset = f"{from_iso(five['resets_at']):%H:%M} UTC"
+            except (KeyError, TypeError, ValueError):
+                reset = "later"
+            return seen, f"the 5-hour window is at {fmt(five_hour)}% ({name} five_hour.used_percentage), 90 is its cap. It resets {reset}."
+        seen["week"] = week_pct
+        if pace_skip:
+            if week_pct >= 98:
+                why = f"while the pace check is off until {pace_off} (usage-pace-off-until)" if pace_off else "for a resume of a live session"
+                return seen, f"the week is at {fmt(week_pct)}% ({name} seven_day.used_percentage), and 98% is the sanity backup {why}"
+        else:
+            days_in = 7 - (resets - now).total_seconds() / 86400
+            pace = max(days_in, 1) * 100 / 7  # never below one day's share, so a week that has just reset is not refused for its first points
+            if week_pct > pace:
+                return seen, f"the week is at {fmt(week_pct)}% ({name} seven_day.used_percentage), past 14.3 points a day ({days_in:.1f} days in, {pace:.1f} is its pace)"
+        return seen, None
+
     if account:
         if account.lower() in parked:
             refuse("usage", f"--account {account} is parked until {parked[account.lower()]} (usage.accounts parkedUntil). Name another account, or none, so it starts on the login with the most room")
@@ -571,7 +802,22 @@ try:
                 roomiest = min(((acct, week) for key, (acct, week, _) in weeks.items() if key != account.lower() and week < 100), key=lambda pair: pair[1], default=None)
                 hint = f"Name {roomiest[0]}, the account with the most room (its week reads {fmt(roomiest[1])}%), or, for a session that may run on this machine's login, none" if roomiest else "No account in usage.json's accounts has room; wait for a week to reset"
                 refuse("usage", f"--account {account}: its week reads {fmt(week_pct)}% (usage.json accounts) until {resets:%a %H:%M} UTC. {hint}")
-        readings["usage"] = f"skipped (--account {account}, whose usage this machine does not read)"
+        # its own usage-<local part>.json, which the ops tick's other-logins beat writes every 30 minutes (account-watch.py), judged at a bare start's pace while under its hour; with none fresh, the check skips
+        name = f"usage-{account.split('@')[0]}.json"
+        other, other_detail = load(name)
+        try:
+            age = (now - from_iso(other["writtenAt"])).total_seconds() / 60 if not other_detail and str(other.get("account") or "").lower() == account.lower() else None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            age = None
+        if age is None or age >= 60:
+            readings["usage"] = f"skipped (--account {account}: this machine holds no {name} for it under 60 minutes old, which the ops tick's other-logins beat writes)"
+        else:
+            seen, detail = judge(name, other, 60, "")
+            readings.update(seen)
+            if pace_skip:
+                readings["pace"] = pace_skip
+            if detail:
+                refuse("usage", f"--account {account}: {detail}. Name another account, or none, so it starts on the login with the most room")
     elif backend == "glm":
         beat = read("ops/ops-zai-usage.json")
         if not isinstance(beat, dict) or beat.get("lastResult") != "ok":
@@ -607,88 +853,112 @@ try:
         except (KeyError, TypeError):
             week_pct = None
         readings["week"] = week_pct
+    elif backend == "local":
+        # a local session draws no Claude usage: its own window is the sessions this machine's model server takes at once, which the model switch sizes, and the speed each keeps, which the keep beat reads from /metrics (local-cap.ts read both before the gate)
+        gate = json.loads(local_cap)
+        cap, cap_from, speed = gate["cap"], gate["from"], gate["speed"]
+        rows = roster_rows()
+        if rows is None:
+            refuse("usage", f"it cannot read {roster_path} (does not read), so it cannot count the local sessions")
+        def pinned_local(name):
+            try:
+                with open(os.path.join(data_dir, "backends", name)) as f:
+                    return f.read().split() == ["claude-code", "local"]
+            except OSError:
+                return False
+        live = sorted(a["name"] for a in rows if a["name"] != session and a.get("status") in LIVE and pinned_local(a["name"]))
+        readings.update(local_cap=cap, local_sessions=len(live))
+        if resumes_live(rows):
+            readings["counted"] = True
+        elif len(live) >= cap:
+            refuse("usage", f"{len(live)} live local sessions ({', '.join(live)}), and the local model here serves {cap} at once ({cap_from}). Wait for one to end, close a session that is done, or start it on --backend glm or claude.")
+        elif speed:
+            # a request waiting refuses at any n; the decode and first-token terms need samples, and the decode term reads only beside live local sessions, whose share of the server it is
+            n, tps, ttft = len(live), speed["decodeTps"], speed["ttftMean"]
+            readings.update(local_speed=speed)
+            later = "Wait for the next keep beat, close a session that is done, or start it on --backend glm or claude."
+            if speed["waiting"] > 0:
+                refuse("usage", f"the local model here has {speed['waiting']} request{'' if speed['waiting'] == 1 else 's'} waiting, so one more session would queue behind them. {later}")
+            if n and tps is not None and tps * n / (n + 1) < gate["minTps"]:
+                refuse("usage", f"each of the {n} live local sessions decodes {tps:.1f} tokens a second, so one more would leave about {tps * n / (n + 1):.1f}, under the speed floor of {gate['minTps']} (localModels.minTps). {later}")
+            if ttft is not None and ttft >= gate["maxFirstTokenSeconds"]:
+                refuse("usage", f"the local model here takes {ttft:.1f} s on average to a first token, at or over the first-token floor of {gate['maxFirstTokenSeconds']} s (localModels.maxFirstTokenSeconds). {later}")
     else:
-        # The pace override (#i509): while ~/.playground/usage-pace-off-until holds a future ISO 8601 time with its zone,
-        # the week-pace check is off and a 98% sanity backup holds instead; anything else leaves the pace on (fail closed).
-        pace_off = None
-        try:
-            with open(os.path.join(data_dir, "usage-pace-off-until")) as f:
-                until = dt.datetime.fromisoformat(f.read().strip().replace("Z", "+00:00"))
-            if until.tzinfo is not None and until > now:
-                pace_off = until.astimezone(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        except (OSError, ValueError):
-            pass
-        if pace_off:
-            readings["pace"] = f"skipped until {pace_off} (usage-pace-off-until)"
-
-        # One login's reading: what it read, and why it is over the gate (None when it passes).
-        def judge(name, usage, limit, writer):
-            seen = {}
-            try:
-                written = from_iso(usage["writtenAt"])
-            except (KeyError, TypeError, ValueError):
-                return seen, f"it cannot read {name} (does not read)"
-            age = int((now - written).total_seconds() // 60)
-            if age >= limit:
-                return seen, f"{name} was written {age} minutes ago (writtenAt), {limit} is its limit. {writer}"
-            rate = usage.get("rate_limits")
-            if not isinstance(rate, dict):
-                return seen, f"{name} holds no rate_limits (does not read)"
-            try:
-                week = rate["seven_day"]
-                resets = from_iso(week["resets_at"])
-                week_pct = week["used_percentage"]
-                if isinstance(week_pct, bool) or not isinstance(week_pct, (int, float)):
-                    raise TypeError
-            except (KeyError, TypeError, ValueError):
-                return seen, f"{name} holds no week share (seven_day.used_percentage with seven_day.resets_at)"
-            five = rate.get("five_hour")
-            five_hour = five.get("used_percentage") if isinstance(five, dict) else None
-            if isinstance(five_hour, bool) or not isinstance(five_hour, (int, float)):
-                five_hour = None  # no 5-hour window: an account Anthropic gives no 5-hour limit, so none, never 0%
-            seen["fiveHour"] = "none" if five_hour is None else five_hour
-            if five_hour is not None and five_hour >= 90:
-                try:
-                    reset = f"{from_iso(five['resets_at']):%H:%M} UTC"
-                except (KeyError, TypeError, ValueError):
-                    reset = "later"
-                return seen, f"the 5-hour window is at {fmt(five_hour)}% ({name} five_hour.used_percentage), 90 is its cap. It resets {reset}."
-            seen["week"] = week_pct
-            if pace_off:
-                if week_pct >= 98:
-                    return seen, f"the week is at {fmt(week_pct)}% ({name} seven_day.used_percentage), and 98% is the sanity backup while the pace check is off until {pace_off} (usage-pace-off-until)"
-            else:
-                days_in = 7 - (resets - now).total_seconds() / 86400
-                pace = max(days_in, 1) * 100 / 7  # never below one day's share, so a week that has just reset is not refused for its first points
-                if week_pct > pace:
-                    return seen, f"the week is at {fmt(week_pct)}% ({name} seven_day.used_percentage), past 14.3 points a day ({days_in:.1f} days in, {pace:.1f} is its pace)"
-            return seen, None
-
+        if pace_skip:
+            readings["pace"] = pace_skip
         # this machine's own login (usage.json, which ops-usage writes every 5 minutes) and each other login with a usage-<name>.json,
-        # which ops-usage writes for the stored login and account-watch.py <email>, run by hand, for another; another login's week moves slowly, so its reading holds for an hour.
+        # which ops-usage writes for the stored login and the ops tick's other-logins beat (account-watch.py <email>) every 30 minutes for another; another login's week moves slowly, so its reading holds for an hour.
+        # why the own login's stored reading reads nothing, from run.py's stored-login-status.json while it is under 15 minutes old: its Claude Code login ended (loginEnded), or its access token expired (tokenExpired), which Claude Code refreshes only while it runs
+        login_status, _ = load("ops/usage/stored-login-status.json")
+        try:
+            status_fresh = (now - from_iso(login_status["writtenAt"])).total_seconds() < 15 * 60
+        except (KeyError, TypeError, ValueError):
+            status_fresh = False
+        login_ended = login_status["loginEnded"] if status_fresh and isinstance(login_status.get("loginEnded"), str) and login_status["loginEnded"] else None
+        expired_cause = "its Claude Code access token has expired (stored-login-status.json tokenExpired), and Claude Code refreshes it only while it runs: opening Claude Code refreshes it, the owner's /login brings it back, and `playground accounts add` keeps a seat token for it" if status_fresh and not login_ended and login_status.get("tokenExpired") is True else None
+        # an --account start on the own login whose stored-login.json gives no reading (stale, missing, or its Claude Code login ended) starts on the login's seat token under usage.keychainService, as a second login does, judged as a probed login is by login-flip.json's seen reading of it, which run.py's seat probe keeps; the item's existence alone is checked, with no -w, and inside the sandbox it is left to the new pane, as keychain_has does
+        def seat_start(email, stale):
+            service = os.environ.get("KEYCHAIN_SERVICE", "")
+            if subprocess.run(["security", "find-generic-password", "-s", service, "-a", email], capture_output=True).returncode:
+                if os.environ.get("SANDBOX_RUNTIME") == "1":
+                    print(f"spawn.sh: the sandbox closes the Keychain to this shell, so the new pane checks the {service} item for {email}", file=sys.stderr)
+                elif login_ended:
+                    return "stored-login.json", {}, f"its Claude Code login has ended (loginEnded: {login_ended}), and the Keychain holds no {service} item for it to start on. The owner's /login in Claude Code brings the login back, and `playground accounts add` keeps a seat token for it", False
+                else:
+                    return "stored-login.json", {}, stale, False
+            flip, _ = load("ops/usage/login-flip.json")
+            # run.py probes each account login-flip.json's accounts lists, else its rotation pool's, so a seat on neither list is never read
+            listed = flip.get("accounts") if isinstance(flip, dict) else None
+            if not listed and isinstance(flip, dict) and isinstance(flip.get("rotation"), dict) and isinstance(flip["rotation"].get("pool"), list):
+                listed = [e.get("account") for e in flip["rotation"]["pool"] if isinstance(e, dict)]
+            probed = isinstance(listed, list) and any(isinstance(a, str) and a.lower() == email.lower() for a in listed)
+            name = "login-flip.json seen"
+            later = "ops-usage probes it every 14 minutes; wait for its next run and try again" if probed else f"ops-usage probes only the accounts login-flip.json lists, and it does not list {email}: add it to usage.accounts, or to login-flip.json's accounts while that list is set"
+            entries = flip.get("seen") if isinstance(flip, dict) else None
+            s = next((r for a, r in entries.items() if isinstance(a, str) and a.lower() == email.lower() and isinstance(r, dict)), None) if isinstance(entries, dict) else None
+            if s is None:
+                return name, {}, f"{'its Claude Code login has ended (loginEnded: ' + login_ended + ')' if login_ended else stale.rstrip('.')}, and login-flip.json holds no seen reading of {email} to judge its seat token by. {later}", False
+            rate = {"seven_day": {"used_percentage": s.get("week"), "resets_at": s.get("weekReset")}}
+            if isinstance(s.get("five"), (int, float)):
+                rate["five_hour"] = {"used_percentage": s["five"], "resets_at": s.get("fiveReset")}
+            seen, detail = judge(name, {"rate_limits": rate, "writtenAt": s.get("at")}, 60, later + ".")
+            limited = s.get("limitedUntil")
+            if detail is None and isinstance(limited, (int, float)) and not isinstance(limited, bool) and limited > now.timestamp():
+                detail = f"its account is limited until {from_iso(limited):%Y-%m-%d %H:%M} UTC (login-flip.json seen limitedUntil)"
+            return name, seen, detail, True
+
         usage, detail = load("usage.json")
         own = usage.get("account") if isinstance(usage, dict) else None
         writer = "The ops-usage job writes it every 5 minutes; wait for its next run and try again."
-        # a usage.json never written, as on a fresh install before ops-usage first runs, passes: the gate paces spending, and Anthropic's own limits still bind the login. One that exists is judged.
-        if not os.path.exists(os.path.join(data_dir, "usage.json")):
-            seen, detail = {"usage": "unread (usage.json not yet written)"}, None
-        else:
-            seen, detail = judge("usage.json", usage, 15, writer) if not detail else ({}, detail)
-        logins = [(own or "this machine's login", "usage.json", None, seen, detail)]
-        # a bare start runs on the config's own login; while usage.json reads another account (the factory's), that login is judged by ops-usage's stored-login.json, failing when the file is missing, stale or names another account, and the factory becomes a login --account reaches.
         try:
             with open(own_config) as f:
                 runs_on = (json.load(f).get("oauthAccount") or {}).get("emailAddress")
         except Exception:
             runs_on = None
+        # a usage.json never written, as on a fresh install before ops-usage first runs, passes: the gate paces spending, and Anthropic's own limits still bind the login. One that exists is judged.
+        if not os.path.exists(os.path.join(data_dir, "usage.json")):
+            seen, detail = {"usage": "unread (usage.json not yet written)"}, None
+        else:
+            # usage.json naming the config's own login, as on a machine with that one login, is the stored login's reading, so an expired access token is its stale reading's cause too
+            own_reading = not isinstance(runs_on, str) or not runs_on or not isinstance(own, str) or runs_on.lower() == own.lower()
+            seen, detail = judge("usage.json", usage, 15, f"It reads nothing because {expired_cause}." if expired_cause and own_reading else writer) if not detail else ({}, detail)
+        logins = [(own or "this machine's login", "usage.json", None, seen, detail)]
+        # a bare start runs on the config's own login; while usage.json reads another account (the factory's), that login is judged by ops-usage's stored-login.json, failing when the file is missing, stale or names another account (but for seat_start below), and the factory becomes a login --account reaches.
         if isinstance(runs_on, str) and runs_on and own and runs_on.lower() != own.lower():
             name = "ops/usage/stored-login.json"
             stored, stored_detail = load(name)
             named = stored.get("account") if isinstance(stored, dict) else None
             if not stored_detail and (not isinstance(named, str) or named.lower() != runs_on.lower()):
                 stored_detail = f"{name} reads {named or 'no account'}, not {runs_on}, the login a start with no --account runs on"
-            stored_seen, stored_detail = judge(name, stored, 15, writer) if not stored_detail else ({}, stored_detail)
-            logins = [(runs_on, "stored-login.json", None, stored_seen, stored_detail), (own, "usage.json", own, seen, detail)]
+            # an expired access token is the stale reading's cause, named in place of a run to wait for
+            stored_writer = f"It reads nothing because {expired_cause}." if expired_cause else writer
+            if stored_detail and stored is None and expired_cause:
+                stored_detail = f"{stored_detail}. {stored_writer}"
+            stored_seen, stored_detail = judge(name, stored, 15, stored_writer) if not stored_detail else ({}, stored_detail)
+            stored_name = "stored-login.json"
+            if own_pick and stored_detail and not stored_seen:
+                stored_name, stored_seen, stored_detail, on_seat = seat_start(runs_on, stored_detail)
+            logins = [(runs_on, stored_name, None, stored_seen, stored_detail), (own, "usage.json", own, seen, detail)]
         known = {login[0].lower() for login in logins}
         for path in sorted(glob.glob(os.path.join(data_dir, "usage-*.json"))):
             name = os.path.basename(path)
@@ -700,7 +970,7 @@ try:
             email = other.get("account") if isinstance(other, dict) else None
             if not isinstance(email, str) or not email or email.lower() in known:
                 continue
-            seen, detail = judge(name, other, 60, "ops-usage writes the stored login's every 5 minutes, and account-watch.py <email>, run by hand, another account's.")
+            seen, detail = judge(name, other, 60, "ops-usage writes the stored login's every 5 minutes, and the ops tick's other-logins beat (account-watch.py <email>) every other account's every 30 minutes.")
             logins.append((email, name, email, seen, detail))
             # a refused file leaves the account open to its login-flip reading below
             if detail is None:
@@ -729,11 +999,16 @@ try:
             if logins[0][4]:
                 readings.update(logins[0][3])
                 refuse("usage", f"--account {own_pick}, this machine's own login: {logins[0][4]}")
+            if on_seat:
+                readings["account"] = own_pick
         passing = [login for login in logins if login[4] is None]
         if not passing:
             readings.update(logins[0][3])
             if len(logins) == 1:
-                refuse("usage", logins[0][4])
+                # the one login this machine reads is parked: name each usage.accounts Claude row neither parked nor read here, the way out on a machine with one login
+                only = str(logins[0][0]).lower()
+                others = [row["email"] for row in gates["accounts"] if isinstance(row, dict) and isinstance(row.get("email"), str) and row.get("provider") in (None, "claude") and row["email"].lower() not in parked and row["email"].lower() != only] if only in parked else []
+                refuse("usage", logins[0][4] + (f". usage.accounts also lists {', '.join(others)}, not parked and not signed in on this machine: sign one in with Add account in the Dashboard's Settings, then start it again" if others else ""))
             readings["logins"] = {f"{email} ({name})": detail for email, name, _, _, detail in logins}
             refuse("usage", "every login is over it: " + "; ".join(f"{email} ({name}): {detail}" for email, name, _, _, detail in logins))
         # login-flip.py's split, under 30 minutes old (two of the ops tick's 15-minute beats), picks among the passing logins it shares by smooth weighted round robin over split-picks.json (playbook's SPAWN.md, --account), else the lowest week
@@ -791,6 +1066,8 @@ for gate, detail in skips:
 why = f"next in the account split ({fmt(readings['share'] * 100)}% of new sessions)" if "share" in readings else "the login with the most room this week"
 if any(gate == "usage" for gate, _ in skips):
     print("ok")
+elif own_pick and on_seat:
+    print(f"ok {own_pick} --account {own_pick} is this machine's own login, whose stored reading reads nothing, so it starts on its seat token, the split skipped: its week is at {fmt(readings['week'])}% ({chosen[1]})")
 elif own_pick:
     week = f"its week is at {fmt(readings['week'])}%" if "week" in readings else f"its usage {readings.get('usage', 'unread')}"
     print(f"ok - --account {own_pick} is this machine's own login, so it starts there, the split skipped: {week} ({chosen[1]})")
@@ -813,14 +1090,15 @@ PY
     "ok "*)
       pick=${verdict#ok }
       pick=${pick%% *}
-      [ "$pick" = - ] || { ACCOUNT=$pick; PICKED=1; check_account; }
+      # the own login on its seat token: seat_start checked its item, and check_account refuses the own login by name
+      [ "$pick" = - ] || { ACCOUNT=$pick; PICKED=1; if [ "$pick" = "$OWN_LOGIN" ]; then plain_account; else check_account; fi; }
       echo "spawn.sh: ${verdict#ok "$pick" }"
       ;;
     *) refuse "$verdict" ;;
   esac
 }
 
-# --account, --backend, --harness, --model, --effort, --brief, --pr, --reports-to, --title, --in, --memory, --check and --priority may sit anywhere among the words; the rest are the mode's.
+# --account, --backend, --harness, --model, --effort, --brief, --pr, --reports-to, --title, --in, --memory, --check, --priority, --reads-only, --remote-control, --sandbox, --ssh, --key and --force may sit anywhere among the words; the rest are the mode's.
 ACCOUNT=
 PICKED=
 BACKEND=
@@ -829,17 +1107,17 @@ GLM_ACCOUNT=
 GLM_GIVEN=
 # usage.accounts sits mid-list, since an empty list prints an empty line, which a last line would lose. The models a session runs on (models.*) and the capacity gate's lines (gates.*) are settings, each in the docs' list of keys, so changing one is a settings write, never an edit here.
 MODEL_SETTINGS=$(env $UNSET "$BUN" "$REPO/packages/scripts/src/playground/setting.ts" --text models.claude models.default models.checker models.glm models.glmKeychainService \
-  gates.glmLoad5Max gates.glmSwapinsMax gates.memoryFreeMin gates.reviewReserve gates.smallReserve gates.startsWindow usage.accounts sessions.names sessions.aliases context.window 2>&1) ||
+  gates.glmLoad5Max gates.glmSwapinsMax gates.memoryFreeMin gates.reviewReserve gates.sessionCap gates.smallReserve gates.startsWindow usage.accounts sessions.names sessions.aliases context.window 2>&1) ||
   { echo "spawn.sh refuses: it cannot read the model and gate settings: $MODEL_SETTINGS" >&2; exit 1; }
 {
   read -r CLAUDE_MODELS; read -r DEFAULT_MODEL; read -r CHECKER_MODEL; read -r GLM_ID; read -r GLM_KEYCHAIN
-  read -r GLM_LOAD5_MAX; read -r GLM_SWAPINS_MAX; read -r MEMORY_FREE_MIN; read -r REVIEW_RESERVE; read -r SMALL_RESERVE; read -r STARTS_WINDOW
+  read -r GLM_LOAD5_MAX; read -r GLM_SWAPINS_MAX; read -r MEMORY_FREE_MIN; read -r REVIEW_RESERVE; read -r SESSION_CAP; read -r SMALL_RESERVE; read -r STARTS_WINDOW
   read -r USAGE_ACCOUNTS; read -r SESSION_NAMES; read -r SESSION_ALIASES; read -r WINDOW
 } <<<"$MODEL_SETTINGS"
 SESSION_KINDS=$(python3 -I -c 'import json, sys; n, a = map(json.loads, sys.argv[1:3]); [print(*row) for row in [(v, k) for k, v in n.items()] + [(n["dispatcher"] + "-2", "dispatcher")] + list(a.items())]' "$SESSION_NAMES" "$SESSION_ALIASES")
 # slots.peers, the ops folders of the other factories on this machine, whose starts the load gate counts beside this one's; none when unread
 PEERS=$(setting slots.peers) || PEERS=; [ -n "$PEERS" ] || PEERS="[]"
-GATES="{\"accounts\": ${USAGE_ACCOUNTS:-[]}, \"glmLoad5Max\": $GLM_LOAD5_MAX, \"glmSwapinsMax\": $GLM_SWAPINS_MAX, \"memoryFreeMin\": $MEMORY_FREE_MIN, \"peers\": $PEERS, \"reviewReserve\": $REVIEW_RESERVE, \"smallReserve\": $SMALL_RESERVE, \"startsWindow\": $STARTS_WINDOW}"
+GATES="{\"accounts\": ${USAGE_ACCOUNTS:-[]}, \"glmLoad5Max\": $GLM_LOAD5_MAX, \"glmSwapinsMax\": $GLM_SWAPINS_MAX, \"memoryFreeMin\": $MEMORY_FREE_MIN, \"peers\": $PEERS, \"reviewReserve\": $REVIEW_RESERVE, \"sessionCap\": $SESSION_CAP, \"smallReserve\": $SMALL_RESERVE, \"startsWindow\": $STARTS_WINDOW}"
 MODELS=$(printf '%s\n' $CLAUDE_MODELS | awk '{ m[NR] = $0 } END { for (i = 1; i <= NR; i++) printf "%s%s", m[i], (i < NR - 1 ? ", " : i == NR - 1 ? " or " : "") }')
 CLAUDE_MODEL=
 EFFORT=
@@ -854,9 +1132,16 @@ MEMORY_DIR=
 MEMORY_OFF=
 CHECK=
 PRIORITY=
+READS_ONLY=
+SANDBOX_ARG=
 NAME_PROJECT=
 SIZE=
 RUNTIME=
+REMOTE_CONTROL=
+TOKEN_ONLY=
+SSH_HOST=
+SSH_KEY=
+FORCE=
 words=()
 while [ $# -gt 0 ]; do
   if [ "$1" = --account ]; then
@@ -930,6 +1215,28 @@ while [ $# -gt 0 ]; do
   elif [ "$1" = --priority ]; then
     PRIORITY=1
     shift
+  elif [ "$1" = --reads-only ]; then
+    READS_ONLY=1
+    shift
+  elif [ "$1" = --sandbox ]; then
+    SANDBOX_ARG=1
+    shift
+  elif [ "$1" = --force ]; then
+    FORCE=1
+    shift
+  elif [ "$1" = --remote-control ]; then
+    [ $# -ge 2 ] && [ -z "$REMOTE_CONTROL" ] && word "$2" || usage "--remote-control takes a name of lowercase words joined by hyphens, once"
+    REMOTE_CONTROL=$2
+    shift 2
+  elif [ "$1" = --ssh ]; then
+    # a plain user@host, which never starts with -, so ssh never reads it as an option
+    [ $# -ge 2 ] && [ -z "$SSH_HOST" ] && [[ $2 =~ ^[a-z_][a-z0-9_-]*@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || usage "--ssh takes a plain user@host, once"
+    SSH_HOST=$2
+    shift 2
+  elif [ "$1" = --key ]; then
+    [ $# -ge 2 ] && [ -z "$SSH_KEY" ] && [[ $2 == /* ]] || usage "--key takes an absolute path to a key file, once"
+    SSH_KEY=$2
+    shift 2
   elif [ "$1" = --brief ]; then
     [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$RESUME_BRIEF" ] || usage
     case "$2" in --*) usage "--brief needs a value; \"$2\" starts with --" ;; esac
@@ -976,16 +1283,58 @@ PY
     refuse "the herdr server $HERDR_SESSION_NAME is not running at $HERDR_DIR/$HERDR_SESSION_NAME.sock; playground, or bun run ops:herdr start, brings it up"
 }
 
+# What claude's sandbox needs on Linux, read in a POSIX shell: bwrap and socat on PATH, and a bwrap that opens the sandbox's network namespace, which Ubuntu 24.04's AppArmor refuses with no profile for it; one line a missing piece, then ok.
+SANDBOX_NEEDS='if [ "$(uname -s)" = Linux ]; then
+  for t in bwrap socat; do command -v "$t" >/dev/null 2>&1 || echo "missing $t"; done
+  if command -v bwrap >/dev/null 2>&1 && ! e=$(bwrap --ro-bind / / --unshare-net true 2>&1 >/dev/null); then echo "apparmor $(printf "%s\n" "$e" | head -n 1)"; fi
+fi
+echo ok'
+# A sandboxed start's claude exits in its pane, naming nothing here, when its machine lacks what the sandbox needs (failIfUnavailable), so that machine is read before the pane opens: an --ssh probe's over ssh, under the launch's PATH and with its first run finished there too, else this one; it installs nothing.
+sandbox_ready() {
+  local where said line why= signin=
+  if [ -n "$SSH_HOST" ]; then
+    where=$SSH_HOST
+    # --remote-control also asks whether that machine holds a claude.ai sign-in, by the file's presence alone
+    [ -z "$REMOTE_CONTROL" ] || signin='[ -f "$HOME/.claude/.credentials.json" ] || echo token-only; '
+    said=$(ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$SSH_HOST" "PATH=\"\$HOME/.bun/bin:\$PATH\"; grep -Eq '\"hasCompletedOnboarding\"[[:space:]]*:[[:space:]]*true' \"\$HOME/.claude.json\" 2>/dev/null || echo onboarding; $signin$SANDBOX_NEEDS" </dev/null 2>&1) ||
+      refuse "it cannot read $SSH_HOST over ssh ($(tail -n 1 <<<"$said"))"
+  else
+    where="this machine"
+    said=$(bash -c "$SANDBOX_NEEDS" 2>&1) || refuse "it cannot read what this machine holds for claude's sandbox ($(tail -n 1 <<<"$said"))"
+  fi
+  [ "$(tail -n 1 <<<"$said")" = ok ] || refuse "it cannot read what $where holds for claude's sandbox ($(tail -n 1 <<<"$said"))"
+  while IFS= read -r line; do
+    case $line in
+      token-only) TOKEN_ONLY=1 ;;
+      onboarding) why+="; ~/.claude.json there lacks \"hasCompletedOnboarding\": true, so claude would wait on its first-run screens: start claude there once by hand" ;;
+      "missing "*) why+="; ${line#missing } is not on PATH, and claude's sandbox needs it" ;;
+      "apparmor "*) why+="; bwrap cannot open the sandbox's network namespace (${line#apparmor }): Ubuntu 24.04's kernel.apparmor_restrict_unprivileged_userns=1 refuses it unless an AppArmor profile lets bwrap use user namespaces" ;;
+    esac
+  done <<<"$said"
+  [ -z "$why" ] || refuse "on $where ${why#; }, so its claude would exit in its pane (failIfUnavailable); spawn.sh installs nothing"
+}
+
 MODE=${1:-}
 [ $# -gt 0 ] && shift
 [ -z "$REPORTS_TO" ] || [ "$MODE" = worker ] || usage "--reports-to is for a worker, not ${MODE:-no mode}"
 [ -z "$IN_DIR" ] || [ "$MODE" = worker ] || usage "--in is for a worker, not ${MODE:-no mode}"
+[ -z "$READS_ONLY" ] || [ "$MODE" = worker ] || usage "--reads-only is for a worker, not ${MODE:-no mode}"
+[ -z "$FORCE" ] || [ "$MODE" = resume ] || usage "--force is for a resume, not ${MODE:-no mode}"
+SANDBOX_ONLY="--sandbox is for a worker's, a reviewer's or a probe's start"
+[ -z "$SANDBOX_ARG" ] || [[ $MODE =~ ^(worker|column|probe)$ ]] || usage "$SANDBOX_ONLY, not a ${MODE:-session}'s"
 [ -z "$PR_ARG" ] || [[ $MODE =~ ^(column|resume)$ ]] || usage "--pr is for a reviewer's or tester's column or resume, not ${MODE:-no mode}"
 [ -z "$TITLE_ARG" ] || [[ $MODE =~ ^(worker|column|resume)$ ]] || usage "--title is for a worker or a reviewer's or tester's column, not ${MODE:-no mode}"
+# A probe alone runs on another machine or with Remote Control, so a session that does real work stays here, where its gate, its guards and restore read it.
+for flag in remote-control:"$REMOTE_CONTROL" ssh:"$SSH_HOST" key:"$SSH_KEY"; do
+  [ -z "${flag#*:}" ] || [ "$MODE" = probe ] || usage "--${flag%%:*} is for a probe's start (spawn.sh probe), not a ${MODE:-session}'s"
+done
+[ -z "$SSH_HOST" ] || [ -n "$SSH_KEY" ] || usage "--ssh needs --key <file>"
+[ -z "$SSH_KEY" ] || [ -n "$SSH_HOST" ] || usage "--key needs --ssh <user@host>"
+[ -z "$SSH_KEY" ] || { [ -f "$SSH_KEY" ] && [ -r "$SSH_KEY" ]; } || usage "--key names no readable file at $SSH_KEY"
 # herdr 0.9.5 keeps a resume command only from a source that holds the pane through report-agent, and then shows that source's state in place of its own (measured: a 14s turn read idle throughout), so restore reruns the sessions spawn.sh itself listed, with ops-herdr's resume_agents_on_restore off. Each goes through resume, so the gate and the live-name check judge it, and a live one is left as it is.
 if [ "$MODE" = restore ]; then
   NAME=restore
-  [ $# -eq 0 ] && [ -z "$CHECK$ACCOUNT$BACKEND$CLAUDE_MODEL$EFFORT$MEMORY_DIR$MEMORY_OFF$RESUME_BRIEF$RUNTIME$SIZE" ] || usage "restore takes no other words"
+  [ $# -eq 0 ] && [ -z "$CHECK$ACCOUNT$BACKEND$CLAUDE_MODEL$EFFORT$HARNESS$MEMORY_DIR$MEMORY_OFF$PRIORITY$RESUME_BRIEF$RUNTIME$SIZE" ] || usage "restore takes no other words"
   # One restore at a time: ops-herdr's start and its job's next cycle can both run one, and two resumes of a name both pass the live-name check until its claude writes its registry file, so it would start twice. The lock is a symlink naming its holder's pid and start time, so a holder that died, or a pid macOS handed on, frees it.
   LOCK="$RESUME_DIR/.restore.lock"
   ME=$(started $$)
@@ -994,11 +1343,11 @@ if [ "$MODE" = restore ]; then
   if ! ln -s "$ME" "$LOCK" 2>/dev/null; then
     HELD=$(readlink "$LOCK")
     if [ -n "$HELD" ] && [ "$HELD" = "$(started "${HELD%% *}")" ]; then
-      echo "another restore is running (pid ${HELD%% *})"
+      echo "a restore is already running (pid ${HELD%% *}), so this one stops; nothing is wrong"
       exit 1
     fi
     rm -f "$LOCK"
-    ln -s "$ME" "$LOCK" 2>/dev/null || { echo "another restore is running"; exit 1; }
+    ln -s "$ME" "$LOCK" 2>/dev/null || { echo "a restore is already running, so this one stops; nothing is wrong"; exit 1; }
   fi
   trap '[ "$(readlink "$LOCK")" = "$ME" ] && rm -f "$LOCK"' EXIT
   # A function holds the heredoc, since macOS bash 3.2 misreads the # in a heredoc inside $( ). The roster is roster.ts's own, which runs without CLAUDE_CONFIG_DIR under inscope, as the TITLE read below does.
@@ -1051,28 +1400,41 @@ for file in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
         continue
     extras = words[6:]
     keys = extras[::2]
+    if {"--ssh", "--remote-control"} & set(keys):
+        skip(name, "it started with --ssh or --remote-control, a probe's start alone, so restore leaves it down")
+        continue
     if (
         len(words) >= 6
         and words[1].endswith("/scripts/spawn.sh")
         and words[2:4] == ["resume", name]
         and len(extras) % 2 == 0
         and sorted(set(keys)) == sorted(keys)
-        and set(keys) <= {"--account", "--effort", "--model"}
+        and set(keys) <= {"--account", "--effort", "--model", "--pr"}
         and not any("\t" in w or "\n" in w for w in words)
     ):
-        print("run\t" + "\t".join(words[3:] + (["--pr", served[name]] if served.get(name) else [])))
+        # a checker's record names the PRs it served at its start, and its roster row the ones it serves now, which win
+        pairs = [(k, v) for k, v in zip(extras[::2], extras[1::2]) if not (k == "--pr" and served.get(name))]
+        pairs += [("--pr", served[name])] if served.get(name) else []
+        print("run\t" + "\t".join(words[3:6] + [w for pair in pairs for w in pair]))
     else:
         skip(name, "its exec line is not a resume restore runs")
 PY
   }
   lines=$(restore_list) || refuse "it cannot read the roster or the resume files"
-  # The first dispatcher's record runs first, so the owner's dispatcher is back before any other resume takes the gate's room.
+  # The first dispatcher's record runs first, so the owner's dispatcher is back before any other resume takes the gate's room, then every other manager's line (role_of_kind's dispatcher and lead), then the rest in their order, so the managers are back before the workers.
+  # A run line's kind is kind_of's; a skip line, which starts nothing and may number in the hundreds, takes its name's kind alone (kind_of_name), since kind_of reads the roster once a call.
   first=$(dispatcher_of 1)
-  lead= rest=
+  lead= ahead= rest=
   while IFS= read -r line; do
-    case "$line" in "run"$'\t'"$first"$'\t'*) lead+="$line"$'\n' ;; *) rest+="$line"$'\n' ;; esac
+    name=${line#*$'\t'} name=${name%%$'\t'*}
+    case "$line" in
+      "run"$'\t'"$first"$'\t'*) lead+="$line"$'\n'; continue ;;
+      "run"$'\t'*) kind=$(kind_of "$name") ;;
+      *) kind=$(kind_of_name "$name") ;;
+    esac
+    case "$(role_of_kind "$kind")" in dispatcher | lead) ahead+="$line"$'\n' ;; *) rest+="$line"$'\n' ;; esac
   done <<<"$lines"
-  lines="$lead$rest"
+  lines="$lead$ahead$rest"
   # A resume that waits (restore_waits) comes back on a later restore, so it is progress, printed as waiting, and leaves the exit 0; any other miss fails the restore.
   failed=0
   while IFS=$'\t' read -r -a args; do
@@ -1104,14 +1466,9 @@ PY
   done <<<"$lines"
   exit "$failed"
 fi
-# A factory session closes a herdr session's pane only here, since the no-raw-spawn hook refuses herdr's own pane close: herdr's socket has no access control. It closes only a pane spawn.sh opened, by the label it set, on the server the session's resume record names, and ends the session's roster row just before the pane closes (putting its status back when herdr refuses the close), so a restore that finds the session gone reads ended, keeping its time and the row's status in $DATA/closes/<name> for the load gate (JUST_CLOSED) and leaving the pins and the record as they are, so a resume, which sets the row back to starting, can reopen it.
-if [ "$MODE" = close ]; then
-  NAME=${1:-close}
-  [ $# -eq 1 ] && [ -z "$CHECK$ACCOUNT$BACKEND$CLAUDE_MODEL$EFFORT$MEMORY_DIR$MEMORY_OFF$RESUME_BRIEF$RUNTIME$SIZE" ] || usage "close takes a session's name alone"
-  word "$NAME" || refuse "a name is lowercase words joined by hyphens"
-  [ "$(cat "$DATA/runtimes/$NAME" 2>/dev/null)" = herdr ] ||
-    refuse "its runtime pin ($SHOWN/runtimes/$NAME) does not read herdr, so spawn.sh did not open it in herdr"
-  [ -f "$RESUME_DIR/$NAME.sh" ] || refuse "it has no resume record ($RESUME_DIR/$NAME.sh), which spawn.sh writes when herdr runs a session it opened"
+# The pane spawn.sh opened for $NAME, by the label it set, on the server its resume record names, into $server and $panes: with WANT_SID the labelled pane whose claude runs that session, $stays counting the labelled panes it leaves, else the one labelled pane; each refusal ends on $unpinned and names $MODE.
+labelled_pane() {
+  [ -f "$RESUME_DIR/$NAME.sh" ] || refuse "it has no resume record ($RESUME_DIR/$NAME.sh), which spawn.sh writes when herdr runs a session it opened$unpinned"
   # A record with no server line is playground's, as restore reads it.
   server=$(sed -n 's/^# server: //p' "$RESUME_DIR/$NAME.sh" | head -1)
   server=${server:-playground}
@@ -1125,18 +1482,72 @@ try:
 except (ValueError, KeyError, TypeError):
     sys.exit(1)' "$NAME") || refuse "it cannot read the panes of the herdr server $server"
   count=$(grep -c . <<<"$panes" || true)
-  [ "$count" -gt 0 ] || refuse "no pane on the herdr server $server carries the label $NAME, so spawn.sh opened none it can close"
-  [ "$count" -eq 1 ] || refuse "$count panes on the herdr server $server carry the label $NAME, so it cannot tell which one spawn.sh opened"
+  [ "$count" -gt 0 ] || refuse "no pane on the herdr server $server carries the label $NAME, so spawn.sh opened none it can $MODE$unpinned"
+  # With a session id, the labelled pane whose claude runs it: herdr's process-info names the claude's pid, and Claude Code's registry file for that pid names the session it runs, a resumed one's included.
+  stays=0
+  if [ -n "$WANT_SID" ]; then
+    picked=
+    for pane in $panes; do
+      ran=$(hr pane process-info --pane "$pane" 2>/dev/null | python3 -I -c 'import json, os, sys
+try:
+    for proc in json.load(sys.stdin)["result"]["process_info"]["foreground_processes"]:
+        if os.path.basename(str((proc.get("argv") or [""])[0])) == "claude":
+            with open(os.path.join(sys.argv[1], str(int(proc["pid"])) + ".json")) as f:
+                print(json.load(f).get("sessionId", ""))
+            break
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    pass' "$REGISTRY") || ran=
+      [ "$ran" != "$WANT_SID" ] || picked+="$pane"$'\n'
+    done
+    [ -n "$picked" ] || refuse "no pane on the herdr server $server carrying the label $NAME runs session $WANT_SID"
+    [ "$(grep -c . <<<"$picked")" -eq 1 ] || refuse "two panes on the herdr server $server carrying the label $NAME run session $WANT_SID"
+    panes=${picked%$'\n'}
+    stays=$((count - 1))
+  else
+    [ "$count" -eq 1 ] || refuse "$count panes on the herdr server $server carry the label $NAME, so it cannot tell which one spawn.sh opened$unpinned; name the session id of the one to $MODE"
+  fi
+}
+# A factory session reads a pane on a herdr server other than the default only here, since no-raw-spawn refuses a herdr call carrying HERDR_SOCKET_PATH: it finds the pane as close does and runs herdr's read alone there, on that server's own socket, writing nothing.
+if [ "$MODE" = read ]; then
+  NAME=${1:-read} WANT_SID=${2:-} unpinned=
+  [ $# -ge 1 ] && [ $# -le 2 ] && [ -z "$CHECK$ACCOUNT$BACKEND$CLAUDE_MODEL$EFFORT$HARNESS$MEMORY_DIR$MEMORY_OFF$PRIORITY$RESUME_BRIEF$RUNTIME$SIZE" ] || usage "read takes a session's name, and its session id to pick one of two panes under the name"
+  word "$NAME" || refuse "a name is lowercase words joined by hyphens"
+  [ -z "$WANT_SID" ] || [[ $WANT_SID =~ ^[0-9a-f-]{36}$ ]] || refuse "$WANT_SID is not a session id"
+  labelled_pane
+  hr pane read "$panes" --source recent-unwrapped --lines 200 || refuse "herdr could not read pane $panes on $server"
+  exit 0
+fi
+# A factory session closes a herdr session's pane only here, since the no-raw-spawn hook refuses herdr's own pane close: herdr's socket has no access control. It closes only a pane spawn.sh opened, by the label it set, on the server the session's resume record names, and ends the session's roster row just before the pane closes (putting its status back when herdr refuses the close), so a restore that finds the session gone reads ended, keeping its time and the row's status in $DATA/closes/<name> for the load gate (JUST_CLOSED) and leaving the pins and the record as they are, so a resume, which sets the row back to starting, can reopen it; a pin a stopped start left unwritten, it writes before the close.
+if [ "$MODE" = close ]; then
+  NAME=${1:-close} WANT_SID=${2:-}
+  [ $# -ge 1 ] && [ $# -le 2 ] && [ -z "$CHECK$ACCOUNT$BACKEND$CLAUDE_MODEL$EFFORT$HARNESS$MEMORY_DIR$MEMORY_OFF$PRIORITY$RESUME_BRIEF$RUNTIME$SIZE" ] || usage "close takes a session's name, and its session id to pick one of two panes under the name"
+  word "$NAME" || refuse "a name is lowercase words joined by hyphens"
+  [ -z "$WANT_SID" ] || [[ $WANT_SID =~ ^[0-9a-f-]{36}$ ]] || refuse "$WANT_SID is not a session id"
+  # A start stopped after herdr ran the session but before its pin landed leaves its record and its pane, so an absent pin passes on to them, and their refusals name it.
+  unpinned=
+  if [ ! -e "$DATA/runtimes/$NAME" ]; then
+    unpinned=", and it has no runtime pin ($SHOWN/runtimes/$NAME)"
+  elif [ "$(cat "$DATA/runtimes/$NAME" 2>/dev/null)" != herdr ]; then
+    refuse "its runtime pin ($SHOWN/runtimes/$NAME) does not read herdr, so spawn.sh did not open it in herdr"
+  fi
+  labelled_pane
   # herdr sets HERDR_PANE_ID and HERDR_SESSION in every pane, and a pane id is unique on its own server alone.
   [ "$panes" != "${HERDR_PANE_ID:-}" ] || [ "${HERDR_SESSION:-$server}" != "$server" ] ||
     refuse "pane $panes is your own; a session ends itself with /exit"
+  [ -z "$unpinned" ] || { mkdir -p "$DATA/runtimes" && printf 'herdr\n' > "$DATA/runtimes/$NAME"; } 2>/dev/null ||
+    refuse "it cannot write its runtime pin ($SHOWN/runtimes/$NAME)"
   # The row reads ended before the pane closes, so a restore's resume that finds the session gone reads ended too and leaves it down; a close herdr refuses puts the row's status back.
   # roster.ts drops a parked row's hold once it reads ended, and a park takes one in the same call, so the put-back names it.
   was=$(roster_field "$NAME" status)
   back=("status=$was")
   [ "$was" != parked ] || back+=("hold=$(roster_field "$NAME" hold)")
-  ended=1
-  rostered=$(env $UNSET "$BUN" "$ROSTER" set "$NAME" status=ended 2>&1 >/dev/null) || ended=
+  # A pane under the name that stays runs the session the row and its close time belong to, so a close by id leaves both alone.
+  ended=1 rostered=
+  if [ "$stays" -gt 0 ]; then
+    was=
+  else
+    rostered=$(env $UNSET "$BUN" "$ROSTER" set "$NAME" status=ended 2>&1 >/dev/null) || ended=
+  fi
   if ! said=$(hr pane close "$panes" 2>&1 >/dev/null | tr -s '\n' ' '); then
     said=${said% }
     if [ -n "$ended" ] && [ -n "$was" ] && ! rostered=$(env $UNSET "$BUN" "$ROSTER" set "$NAME" "${back[@]}" 2>&1 >/dev/null); then
@@ -1146,8 +1557,8 @@ except (ValueError, KeyError, TypeError):
     refuse "herdr would not close pane $panes (${said:-no answer from herdr})"
   fi
   echo "closed $NAME (pane $panes on $server)"
-  # The close keeps its time and the row's status before it ended it, for the load gate's pass of a resume within 15 minutes (JUST_CLOSED, below).
-  { mkdir -p "$DATA/closes" && echo "$(date -u +%s) $(date -u +%FT%TZ) ${was:-none}" > "$DATA/closes/$NAME"; } 2>/dev/null || true
+  # The close keeps its time and the row's status before it ended it, for a just-closed resume's pass (JUST_CLOSED, below).
+  [ "$stays" -gt 0 ] || { mkdir -p "$DATA/closes" && echo "$(date -u +%s) $(date -u +%FT%TZ) ${was:-none}" > "$DATA/closes/$NAME"; } 2>/dev/null || true
   if [ -z "$ended" ]; then
     [ -n "$rostered" ] && echo "roster.ts says: $rostered" >&2
     echo "spawn.sh: $NAME closed, but its roster write failed; record it with $BUN $ROSTER set $NAME status=ended, adding task=<what it does> for a name the roster lacks" >&2
@@ -1259,6 +1670,16 @@ case "$MODE" in
     [ $# -ge 2 ] && [ $# -le 3 ] || usage
     [ -z "$TITLE_ARG" ] || usage "--title is for a worker's or a checker's start, not a resume"
     NAME=$1 DIR=$2 SESSION=${3:-$1} BRIEF=$RESUME_BRIEF
+    # A probe started with --ssh or --remote-control comes back only as a new probe start, since a resume would run it here without them and write its record afresh.
+    grep -qE '^exec .* --(ssh|remote-control) ' "$RESUME_DIR/$NAME.sh" 2>/dev/null &&
+      refuse "it started as a probe with --ssh or --remote-control, which a resume would drop: start it again with spawn.sh probe"
+    # A row marked done, or ended with an endReason (an auto-end's), stays down unless --force, since an account move's resume once brought back a tester whose PR had merged; a plain close records no reason, so a close then a resume passes, and restore's own resume reads the row below.
+    if [ -z "$FORCE" ] && [ -z "${SPAWN_RESTORING:-}" ]; then
+      row_status=$(roster_field "$NAME" status) end_reason=$(roster_field "$NAME" endReason)
+      if [ "$row_status" = done ] || { [ "$row_status" = ended ] && [ -n "$end_reason" ]; }; then
+        refuse "its roster row reads $row_status (endReason ${end_reason:-none}), so it stays down: add --force to bring it back on purpose"
+      fi
+    fi
     KIND=$(kind_of "$NAME")
     ROLE=$(role_of_kind "$KIND")
     [ -n "$ROLE" ] || refuse "$NAME is not a factory session's name, and the roster gives it no kind"
@@ -1317,6 +1738,22 @@ case "$MODE" in
     ;;
   *) NAME=${MODE:-session}; usage ;;
 esac
+[ -z "$SANDBOX_ARG" ] || [[ $ROLE =~ ^(worker|reviewer|probe)$ ]] || usage "$SANDBOX_ONLY, not a $ROLE's"
+# A worker or checker names its login while usage.accounts lists a Claude row, since the account split ranks logins by week left per hour and cannot follow which login takes which work; a fresh install lists none, so its bare start stays on this machine's own login.
+if [ -z "$ACCOUNT" ] && [ "$MODE" != resume ] && [[ ! $BACKEND =~ ^(glm|local)$ ]] && [[ $ROLE =~ ^(worker|reviewer|tester)$ ]]; then
+  ORDER=$(python3 -I -c 'import datetime as dt, json, sys
+now = dt.datetime.now(dt.timezone.utc)
+def named(row):
+    until = row.get("parkedUntil")
+    try:
+        parked = isinstance(until, str) and dt.datetime.fromisoformat(until.replace("Z", "+00:00")) > now
+    except ValueError:
+        parked = False
+    return row["email"] + (" (parked until " + until + ")" if parked else "")
+rows = [r for r in json.loads(sys.argv[1]) if isinstance(r, dict) and r.get("provider", "claude") == "claude" and isinstance(r.get("email"), str)]
+print(", ".join(named(r) for r in rows))' "${USAGE_ACCOUNTS:-[]}") || refuse "it cannot read usage.accounts to check that a $ROLE names its login"
+  [ -z "$ORDER" ] || refuse "a $ROLE names its login with --account <email>, since the account split cannot follow which login takes which work: usage.accounts lists $ORDER"
+fi
 word "$NAME" || refuse "a name is lowercase words joined by hyphens"
 # A new name gives its kind, since a reader of the name alone would show and place it as another; a lead or manager may take its kind from the roster instead, and a resume keeps the name it has.
 NAMED=$(kind_of_name "$NAME")
@@ -1364,9 +1801,10 @@ if [ "$MODE" = resume ]; then
     # A pin names its harness, then its backend (HARNESSES in packages/settings/src/harnesses.ts); one written before the harness split names its backend alone.
     case "$pin" in
       glm | "claude-code glm") BACKEND=glm ;;
+      "claude-code local") BACKEND=local ;;
       claude | "claude-code claude") ;;
       "codex openai") HARNESS=codex ;;
-      *) refuse "the backend pin for $NAME reads none of claude-code claude, claude-code glm, codex openai, glm or claude: it cannot know how $NAME ran. Fix or remove $SHOWN/backends/$NAME, then resume." ;;
+      *) refuse "the backend pin for $NAME reads none of claude-code claude, claude-code glm, claude-code local, codex openai, glm or claude: it cannot know how $NAME ran. Fix or remove $SHOWN/backends/$NAME, then resume." ;;
     esac
   elif [ -n "$BACKEND$HARNESS" ]; then
     PIN_GIVEN=1
@@ -1374,7 +1812,7 @@ if [ "$MODE" = resume ]; then
     if [ "$ROLE" = reviewer ] || [ "$ROLE" = tester ]; then
       refuse "no backend pin for $NAME: it cannot know how $NAME ran. Resume it with --backend claude, which records the pin."
     fi
-    refuse "no backend pin for $NAME: it cannot know how $NAME ran. Resume it with --backend glm or --backend claude, whichever it ran on, which records the pin."
+    refuse "no backend pin for $NAME: it cannot know how $NAME ran. Resume it with --backend glm, --backend local or --backend claude, whichever it ran on, which records the pin."
   fi
 fi
 # Codex runs the first dispatcher alone, on the one login its CODEX_HOME holds, with the model and effort its own config names.
@@ -1408,17 +1846,26 @@ except Exception:
 sys.exit(0 if isinstance(email, str) and email.lower() == sys.argv[2].lower() else 1)
 PY
 }
+# Whether the Keychain holds service $1's item for account $2: only that it exists, with no -w, so the token is never read here. Claude Code's sandbox (SANDBOX_RUNTIME=1 in its shell) can close the Keychain, which then reads as no item, so a start from inside it names the check it leaves to the new pane's shell, which runs outside the sandbox and stops on a missing item before claude runs.
+keychain_has() {
+  security find-generic-password -s "$1" -a "$2" >/dev/null 2>&1 && return
+  [ "${SANDBOX_RUNTIME:-}" = 1 ] || return 1
+  echo "spawn.sh: the sandbox closes the Keychain to this shell, so the new pane checks the $1 item for $2" >&2
+}
+# The email goes into the pane's command, so it is a plain local@domain: no quote, space or $.
+plain_account() {
+  [[ $ACCOUNT =~ ^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] || refuse "--account takes a plain email, not $ACCOUNT"
+}
 # An --account, or the login the usage gate picks for a bare spawn, is a second login whose Keychain item exists.
 check_account() {
-  # The email goes into the pane's command, so it is a plain local@domain: no quote, space or $.
-  [[ $ACCOUNT =~ ^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] || refuse "--account takes a plain email, not $ACCOUNT"
+  plain_account
   ! own_login || refuse "--account $ACCOUNT is this machine's own Claude login, whose usage the session would share unchecked: name a second account"
-  # Only that the item exists: no -w, so the token is never read here.
-  security find-generic-password -s "$KEYCHAIN" -a "$ACCOUNT" >/dev/null 2>&1 ||
-    refuse "the Keychain holds no $KEYCHAIN item for $ACCOUNT"
+  keychain_has "$KEYCHAIN" "$ACCOUNT" || refuse "the Keychain holds no $KEYCHAIN item for $ACCOUNT"
 }
 # --account naming this machine's own login starts on it with no token, as a bare start does, its usage judged by that login's reading and the split skipped.
 OWN_LOGIN=
+# A local session runs on a placeholder token, so no login of either kind reaches it.
+[ "$BACKEND" != local ] || [ -z "$ACCOUNT" ] || refuse "a session on a local model takes no --account: it runs on a placeholder token"
 if [ -n "$ACCOUNT" ] && [ "$BACKEND" != glm ] && own_login; then
   OWN_LOGIN=$ACCOUNT
   ACCOUNT=
@@ -1427,15 +1874,23 @@ fi
 [ -z "$ACCOUNT" ] || [ "$BACKEND" = glm ] || check_account
 if [ -n "$BACKEND" ]; then
   case "$BACKEND" in
-    glm | claude) ;;
-    *) refuse "--backend takes glm or claude, not $BACKEND" ;;
+    glm | local | claude) ;;
+    *) refuse "--backend takes glm, local or claude, not $BACKEND" ;;
   esac
   # A checker's verdict gates a merge, so it stays on Claude.
-  case "$ROLE" in reviewer | tester) [ "$BACKEND" = glm ] && refuse "a $ROLE runs on Claude, so it takes no --backend glm" ;; esac
+  case "$ROLE" in reviewer | tester) [ "$BACKEND" != claude ] && refuse "a $ROLE runs on Claude, so it takes no --backend $BACKEND" ;; esac
+fi
+# Claude plans and researches (the glm rule), and spawn.sh holds that for the local model by kind.
+if [ "$BACKEND" = local ]; then
+  case "$(kind_of "$NAME")" in
+    planner) refuse "a planner plans on Claude, so it takes no --backend local" ;;
+    researcher) refuse "a researcher researches on Claude, so it takes no --backend local" ;;
+  esac
+  [ -z "$SSH_HOST" ] || refuse "the local model listens on this machine's loopback alone, so an --ssh probe takes no --backend local"
 fi
 # Inbox #i520: the second dispatcher (a manager start, a dispatcher's name with -2, or a roster slot of 2) never shares the first's login, so it keeps answering when the first runs out.
 if [ "$KIND" = dispatcher ] && { { [ "$MODE" = manager ] && [ -z "$FIRST" ]; } || second_dispatcher "$NAME" || [ "$(roster_field "$NAME" slot)" = 2 ]; } && [ "$BACKEND" != glm ] && [ -z "$ACCOUNT" ]; then
-  refuse "$NAME, the second dispatcher, runs on --backend glm, or on Claude with --account <email>, a second account: on this machine's own login it would run out with the first"
+  refuse "$NAME, the second dispatcher, runs on --backend glm, or on Claude with --account <email>, a second account: on this machine's own login it would run out with the first, and --backend local takes no dispatcher, since a dispatcher plans"
 fi
 case "${EFFORT:-high}" in
   low | medium | high | xhigh | max) ;;
@@ -1450,22 +1905,51 @@ case "$ROLE" in
   reviewer | tester) [ -z "$CLAUDE_MODEL" ] || [ "$CLAUDE_MODEL" = "$CHECKER_MODEL" ] ||
     refuse "a $ROLE runs on $CHECKER_MODEL, since its verdict gates a merge, so it takes no --model $CLAUDE_MODEL" ;;
 esac
-if [ "$BACKEND" = glm ]; then
-  # The GLM launch maps every model Claude Code asks for to GLM, so a Claude model asked for here would never run; a resume reads glm from its pin first.
-  [ -z "$CLAUDE_MODEL" ] || refuse "a session on GLM takes no --model: GLM maps every model itself"
-  # No guarded org's data reaches GLM: a session in a folder named for an org ext.links guards, or on a brief naming a word glm-refused-sources lists, runs on Claude.
+OFF_CLAUDE=
+[ "$BACKEND" = glm ] && OFF_CLAUDE=GLM
+[ "$BACKEND" = local ] && OFF_CLAUDE="the local model"
+if [ -n "$OFF_CLAUDE" ]; then
+  # The GLM and local launches map every model Claude Code asks for to their own, so a Claude model asked for here would never run; a resume reads the backend from its pin first.
+  [ "$BACKEND" != glm ] || [ -z "$CLAUDE_MODEL" ] || refuse "a session on GLM takes no --model: GLM maps every model itself"
+  [ "$BACKEND" != local ] || [ -z "$CLAUDE_MODEL" ] || refuse "a session on a local model takes no --model: the launch maps every model to the served name"
+  # No guarded org's data reaches GLM or the local model: a session in a folder named for an org ext.links guards, or on a brief naming a word glm-refused-sources lists, runs on Claude.
   # A failed read of the guarded orgs refuses.
   orgs=$( (cd / && env $UNSET "$BUN" --no-env-file "$REPO/packages/scripts/src/playground/setting.ts" --guarded-orgs) 2>&1) ||
     refuse "it cannot read the orgs ext.links guards, so it cannot tell a guarded org's checkout: $orgs"
   origin=$(git -C "${DIR:-/}" remote get-url origin 2>/dev/null) || origin=
   # A guarded org, as a folder on the session's path or as the owner of that folder's GitHub origin, in any case.
   org=$(python3 -I -c 'import json, re, sys; parts = sys.argv[1].lower().split("/"); m = re.search(r"github\.com[:/]([\w.-]+)/", sys.argv[3]); owner = m.group(1).lower() if m else ""; print(next((o for o in json.loads(sys.argv[2]) if o in parts or o == owner), ""))' "${DIR:-}" "$orgs" "$origin") || refuse "it cannot read the orgs ext.links guards"
-  [ -z "$org" ] || refuse "$NAME runs in a checkout of $org, an org ext.links guards, so it runs on Claude: start it with --backend claude, closing a GLM-pinned session first"
+  [ -z "$org" ] || refuse "$NAME runs in a checkout of $org, an org ext.links guards, so it runs on Claude: start it with --backend claude, closing a $BACKEND-pinned session first"
   if [ -n "${BRIEF:-}" ]; then
     words=$(guard_list glm-refused-sources 2>&1) || refuse "$words"
     named=$(python3 -I -c 'import json, sys; text = open(sys.argv[1], encoding="utf-8", errors="replace").read().lower(); print(next((w for w in json.loads(sys.argv[2]) if w and w.lower() in text), ""))' "$DATA/$BRIEF" "$words") || refuse "it cannot read $SHOWN/$BRIEF for glm-refused-sources' words"
-    [ -z "$named" ] || refuse "$BRIEF names $named, a source glm-refused-sources keeps off GLM, so it runs on Claude: start it with --backend claude, closing a GLM-pinned session first"
+    [ -z "$named" ] || refuse "$BRIEF names $named, a source glm-refused-sources keeps off $OFF_CLAUDE, so it runs on Claude: start it with --backend claude, closing a $BACKEND-pinned session first"
   fi
+fi
+# The local model answers on this machine's one model server port; a start checks it lists the served name, which also tells the model is up. A test holds it to packages/config/src/console.ts's LOCAL_URL.
+LOCAL_URL=http://127.0.0.1:8000
+# The name serve.sh gives every local model (--served-model-name local), so a swap changes no launch. A test holds it to packages/config/src/console.ts's LOCAL_SERVED.
+LOCAL_SERVED=local
+if [ "$BACKEND" = local ]; then
+  # The room kept for the reply, which shares the server's window.
+  LOCAL_MARGIN=8192
+  listed=$(curl -sS --max-time 5 "$LOCAL_URL/v1/models" 2>&1) || refuse "the local model at $LOCAL_URL did not answer in 5 s ($listed): ask Ops to bring it up, or start it on --backend glm or claude"
+  LOCAL_LEN=$(python3 -I -c 'import json, sys
+try:
+    card = [m for m in json.loads(sys.argv[1]).get("data", []) if m.get("id") == sys.argv[2]]
+except (ValueError, AttributeError, TypeError):
+    card = []
+if not card:
+    sys.exit(1)
+n = card[0].get("max_model_len")
+print(n if type(n) is int and n > 2 * int(sys.argv[3]) else "")' "$listed" "$LOCAL_SERVED" "$LOCAL_MARGIN") ||
+    refuse "the local model at $LOCAL_URL serves no model named $LOCAL_SERVED: ask Ops which model is up, or start it on --backend glm or claude"
+  # Claude Code assumes 1M for a model name it does not know, so the session declares the server's own window, its card's max_model_len, less 8192 for the reply that shares it; a card without a number above twice that takes 120000, a round default under K's 131072 less 8192, which is 122880.
+  LOCAL_CONTEXT=120000
+  [ -n "$LOCAL_LEN" ] && LOCAL_CONTEXT=$((LOCAL_LEN - LOCAL_MARGIN))
+  LOCAL_CAP=$( (cd / && env $UNSET "$BUN" --no-env-file "$REPO/packages/scripts/src/spawn/local-cap.ts" "${LOCAL_URL##*:}") 2>&1) || refuse "$LOCAL_CAP"
+fi
+if [ "$BACKEND" = glm ]; then
   # The GLM key is a usage.accounts row of provider glm: the one --account labels, else the first; ACCOUNT then empties, since it names a Claude login everywhere below.
   GLM_LABELS=$(setting usage.accounts | python3 -I -c 'import json, sys; [print(a["label"]) for a in json.load(sys.stdin) if a.get("provider") == "glm"]' 2>/dev/null) || GLM_LABELS=
   if [ -n "$ACCOUNT" ]; then
@@ -1475,8 +1959,7 @@ if [ "$BACKEND" = glm ]; then
     GLM_ACCOUNT=$(head -n 1 <<<"$GLM_LABELS") GLM_GIVEN=
     [ -n "$GLM_ACCOUNT" ] || refuse "usage.accounts lists no GLM key: add one with playground accounts add --provider glm --label <label>"
   fi
-  security find-generic-password -s "$GLM_KEYCHAIN" -a "$GLM_ACCOUNT" >/dev/null 2>&1 ||
-    refuse "the Keychain holds no $GLM_KEYCHAIN item for $GLM_ACCOUNT"
+  keychain_has "$GLM_KEYCHAIN" "$GLM_ACCOUNT" || refuse "the Keychain holds no $GLM_KEYCHAIN item for $GLM_ACCOUNT"
 fi
 
 holders=$(live_holders "$NAME") || refuse "it cannot read the live sessions in $REGISTRY"
@@ -1493,6 +1976,37 @@ restoring_row_down() {
   return 1
 }
 ! restoring_row_down || REFUSE_CODE=4 refuse "its roster row reads $row_status"
+# Claude Code asks whether you trust a folder before its first session there and waits with No, exit marked; its yes stays in its config as projects[<folder>].hasTrustDialogAccepted, read on the session's folder and each folder above it up to the checkout's root and no further (measured on 2.1.325), so the yes on the checkout's root covers every worktree in it and a yes on a folder above the checkout counts for nothing.
+# A Claude session in this checkout starts only once that yes is there, which install.sh records for the checkout it cloned and first run's Trust this folder records otherwise; a folder outside it keeps herdr_answer's answer, and an --ssh probe's claude runs on the other machine, whose own config it reads.
+claude_trusts() {
+  python3 -I - "$(own_config)" "$1" "$2" <<'PY'
+import json, os, sys
+try:
+    projects = json.load(open(sys.argv[1])).get("projects") or {}
+except Exception:
+    sys.exit(1)
+yes = set()
+for path, project in projects.items():
+    if isinstance(project, dict) and project.get("hasTrustDialogAccepted") is True:
+        yes |= {os.path.abspath(path), os.path.realpath(path)}
+for d, top in ((os.path.abspath(sys.argv[2]), os.path.abspath(sys.argv[3])), (os.path.realpath(sys.argv[2]), os.path.realpath(sys.argv[3]))):
+    while True:
+        if d in yes:
+            sys.exit(0)
+        if d == top or os.path.dirname(d) == d:
+            break
+        d = os.path.dirname(d)
+sys.exit(1)
+PY
+}
+if [ "$HARNESS" != codex ] && [ -z "$SSH_HOST" ]; then
+  for checkout in "$MAIN" "${PLAYGROUND_REPO:-$MAIN}"; do
+    [[ ${DIR:-$REPO}/ == "$checkout"/* ]] || continue
+    claude_trusts "${DIR:-$REPO}" "$checkout" ||
+      refuse "Claude Code would stop on its folder trust question in ${DIR:-$REPO}, since $(own_config) holds no yes for $checkout: click Trust this folder on Claude Code's card, in the Dashboard's first run or Settings' Harness section, then start it again"
+    break
+  done
+fi
 # The item's size and its load units: --size, else small for a checker, a short read run-slot.sh knows no name for, else the roster and plan.json through run-slot.sh's own reader
 [ -n "$SIZE" ] || case "$ROLE" in reviewer | tester) SIZE=small ;; esac
 case "$SIZE" in
@@ -1502,9 +2016,13 @@ esac
 case "$ITEM" in "small 1" | "medium 2" | "big 3") ;; *) ITEM="medium 2" ;; esac
 PRIORITY_FILE=
 if [ -n "$PRIORITY" ]; then
-  PRIORITY_FILE=$(priority_file) || refuse "--priority starts only while a priority file stands in $DATA (priority.json, priority-start.json or another priority-<name>.json), and none does: playground priority on <session> --reason \"<why>\" opens one, on the owner's or the dispatcher's word"
+  priority_file || if [ -n "$PRIORITY_KEPT" ]; then
+    refuse "--priority starts only on a priority file that passes it, and none in $DATA does: $PRIORITY_KEPT; a session's own window passes only its own start, and playground priority on $NAME --reason \"<why>\" opens one, on the owner's or the dispatcher's word"
+  else
+    refuse "--priority starts only while a priority file stands in $DATA (priority.json, priority-start.json or another priority-<name>.json), and none does: playground priority on <session> --reason \"<why>\" opens one, on the owner's or the dispatcher's word"
+  fi
 fi
-# A resume within 15 minutes of spawn.sh closing its row while it read live (not ended, parked, paused or done) passes the load gate, as a Claude Code update's close and resume do, since that session already counts in the load it comes back into; a new start, an older close and a close of a row that read otherwise meet it.
+# JUST_CLOSED names a just-closed resume, whose pass playbook's SPAWN.md, Capacity gate, holds: a resume within 15 minutes of spawn.sh closing its row while it read live, as a Claude Code update's close and resume are.
 JUST_CLOSED=
 if [ "$MODE" = resume ] && [ -f "$DATA/closes/$NAME" ] && read -r closed_at closed_iso closed_was < "$DATA/closes/$NAME"; then
   case "${closed_was:-none}" in
@@ -1512,7 +2030,7 @@ if [ "$MODE" = resume ] && [ -f "$DATA/closes/$NAME" ] && read -r closed_at clos
     *) if [[ $closed_at =~ ^[0-9]+$ ]] && age=$(($(date -u +%s) - closed_at)) && [ "$age" -ge 0 ] && [ "$age" -le 900 ]; then JUST_CLOSED="its $closed_was row closed at $closed_iso"; fi ;;
   esac
 fi
-# While focus stands (playground focus), one session has the Mac, so a start waits for its end, but for that session's own reviewer and tester and a --priority start on any priority file (below).
+# While focus stands (playground focus), one session has the Mac, so a start waits for its end, but for that session's own reviewer and tester and a --priority start on a priority file that passes it (priority_file, below).
 if FOCUS=$(python3 -I - "$DATA/focus.json" <<'PY' 2>/dev/null
 import datetime, json, sys
 try:
@@ -1525,7 +2043,7 @@ if until <= datetime.datetime.now(datetime.timezone.utc):
 print(f"{f.get('session')} until {f['until']}")
 PY
 ); then
-  # the focused session's own reviewer and tester start, the one a column reports to or a resume's roster row serves, so an urgent fix is still checked, and a --priority start goes on while any priority file stands, a job's own start file included, since no gate but the machine's own delays a job's ticket start
+  # the focused session's own reviewer and tester start, the one a column reports to or a resume's roster row serves, so an urgent fix is still checked, and a --priority start goes on while a priority file passes it, a job's own start file included, since no gate but the machine's own delays a job's ticket start
   [ -n "$PRIORITY_FILE" ] || case "$ROLE" in reviewer | tester) [ "${TO:-${serves:-}}" = "${FOCUS%% until *}" ] ;; *) false ;; esac ||
     refuse "focus stands for $FOCUS, so no new session starts until it ends but its own reviewer and tester (playground focus off ends it)"
 fi
@@ -1543,6 +2061,13 @@ if [ "$RUNTIME" = herdr ]; then
   [ "${#NAME}" -le 32 ] || refuse "herdr names an agent with at most 32 characters, and $NAME has ${#NAME}"
   herdr_ready "${PLAYGROUND_HERDR_SESSION:-${DESK_HERDR_SESSION:-playground}}"
 fi
+# A probe runs its shell commands in Claude Code's sandbox, which every child process inherits, so a delete a script makes where no guard hook sees it stays inside the write roots; its settings go in a file of their own.
+SANDBOX=
+[ "$ROLE" = probe ] && SANDBOX=sandbox-
+# --sandbox, or a resumed row that records it, takes the closed sandbox in a file of its own: a probe's, with loopback, the Keychain and the data folder's secret files closed too (scripts/README.md, spawn.sh).
+CLOSED=
+{ [ -n "$SANDBOX_ARG" ] || { [ "$MODE" = resume ] && [ "$(roster_field "$NAME" sandbox)" = on ]; }; } && CLOSED=1 SANDBOX=sandbox-closed-
+[ -z "$SANDBOX" ] || sandbox_ready
 if [ -n "$CHECK" ]; then
   echo "ok: $NAME can start"
   exit 0
@@ -1552,7 +2077,7 @@ MEMORY=off
 ARM=
 if [ -n "$MEMORY_DIR" ]; then
   MEMORY=on
-elif [ -z "$MEMORY_OFF" ] && [ "$BACKEND" != glm ]; then
+elif [ -z "$MEMORY_OFF" ] && [ -z "$OFF_CLAUDE" ]; then
   case "$ROLE:$KIND" in
     dispatcher:* | lead:builder | lead:ops | lead:planner)
       # a resume keeps a row --memory off left off, as a worker's keeps its arm
@@ -1585,6 +2110,11 @@ CARRY=; [ -n "${PLAYGROUND_DATA_DIR:-}" ] && CARRY="PLAYGROUND_DATA_DIR=$(printf
 LAUNCH="env ${UNSET}${CARRY}PLAYGROUND_ROLE=$ROLE claude"
 # Single quotes keep the lookup as text, so the pane's own shell reads the token, never into an argv, this script's output or the roster; the pane stops on an empty one before claude runs.
 [ -n "$ACCOUNT" ] && LAUNCH='tk="$(security find-generic-password -s '"$KEYCHAIN"' -a '"$ACCOUNT"' -w)" || exit 1; [ -n "$tk" ] || { echo "The '"$KEYCHAIN"' item for '"$ACCOUNT"' holds an empty token; save it again with security add-generic-password -s '"$KEYCHAIN"' -a '"$ACCOUNT"' -w, then respawn." >&2; exit 1; }; CLAUDE_CODE_OAUTH_TOKEN="$tk" '"$LAUNCH"
+# Remote Control forms no link for a start on a token (CLAUDE_CODE_OAUTH_TOKEN, measured), so SendMessage never reaches it: --remote-control warns on an --account start, and on an --ssh one whose machine holds no claude.ai sign-in.
+if [ -n "$REMOTE_CONTROL" ] && { [ -n "$ACCOUNT" ] || [ -n "$TOKEN_ONLY" ]; }; then
+  [ -n "$ACCOUNT" ] && on="--account $ACCOUNT starts it on a token" || on="$SSH_HOST holds no claude.ai sign-in (~/.claude/.credentials.json), so it runs on a token"
+  echo "spawn.sh: --remote-control $REMOTE_CONTROL forms no Remote Control link, since $on; for a link, start it on a claude.ai sign-in: no --account, on a machine signed in to claude.ai" >&2
+fi
 MODEL=${CLAUDE_MODEL:-$DEFAULT_MODEL}
 case "$ROLE" in reviewer | tester) MODEL=$CHECKER_MODEL ;; esac
 GLM_MODEL="'$GLM_ID[1m]'"
@@ -1593,25 +2123,89 @@ if [ "$BACKEND" = glm ]; then
   LAUNCH='tk="$(security find-generic-password -s '"$GLM_KEYCHAIN"' -a '"$GLM_ACCOUNT"' -w)" || exit 1; [ -n "$tk" ] || { echo "The '"$GLM_KEYCHAIN"' item for '"$GLM_ACCOUNT"' holds an empty token; save it again with playground accounts add --provider glm --label '"$GLM_ACCOUNT"', then respawn." >&2; exit 1; }; ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic ANTHROPIC_AUTH_TOKEN="$tk" ANTHROPIC_DEFAULT_OPUS_MODEL='"$GLM_MODEL"' ANTHROPIC_DEFAULT_SONNET_MODEL='"$GLM_MODEL"' ANTHROPIC_DEFAULT_HAIKU_MODEL='"$GLM_ID"' ENABLE_TOOL_SEARCH=true '"$LAUNCH"
   MODEL=$GLM_MODEL
 fi
-# Every kind compacts in one window, context.window (400k by default), GLM's included, the window the factory's settings give a session spawn.sh did not start; it was read with the model settings above.
+# The local model maps every model Claude Code asks for to the served name, on its loopback port and a placeholder token, the tool search deferred as on GLM.
+# Its chat template reads no effort, so each effort sets Claude Code's thinking instead (measured on M, 17 Nov: vLLM ends thinking at the cap; off answered 10-30x sooner, and was wrong where uncapped thinking was right): low turns it off by sending thinking disabled in the request body, since Claude Code sends no thinking field at MAX_THINKING_TOKENS=0 off Anthropic's API and the server thinks without one (local-thinking-check.ts), medium caps it at 8192 tokens with adaptive thinking off, since adaptive thinking ignores MAX_THINKING_TOKENS, and high and above leave it uncapped.
+if [ "$BACKEND" = local ]; then
+  case "${EFFORT:-high}" in
+    low) THINKING="thinking off; CLAUDE_CODE_EXTRA_BODY='{\"thinking\":{\"type\":\"disabled\"}}' " ;;
+    medium) THINKING="thinking capped at 8192 tokens; CLAUDE_CODE_MODEL_CAPABILITIES=$LOCAL_SERVED=-adaptive_thinking MAX_THINKING_TOKENS=8192 " ;;
+    *) THINKING="thinking uncapped; " ;;
+  esac
+  LAUNCH=": effort ${EFFORT:-high}, ${THINKING}ANTHROPIC_BASE_URL=$LOCAL_URL ANTHROPIC_AUTH_TOKEN=local ANTHROPIC_DEFAULT_OPUS_MODEL=$LOCAL_SERVED ANTHROPIC_DEFAULT_SONNET_MODEL=$LOCAL_SERVED ANTHROPIC_DEFAULT_HAIKU_MODEL=$LOCAL_SERVED CLAUDE_CODE_MAX_CONTEXT_TOKENS=$LOCAL_CONTEXT ENABLE_TOOL_SEARCH=true $LAUNCH"
+  MODEL=$LOCAL_SERVED
+  # The compact window, capped at the declared one above, so a session on a smaller server compacts at its window instead.
+  WINDOW=120000
+fi
+# Every kind compacts in one window, context.window (400k by default), GLM's included (a local session's is 120k, set above), the window the factory's settings give a session spawn.sh did not start; it was read with the model settings above.
 # The window reaches the session through its one settings file, built here from the factory's on every launch so the two never drift, one file per backend. On GLM: the user settings may turn on telemetry to an org's usage collector, which counts Claude usage alone, so a GLM session exports none. Claude Code keeps only the last --settings, and the user settings' env beats a variable on the launch line (both measured by a reviewer, 16 Oct), so the session's one settings file also turns the telemetry off (measured from a folder outside any checkout, 16 Oct: a SessionStart hook ran, no-env-dump refused printenv, and no metric left).
 TAG=
-[ "$BACKEND" = glm ] && TAG=glm-
-# A probe runs its shell commands in Claude Code's sandbox, which every child process inherits, so a delete a script makes where no guard hook sees it stays inside the write roots; its settings go in a file of their own. Workers and testers join once the worker git flow runs inside it, as run-slot and spawn.sh do.
-SANDBOX=
-[ "$ROLE" = probe ] && SANDBOX=sandbox-
+[ -n "$OFF_CLAUDE" ] && TAG=$BACKEND-
 # A manager hands every build, read or research to a worker session (playbook's **workers**), so its file of its own denies the Agent and Workflow tools, which a bare deny takes out of its tools; every other session keeps both, a reviewer's code-review sub-agents among them.
 MANAGER=
 case "$ROLE" in dispatcher | lead) MANAGER=manager- ;; esac
 BUILT="$DATA/factory-settings-$TAG$MANAGER$SANDBOX$((WINDOW / 1000))k.json"
+# The closed sandbox's file holds the session's own worktree, so each session builds its own, and a later start never rewrites the file a live one runs on.
+[ -n "$CLOSED" ] && BUILT="$DATA/factory-settings-$TAG$SANDBOX$((WINDOW / 1000))k-$NAME.json"
 # A --memory launch builds a file of its own, so the shared one every other session reads keeps the factory's memory off.
 [ -n "$MEMORY_DIR" ] && BUILT="$DATA/factory-settings-$TAG$SANDBOX$((WINDOW / 1000))k-memory-$NAME.json"
+# A fresh --sandbox worker or reviewer with no --in starts in a worktree of its own, made here outside the sandbox, since Claude Code's sandbox keeps the repository's .git/worktrees read-only but for the folder a session starts in (SPAWN.md, --sandbox).
+# A reviewer of this checkout's own PR takes code-review-loop's review-<n> clone, which nightly-clean removes once the PR closes; any other session a folder by its own name.
+TREE=
+if [ -n "$SANDBOX_ARG" ] && [ -z "$IN_DIR" ] && [[ $ROLE =~ ^(worker|reviewer)$ ]]; then
+  leaf=$NAME first=${PR_ARG%%,*}
+  # origin as configured, which names the PR's repository even where an insteadOf points its fetches elsewhere
+  origin=$(git -C "$MAIN" config --get remote.origin.url 2>/dev/null) || origin=
+  [[ $origin =~ github\.com[:/]([^/]+/[^/]+)$ ]] && origin=${BASH_REMATCH[1]%.git} || origin=
+  ref=refs/heads/canary
+  if [[ $first =~ ^#?([1-9][0-9]*)$ ]] || { [ -n "$origin" ] && [[ $first =~ ^https://github\.com/$origin/pull/([1-9][0-9]*)$ ]]; }; then leaf=review-${BASH_REMATCH[1]} ref=refs/pull/${BASH_REMATCH[1]}/head; fi
+  TREE="$MAIN/.claude/worktrees/$leaf"
+  if [ ! -e "$TREE" ]; then
+    # The worktree starts at the commit the session works from, its PR's head for a reviewer of this checkout's PR and origin's canary for any other, fetched here, so its first checkout changes no file: the sandbox shuts .claude/ and skills/zerostarter/, which .claude/skills links to, so a checkout that changes either fails inside it (SPAWN.md, --sandbox).
+    at=$(git -C "$MAIN" ls-remote origin "$ref" 2>/dev/null) && at=${at%%[[:space:]]*} || at=
+    # GitHub makes a PR's pull ref a little after the PR opens, so while it has none the PR's branch stands in, taken only at the head GitHub names for the PR, as pr:merge's fetchHead does
+    if [ -z "$at" ] && [[ $ref == refs/pull/* ]] && [ -n "$origin" ]; then
+      pull_n=${ref#refs/pull/}
+      head_of=$(gh pr view "${pull_n%/head}" -R "$origin" --json headRefName,headRefOid --jq '.headRefName + " " + .headRefOid' 2>/dev/null) || head_of=
+      if [ -n "$head_of" ]; then
+        head_branch=${head_of% *} head_oid=${head_of##* }
+        head_tip=$(git -C "$MAIN" ls-remote origin "refs/heads/$head_branch" 2>/dev/null) && head_tip=${head_tip%%[[:space:]]*} || head_tip=
+        head_seen=${head_tip:0:7}
+        [ "$head_tip" = "$head_oid" ] || refuse "$ref is missing, and its branch $head_branch is at ${head_seen:-nothing}, not the head ${head_oid:0:7}, so $NAME has no commit to start its worktree at"
+        ref=refs/heads/$head_branch at=$head_tip
+      fi
+    fi
+    [ -n "$at" ] || refuse "git ls-remote origin $ref read no commit, so $NAME has no commit to start its worktree at"
+    git -C "$MAIN" cat-file -e "$at^{commit}" 2>/dev/null || git -C "$MAIN" fetch -q --no-write-fetch-head origin "$ref" 2>/dev/null
+    git -C "$MAIN" cat-file -e "$at^{commit}" 2>/dev/null || refuse "git fetch origin $ref did not bring $at, so $NAME has no commit to start its worktree at"
+    made=$(git -C "$MAIN" worktree add -q --detach "$TREE" "$at" 2>&1) || refuse "git worktree add $TREE failed, so $NAME has no worktree to start in: ${made%%$'\n'*}"
+  fi
+  DIR=$(cd -P "$TREE" && pwd -P)
+fi
+# The live dashboard's branch, live.branch, which a closed session's refs stay shut to beside canary and main; its default when the setting reads empty, so the deny never drops.
+LIVE=
+[ -n "$CLOSED" ] && { LIVE=$(setting_text live.branch); LIVE=${LIVE:-live/dashboard}; }
 # The folder the session runs in, as the launch below moves to it.
 OWN=${DIR:-$REPO}
-[ "$MODE" = column ] && OWN=$REPO
-python3 -I - "$SETTINGS" "$BUILT" "$WINDOW" "$BACKEND" "$SANDBOX" "$DATA" "$HERDR_DIR" "$MAIN" "$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)" "$OWN" "$MEMORY_DIR" "$MANAGER" <<'PY' || refuse "it cannot build $BUILT from $SETTINGS"
+[ "$MODE" = column ] && [ -z "$TREE" ] && OWN=$REPO
+# The session's temp folder, which its sandbox may write: macOS's per-user one, else on Linux, whose getconf has no such name and whose /tmp every user and session shares, a folder of the session's own that mktemp makes under /tmp at each launch, mode 700, which the launch sets as TMPDIR; a sandboxed start there builds a file of its own, since the folder is the session's.
+TEMP=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || TEMP=
+LINUX_TEMP=
+if [ -z "$TEMP" ]; then
+  LINUX_TEMP=$(mktemp -d "/tmp/playground-$NAME.XXXXXX") || refuse "mktemp -d under /tmp failed, so $NAME has no temp folder of its own"
+  TEMP=$LINUX_TEMP
+  [ -n "$SANDBOX" ] && [ "$BUILT" = "$DATA/factory-settings-$TAG$MANAGER$SANDBOX$((WINDOW / 1000))k.json" ] && BUILT="$DATA/factory-settings-$TAG$MANAGER$SANDBOX$((WINDOW / 1000))k-$NAME.json"
+fi
+# An --ssh probe's temp folder on the other machine, which its settings, skills and brief are copied into: this one's own name on Linux, else a new name under /tmp.
+REMOTE=
+[ -z "$SSH_HOST" ] || REMOTE=${LINUX_TEMP:-$(mktemp -u "/tmp/playground-$NAME.XXXXXX")}
+# Its sandbox writes that folder, the TMPDIR it runs with there, in a settings file of its own, since the shared one holds this machine's temp folder.
+if [ -n "$REMOTE" ] && [ "$REMOTE" != "$TEMP" ]; then
+  TEMP=$REMOTE
+  [[ $BUILT == *-"$NAME".json ]] || BUILT="${BUILT%.json}-$NAME.json"
+fi
+python3 -I - "$SETTINGS" "$BUILT" "$WINDOW" "$BACKEND" "$SANDBOX" "$DATA" "$HERDR_DIR" "$MAIN" "$TEMP" "$OWN" "$MEMORY_DIR" "$MANAGER" "$CLOSED" "$LIVE" <<'PY' || refuse "it cannot build $BUILT from $SETTINGS"
 import json, os, sys
-src, dst, window, backend, sandbox, data, herdr, main, temp, own, memory, manager = sys.argv[1:13]
+src, dst, window, backend, sandbox, data, herdr, main, temp, own, memory, manager, closed, live = sys.argv[1:15]
 settings = json.load(open(src))
 settings["autoCompactWindow"] = int(window)
 if manager:
@@ -1619,15 +2213,31 @@ if manager:
     settings["permissions"] = {**permissions, "deny": sorted({*permissions.get("deny", []), "Agent", "Workflow"})}
 # The home skill set link-skills.sh turns on at user scope stays off here, since the session loads its own set (below) and two plugins that ship one name refuse it at call time.
 settings["enabledPlugins"] = {**settings.get("enabledPlugins", {}), "ws-home@ws": False}
-if backend == "glm":
+if backend in ("glm", "local"):
     settings["env"] = {**settings.get("env", {}), "CLAUDE_CODE_ENABLE_TELEMETRY": "0", "OTEL_METRICS_EXPORTER": "none"}
 if sandbox:
     # The sandbox lets a session write its own folder, the main checkout or a worktree in it; a deny wins over that, so every entry of the main checkout is denied, .git and every other worktree included, but the path down to a worktree the session runs in.
     own = os.path.realpath(own)
+    git = os.path.join(main, ".git")
+    # The closed sandbox lets a session fetch, commit and push in the worktree it runs in: that worktree and its .git/worktrees entry, and what git writes in the common dir.
+    work = set()
+    if closed:
+        work = {os.path.join(git, entry) for entry in ("FETCH_HEAD", "logs", "objects", "refs")}
+        link = os.path.join(own, ".git")
+        if os.path.isfile(link):
+            entry = os.path.realpath(os.path.join(own, open(link).read().split("gitdir:", 1)[-1].strip()))
+            if entry.startswith(os.path.join(git, "worktrees") + os.sep):
+                work |= {own, entry}
+    kept = work | {own}
     def denied(folder):
-        paths = [os.path.join(folder, name) for name in sorted(os.listdir(folder))]
-        return [d for p in paths if p != own for d in (denied(p) if own.startswith(p + os.sep) else [p])]
-    deny = denied(main)
+        paths = [os.path.join(folder, entry) for entry in sorted(os.listdir(folder))]
+        return [d for p in paths if p not in kept for d in (denied(p) if any(k.startswith(p + os.sep) for k in kept) else [p])]
+    # The extensions root, the data folder's extensions folder, which every guard reads its lists from, is denied too, so a sandboxed session writes the rest of the data folder alone.
+    deny = denied(main) + [os.path.join(data, "extensions")]
+    # The branches the main checkout, the merge flow and the live dashboard follow stay shut inside the refs and logs a closed session writes, and so does packed-refs, which git makes only when it packs.
+    if closed:
+        shut = [os.path.join(git, *parts, branch) for parts in (("refs", "heads"), ("logs", "refs", "heads")) for branch in ("canary", "main", live)] + [os.path.join(git, "packed-refs")]
+        deny += [path for path in shut if path not in deny]
     home = os.path.expanduser("~")
     settings["sandbox"] = {
         # Bypass mode would run the unsandboxed retry with no prompt, and a sandbox that cannot start would run every command unsandboxed.
@@ -1639,11 +2249,23 @@ if sandbox:
         "excludedCommands": ["docker ps", "docker ps *"],
         "failIfUnavailable": True,
         "filesystem": {
-            "allowWrite": sorted({data, os.path.join(home, ".agent-browser"), os.path.join(home, ".bun", "install", "cache"), os.path.join(home, ".cache", "turbo"), os.path.join(home, ".portless")} | ({temp.rstrip("/")} if temp else set())),
+            "allowWrite": sorted({data, os.path.join(home, ".agent-browser"), os.path.join(home, ".bun", "install", "cache"), os.path.join(home, ".cache", "turbo"), os.path.join(home, ".portless")} | ({temp.rstrip("/")} if temp else set()) | work),
             "denyWrite": deny,
         },
         "network": {"allowLocalBinding": True, "allowUnixSockets": sorted({herdr, os.path.join(home, ".agent-browser")})},
     }
+    if closed:
+        # Claude Code's sandbox opens loopback whole or not at all (allowLocalBinding gives every localhost port), and portless's proxy serves the live API's name on the same port as every other stack's, so loopback closes whole; a strict list keeps outbound hosts to the ones a worker's loop reads, since bypass mode lets any other pass. The Keychain's login items are files the client reads itself, so a read deny on its folder refuses them; on Linux Claude Code's login file and the secret store's folder stand in for them.
+        secrets = [os.path.join(data, name) for name in ("dumps", "remote-key.json", "secrets", "whatsapp")]
+        settings["sandbox"]["filesystem"]["denyRead"] = sorted([os.path.join(home, ".claude", ".credentials.json"), os.path.join(home, "Library", "Keychains")] + secrets)
+        settings["sandbox"]["filesystem"]["denyWrite"] = deny + secrets
+        settings["sandbox"]["network"] = {
+            "allowedDomains": ["api.github.com", "github.com", "registry.npmjs.org"],
+            "allowUnixSockets": settings["sandbox"]["network"]["allowUnixSockets"],
+            "strictAllowlist": True,
+        }
+        # gpg writes its home folder to sign, which stays shut since gpg-agent runs the programs its config there names outside the sandbox, so a closed session's commits go unsigned; pr:merge's squash is GitHub's own commit.
+        settings["env"] = {**settings.get("env", {}), "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "commit.gpgsign", "GIT_CONFIG_VALUE_0": "false"}
 if memory:
     settings["autoMemoryEnabled"] = True
     settings["autoMemoryDirectory"] = memory
@@ -1653,15 +2275,23 @@ with open(tmp, "w") as f:
 os.replace(tmp, dst)
 PY
 SETTINGS=$BUILT
+SETTINGS_AT=$SETTINGS
+[ -z "$REMOTE" ] || SETTINGS_AT="$REMOTE/$(basename "$SETTINGS")"
 # The factory's sessions run in bypass mode, passed here so it never rests on the machine's own settings: a session in another mode holds every cross-session message for approval.
-FLAGS="--model $MODEL --effort ${EFFORT:-high} --settings $SETTINGS --dangerously-skip-permissions"
+FLAGS="--model $MODEL --effort ${EFFORT:-high} --settings $SETTINGS_AT --dangerously-skip-permissions"
+[ -z "$REMOTE_CONTROL" ] || FLAGS+=" --remote-control $REMOTE_CONTROL"
 # The skills: one merged plugin per session, from the login's scope, its repo's org, core, then each always org's new names, less each skill whose SKILL.md its checkout's .claude/skills already holds byte for byte, loaded in place by --plugin-dir, from the data folder this launch reads (under inscope ~/.claude's, not the workspace's); the resolver writes it fresh on every spawn, so a skill `playground ext add` puts in an extension reaches the next session with no install. A column runs in this checkout.
 SKILLS_REPO=$OWN
 PLUGIN=$(PLAYGROUND_DATA_DIR="$DATA" "$BUN" --no-env-file "$REPO/packages/scripts/src/playground/orgs.ts" resolve --repo "$SKILLS_REPO") && [ -d "$PLUGIN" ] || refuse "playground orgs resolve gave no skill plugin for $SKILLS_REPO"
-FLAGS+=" --plugin-dir $(printf %q "$PLUGIN")"
-READ="Load the playbook skill first. Your brief is in $SHOWN/$BRIEF: read it in full and follow it."
+PLUGIN_AT=$PLUGIN
+[ -z "$REMOTE" ] || PLUGIN_AT="$REMOTE/$(basename "$PLUGIN")"
+FLAGS+=" --plugin-dir $(printf %q "$PLUGIN_AT")"
+# An --ssh probe reads its brief from the copy in its remote folder, since this machine's data folder is not there.
+BRIEF_AT=$SHOWN/$BRIEF
+[ -z "$REMOTE" ] || BRIEF_AT="$REMOTE/$(basename "$BRIEF")"
+READ="Load the playbook skill first. Your brief is in $BRIEF_AT: read it in full and follow it."
 # Two GLM workers searched ToolSearch for Read, Bash and Skill, found none since it lists only deferred tools, and stopped as if they had none.
-[ "$BACKEND" = glm ] && READ="$READ Skill, Read, Bash, Edit and Write are already loaded; ToolSearch lists only deferred tools."
+[ -n "$OFF_CLAUDE" ] && READ="$READ Skill, Read, Bash, Edit and Write are already loaded; ToolSearch lists only deferred tools."
 # A herdr start names its session id up front, so its resume record can resume exactly that session.
 SID=${SESSION:-}
 if [ "$RUNTIME" = herdr ] && [ "$MODE" != resume ]; then
@@ -1700,9 +2330,11 @@ if [ "$MODE" = resume ]; then
   [ -z "$PROMPT" ] || COMMAND="$COMMAND \"$PROMPT\""
 else
   BINDS=
-  [ "$ROLE" = worker ] && [ "$BACKEND" != glm ] && [ -f "$DATA/brief-rush.md" ] && BINDS=" $SHOWN/brief-rush.md binds you too, on this Claude lane."
+  [ "$ROLE" = worker ] && [ -z "$OFF_CLAUDE" ] && [ -f "$DATA/brief-rush.md" ] && BINDS=" $SHOWN/brief-rush.md binds you too, on this Claude lane."
   WHO="a $ROLE in the Playground factory; you report to $TO"
   REPORT=" Report to $TO with SendMessage (to: $TO)."
+  # SendMessage reaches no session on another machine, so a start over --ssh reports through the outbox, which ops-peer-relay copies across, and waits on its own queue for the answers.
+  [ -z "$SSH_HOST" ] || REPORT=" Report to $TO with: playground send $TO <your text>, since SendMessage does not reach $TO from this machine, and keep playground alerts-wait $NAME running as a background task, started again after each line it prints, for the answers."
   if [ "$ROLE" = dispatcher ]; then
     WHO="the Playground factory's dispatcher; $TO briefs you with a handoff"
     [ -z "$FIRST" ] || WHO="the Playground factory's dispatcher; you work with the owner, who talks to you here and in the Dashboard's chat"
@@ -1747,22 +2379,36 @@ PY
 fi
 # The pane's shell runs this text, so the whole launch goes in a subshell: a failed Keychain read's exit ends only that, the message stays on the pane, and tk dies with it.
 COMMAND="($COMMAND)"
+# An --ssh probe's pane copies the settings file, the skill plugin and the brief into its new remote folder, which mkdir refuses to reuse, then runs the launch there under ssh -tt, whose hangup ends the remote claude when spawn.sh close closes the pane; the other machine's shell reads the command, an --account token's lookup included, as this pane's would, with its own $HOME/.bun/bin put on PATH there, since ssh's command PATH is the system's alone.
+if [ -n "$SSH_HOST" ]; then
+  SSH_OPTS="-i $(printf %q "$SSH_KEY") -o IdentitiesOnly=yes -o BatchMode=yes"
+  COPY="tar -cf - -C $(printf %q "$(dirname "$SETTINGS")") $(printf %q "$(basename "$SETTINGS")") -C $(printf %q "$(dirname "$PLUGIN")") $(printf %q "$(basename "$PLUGIN")") -C $(printf %q "$(dirname "$DATA/$BRIEF")") $(printf %q "$(basename "$BRIEF")")"
+  ON_REMOTE="cd $(printf %q "$OWN") && export TMPDIR=$(printf %q "$REMOTE") PLAYGROUND_REPO=$(printf %q "$MAIN") PATH=\"\$HOME/.bun/bin:\$PATH\" && $COMMAND"
+  COMMAND="$COPY | ssh $SSH_OPTS $SSH_HOST 'mkdir -m 700 $REMOTE && tar -xf - -C $REMOTE' || exit 1"$'\n'"exec ssh $SSH_OPTS -tt $SSH_HOST $(printf %q "$ON_REMOTE")"
+fi
 
 # macOS types at most MAX_CANON 1024 bytes into a pane, and a GLM worker's launch line crosses it (1,025 bytes, measured), so the tail never arrives and the pane waits at >. The same text runs from a file instead: the typed line names the file alone, and the file, read by the pane's own shell, holds the Keychain lookup, never a token. Its first line removes the file, so no past launch outlives its pane to be rerun past this script's refusals.
 LAUNCH_DIR="$DATA/launch"
 mkdir -p "$LAUNCH_DIR" && chmod 700 "$LAUNCH_DIR" || refuse "it cannot prepare $LAUNCH_DIR"
 LAUNCH_FILE="$LAUNCH_DIR/$NAME.sh"
+# A session writes its notes and logs to its own scratchpad from its first step, so the folder is there, owner-only, before the pane opens.
+SCRATCHPAD="$DATA/scratchpad/$NAME"
+mkdir -p "$SCRATCHPAD" && chmod 700 "$SCRATCHPAD" || refuse "it cannot prepare $SCRATCHPAD"
 [ -z "$BEAT" ] || rm -f -- "$BEAT"
 # The factory's hooks read PLAYGROUND_REPO before the session's own folder, so the launch file's second line exports this script's main checkout: a session in a worktree, or outside any Playground checkout, runs the main checkout's guards.
 HEAD_LINES=
 if [ "$RUNTIME" = herdr ]; then
   CWD=${DIR:-}
-  [ "$MODE" = column ] && CWD=$REPO
+  [ "$MODE" = column ] && [ -z "$TREE" ] && CWD=$REPO
   mkdir -p "$RESUME_DIR" && chmod 700 "$RESUME_DIR" || refuse "it cannot prepare $RESUME_DIR"
   # A pane herdr restored keeps the folder it had, so the launch moves to the session's own; a resume stamps each run in <name>.ran, so you can see when a restore ran it.
   HEAD_LINES="cd $(printf %q "$CWD") || exit 1"$'\n'
-  # A herdr server hands its panes the shell basics alone, so the launch gives the session the user's temp folder, keeping one already set.
-  HEAD_LINES+='export TMPDIR="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR)}"'$'\n'
+  # A herdr server hands its panes the shell basics alone, so the launch gives the session its temp folder (TEMP, above): on macOS its per-user one, keeping one already set; on Linux the session's own, always, since an inherited TMPDIR there (an rc file's /tmp) would widen the sandbox's and no-raw-spawn's temp folder to what every session shares.
+  if [ -n "$LINUX_TEMP" ]; then
+    HEAD_LINES+="export TMPDIR=$(printf %q "$LINUX_TEMP")"$'\n'
+  else
+    HEAD_LINES+='export TMPDIR="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR)}"'$'\n'
+  fi
   [ "$MODE" = resume ] && HEAD_LINES+="date -u +%FT%TZ >> $(printf %q "$RESUME_DIR/$NAME.ran")"$'\n'
 fi
 (umask 077 && printf 'rm -f -- "$0"\n%sexport PLAYGROUND_REPO=%q\n%s' "$HEAD_LINES" "$MAIN" "$COMMAND" > "$LAUNCH_FILE" && chmod 700 "$LAUNCH_FILE") ||
@@ -1885,9 +2531,9 @@ herdr_answer() {
 # The roster row: a checker's is written before its pane opens, since no-outside-pr-code reads the PR it names at the session's first tool call, and every other row once its session has started.
 write_row() {
   set -- set "$NAME" "kind=$KIND"
-  # A resume, or a start that reuses an ended name, runs the session again, so a row close ended reads starting once more; a live row keeps its status, and so does restore's resume, whose row a close can end mid-launch.
-  [ "$(roster_field "$NAME" status)" = ended ] && [ -z "${SPAWN_RESTORING:-}" ] && set -- "$@" "status=starting"
-  # A checker's --pr replaces an ended row's prs, the PRs it last served, and its pr, which auto-end's merge check and the checker's write mode read, with the first pull request named; on a live row, or none, it joins prs, as assign does, and gives a row with no pr the first pull request named.
+  # A resume, or a start that reuses an ended name, runs the session again, so a row close or auto-end ended, or one marked done, reads starting once more; a live row keeps its status, and so does restore's resume, whose row a close can end mid-launch.
+  [[ $(roster_field "$NAME" status) =~ ^(done|ended)$ ]] && [ -z "${SPAWN_RESTORING:-}" ] && set -- "$@" "status=starting"
+  # A checker's --pr replaces an ended or done row's prs, the PRs it last served, and its pr, which auto-end's merge check and the checker's write mode read, with the first pull request named; on a live row, or none, it joins prs, as assign does, and gives a row with no pr the first pull request named.
   if [ -n "$PR_ARG" ]; then
     first_pull=
     IFS=, read -ra prs_named <<<"$PR_ARG"
@@ -1897,7 +2543,7 @@ write_row() {
         break
       fi
     done
-    if [ "$(roster_field "$NAME" status)" = ended ]; then
+    if [[ $(roster_field "$NAME" status) =~ ^(done|ended)$ ]]; then
       set -- "$@" "prs=$PR_ARG" "pr=$first_pull"
     else
       set -- "$@" "prs+=$PR_ARG"
@@ -1943,6 +2589,18 @@ PY
   [ -z "$TITLE_ARG" ] || set -- "$@" "title=$TITLE_ARG"
   [ "${held:1:1}" = 1 ] || set -- "$@" "task=$TASK"
   set -- "$@" "memory=$MEMORY"
+  # A start without the flag clears a row's sandbox=on, so a later resume or restore keeps the settings this start took.
+  if [ -n "$CLOSED" ]; then
+    set -- "$@" sandbox=on
+  elif [ "$MODE" != resume ] && [ "$(roster_field "$NAME" sandbox)" = on ]; then
+    set -- "$@" sandbox=
+  fi
+  # A --priority start on a priority file that passes it marks its row, which the sessions gate leaves out of the count, and a start without it clears the mark, as for sandbox=on.
+  if [ -n "$PRIORITY_FILE" ]; then
+    set -- "$@" priority=1
+  elif [ "$MODE" != resume ] && [ "$(roster_field "$NAME" priority)" = 1 ]; then
+    set -- "$@" priority=
+  fi
   [ -z "${ARM:-}" ] || { mkdir -p "$DATA/memory" && printf '%s\n' "$MEMORY" > "$ARM"; } || echo "spawn.sh: $NAME $WHEN, but the memory trial's turn could not be written to $ARM" >&2
   said=
   if ! roster "$@"; then
@@ -2064,6 +2722,11 @@ PY
   [ -n "$OWN_LOGIN" ] && record+="--account $OWN_LOGIN "
   [ -n "$CLAUDE_MODEL" ] && record+="--model $CLAUDE_MODEL "
   [ -n "$EFFORT" ] && [ "$EFFORT" != high ] && record+="--effort $EFFORT "
+  # A probe's own flags ride its record, so restore leaves it down and a resume refuses it rather than bringing it back on this machine.
+  [ -n "$REMOTE_CONTROL" ] && record+="--remote-control $REMOTE_CONTROL "
+  [ -n "$SSH_HOST" ] && record+="--ssh $SSH_HOST --key $(printf %q "$SSH_KEY") "
+  # A checker's start and resume each name its PRs, so its record names them too and resumes as written.
+  [[ $ROLE =~ ^(reviewer|tester)$ ]] && [ -n "$PR_ARG" ] && record+="--pr $(printf %q "$PR_ARG") "
   account_line=
   [ -n "$ACCOUNT" ] && account_line="# account: $ACCOUNT"$'\n'
   (umask 077 && printf '#!/bin/bash\n# spawn.sh writes this at every herdr start and resume; spawn.sh restore reads its exec line and the server it ran on.\n# server: %s\n%s%s\n' "$HERDR_SESSION_NAME" "$account_line" "${record% }" > "$RESUME_DIR/$NAME.sh" && chmod 700 "$RESUME_DIR/$NAME.sh") ||

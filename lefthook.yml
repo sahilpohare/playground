@@ -29,6 +29,7 @@ pre-commit:
       priority: 5
       glob:
         - ".agents/dashboard/*.md"
+        - ".agents/shipping.md"
         - "AGENTS.md"
         - "CLAUDE.md"
         - "tests/AGENTS.test.ts"
@@ -54,6 +55,7 @@ pre-commit:
       priority: 4
       glob:
         - ".agents/dashboard/*.md"
+        - ".agents/shipping.md"
         - ".agents/skill-trial.md"
         - ".agents/testing.md"
         - "AGENTS.md"
@@ -71,6 +73,7 @@ pre-commit:
       skip:
         - merge
       glob: &bundle-inputs
+        - "api/hono/src/lib/dev/proxy.ts"
         - "bun.lock"
         - "packages/config/src/*"
         - "packages/env/src/*"
@@ -104,6 +107,26 @@ pre-commit:
         - "*.webp"
         - "*.woff2"
       run: bun run test:file tests/cmux.test.ts tests/shell-read-redirect.test.ts
+    no-raw-delete:
+      # the raw-delete test, about 0.25 s, which went red only in CI after a push on 14 Nov while no commit ran it; it reads every tracked file, so it skips only what text-tests skips
+      priority: 4
+      exclude:
+        - "*.gif"
+        - "*.ico"
+        - "*.jpeg"
+        - "*.jpg"
+        - "*.png"
+        - "*.webp"
+        - "*.woff2"
+      run: bun run test:file tests/no-raw-delete.test.ts
+    workflow-runners:
+      # the workflows' runner test, under 0.1 s, which went red only in CI after a push on 14 Nov while no commit ran it; its glob is what the test reads: the workflows, the checker it imports and itself
+      priority: 4
+      glob:
+        - ".github/workflows/*"
+        - "packages/scripts/src/workflow-runners.ts"
+        - "tests/packages/scripts/src/workflow-runners.test.ts"
+      run: bun run test:file tests/packages/scripts/src/workflow-runners.test.ts
     dev-stack:
       # the build below rebuilds packages/* under this checkout's running `bun run dev` and hangs it, so the commit waits for the stack to stop
       priority: 4
@@ -140,20 +163,23 @@ pre-commit:
 
 commit-msg:
   commands:
-    commitlint:
-      run: bunx commitlint --edit {1}
     co-authored-by:
-      # AGENTS.md's Commits rule; commitlint's trailer-exists matches case-sensitively, so it would miss Co-Authored-By
-      run: "if grep -iq '^co-authored-by:' {1}; then echo 'AGENTS.md: no Co-authored-by trailer, in any case' >&2; exit 1; fi"
+      # AGENTS.md's Commits rule: drops the trailer, in any case, and says so, so a commit that carries one goes through on its first try
+      priority: 1
+      run: bun --no-env-file packages/scripts/src/commit-trailer.ts {1}
+    commitlint:
+      priority: 2
+      run: bunx commitlint --edit {1}
     pg-scope:
+      priority: 2
       # a (PG-<n>) scope names the branch's own PG-<n>- item, since a commit made on another item's branch conflicts there later
       run: bun packages/scripts/src/commit-scope.ts {1}
 
 pre-push:
   commands:
     audit:
-      # GHSA-vfj7-8cjw-p6xm: braces has no patched release, and only dev tooling (shadcn, globby) reaches it
-      run: bun audit --audit-level high --ignore GHSA-vfj7-8cjw-p6xm
+      # GHSA-67mh-4wv8-2f99 (esbuild) and GHSA-g3hv-75wg-m249 (minimatch): only dev tooling reaches them, and each parent's latest still pins the old range
+      run: bun audit --audit-level moderate --ignore GHSA-67mh-4wv8-2f99 --ignore GHSA-g3hv-75wg-m249
       only:
         - ref: canary
     ensure-branches:
@@ -164,8 +190,45 @@ pre-push:
       glob: *bundle-inputs
       # lefthook reads files: only for a run that names {files}, so the list goes in a shell comment, quoted so YAML keeps it
       run: "bun --no-env-file packages/scripts/src/hooks-bundle.ts --check --merged origin/canary # {files}"
+    test-skills:
+      # CI's test check, which went red on 16 Nov after a branch changed the sandbox its steps run in while no local run caught it; a push of a branch that changed a file a step reads since it forked from the local origin/canary runs it, about 100 s (measured), through the commit slot as the pre-commit build is, so parallel pushes queue; a push of docs or briefs alone skips it
+      files: git diff --name-only origin/canary...HEAD
+      glob:
+        - "*SKILL.md"
+        - "extensions/core/skills/code-review-loop/scripts/*"
+        - "extensions/core/skills/setup/scripts/*"
+        - "packages/config/src/kinds.ts"
+        - "packages/env/src/data-dir.ts"
+        - "packages/safe-delete/src/*"
+        - "packages/scripts/src/box-env.ts"
+        - "packages/scripts/src/clock-exempt.ts"
+        - "packages/scripts/src/docs-wrap/*"
+        - "packages/scripts/src/hooks-on-main.ts"
+        - "packages/scripts/src/pr-merge/gates.ts"
+        - "packages/scripts/src/sandbox.ts"
+        - "packages/scripts/src/skills-ref/*"
+        - "packages/scripts/src/test-sandbox.ts"
+        - "packages/scripts/src/test-skills.ts"
+        - "packages/scripts/src/verify/prebuild.ts"
+        - "packages/settings/src/folder.ts"
+        - "packages/settings/src/rendered.ts"
+        - "scripts/*.js"
+        - "scripts/*.json"
+        - "scripts/*.py"
+        - "scripts/*.sh"
+        - "scripts/*.ts"
+        - "tests/extensions/core/skills/code-review-loop/scripts/*"
+        - "tests/scripts/hooks/render-set.ts"
+        - "tests/session-names.ts"
+        - "tests/skill-frontmatter.test.ts"
+        - "tests/test_*.py"
+      run: "bun --no-env-file packages/scripts/src/commit-slot.ts bun run test:skills # {files}"
   # the jobs that read the pushed refs on stdin run from .lefthook/pre-push/, since lefthook skips every pre-push command while the checked-out branch has nothing new against its upstream, and runs a script on every push
   scripts:
+    # a pushed commit whose message holds a Co-authored-by trailer and that no live branch of the remote it pushes to holds yet, since a commit made with --no-verify skips commit-msg, and such a commit's message or a pushed branch or tag name holding a term from no-public-leak's list
+    "commit-trailer.sh":
+      runner: bash
+      use_stdin: true
     # what each pushed ref sends, so a commit made with hooks off is refused before it reaches the remote
     "conflict-markers.sh":
       runner: bash

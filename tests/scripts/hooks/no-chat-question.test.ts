@@ -12,6 +12,7 @@ import {
   LEAD_REASON,
   REASON,
   STEPS_REASON,
+  waiterReason,
 } from "../../../scripts/hooks/no-chat-question"
 import { capital, OLD, OLD_NAMES } from "../../session-names"
 import { ITEMS } from "./inbox-items"
@@ -42,6 +43,24 @@ writeFileSync(
     ],
   }),
 )
+
+// The managers the cases below name keep a live alerts-wait, this test's own pid, so the waiter gate passes them.
+mkdirSync(join(config, "playground", "ops", "outbox", "alerts-wait"), { recursive: true })
+for (const name of [
+  "dispatcher",
+  "optimizer",
+  "seat-k8w2rd",
+  "x7mh4d-builder",
+  OLD.builder,
+  OLD.dispatcher,
+  `${OLD.dispatcher}-2`,
+  OLD.ops,
+  OLD.planner,
+])
+  writeFileSync(
+    join(config, "playground", "ops", "outbox", "alerts-wait", `${name}.pid`),
+    String(process.pid),
+  )
 
 const input = (last: unknown, active = false) =>
   JSON.stringify({
@@ -108,6 +127,18 @@ describe("a manager's reply that asks Quilla a decision is refused until it is i
     ["settles it", "Your yes settles it."],
     ["is yours to", "The ship is yours to make."],
     ["if you want", "I can post it if you want."],
+    // 16 Nov: an offer in a status report still waits on his choice (PG-2316)
+    [
+      "an offer: if you want",
+      "If you want both used, I'll pass that to the Planner as its own job.",
+    ],
+    // a bold lead-in question asks, answered or rhetorical alike, so a lead-in is written as a label (PG-2316)
+    [
+      "a bold lead-in question its sentence answers",
+      "**Is there a reason the copy is made only once?** I searched the docs and found no recorded reason.",
+    ],
+    ["a bold lead-in question, rhetorical", "**Merge after the fix?** I think so."],
+    ["a rhetorical question", "Merge after the fix? I think so."],
     ["any case", "SHOULD I ship it."],
     ["an ask under a list", "Done:\n- merged #472\n\nShould I ship it."],
     ["a question addressed to Quilla by @", "@Quilla, should I ship it?"],
@@ -183,6 +214,15 @@ describe("a manager's reply that asks Quilla a decision is refused until it is i
     ["tell us if", "Tell us if you want to look."],
     ["need to know if", "I need to know if you want to look."],
     ["say, words, then if", "Just say here if you want to see it."],
+    // a phrase put to him is an ask even when reported, so only one put to someone else passes (PG-2404)
+    ["a phrase reported as put to you", "I asked you to tell me if it breaks."],
+    ["a phrase reported as put to Quilla", "I asked Quilla to tell me if it breaks."],
+    ["a phrase reported as put to his handle", "I told @qmarsh to tell me if it breaks."],
+    [
+      "a reported phrase, then one of its own",
+      "I asked Ops to check; tell me if you want it sooner.",
+    ],
+    ["a question for a run on a machine", "Run the test on spark-9dfb?"],
   ])("%s", async (_name, last) => {
     expect(await stop(last)).toBe(REASON)
   })
@@ -199,6 +239,13 @@ describe("a manager's reply that asks Quilla a decision is refused until it is i
     ["when you can", "Add the key when you can."],
     ["when you get a chance", "Log in to Loom when you get a chance."],
     ["is waiting on you", "The ship is waiting on you."],
+    ["is waiting on you after no and a comma", "No rush, the merge is waiting on you."],
+    ["is waiting on you two words past no", "There is no doubt the merge is waiting on you."],
+    [
+      "is waiting on you after a no clause",
+      "No merge is waiting on you; the fix is waiting on you.",
+    ],
+    ["is waiting on you after no mid-sentence", "The merge with no conflicts is waiting on you."],
     ["<verb> it yourself", "Run it yourself from the main checkout."],
     ["a bare imperative addressed to Quilla", "Quilla, plug in the Mac."],
     ["a bare imperative addressed to @Quilla", "@Quilla: paste the token in 1Password."],
@@ -327,6 +374,18 @@ describe("what passes", () => {
     ["an update addressed to Quilla", "@Quilla: your PR is ready in the inbox as an update."],
     ["please inside a channel's name", "I posted your EOB to #projects-status-eob-please."],
     ["nothing waiting on him", "Nothing is waiting on you now."],
+    // 16 Nov: a status report saying no decision waits on him (PG-2316)
+    [
+      "no decision waiting on him",
+      "No decision is waiting on you, so nothing went to the Inbox: my last update reported the dispatcher's decision, which is already made, and asked you nothing.",
+    ],
+    ["no item waiting on him", "No item is waiting on you."],
+    ["no decision waiting on him, bulleted", "- No decision is waiting on you."],
+    [
+      "no decision waiting on him, a second sentence",
+      "Both merged. No decision is waiting on you.",
+    ],
+    ["no one waiting on him", "No one is waiting on you."],
     ["nothing he needs to do", "Nothing you need to do here."],
     ["a need under if", "If you need to roll back, run the old build."],
     ["a need under anything", "Anything you need to decide reaches you through your Inbox."],
@@ -350,8 +409,48 @@ describe("what passes", () => {
       "It is a quick screenshot job if you want to see it.",
     ],
     ["it yourself right after you can", "You can withdraw it yourself."],
+    // 16 Nov: a report of what he no longer has to do, and of what the session asked another (PG-2404)
+    [
+      "it yourself after without having to",
+      "After that, you hear about it without having to notice it yourself.",
+    ],
+    ["it yourself after without", "You hear about it without checking it yourself."],
+    [
+      "a phrase reported as put to an agent",
+      "I told the Builder and Ops, and asked Ops to tell me if anything else is missing.",
+    ],
   ])("not a request for his action: %s", async (_name, last) => {
     expect(await stop(last)).toBeUndefined()
+  })
+
+  // 16 Nov: a lead's reports naming a done item were refused, while its real question was not (PG-2404)
+  test.each([
+    [
+      "a done item, with what it asked Ops",
+      "- **One mix-up fixed:** the Builder thought Ops' test still waits on a token from you (#i7) and on setting up the second Spark. By my records both are already done: the setup at 07:45 UTC, and the token, which already works there, at 08:53 UTC. I told the Builder and Ops, and asked Ops to tell me if anything else is missing.",
+    ],
+    ["a done item, said done", "#i7 is done; nothing waits on you there."],
+    [
+      "a done item, with what he no longer has to do",
+      "All three parts of the outage fix (#i16) have merged.\n\n- **When it reaches you:** after that, an outage like this morning's lasts about a minute, and you hear about it without having to notice it yourself.",
+    ],
+    ["an open item, posted", "The local-model test decision is in your Inbox as #i23."],
+  ])("a lead's report naming an item passes: %s", async (_name, last) => {
+    expect(
+      await stop(last, {
+        role: "lead",
+        statuses: { "#i7": "done", "#i16": "done", "#i23": "open" },
+      }),
+    ).toBeUndefined()
+  })
+
+  test("a lead's real question in chat is still sent to the dispatcher (PG-2404)", async () => {
+    expect(
+      await stop(
+        "**Your decision: run the test on spark-9dfb?** It would install four things there, each with its undo.",
+        { role: "lead" },
+      ),
+    ).toBe(LEAD_REASON)
   })
 
   test("a line to the owner by name asks only for the names owner.names sets, so with none set it is an agent's", async () => {
@@ -813,5 +912,82 @@ describe("a session with a manager asks it by SendMessage, never by an AskUserQu
     })
     expect(await run.exited).toBe(2)
     refused(await new Response(run.stderr).text())
+  })
+})
+
+describe("a manager's stop with no alerts-wait running is refused, naming its restart", () => {
+  // A data folder of its own, its outbox holding the waiter's pid when given.
+  const folder = (pid?: number) => {
+    const data = mkdtempSync(join(config, "waiter-"))
+    writeFileSync(
+      join(data, "roster.json"),
+      readFileSync(join(config, "playground", "roster.json")),
+    )
+    const outbox = join(data, "ops", "outbox")
+    mkdirSync(join(outbox, "alerts-wait"), { recursive: true })
+    if (pid !== undefined)
+      writeFileSync(join(outbox, "alerts-wait", "x7mh4d-builder.pid"), String(pid))
+    const stopAs = (name: string, last = "Both PRs merged.", active = false) =>
+      check(
+        input(last, active),
+        { CLAUDE_CONFIG_DIR: config, PLAYGROUND_DATA_DIR: data, PLAYGROUND_ROLE: "" },
+        { itemStatus: fakeDashboard(), ownerNames: async () => OWNER, sessionName: () => name },
+      )
+    return { stopAs }
+  }
+  // A pid whose process has gone: a child that has already exited.
+  // past Linux's highest pid_max (2^22) and macOS's 99998, so no process can hold it
+  const GONE_PID = 2 ** 22 + 1
+
+  test("no waiter refuses the stop", async () => {
+    const f = folder()
+    expect(await f.stopAs("x7mh4d-builder")).toBe(waiterReason("x7mh4d-builder"))
+    expect(waiterReason("x7mh4d-builder")).toBe(
+      "restart playground alerts-wait x7mh4d-builder in the background",
+    )
+  })
+
+  test("a live waiter passes the stop", async () => {
+    expect(await folder(process.pid).stopAs("x7mh4d-builder")).toBeUndefined()
+  })
+
+  test("a stale pid file whose process is gone refuses the stop", async () => {
+    expect(await folder(GONE_PID).stopAs("x7mh4d-builder")).toBe(waiterReason("x7mh4d-builder"))
+  })
+
+  test("each manager kind is held to it, by roster kind, id name or seat name", async () => {
+    const f = folder()
+    for (const name of [
+      "seat-k8w2rd",
+      "dispatcher",
+      "planner",
+      "builder",
+      "ops",
+      "optimizer",
+      "p4ktzq-planner",
+    ])
+      expect(await f.stopAs(name)).toBe(waiterReason(name))
+  })
+
+  test("workers, checkers, runners, probes and the owner's own sessions are untouched", async () => {
+    const f = folder()
+    for (const name of [
+      "k3v9q2-worker",
+      "k3v9q2-reviewer",
+      "k3v9q2-tester",
+      "k3v9q2-runner",
+      "probe-dashboard",
+      "scratch",
+    ])
+      expect(await f.stopAs(name)).toBeUndefined()
+  })
+
+  test("the stop after a refusal passes, so a manager that cannot start its waiter still stops", async () => {
+    expect(await folder().stopAs("x7mh4d-builder", "Both PRs merged.", true)).toBeUndefined()
+  })
+
+  test("a decision ask and a missing waiter both reach the session", async () => {
+    const reason = await folder().stopAs("x7mh4d-builder", "Merge them now?")
+    expect(reason).toBe(`${LEAD_REASON}\n${waiterReason("x7mh4d-builder")}`)
   })
 })

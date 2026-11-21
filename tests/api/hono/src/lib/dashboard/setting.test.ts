@@ -41,11 +41,18 @@ describe("a session setting", () => {
     expect(settingRequestSchema.parse({ id, model: "opus" })).toEqual({ id, model: "opus" })
     expect(settingRequestSchema.parse({ effort: "low", id })).toEqual({ effort: "low", id })
     expect(settingRequestSchema.parse({ model: "opus" })).toEqual({ model: "opus" })
+    expect(settingRequestSchema.parse({ id, local: "ornith-1.5-122b-nvfp4" })).toEqual({
+      id,
+      local: "ornith-1.5-122b-nvfp4",
+    })
     for (const body of [
       { id: "not-a-uuid", model: "opus" },
       { effort: "high", id, model: "opus" },
       { id, model: "opus", text: "hi" },
       { id },
+      { local: "-x" },
+      { local: "a b" },
+      { local: "ornith", model: "opus" },
     ]) {
       expect(settingRequestSchema.safeParse(body).success).toBe(false)
     }
@@ -56,6 +63,9 @@ describe("a session setting", () => {
     expect(settingCommand({ effort: "xhigh" })).toBe("/effort xhigh")
     expect(settingSummary("dispatcher", { model: "sonnet" })).toBe(
       "Set dispatcher's model to sonnet",
+    )
+    expect(settingSummary("probe-sdk", { local: "ornith-1.5-122b-nvfp4" })).toBe(
+      "Set probe-sdk's model to ornith-1.5-122b-nvfp4 (local)",
     )
   })
 

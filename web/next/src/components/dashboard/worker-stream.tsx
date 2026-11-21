@@ -10,11 +10,11 @@ import {
   RiDeleteBinLine,
   RiEditLine,
   RiErrorWarningLine,
+  RiGitBranchLine,
   RiHistoryLine,
   RiInboxArchiveLine,
   RiQuestionLine,
   RiRefreshLine,
-  RiRobot2Line,
   RiToolsLine,
 } from "@remixicon/react"
 import { useQuery } from "@tanstack/react-query"
@@ -147,6 +147,8 @@ import { readChatPrefs, prefsOf, saveChatPrefs, useChatPrefs } from "@/lib/chat-
 import { config } from "@/lib/config"
 import { fetchSubagentSteps, oneLine, type Older } from "@/lib/dashboard"
 import { stepOf } from "@/lib/live-activity"
+import { useMakerIcon } from "@/lib/model-icons"
+import { initialsOf, rowModelName, rowProvider } from "@/lib/model-label"
 import {
   lostPrompt,
   needsYouAnchor,
@@ -320,6 +322,13 @@ export function ReasoningStep({ defaultOpen, text }: { defaultOpen?: boolean; te
 
 const SUBAGENT_REFRESH_MS = 5000
 
+// A subagent's mark: its parent session's model logo, by the rows' resolver, since a subagent runs on that model; a branch off the session when its model is unknown, and its place kept empty while the logo is read.
+function SubagentIcon({ worker }: { worker: Pick<Worker, "localModel" | "model"> }) {
+  const Logo = useMakerIcon(rowProvider(worker), initialsOf(rowModelName(worker)))
+  if (!worker.model) return <RiGitBranchLine />
+  return Logo ? <Logo aria-hidden /> : null
+}
+
 // A subagent's run as AI Elements' Task: the Agent call's row, opening to the subagent's own steps, read from its transcript while it is open (again every few seconds while it runs), then what it reported. Its steps are known once Claude Code names the subagent, which a run in the background does at once and one in the foreground when it reports.
 function SubagentRun({ part, worker }: { part: DashboardToolPart; worker: Worker }) {
   const [open, setOpen] = useState(false)
@@ -339,7 +348,7 @@ function SubagentRun({ part, worker }: { part: DashboardToolPart; worker: Worker
     <Trace>
       <TraceCollapsible open={open} onOpenChange={setOpen}>
         <TraceCollapsibleTrigger>
-          <ToolLine icon={<RiRobot2Line />} part={part} />
+          <ToolLine icon={<SubagentIcon worker={worker} />} part={part} />
         </TraceCollapsibleTrigger>
         <TraceCollapsibleContent className="flex flex-col gap-2 text-xs">
           {agentId === null ? (
@@ -448,14 +457,27 @@ export function PeerStep({
 
 const Step = memo(StepRow, sameStep)
 
-// a row draws again only when what it reads moved, so a board frame or a keystroke leaves the stream's rows alone
-function sameStep(a: Parameters<typeof StepRow>[0], b: Parameters<typeof StepRow>[0]) {
+// What the clock shows in a row: the day its time is read against (messageTime names the day off it), and whether the owner's newest message still offers Undo.
+const clockOf = (props: Parameters<typeof StepRow>[0]): string =>
+  `${props.now.toDateString()} ${
+    undoState({
+      marker: props.marker,
+      newest: props.newest,
+      now: props.now.getTime(),
+      sent: props.sent,
+      unsent: Boolean(props.message.metadata?.unsent),
+      waiting: props.waiting,
+    })?.kind ?? ""
+  }`
+
+// a row draws again only when what it reads moved, so a board frame, a keystroke or a clock tick that moves nothing it shows leaves the stream's rows alone
+export function sameStep(a: Parameters<typeof StepRow>[0], b: Parameters<typeof StepRow>[0]) {
   return (
     a.composer === b.composer &&
     a.marker === b.marker &&
     a.message === b.message &&
     a.newest === b.newest &&
-    a.now.getTime() === b.now.getTime() &&
+    clockOf(a) === clockOf(b) &&
     a.outbox === b.outbox &&
     a.sent === b.sent &&
     a.waiting === b.waiting &&

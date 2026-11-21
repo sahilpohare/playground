@@ -5,7 +5,7 @@ Everything in this folder is Playground's own, covered by the repository's NOTIC
 Upstream skills
 
 code-review, codebase-design, diagnosing-bugs, domain-modeling, handoff, pr, research, tdd, to-spec and writing-for-agents come from mattpocock/skills, by Matt Pocock, at the commit upstream/mattpocock/SOURCE names.
-Nine are copied byte for byte, upstream/mattpocock/MANIFEST holding each file's sha; pr is upstream's text with a TL;DR block and a Links block added.
+Nine are copied byte for byte, upstream/mattpocock/MANIFEST holding each file's sha; pr is upstream's text with a TL;DR block, an Evidence note and a Links block added.
 They are used under the MIT License, whose full text is upstream/mattpocock/LICENSE.
 Copyright (c) 2026 Matt Pocock.
 

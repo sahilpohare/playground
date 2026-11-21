@@ -1,33 +1,32 @@
-// The stand-ins a gate box puts first on PATH, so a new user's install runs end to end with no real claude, gh, brew, launchctl, Keychain, sudo or GUI call; every call is logged to calls.log, and gh's repos are bare repos under the box's remote folder. docker is the real one, and bunx is real but for pglaunch, whose stand-in starts a container published on loopback alone. claude, launched with a session name, runs the scripted session in claude.ts.
+// The stand-ins a gate box puts first on PATH, so a new user's install runs end to end with no real claude, gh, brew, launchctl, systemd (systemctl, loginctl), Keychain, sudo or GUI call; every call is logged to calls.log, and gh's repos are bare repos under the box's remote folder. docker is the real one narrowed to the containers the box made (docker.ts), curl is real with each URL logged, and bunx is real with each call logged. claude, launched with a session name, runs the scripted session in claude.ts.
 
-import { join } from "node:path"
-
-// The suffix the pglaunch stand-in gives its container, 4 letters as pglaunch's own, so the live dashboard's name rule reads it as first run's.
-export const GATE_SUFFIX = "gate"
-
-// The label on every container the gate starts, which its clean-up removes by name.
-export const GATE_LABEL = "playground-gate=1"
+import { basename, join } from "node:path"
 
 const logged = (box: string, name: string) =>
   `#!/bin/bash\necho "${name} $*" >> "${box}/calls.log"\n`
 
-// Pure: each stand-in's file name and script for a box at box, with bunx execing realBunx for anything but pglaunch.
-export const stubs = (box: string, realBunx: string): Record<string, string> => ({
+// Pure: each stand-in's file name and script for a box at box, with bunx execing the real one for everything, and docker the real one narrowed to the box's own containers (docker.ts).
+export const stubs = (
+  box: string,
+  realBunx: string,
+  realCurl = "",
+  realDocker = "",
+): Record<string, string> => ({
   brew: `${logged(box, "brew")}exit 1\n`,
-  bunx: `${logged(box, "bunx")}pg=; name=; prev=
-for a in "$@"; do case "$a" in pglaunch@*) pg=1 ;; esac; [ "$prev" = -n ] && name=$a; prev=$a; done
-[ -n "$pg" ] || exec "${realBunx}" "$@"
-c="$name-${GATE_SUFFIX}"
-docker inspect "$c" >/dev/null 2>&1 || docker run -d --name "$c" --label ${GATE_LABEL} -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 postgres:alpine >/dev/null || exit 1
-docker start "$c" >/dev/null 2>&1
-port=$(docker port "$c" 5432 | head -1 | sed 's/.*://')
-echo "name \\"$c :$port\\" started"
-echo "postgres://postgres:postgres@localhost:$port/postgres"
-`,
+  bunx: `${logged(box, "bunx")}exec "${realBunx}" "$@"\n`,
   // a launch that names its session runs the scripted one (claude.ts), any other call answers at once; HERDR_AGENT is herdr's wrapper hint, so it reads the bun process as claude's foreground process
   claude: `${logged(box, "claude")}[ "$1" = setup-token ] && exec bun "${box}/h/playground/api/hono/src/fixtures/setup-token.ts" setup-token
 [ "$1 $2" = "auth status" ] && { echo '{"loggedIn": true}'; exit 0; }
 HERDR_AGENT=claude exec bun "${join(import.meta.dir, "claude.ts")}" "$@"
+`,
+  // the real curl, with each URL it fetches logged and no other argument, since a header can carry a token
+  curl: `#!/bin/bash
+u=; for a in "$@"; do case "$a" in http://* | https://*) u="$u $a" ;; esac; done
+echo "curl$u" >> "${box}/calls.log"
+exec "${realCurl}" "$@"
+`,
+  docker: `#!/bin/bash
+exec bun --no-env-file "${join(import.meta.dir, "docker.ts")}" "${realDocker}" "${basename(box)}" "${box}/calls.log" "$@"
 `,
   gh: `${logged(box, "gh")}case "$1 $2" in
   "api user") echo gate-user ;;
@@ -41,6 +40,7 @@ esac
 `,
   herdr: `${logged(box, "herdr")}exit 1\n`,
   launchctl: `${logged(box, "launchctl")}exit 1\n`,
+  loginctl: `${logged(box, "loginctl")}exit 1\n`,
   open: `${logged(box, "open")}exit 1\n`,
   osascript: `${logged(box, "osascript")}exit 1\n`,
   // the Keychain as a file in the box, one service, account and secret per line; only the subcommand is logged, never a secret
@@ -77,17 +77,25 @@ fi
 handle "$@"
 `,
   sudo: `${logged(box, "sudo")}exit 1\n`,
+  // on Linux the box's jobs render would otherwise reach the user's live manager and start or stop the machine's own ops jobs
+  systemctl: `${logged(box, "systemctl")}exit 1\n`,
 })
 
 // An ISO time as Python 3.9's fromisoformat reads it, with no fraction and no Z.
 const iso = (at: number) => new Date(at).toISOString().replace(/\.\d+Z$/, "+00:00")
 
-// Pure: the box's usage reading at now, which the ops-usage job reads as it reads Claude's: a made-up stored login in the Keychain file, and the profile and usage answers it reads through PLAYGROUND_USAGE_API from the box's files, a 5-hour window at 5% and a week at 10%, each resetting after now.
-export const usageReading = (user: string, now: number) => ({
-  keychain: `Claude Code-credentials\t${user}\t${JSON.stringify({ claudeAiOauth: { accessToken: "made-up", expiresAt: now + 30 * 86_400_000 } })}\n`,
-  profile: { account: { email: "gate@example.com" } },
-  usage: {
-    five_hour: { resets_at: iso(now + 3 * 3_600_000), utilization: 5 },
-    seven_day: { resets_at: iso(now + 5 * 86_400_000), utilization: 10 },
-  },
-})
+// Pure: the box's usage reading at now, which the ops-usage job reads as it reads Claude's: a made-up stored login, as the Keychain file's line and as Linux's credentials file, and the profile and usage answers it reads through PLAYGROUND_USAGE_API from the box's files, a 5-hour window at 5% and a week at 10%, each resetting after now.
+export const usageReading = (user: string, now: number) => {
+  const credentials = JSON.stringify({
+    claudeAiOauth: { accessToken: "made-up", expiresAt: now + 30 * 86_400_000 },
+  })
+  return {
+    credentials,
+    keychain: `Claude Code-credentials\t${user}\t${credentials}\n`,
+    profile: { account: { email: "gate@example.com" } },
+    usage: {
+      five_hour: { resets_at: iso(now + 3 * 3_600_000), utilization: 5 },
+      seven_day: { resets_at: iso(now + 5 * 86_400_000), utilization: 10 },
+    },
+  }
+}

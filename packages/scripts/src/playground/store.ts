@@ -5,6 +5,7 @@ import { dataDir } from "@packages/env/data-dir"
 import {
   diffItem,
   exportTo,
+  extensionsDir,
   importFrom,
   importLists,
   itemHistory,
@@ -20,6 +21,7 @@ import {
   type Ref,
   SCOPE_NAME,
   searchItems,
+  setRootLock,
   showItem,
   type Verdict,
 } from "@packages/settings"
@@ -30,7 +32,7 @@ import { SETTINGS_USAGE, settingsCommand } from "./settings"
 export type Out = (line: string) => void
 
 export const EXT_USAGE =
-  "usage: playground ext init [--yes | --dry-run] | add <name> [<owner/name>] [--yes | --dry-run] | order <name>... | link <name> <org|*> | unlink <name> <org|*> | remove <name> | sync [<scope>] | list [--scope <scope>] [--kind <kind>] | show <scope> <kind> <key> [--rev <sha>] | put <scope> <kind> <key> <path|-> --reason <why> [--attach <path>]... | which <skill> [--repo <dir> | --org <org>] | why <scope> <kind> <key> | why <skill> [--repo <dir> | --org <org>] | diff <scope> <kind> <key> --from <sha> --to <sha> | search <words> [--kind <kind>] | export <dir> | import <dir> [--dry-run] | import --from-tree <dir> [--dry-run] | import-scripts <ops-dir> <job>... --org <org> [--dry-run] | score <scope> <kind> <key> <sha> <0-5> --reason <why> | accept|reject <scope> <kind> <key> <sha> --reason <why> | check-modes"
+  "usage: playground ext init [--yes | --dry-run] | add <name> [<owner/name>] [--yes | --dry-run] | order <name>... | link <name> <org|*> | unlink <name> <org|*> | lock | unlock | remove <name> | sync [<scope>] | list [--scope <scope>] [--kind <kind>] | show <scope> <kind> <key> [--rev <sha>] | put <scope> <kind> <key> <path|-> --reason <why> [--attach <path>]... | which <skill> [--repo <dir> | --org <org>] | why <scope> <kind> <key> | why <skill> [--repo <dir> | --org <org>] | diff <scope> <kind> <key> --from <sha> --to <sha> | search <words> [--kind <kind>] | export <dir> | import <dir> [--dry-run] | import --from-tree <dir> [--dry-run] | import-scripts <ops-dir> <job>... --org <org> [--dry-run] | score <scope> <kind> <key> <sha> <0-5> --reason <why> | accept|reject <scope> <kind> <key> <sha> --reason <why> | check-modes"
 
 const MIME: Record<string, string> = {
   ".json": "application/json",
@@ -121,6 +123,8 @@ export const contentOf = async (
 }
 
 export type Io = {
+  // the checkout whose tracked files settings set's owner.names warning reads, this code's own when unset
+  checkout?: string
   data: string
   // the calling session's name in Claude Code's registry, which a write records as its author
   name?: string
@@ -200,6 +204,11 @@ export async function extCommand(words: string[], io: Io): Promise<number> {
   if (verb === "add" || verb === "init" || verb === "sync") {
     const { askCreate, extVerb } = await import("./ext-init")
     return extVerb(verb, positional, io, undefined, askCreate("--yes" in options))
+  }
+  if (verb === "lock" || verb === "unlock") {
+    setRootLock(io.data, verb === "lock")
+    io.out(`${verb}ed ${extensionsDir(io.data)}`)
+    return 0
   }
   if (verb === "link" || verb === "order" || verb === "remove" || verb === "unlink")
     return (await import("./ext-init")).extArrange(verb, positional, io)
@@ -325,7 +334,7 @@ export const runStore = async (
   err: Out,
 ): Promise<number> => {
   try {
-    return await (command === "settings" ? settingsCommand : extCommand)(words, io)
+    return await (command === "settings" ? settingsCommand : extCommand)(words, io, err)
   } catch (error) {
     const usage = error instanceof Usage
     err(

@@ -1,5 +1,17 @@
 // The steady variables of a line, the one way a writer or a cd holds a variable's value: each named once, by a plain assignment the hook reads whole at the line's top level, so a later word that reads it can be lexed again with its value
-import { ASSIGN, type Command, type Env, lex, marked, parse, type Parsed, type Word } from "./shell"
+import {
+  ASSIGN,
+  type Command,
+  type Env,
+  lex,
+  marked,
+  NAME_SETTERS,
+  parse,
+  type Parsed,
+  PRINTS,
+  RUNS_TEXT,
+  type Word,
+} from "./shell"
 
 // the line's text as a shell it runs reads it: backslash-newlines, a $ before a quote, and every quote and backslash removed
 export const unquoted = (text: string) => text.replace(/\\\n|\$(?=["'])|["'\\]/g, "")
@@ -96,7 +108,7 @@ const WORD = new RegExp(String.raw`^(?:(?:[\w./:=@%+,~-]|${READ})+|'[^']*'|"(?:$
 const REDIRECT = /^(?:[<>]&(?:\d+|-)|<<<|&>>?|>>?\|?|<>?)/
 // the reserved words and precommand modifiers after which the next word is still a program word
 const KEEPS_PROGRAM =
-  /^(?:builtin|command|do|elif|else|exec|if|nocorrect|noglob|then|time|until|while)$/
+  /^(?:-|builtin|command|do|elif|else|exec|if|nocorrect|noglob|then|time|until|while)$/
 // the prompt parameters zsh expands (under promptsubst for the PS/RPROMPT family), so a line that sets one, by assignment or as a `read` or `print -v` target, can run a captured body's text as a prompt, as `print -P` runs its argument; the name is matched as a bare word, so a mere mention reads the line whole too
 const PROMPT_PARAM = /^(?:PS[0-4]|PROMPT[2-4]?|RPROMPT2?|RPS[12]|SPROMPT)(?!\w)/
 // a heredoc operator whose delimiter is quoted (`<<'EOF'`, `<<"EOF"`, `<<\EOF`), its word ending where a word does
@@ -375,88 +387,19 @@ function holdable(key: string, named: Namings, counts: Map<string, number>): boo
   )
 }
 
-// has: whether the call holds a steady value for a key; exported: the same for a key a bare `export K=value` sets, which a redirect alone reads; loop: the literal words a for loop around the command gives a key that nothing else on the line names
+// has: whether the call holds a steady value for a key; exported: the same for a key a bare `export K=value` sets, which a redirect alone reads; loop: the literal words a for loop around the command gives a key that nothing else on the line names; past: a key a cd's && chain sets to a literal, held past that chain where the session's environment does not set it (steadyNames' past)
 export type Steady = {
   exported?: (key: string) => boolean
   has: (key: string) => boolean
   loop?: (key: string) => string[] | undefined
+  past?: (key: string) => boolean
 }
 export const NONE: Steady = { has: () => false }
 
-// The builtins that set a variable by a name among their words, from bash 5.3's bash(1), SHELL BUILTIN COMMANDS, and zsh 5.9's zshbuiltins(1) and zshmodules(1)
-const NAME_SETTERS = new Set([
-  "compgen",
-  "declare",
-  "export",
-  "float",
-  "getln",
-  "getopts",
-  "integer",
-  "let",
-  "local",
-  "mapfile",
-  "pcre_match",
-  "print",
-  "printf",
-  "private",
-  "read",
-  "readarray",
-  "readonly",
-  "set",
-  "shift",
-  "stat",
-  "strftime",
-  "syserror",
-  "sysopen",
-  "sysread",
-  "syswrite",
-  "typeset",
-  "unset",
-  "vared",
-  "wait",
-  "zcurses",
-  "zformat",
-  "zgdbmpath",
-  "zgetattr",
-  "zlistattr",
-  "zmodload",
-  "zparseopts",
-  "zpty",
-  "zregexparse",
-  "zselect",
-  "zsocket",
-  "zstat",
-  "zstyle",
-  "zsystem",
-  "ztcp",
-  "ztie",
-  "zuntie",
-])
-// the setters that name a variable only by their v option, so their other words are text they print
-const PRINTS = new Set(["print", "printf"])
 // zsh's builtins that make a name integer or float, so every later assignment to it is an arithmetic evaluation, as let's words are
 const NUMERIC = new Set(["float", "integer"])
 // the builtins that give a name an attribute: n makes a bash nameref, a name whose every later write sets the variable its value names, and i (zsh's E and F too) makes every later assignment to it an arithmetic evaluation
 const TYPESETS = new Set(["declare", "export", "local", "readonly", "typeset"])
-// the builtins that run text or load code as the line's own shell, which can set any variable: a trap's text runs there (a DEBUG trap's before each command), as do zsh's sched's, emulate -c's, a zstyle -e value's and a zregexparse action's, bash's mapfile -C callback, an alias on a later line, a history event fc or r runs, and the code autoload, zmodload and enable -f load
-const RUNS_TEXT = new Set([
-  ".",
-  "alias",
-  "autoload",
-  "emulate",
-  "enable",
-  "eval",
-  "fc",
-  "mapfile",
-  "r",
-  "readarray",
-  "sched",
-  "source",
-  "trap",
-  "zmodload",
-  "zregexparse",
-  "zstyle",
-])
 // the tests whose -v reads its operand as a name, evaluating any subscript it holds; test and [ take their operators after expansion, so a word that expands may be a -v or split into one and its operand, while [[ reads its operators as written
 const TESTS = new Set(["[", "[[", "test"])
 // the -v operand that names no subscript: a plain unquoted name, as written
@@ -497,24 +440,27 @@ const OPENS = new Set(["case", "for", "if", "select", "until", "while", "{"])
 const CLOSES = new Set(["done", "esac", "fi", "}"])
 const LEADS = new Set(["!", "coproc", "do", "elif", "else", "then", "time"])
 
-// For each command of the line, the variables whose value the shell has when it runs: each named once, by an unquoted plain assignment that is its command's first word, at the line's top level (outside any function, compound body, group or subshell) and not piped or sent to the background; one the shell always runs (first, or after `;` or `&`) holds for every later command, and one after `&&` only along that `&&` chain, since the shell skips the rest of the chain with it. A line that runs text or loads code in its own shell (a RUNS_TEXT builtin, or a command whose name the hook cannot read, which may be any of them or a builtin that sets a variable), sets a variable by a name the hook cannot read whole (a name-indirection assignment, a bash nameref, an integer attribute or text the shell evaluates among them), or names IFS, holds none, and holdable() is the rest of the allow-list
-export function steadyNames(named: Namings, commands: Command[]): (cmd: Command) => Steady {
-  if (named.blind || named.counts.has("IFS")) return () => NONE
+// Each name the line names but by reading it, with a setter's name words counted again, or undefined when no variable holds steady on it: a line that runs text or loads code in its own shell (a RUNS_TEXT builtin, or a command whose name the hook cannot read, which may be any of them or a builtin that sets a variable), sets a variable by a name the hook cannot read whole (a name-indirection assignment, a bash nameref, an integer attribute or text the shell evaluates among them), or names IFS
+function setterCounts(
+  named: Namings,
+  commands: Command[],
+  parses: Parsed[],
+): Map<string, number> | undefined {
+  if (named.blind || named.counts.has("IFS")) return undefined
   const counts = new Map(named.counts)
-  const parses = commands.map((cmd) => parse(cmd))
   for (const [at, cmd] of commands.entries()) {
     const { name } = parses[at]
-    if (RUNS_TEXT.has(name) || marked(name)) return () => NONE
+    if (RUNS_TEXT.has(name) || marked(name)) return undefined
     const flagged = (letters: RegExp) =>
       cmd.words.some((w, k) => k > 0 && /^-[^-\s]/.test(w.value) && letters.test(w.value))
-    if (NUMERIC.has(name) || (TYPESETS.has(name) && flagged(/[EFin]/))) return () => NONE
+    if (NUMERIC.has(name) || (TYPESETS.has(name) && flagged(/[EFin]/))) return undefined
     // let evaluates each word as arithmetic, which evaluates a variable's value as an expression
     if (name === "let" && cmd.words.some((w, k) => k > 0 && /[A-Za-z_]/.test(w.value)))
-      return () => NONE
+      return undefined
     // zsh's print -P expands its words as a prompt, which with PROMPT_SUBST set runs their expansions
-    if (name === "print" && flagged(/P/)) return () => NONE
+    if (name === "print" && flagged(/P/)) return undefined
     // a -v operand holds only as a PLAIN_NAME, since any other may name a subscript, and in test and [ a word that EXPANDS holds nothing, nor does a plain `$name` the hook cannot read but as a quoted operand
-    if (TESTS.has(name) && testsAName(parses[at].args, name !== "[[")) return () => NONE
+    if (TESTS.has(name) && testsAName(parses[at].args, name !== "[[")) return undefined
     const loop = cmd.words.findIndex(
       (w) => !w.quoted && (w.value === "for" || w.value === "select"),
     )
@@ -530,13 +476,29 @@ export function steadyNames(named: Namings, commands: Command[]): (cmd: Command)
     // a name the shell reads after quote removal (`read X\Y` sets XY) counts as written, and one the hook cannot read could be any; a name word with a quote or a backslash and a `[` reads as subscripted whatever the subscript, so no quoted or escaped subscript in a setter's name passes
     for (const word of names) {
       if (!word) continue
-      if (marked(word.value.split("=")[0])) return () => NONE
-      if (word.quoted && word.value.includes("[")) return () => NONE
+      if (marked(word.value.split("=")[0])) return undefined
+      if (word.quoted && word.value.includes("[")) return undefined
       for (const key of word.value.match(/[A-Za-z_]\w*/g) ?? [])
         counts.set(key, (counts.get(key) ?? 0) + 1)
     }
   }
+  return counts
+}
+
+// For each command of the line, the variables whose value the shell has when it runs: each named once, by an unquoted plain assignment that is its command's first word, at the line's top level (outside any function, compound body, group or subshell) and not piped or sent to the background; one the shell always runs (first, or after `;` or `&`) holds for every later command, and one after `&&` only along that `&&` chain, since the shell skips the rest of the chain with it. A line that runs text or loads code in its own shell (a RUNS_TEXT builtin, or a command whose name the hook cannot read, which may be any of them or a builtin that sets a variable), sets a variable by a name the hook cannot read whole (a name-indirection assignment, a bash nameref, an integer attribute or text the shell evaluates among them), or names IFS, holds none, and holdable() is the rest of the allow-list
+// With past, an assignment of one absolute literal word (LITERAL) on an `&&` chain whose every command before it is a cd or a pushd is held past that chain too, as a writer's file alone (a hook holds a folder with past left out): when the cd fails the shell skips it, and the name, set nowhere else on the line, is then empty or the session's own, which the hook's process holds
+export function steadyNames(
+  named: Namings,
+  commands: Command[],
+  past = false,
+): (cmd: Command) => Steady {
+  const parses = commands.map((cmd) => parse(cmd))
+  const counts = setterCounts(named, commands, parses)
+  if (!counts) return () => NONE
   const set = new Map<string, { at: number; chain?: number }>()
+  const pasts = new Map<string, number>()
+  // whether every command of the current && chain so far is a cd or a pushd at the top level, or an assignment after one
+  let moves = false
   const exports = new Map<string, { at: number; chain?: number }>()
   const where = new Map<Command, { at: number; chain: number }>()
   // the for loops whose body the walk is in, each with the depth its body sits at, and the loop values each body command takes
@@ -562,6 +524,9 @@ export function steadyNames(named: Namings, commands: Command[]): (cmd: Command)
     const head = forList(cmd, named)
     if (head) open.push({ depth, ...head })
     const always = !cmd.follows || cmd.follows === ";" || cmd.follows === "&"
+    const moved: boolean = moves && cmd.follows === "&&"
+    const isMove = top && !cmd.detached && ["cd", "pushd"].includes(parses[at].name)
+    moves = (always || moved) && (isMove || (moved && parses[at].name === ""))
     if (!top || cmd.detached || (!always && cmd.follows !== "&&")) continue
     if (bareExport(parses[at])) {
       for (const w of parses[at].args) {
@@ -576,6 +541,16 @@ export function steadyNames(named: Namings, commands: Command[]): (cmd: Command)
     if (/^[A-Za-z_]\w*\+?=\(/.test(first.value)) continue
     for (const key of parses[at].local.keys())
       if (holdable(key, named, counts)) set.set(key, always ? { at } : { at, chain })
+    const literal = first.source?.slice(first.source.indexOf("=") + 1) ?? ""
+    if (
+      past &&
+      moved &&
+      cmd.words.length === 1 &&
+      LITERAL.test(literal) &&
+      /^["']?\//.test(literal)
+    )
+      for (const key of parses[at].local.keys())
+        if (holdable(key, named, counts)) pasts.set(key, at)
   }
   return (cmd) => {
     const here = where.get(cmd)
@@ -586,9 +561,36 @@ export function steadyNames(named: Namings, commands: Command[]): (cmd: Command)
       exported: (key) => before(exports.get(key)),
       has: (key) => before(set.get(key)),
       loop: (key) => loops.get(cmd)?.get(key),
+      past: (key) => (pasts.get(key) ?? here.at) < here.at,
     }
   }
 }
+
+// The variables of the session's starting environment, the hook's own, that hold their value for every command of a line, beside known (the line's HOME, TMPDIR and PWD), so a cd or a -C through one (`cd "${PLAYGROUND_REPO:?}"`, `git -C "$W"`) is judged by the folder it names: an uppercase name (zsh keeps its lowercase parameters apart from the environment) that the line names nowhere but by reading it, on a line setterCounts holds something on, and none the shell sets or ties to another, nor IFS or ZDOTDIR, which the shell takes from no environment as is, nor one led by CLAUDE (CLAUDECODE, CLAUDE_*), some of which Claude Code sets in a hook's environment alone (CLAUDE_PROJECT_DIR)
+export function startingVariables(
+  command: string,
+  environment: Record<string, string | undefined>,
+  known: Record<string, string>,
+): Record<string, string> {
+  const commands = lex(command, known).commands
+  const counts = setterCounts(
+    namings(command),
+    commands,
+    commands.map((cmd) => parse(cmd)),
+  )
+  const starting: Record<string, string> = {}
+  if (!counts) return starting
+  for (const [key, value] of Object.entries(environment)) {
+    if (!value || key in known || !/^[A-Z_][A-Z0-9_]*$/.test(key) || counts.has(key)) continue
+    if (SHELL_SETS.has(key) || SHELL_SETS_PREFIX.test(key) || TIED.has(key)) continue
+    if (key === "IFS" || key === "ZDOTDIR" || key.startsWith("CLAUDE")) continue
+    starting[key] = value
+  }
+  return starting
+}
+
+// One literal word as an assignment writes its value: plain characters, or a quoted span holding no expansion, with no glob, ~ or blank; past holds an absolute one alone, since a relative one names a file in each folder the shell may be in, the starting one too
+const LITERAL = /^(?:[\w./:@%+,-]|'[^'\s]*'|"[^"$`\\\s]*")+$/
 
 // An export with no option whose every word is a plain unquoted NAME=value, so each name it sets is counted once, by its own spelling
 const bareExport = ({ args, name }: Parsed): boolean =>
@@ -615,7 +617,11 @@ function forList(cmd: Command, named: Namings): { key: string; values: string[] 
 // Every reading of a word over the values the for loops around it give its variables, the steady ones held too; undefined when one still holds a value the hook cannot read, or the readings pass LOOP_READINGS
 export function heldReadings(word: Word, env: Env, steady: Steady): Word[] | undefined {
   if (!word.raw || !marked(word.value)) return undefined
-  const known = heldVars(env, { has: (key) => steady.has(key) || !!steady.exported?.(key) })
+  const known = heldVars(
+    env,
+    { has: (key) => steady.has(key) || !!steady.exported?.(key), past: steady.past },
+    word.raw,
+  )
   let sets: Record<string, string>[] = [known]
   for (const key of new Set(word.raw.match(/[A-Za-z_]\w*/g) ?? [])) {
     const values = steady.loop?.(key)
@@ -630,7 +636,9 @@ const LOOP_READINGS = 64
 
 // A word with a value the lexer could not read, lexed again with the steady variables the call has set by now; undefined when it holds none, or still holds one the hook cannot read
 export function heldWord(word: Word, env: Env, steady: Steady): Word | undefined {
-  return word.raw && marked(word.value) ? relexed(word.raw, heldVars(env, steady)) : undefined
+  return word.raw && marked(word.value)
+    ? relexed(word.raw, heldVars(env, steady, word.raw))
+    : undefined
 }
 
 // A raw word lexed with known variables: the one word it makes, or undefined when it still holds a value the hook cannot read
@@ -641,11 +649,15 @@ function relexed(raw: string, known: Record<string, string>): Word | undefined {
 }
 
 // The steady variables the call has set by now whose values the hook holds, an assignment that names an earlier one (`T="$S/x"`) lexed again with it, in the order they were set
-function heldVars(env: Env, steady: Steady): Record<string, string> {
+// A key held past its chain (Steady.past) reads only in a word that is its quoted read alone (`"$f"`, `"${f}"`), since the empty value a failed cd leaves turns any other word into the rest of it (`$S/c` into `/c`) and an unquoted read into no word, which hands its place to the word before it (`cp a sub $f` copies to `sub`)
+function heldVars(env: Env, steady: Steady, raw?: string): Record<string, string> {
+  const alone = raw?.match(/^"\$\{?([A-Za-z_]\w*)\}?"$/)?.[1]
   const known = { ...env.known }
   for (const [key, text] of env.vars) {
     // a TMPDIR the call sets steers mktemp, so mktemp's path stays unheld
-    if (key === "TMPDIR" || !steady.has(key)) continue
+    const held =
+      steady.has(key) || (key === alone && !!steady.past?.(key) && env.process[key] === undefined)
+    if (key === "TMPDIR" || !held) continue
     if (!text.unknown && !marked(text.value)) known[key] = text.value
     else if ("raw" in text && typeof text.raw === "string") {
       const again = relexed(text.raw, known)?.value

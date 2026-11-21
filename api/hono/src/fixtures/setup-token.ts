@@ -1,4 +1,4 @@
-// A made-up `claude setup-token` for fixture stacks and tests, so no stack off this machine's own reads starts the real one: as the real one does, it hands $BROWSER a sign-in link of its own, prints the paste-the-code link wrapped at its terminal's width, reads one code as Ink does, then prints a made-up token for it; for the code "refused" it prints 2.1.314's own reject screen and waits, as the real one does, for "slow" it answers 5s late, and for "silent" never, as a sign-in on a dropping link does.
+// A made-up `claude setup-token` for fixture stacks and tests, so no stack off this machine's own reads starts the real one: as the real one does, it hands $BROWSER a sign-in link of its own, prints the paste-the-code link wrapped at its terminal's width, reads one code as Ink does, then prints a made-up token for it; for the code "refused" it prints 2.1.314's own reject screen and waits, as the real one does, for "slow" it answers 5s late, for "silent" never, as a sign-in on a dropping link does, and for "drawn" it prints a token of the real one's 108 characters with a cursor move, not a line break, before the next word, as Ink draws it.
 import { createHash, randomUUID } from "node:crypto"
 
 if (process.argv[2] !== "setup-token") {
@@ -44,7 +44,12 @@ if (code === "refused") {
 }
 if (code === "silent") await hold()
 if (code === "slow") await Bun.sleep(5_000)
-const token = `sk-ant-oat01-${createHash("sha256").update(code).digest("hex")}-made-up-AA`
+const hex = createHash("sha256").update(code).digest("hex")
+const token =
+  code === "drawn"
+    ? `sk-ant-oat01-${hex}-made-up-${"A".repeat(22)}`
+    : `sk-ant-oat01-${hex}-made-up-AA`
+const after = code === "drawn" ? "\x1b[2B\x1b[1G" : "\n\n"
 process.stdout.write(
-  `\n\x1b[32m✓\x1b[39m Long-lived authentication token created successfully!\n\nYour OAuth token (valid for 1 year):\n\n${wrap(token)}\n\nStore this token securely. You won't be able to see it again.\n`,
+  `\n\x1b[32m✓\x1b[39m Long-lived authentication token created successfully!\n\nYour OAuth token (valid for 1 year):\n\n${wrap(token)}${after}Store this token securely. You won't be able to see it again.\n`,
 )

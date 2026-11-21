@@ -71,7 +71,7 @@ var applyEnvAliases = (env = process.env) => {
 applyEnvAliases();
 
 // scripts/hooks/no-chat-question.ts
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 
 // node_modules/.bun/zod@4.6.7/node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
@@ -5894,6 +5894,7 @@ var answerPayloadSchema = strictObject({
   accepted: ranSchema.optional(),
   at: exports_iso.datetime(),
   close: string2().min(1).optional(),
+  cloned: ranSchema.optional(),
   comment: string2().optional(),
   go: boolean2(),
   id: string2().min(1),
@@ -5921,6 +5922,7 @@ var answerPayloadSchema = strictObject({
     exitCode: number2().int().nullable(),
     line: string2().optional()
   })).optional(),
+  rooted: ranSchema.optional(),
   set: ranSchema.optional(),
   text: string2().optional(),
   title: string2(),
@@ -5929,6 +5931,115 @@ var answerPayloadSchema = strictObject({
   verb: _enum(ANSWER_VERBS)
 });
 var CLOCKS_STOPPED_AT = "2026-11-05T03:44:00.000Z";
+var ROOT_STEPS = {
+  "bwrap-userns": {
+    adds: ["/etc/apparmor.d/bwrap"],
+    undo: "remove /etc/apparmor.d/bwrap and unload its AppArmor profile",
+    what: "Lets Claude Code's sandbox start: an AppArmor profile that lets bwrap make a user namespace"
+  },
+  "chromium-ca": {
+    adds: [
+      "/etc/chromium/policies/managed/portless-ca.json",
+      "/etc/opt/chrome_for_testing/policies/managed/portless-ca.json"
+    ],
+    undo: "remove /etc/chromium/policies/managed/portless-ca.json and /etc/opt/chrome_for_testing/policies/managed/portless-ca.json",
+    what: "Lets Helium and Chrome for Testing trust the Dashboard's certificate for .localhost addresses alone, through a browser policy; Helium may then show Managed by your organization in its menu, and needs one restart"
+  }
+};
+var ROOT_NAMES = Object.keys(ROOT_STEPS);
+var ROOT_BASE = "/usr/local/lib/playground";
+var ROOT_DIR = `${ROOT_BASE}/root`;
+var ROOT_CA = `${ROOT_BASE}/data/portless-ca.der`;
+var CA_MAX_BYTES = 16384;
+var REFUSE_HASH = 'echo "refused: a hash is not 64 lowercase hex" >&2; exit 1';
+var refuse = (why) => `{ echo "refused: ${why}" >&2; exit 1; }`;
+var INSTALL_TEXT = [
+  "set -eu",
+  "umask 022",
+  `base=${ROOT_BASE}`,
+  "src=$1",
+  "shift",
+  'case $src in /*) ;; *) echo "refused: the scripts folder is not an absolute path" >&2; exit 1 ;; esac',
+  `[ $# -eq ${ROOT_NAMES.length} ] || [ $# -eq ${ROOT_NAMES.length + 2} ] || ${refuse(`${ROOT_NAMES.length} hashes are needed, one for each script, then the CA's path and hash or neither`)}`,
+  "n=0",
+  'for h in "$@"; do',
+  "  n=$((n + 1))",
+  `  [ $n -le ${ROOT_NAMES.length} ] || break`,
+  `  case $h in *[!0123456789abcdef]*) ${REFUSE_HASH} ;; esac`,
+  `  [ \${#h} -eq 64 ] || { ${REFUSE_HASH}; }`,
+  "done",
+  'mkdir -p "$base/root" "$base/data"',
+  'chown root:root "$base" "$base/root" "$base/data"',
+  'chmod 0755 "$base" "$base/root" "$base/data"',
+  'stage=$(mktemp -d "$base/.stage.XXXXXX")',
+  `trap 'rm -f "$stage"/*; rmdir "$stage"' EXIT`,
+  `for name in ${ROOT_NAMES.join(" ")}; do`,
+  '  cp "$src/$name" "$stage/$name"',
+  '  sum=$(sha256sum "$stage/$name")',
+  '  [ "${sum%% *}" = "$1" ] || { echo "refused: $name changed since you approved it" >&2; exit 1; }',
+  "  shift",
+  "done",
+  "if [ $# -eq 2 ]; then",
+  `  case $1 in /*) ;; *) ${refuse("the CA's path is not absolute")} ;; esac`,
+  `  case $2 in *[!0123456789abcdef]*) ${REFUSE_HASH} ;; esac`,
+  `  [ \${#2} -eq 64 ] || { ${REFUSE_HASH}; }`,
+  `  head -c ${CA_MAX_BYTES + 1} "$1" > "$stage/ca.pem"`,
+  `  [ "$(wc -c < "$stage/ca.pem")" -le ${CA_MAX_BYTES} ] || ${refuse(`the CA file is over ${CA_MAX_BYTES / 1024} KB`)}`,
+  `  [ "$(grep -c -- "-----BEGIN CERTIFICATE-----" "$stage/ca.pem")" -eq 1 ] || ${refuse("the CA file holds other than one certificate")}`,
+  '  openssl x509 -in "$stage/ca.pem" -outform DER -out "$stage/ca.der"',
+  '  sum=$(sha256sum "$stage/ca.der")',
+  `  [ "\${sum%% *}" = "$2" ] || ${refuse("the Dashboard's CA changed since you approved it")}`,
+  "fi",
+  `for name in ${ROOT_NAMES.join(" ")}; do`,
+  '  chown root:root "$stage/$name"',
+  '  chmod 0755 "$stage/$name"',
+  '  mv -f "$stage/$name" "$base/root/$name"',
+  "done",
+  `echo "installed ${ROOT_NAMES.join(", ")} in $base/root"`,
+  'if [ -f "$stage/ca.der" ]; then',
+  '  chown root:root "$stage/ca.der"',
+  '  chmod 0644 "$stage/ca.der"',
+  '  mv -f "$stage/ca.der" "$base/data/portless-ca.der"',
+  `  echo "kept the Dashboard's CA in $base/data/portless-ca.der"`,
+  "fi"
+].join(`
+`);
+var PEER_ACTION = "org.playground.root";
+var PEER_POLICY = `/usr/share/polkit-1/actions/${PEER_ACTION}.policy`;
+var PEER_RULE = "/etc/polkit-1/rules.d/49-playground-root.rules";
+var PEER_POLICY_LINES = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">',
+  "<policyconfig>",
+  ...ROOT_NAMES.flatMap((name) => [
+    `  <action id="${PEER_ACTION}.${name}">`,
+    `    <description>Run the Playground root step ${name}</description>`,
+    `    <message>The Playground root step ${name} needs an administrator</message>`,
+    "    <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin</allow_active></defaults>",
+    `    <annotate key="org.freedesktop.policykit.exec.path">${ROOT_DIR}/${name}</annotate>`,
+    "  </action>"
+  ]),
+  "</policyconfig>"
+];
+var PEER_IDS = ROOT_NAMES.map((name) => `"${PEER_ACTION}.${name}"`).join(", ");
+var PEER_INSTALL_TEXT = [
+  "set -eu",
+  "user=${SUDO_USER:-}",
+  `case $user in ""|root|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) ${refuse("sudo named no user other than root, so the rule names no one")} ;; esac`,
+  `[ -d ${PEER_POLICY.slice(0, PEER_POLICY.lastIndexOf("/"))} ] || ${refuse("this machine has no polkit actions folder")}`,
+  `[ -d ${PEER_RULE.slice(0, PEER_RULE.lastIndexOf("/"))} ] || ${refuse("this machine has no polkit rules folder")}`,
+  INSTALL_TEXT,
+  `printf '%s\\n' ${PEER_POLICY_LINES.map((line) => `'${line}'`).join(" ")} > "$stage/policy"`,
+  `printf '%s\\n' '// Playground root steps: these actions alone, for this user alone, with no password' 'polkit.addRule(function (action, subject) {' > "$stage/rule"`,
+  `printf '  if (subject.user === "%s" && [%s].indexOf(action.id) >= 0) return polkit.Result.YES;\\n' "$user" '${PEER_IDS}' >> "$stage/rule"`,
+  `printf '%s\\n' '});' >> "$stage/rule"`,
+  'chown root:root "$stage/policy" "$stage/rule"',
+  'chmod 0644 "$stage/policy" "$stage/rule"',
+  `mv -f "$stage/policy" ${PEER_POLICY}`,
+  `mv -f "$stage/rule" ${PEER_RULE}`,
+  `echo "let $user run ${ROOT_NAMES.join(", ")} as root with no password, through ${PEER_RULE}"`
+].join(`
+`);
 
 // packages/config/src/kinds.ts
 var ROSTER_KINDS = [
@@ -5988,6 +6099,7 @@ var namedKinds = () => {
   ]);
 };
 var placedKindOfName = (name) => kindOfName(name) ?? namedKinds().get(name) ?? null;
+var placedKindOf = (name, kind) => isRosterKind(kind) ? kind : placedKindOfName(name);
 var DISPATCHER_SLOT_LABELS = ["Alpha", "Bravo"];
 function roleOfName(name) {
   const kind = placedKindOfName(name);
@@ -6008,16 +6120,36 @@ var dataDirOf = (env, home = env.HOME || homedir()) => {
 };
 var dataDir = (env = process.env) => dataDirOf(env);
 
+// packages/scripts/src/stuck-alert.ts
+import { join as join2 } from "path";
+var HEAD_BYTES = 64 * 1024;
+var TAIL_BYTES = 256 * 1024;
+var META = new Set(["description", "run_in_background", "timeout"]);
+var waiterPidPath = (outbox, name) => join2(outbox, "alerts-wait", `${name}.pid`);
+var WAITER_GRACE_MS = 5 * 60000;
+async function waiterRunning(outbox, name) {
+  const pid = Number(await Bun.file(waiterPidPath(outbox, name)).text().catch(() => ""));
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+if (false) {}
+
 // packages/settings/src/rendered.ts
 import { existsSync, readFileSync } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 import { fileURLToPath } from "url";
 var CORE = "core";
 var coreDir = () => fileURLToPath(new URL("../../../extensions/core", import.meta.url));
-var extensionsDir = (data) => join2(data, "extensions");
+var extensionsDir = (data) => join3(data, "extensions");
 var fixFor = (file) => {
   const list = /^hooks\/(.+)\.json$/.exec(file)?.[1];
-  if (list && !existsSync(join2(coreDir(), "lists", `${list}.json`)))
+  if (list && !existsSync(join3(coreDir(), "lists", `${list}.json`)))
     return `tell your lead, and the dispatcher hands the owner ! playground ext put <login> list ${list} <file> --reason <why> to type in the dispatcher's terminal window, which writes it, since core ships no such list`;
   return file.startsWith("hooks/") ? "tell your lead, and the dispatcher hands the owner ! playground ext import --from-tree extensions/core/lists to type in the dispatcher's terminal window, which seeds the guards' lists" : "tell your lead, and the dispatcher asks the owner to set up settings, then fill in and save Privacy on the Dashboard's Settings page, which writes it";
 };
@@ -6028,7 +6160,7 @@ var readRenderedSync = (data, file) => {
   const parts = file.split("/");
   if (parts.some((part) => part === "" || part === "." || part === ".."))
     return { refusal: `${file} is not a path inside the extensions (${dir})` };
-  const path = parts[0] === CORE ? join2(coreDir(), ...parts.slice(1)) : join2(dir, file);
+  const path = parts[0] === CORE ? join3(coreDir(), ...parts.slice(1)) : join3(dir, file);
   return existsSync(path) ? { path } : { refusal: `the extensions root (${dir}) holds no ${file}: ${fixFor(file)}` };
 };
 var readPolicy = async (data, org) => readPolicySync(data, org);
@@ -6098,15 +6230,33 @@ var ownerSettings = defineSettings({
   }
 });
 
+// scripts/hooks/input.ts
+var DEADLINE = 13000;
+async function input(name, kind, deadline = DEADLINE) {
+  let timer;
+  const raw = await Promise.race([
+    Bun.stdin.text(),
+    new Promise((done) => {
+      timer = setTimeout(() => done(undefined), deadline - performance.now());
+    })
+  ]).finally(() => clearTimeout(timer));
+  if (raw !== undefined)
+    return raw;
+  if (kind === "recorder")
+    process.exit(0);
+  console.error(`${name} hook: the call's input did not arrive by its deadline, about ${deadline / 1000} s, inside the runner's 15 s timeout, so the call is refused; report it to your lead.`);
+  process.exit(2);
+}
+
 // scripts/hooks/role.ts
 import { homedir as homedir2 } from "os";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 var MANAGER_ROLES = new Set(["dispatcher", "lead", "manager"]);
 var names;
 function loadNames(environment = process.env) {
   names ??= (async () => {
     try {
-      const setting = join3(__CHECKOUT + "/scripts/hooks", "../../packages/scripts/src/playground/setting.ts");
+      const setting = join4(__CHECKOUT + "/scripts/hooks", "../../packages/scripts/src/playground/setting.ts");
       const read = Bun.spawn(["bun", setting, "sessions.names", "sessions.aliases"], {
         env: { ...process.env, ...environment },
         stderr: "ignore",
@@ -6121,17 +6271,17 @@ function loadNames(environment = process.env) {
   return names;
 }
 async function registryName(sessionId, environment = process.env) {
-  const dir = join3(environment.CLAUDE_CONFIG_DIR || join3(homedir2(), ".claude"), "sessions");
+  const dir = join4(environment.CLAUDE_CONFIG_DIR || join4(homedir2(), ".claude"), "sessions");
   for await (const file of new Bun.Glob("*.json").scan(dir)) {
     try {
-      const entry = await Bun.file(join3(dir, file)).json();
+      const entry = await Bun.file(join4(dir, file)).json();
       if (entry.sessionId === sessionId && typeof entry.name === "string")
         return entry.name;
     } catch {}
   }
 }
 async function rosterKind(name, environment = process.env) {
-  const path = join3(dataDirOf(environment), "roster.json");
+  const path = join4(dataDirOf(environment), "roster.json");
   try {
     const roster = await Bun.file(path).json();
     const kind = roster.agents?.find((agent) => agent?.name === name)?.kind;
@@ -6145,9 +6295,9 @@ async function rosterRole(name, environment = process.env) {
   return kind ? FACTORY_ROLE_OF_KIND[kind] : "";
 }
 async function rosterNames(environment = process.env) {
-  const path = join3(dataDirOf(environment), "roster.json");
+  const path = join4(dataDirOf(environment), "roster.json");
   try {
-    const { live } = await Bun.file(join3(__CHECKOUT + "/scripts/hooks", "..", "roster-statuses.json")).json();
+    const { live } = await Bun.file(join4(__CHECKOUT + "/scripts/hooks", "..", "roster-statuses.json")).json();
     const roster = await Bun.file(path).json();
     return (roster.agents ?? []).flatMap((agent) => typeof agent?.name === "string" && live.includes(String(agent.status)) ? [agent.name] : []);
   } catch {
@@ -6169,9 +6319,9 @@ var within = (read) => Promise.race([
 ]);
 var SAY_TO_HIM = String.raw`(?:(?:^\s*(?:(?:[-*]|\d+[.)])\s+)?|[.!?]\s+|[,;:(]\s*)(?:(?:first|now|simply|so|then)\s+)?|\b(?:and|just|or|you(?:'d|'ll|\s+(?:can|could|just|may|might|will|would))?)\s+)say\s+`;
 var SAY = new RegExp(String.raw`${SAY_TO_HIM}(?:["'\`][^"'\`\n]+["'\`]|yes\b|go\b)`, "im");
-var PHRASES = /\b(?:can we|do you want|if you (?:still )?want|if you'd rather|is yours to|let me know which|one[\s-]word answer|settles it|shall I|should I|should we|tell me if|want me to|which do you|your call|your pick)\b/i;
+var PHRASES = String.raw`(?:can we|do you want|if you (?:still )?want|if you'd rather|is yours to|let me know which|one[\s-]word answer|settles it|shall I|should I|should we|tell me if|want me to|which do you|your call|your pick)`;
 var NOT_ASKED = String.raw`(?<!\b(?:anything|if|nothing|what|whatever)\s)`;
-var ACTION = new RegExp(String.raw`\b(?:could you|(?<!\b(?:no one|nobody|nothing)\s)is waiting on you\b(?!')|only you can(?!'|\s(?:access|open|read|see|view)\b)|(?<![-#\w])please(?![-\w])|when you can(?!')|when you get a chance|${NOT_ASKED}you have to|${NOT_ASKED}you must|${NOT_ASKED}you need to|${NOT_ASKED}you(?:'ll| will) need to|(?<!\byou can\s)(?!(?:\w+ed|did|made|ran|saw|wrote)\s)\w+ it yourself)\b`, "i");
+var ACTION = new RegExp(String.raw`\b(?:could you|(?<!\b(?:no one|nobody|nothing)\s)(?<!(?:^\s*(?:(?:[-*]|\d+[.)])\s+)?|[.!?;]\s+)no \w+\s)is waiting on you\b(?!')|only you can(?!'|\s(?:access|open|read|see|view)\b)|(?<![-#\w])please(?![-\w])|when you can(?!')|when you get a chance|${NOT_ASKED}you have to|${NOT_ASKED}you must|${NOT_ASKED}you need to|${NOT_ASKED}you(?:'ll| will) need to|(?<!\byou can\s)(?<!\bwithout (?:having to )?)(?!(?:\w+ed|did|made|ran|saw|wrote)\s)\w+ it yourself)\b`, "i");
 var QUESTION = /\?(?![\w/=&%#-])/;
 var BLOCKQUOTE = /^\s*>/;
 var FENCE = /```[\s\S]*?(?:```|$)/g;
@@ -6179,6 +6329,7 @@ var QUOTED = /^\s*(?:[-*]\s+)?(?!(?:i|we)\s)[@\w][\w@.' -]{0,40}?\s(?:asks|asked
 var escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 var ownerOf = (owner) => owner.map(escape).join("|");
 var agentOf = (owner) => String.raw`(?:@${owner.length ? String.raw`(?!(?:${ownerOf(owner)})\b)` : ""}[\w-]+|light(?:man|kid|boy|plan)|${ID_NAME_SOURCE}|(?:worker|reviewer|tester|runner|probe)-[\w-]+)`;
+var phrases = (owner) => new RegExp(String.raw`\b(?<!\b(?:asked|told) (?!@?(?:you${owner.length ? `|${ownerOf(owner)}` : ""})\b)[\w@-]+ to )${PHRASES}\b`, "i");
 var BULLET = String.raw`(?:(?:[-*]|\d+[.)])\s+)?`;
 var ROLE_LABELS = new Set([...DISPATCHER_SLOT_LABELS, ...MANAGER_KINDS].map((label) => label.toLowerCase()));
 var shownNames = (names) => names.flatMap((name) => {
@@ -6206,11 +6357,12 @@ function ownWords(line, toAgentLine) {
 function asksDecision(reply, names = [], owner = []) {
   const toAgentLine = toAgent(names, owner);
   const toOwnerLine = toOwner(owner);
+  const phrasesLine = phrases(owner);
   const lines = reply.replace(FENCE, "").replace(CODE_SPAN, "").replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'").replace(/\*\*|__/g, "").split(`
 `).filter((line) => line.trim() && !BLOCKQUOTE.test(line));
   return lines.some((line, i) => {
     const own = ownWords(line, toAgentLine).replace(QUOTE_SPAN, '""').replace(POINTER, "");
-    return SAY.test(own) || PHRASES.test(own) || QUESTION.test(own) && !answeredRow(line, lines[i + 1]) || ACTION.test(own) || !!toOwnerLine?.test(own);
+    return SAY.test(own) || phrasesLine.test(own) || QUESTION.test(own) && !answeredRow(line, lines[i + 1]) || ACTION.test(own) || !!toOwnerLine?.test(own);
   });
 }
 var STEP = /^\s*\d+[.)]\s/;
@@ -6260,7 +6412,7 @@ async function output(command, cwd, timeoutMs) {
 }
 var dashboard;
 function dashboardCheckout() {
-  const setting = join4(__CHECKOUT + "/scripts/hooks", "../../packages/scripts/src/playground/setting.ts");
+  const setting = join5(__CHECKOUT + "/scripts/hooks", "../../packages/scripts/src/playground/setting.ts");
   dashboard ??= Promise.all([
     output(["bun", setting, "--text", "live.branch"], __CHECKOUT + "/scripts/hooks", READ_TIMEOUT_MS),
     output(["git", "worktree", "list", "--porcelain"], __CHECKOUT + "/scripts/hooks", GIT_TIMEOUT_MS)
@@ -6289,7 +6441,7 @@ function listedItem(item) {
   return needsYou || reopenable && !dismissedAt || item.kind === "update" && !dismissedAt && !(answer && ("choice" in answer)) && Date.parse(item.readAt ?? item.updatedAt ?? "") >= Date.parse(CLOCKS_STOPPED_AT);
 }
 async function readStatus(ref, checkout, timeoutMs = READ_TIMEOUT_MS) {
-  const item = JSON.parse(await output(["bun", join4(checkout, "api/hono/src/bin/dashboard-ask.ts"), "get", ref], checkout, timeoutMs));
+  const item = JSON.parse(await output(["bun", join5(checkout, "api/hono/src/bin/dashboard-ask.ts"), "get", ref], checkout, timeoutMs));
   const standing = standingOf(item);
   if (!standing)
     throw new Error(`bun run ask printed no status for ${ref}`);
@@ -6369,11 +6521,35 @@ async function gate(reply, deps, reason, counted) {
   const why = read.map((r) => ("status" in r) ? `${r.ref} is ${r.status}, not ${counted.join(" or ")}` : `${r.ref} could not be read with bun run ask (${r.error}), so it does not count`);
   return `${reason} (${why.join("; ")})`;
 }
+var WAITER_KINDS = new Set(["dispatcher", ...MANAGER_KINDS]);
+var waiterReason = (name) => `restart playground alerts-wait ${name} in the background`;
+async function waiterGate(env, sessionId, active, deps) {
+  if (active === true || typeof sessionId !== "string")
+    return;
+  const name = await deps.sessionName(sessionId);
+  if (!name)
+    return;
+  await loadNames(env);
+  const kind = placedKindOf(name, await rosterKind(name, env));
+  if (!kind || !WAITER_KINDS.has(kind))
+    return;
+  const outbox = join5(dataDirOf(env), "ops", "outbox");
+  return await waiterRunning(outbox, name) ? undefined : waiterReason(name);
+}
 async function inspect(raw, env, deps) {
   const input = JSON.parse(raw);
   if (input.hook_event_name === "PreToolUse")
     return picker(input, env, deps);
-  const { last_assistant_message: reply, session_id: sessionId } = input;
+  const [asked, waiter] = await Promise.all([
+    askGate(input.last_assistant_message, input.session_id, env, deps),
+    waiterGate(env, input.session_id, input.stop_hook_active, deps).catch(() => {
+      return;
+    })
+  ]);
+  return [asked, waiter].filter(Boolean).join(`
+`) || undefined;
+}
+async function askGate(reply, sessionId, env, deps) {
   if (typeof reply !== "string")
     return;
   const owner = await (deps.ownerNames ?? policyOwnerNames)(env);
@@ -6398,7 +6574,7 @@ async function check(raw, env = process.env, deps = live) {
   }
 }
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text());
+  const reason = await check(await input("no-chat-question", "recorder"));
   if (reason === PICKER_REASON) {
     console.error(reason);
     process.exit(2);
@@ -6417,5 +6593,6 @@ export {
   check,
   keepsForOwner,
   listedItem,
-  readStatus
+  readStatus,
+  waiterReason
 };

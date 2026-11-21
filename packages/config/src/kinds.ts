@@ -78,6 +78,9 @@ export const kindOfName = (name: string): RosterKind | null =>
 export const kindOf = (name: string, kind: unknown): RosterKind | null =>
   isRosterKind(kind) ? kind : kindOfName(name)
 
+// The session the dashboard hosts on the Agent SDK (api/hono/src/lib/dashboard/sdk.ts): its name reads as a probe, and it runs as one for the factory's hooks, but no lead spawns or records it, so ops-sweep raises no probe alert for it.
+export const SDK_PROBE = "probe-sdk"
+
 // The manager kinds, one live session each, in the chain's order of work: the planner, the builder, ops, then the optimizer.
 export const MANAGER_KINDS = ["planner", "builder", "ops", "optimizer"] as const
 

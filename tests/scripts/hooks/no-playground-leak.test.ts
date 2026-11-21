@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { chmodSync } from "node:fs"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -361,6 +362,16 @@ describe(`a Acme write holding a ${OLD.dispatcher} term is refused`, () => {
     expect(await bash("git push -u origin main", dirs.leaky)).toContain('"worker-envy"')
   })
 
+  test("a push's refusal names the commit whose message held the term, and the branch it names", async () => {
+    const sha = Bun.spawnSync(["git", "-C", dirs.leaky, "rev-parse", "--short", "HEAD"])
+      .stdout.toString()
+      .trim()
+    const message = await bash("git push", dirs.leaky)
+    expect(message).toContain(`, in the message of commit ${sha}`)
+    expect(message).toContain("git commit --amend")
+    expect(await bash("git push", dirs.named)).toContain(", in the branch name it pushes")
+  })
+
   test("git commit and git push carry the branch name", async () => {
     expect(await bash(`git commit -m "Fix"`, dirs.named)).toContain(`"${OLD.builder}"`)
     expect(await bash("git push", dirs.named)).toContain(`"${OLD.builder}"`)
@@ -377,6 +388,90 @@ describe(`a Acme write holding a ${OLD.dispatcher} term is refused`, () => {
     expect(await bash(`gh pr comment 1 --body "Thanks, Worker-Greed"`)).toContain('"Worker-Greed"')
   })
 })
+
+// origin names Acme's repository, so the hook places it, while an insteadOf rule sends git's reads to a local bare repo; each test builds on the one before
+describe("git push and gh pr create read the live branches of the remote they push to", () => {
+  const url = "https://github.com/acme-blue/app.git"
+  const pr = "gh pr create --title Fix --body ok"
+  let dir = ""
+  let bare = ""
+
+  beforeAll(async () => {
+    dir = join(scratch, "live")
+    bare = join(scratch, "live.git")
+    await mkdir(dir, { recursive: true })
+    git(scratch, "init", "-q", "--bare", "-b", "main", bare)
+    git(dir, "init", "-q", "-b", "main")
+    git(dir, "remote", "add", "origin", url)
+    git(dir, "config", `url.${bare}.insteadOf`, url)
+    git(dir, "commit", "-q", "--allow-empty", "-m", "Fix the export button")
+    git(dir, "push", "-q", "origin", "main")
+    git(dir, "checkout", "-q", "-b", "fix/export")
+    git(dir, "commit", "-q", "--allow-empty", "-m", "Fix from worker-envy")
+    git(dir, "push", "-q", "origin", "fix/export")
+    git(bare, "branch", "-D", "fix/export")
+  })
+
+  test("a commit only a stale tracking ref holds, its branch deleted on the remote, is read", async () => {
+    expect(await bash("git push", dir)).toContain('"worker-envy"')
+    expect(await bash("git push origin HEAD", dir)).toContain('"worker-envy"')
+    expect(await bash(pr, dir)).toContain('"worker-envy"')
+  })
+
+  test("a commit another remote holds and the one it pushes to does not is read", async () => {
+    git(dir, "update-ref", "-d", "refs/remotes/origin/fix/export")
+    git(scratch, "init", "-q", "--bare", "-b", "main", join(scratch, "live-fork.git"))
+    git(dir, "remote", "add", "fork", join(scratch, "live-fork.git"))
+    git(dir, "push", "-q", "fork", "fix/export")
+    expect(await bash(pr, dir)).toContain('"worker-envy"')
+    expect(await bash("git push", dir)).toContain('"worker-envy"')
+  })
+
+  test("a commit the live remote holds stays out", async () => {
+    git(dir, "push", "-q", "origin", "fix/export")
+    expect(await bash(pr, dir)).toBeUndefined()
+    expect(await bash("git push", dir)).toBeUndefined()
+  })
+
+  test("a remote it cannot read leaves every commit in", async () => {
+    git(dir, "config", `url.${join(scratch, "nowhere.git")}.insteadOf`, url)
+    git(dir, "config", "--unset", `url.${bare}.insteadOf`)
+    expect(await bash(pr, dir)).toContain('"worker-envy"')
+    expect(await bash("git push", dir)).toContain('"worker-envy"')
+  })
+})
+
+// three checkouts whose origin names Acme's repository while an insteadOf rule sends git's reads to an ssh remote of its own whose ssh logs its arguments as it starts, then sleeps: the pushes of one call share one live-read budget (withLiveBudget), so the first read spends 5 s, the second the 1 s left, the third starts none and reads every commit, and the call ends inside the guard's timeout
+test("three push scans in one call on a hung remote end within the budget", async () => {
+  const url = "https://github.com/acme-blue/app.git"
+  const ssh = join(scratch, "hung-ssh")
+  const log = join(scratch, "hung-ssh.log")
+  await Bun.write(ssh, `#!/bin/sh\necho "$*" >> '${log}'\nexec sleep 10\n`)
+  await Bun.write(log, "")
+  chmodSync(ssh, 0o755)
+  const names = ["hung-a", "hung-b", "hung-c"]
+  const dirs = names.map((name) => join(scratch, name))
+  for (const [i, dir] of dirs.entries()) {
+    await mkdir(dir, { recursive: true })
+    git(dir, "init", "-q", "-b", "main")
+    git(dir, "remote", "add", "origin", url)
+    git(dir, "config", `url.ssh://git@example.invalid/${names[i]}.git.insteadOf`, url)
+    git(dir, "config", "core.sshCommand", ssh)
+    // a set variant skips git's ssh -G probe, so each read starts the fake once, naming its remote's path
+    git(dir, "config", "ssh.variant", "ssh")
+    // the test sandbox's git refuses ssh, so each checkout allows it for this fake alone
+    git(dir, "config", "protocol.ssh.allow", "always")
+  }
+  // the first two scans find no term, so the hook reads all three; the third's commit names a session
+  git(dirs[0], "commit", "-q", "--allow-empty", "-m", "Fix the export button")
+  git(dirs[1], "commit", "-q", "--allow-empty", "-m", "Fix the import button")
+  git(dirs[2], "commit", "-q", "--allow-empty", "-m", "Fix from worker-envy")
+  const reason = await bash(dirs.map((dir) => `git -C ${dir} push`).join(" && "))
+  expect(reason).toContain('"worker-envy"')
+  const started = await Bun.file(log).text()
+  expect(started).toContain("/hung-a.git")
+  expect(started).not.toContain("/hung-c.git")
+}, 12_000)
 
 describe("the roster's names are terms too, since sessions are renamed", () => {
   const slack = "mcp__slack-shared__chat_post_message"
@@ -980,6 +1075,53 @@ describe("a Acme write it cannot read is refused", () => {
     expect(reason).toContain(cause)
     expect(reason).toContain("Pass the input as an object whose fields are strings.")
     expect(reason).not.toContain("--body-file")
+  })
+})
+
+describe("a pull request opened from a pushed branch is judged on its own text (#1941)", () => {
+  const file = (name: string) => join(dirs.lw, name)
+  const pulls = (title: string, body: string) =>
+    `gh api repos/acme-blue/app/pulls -X POST -F title=@${file(title)} -F body=@${file(body)} -f head=fix/export -f base=main`
+  const create = (title: string, body: string) =>
+    `gh pr create ${LW} --head fix/export --title "${title}" --body-file ${file(body)}`
+
+  test("gh api's pulls POST is refused for a factory term in its title or body file, and passes clean", async () => {
+    expect(await bash(pulls("leaky.md", "clean.md"), scratch)).toContain('"worker-envy"')
+    expect(await bash(pulls("clean.md", "leaky.md"), scratch)).toContain('"worker-envy"')
+    expect(await bash(pulls("clean.md", "clean.md"), scratch)).toBeUndefined()
+  })
+
+  test("gh pr create with --head, outside a checkout, is judged on its title and body file", async () => {
+    expect(await bash(create("Fix export", "clean.md"), scratch)).toBeUndefined()
+    expect(await bash(create("Fix export", "leaky.md"), scratch)).toContain('"worker-envy"')
+    expect(await bash(create("Fix by worker-envy", "clean.md"), scratch)).toContain('"worker-envy"')
+  })
+
+  test.each(["-H fix/export", "--head=fix/export", "-Hfix/export", "-dH fix/export"])(
+    "gh pr create %s, outside a checkout, is judged on its text alone",
+    async (head) => {
+      const command = `gh pr create ${LW} ${head} --title "Fix export" --body-file ${file("clean.md")}`
+      expect(await bash(command, scratch)).toBeUndefined()
+    },
+  )
+
+  test("gh pr create --head from a checkout whose unpushed commit holds a term reads no commits, since it pushes none", async () => {
+    expect(await bash(create("Fix export", "clean.md"), dirs.leaky)).toBeUndefined()
+    expect(
+      await bash(
+        `gh pr create ${LW} --title "Fix export" --body-file ${file("clean.md")}`,
+        dirs.leaky,
+      ),
+    ).toContain('"worker-envy"')
+  })
+
+  test("gh pr create with no --head, outside a checkout, stays refused for the commits it may push", async () => {
+    const reason = await bash(
+      `gh pr create ${LW} --title "Fix export" --body-file ${file("clean.md")}`,
+      scratch,
+    )
+    expect(reason).toContain("cannot read its text")
+    expect(reason).toContain("the commits it may push")
   })
 })
 

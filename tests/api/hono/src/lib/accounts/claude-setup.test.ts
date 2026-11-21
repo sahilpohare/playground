@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  type Browser,
   CODE_WAIT_MS,
   openPrivate,
   profileUrl,
@@ -101,7 +102,7 @@ const EMAIL = "made-up@example.test"
 const GONE =
   "This sign-in has ended, most likely because Playground restarted: start again for a new one"
 // The account the sign-in names, as the reader of a kept token would answer it.
-let signedIn: string | null = EMAIL
+let signedIn: string | null | false = EMAIL
 beforeEach(() => {
   signedIn = EMAIL
 })
@@ -109,6 +110,7 @@ const fakes = {
   account: async () => signedIn,
   claude: join(bin, "claude"),
   open: join(bin, "open"),
+  platform: "darwin" as const,
   profiles: bin,
 }
 // The fresh profile folder an open put in its argv.
@@ -367,6 +369,35 @@ describe("the guided Claude sign-in", () => {
     expect(logged()).not.toContain("open ")
   })
 
+  test("a token Ink draws with a cursor move before the next word is read to its own end, the real one's 108 characters", async () => {
+    const data = fresh()
+    const started = await startSetup({ email: EMAIL }, { ...fakes, applications: apps(), data })
+    if (!started.ok) throw new Error(started.message)
+    expect(await submitCode(started.id, "drawn", who, { ...fakes, data })).toMatchObject({
+      ok: true,
+    })
+    const kept = logged().match(/-w "([^"]*)"/)?.[1] ?? ""
+    expect(kept).toBe(
+      `sk-ant-oat01-${createHash("sha256").update("drawn").digest("hex")}-made-up-${"A".repeat(22)}`,
+    )
+    expect(kept).toHaveLength(108)
+  })
+
+  test("a token Claude refuses is shown as refused, and neither kept nor listed", async () => {
+    const data = fresh()
+    const started = await startSetup({ email: EMAIL }, { ...fakes, applications: apps(), data })
+    if (!started.ok) throw new Error(started.message)
+    signedIn = false
+    expect(await submitCode(started.id, "made-up-code", who, { ...fakes, data })).toEqual({
+      message:
+        "Claude refused the token this sign-in made, so it is not kept: start again for a new one",
+      ok: false,
+      status: 409,
+    })
+    expect(logged()).not.toContain("add-generic-password")
+    expect(readSetting(data, "usage.accounts")?.value ?? []).toEqual([])
+  })
+
   test("a token for another account than the email given is dropped, and nothing is listed", async () => {
     const data = fresh()
     const started = await startSetup({ email: EMAIL }, { ...fakes, applications: apps(), data })
@@ -419,6 +450,100 @@ describe("the guided Claude sign-in", () => {
       expect(logged()).toBe("")
     } finally {
       process.env.PLAYGROUND_LIVE_READS = "1"
+    }
+  })
+})
+
+// Linux: browsers by command on a PATH of the case's own, each logging its argv and display, beside a socket folder and a runtime folder holding gdm's auth file.
+describe("the guided Claude sign-in on Linux", () => {
+  const linux = (commands: string[], sockets: string[], env: Record<string, string> = {}) => {
+    const path = join(bin, `path-${n++}`)
+    const x11 = join(bin, `x11-${n++}`)
+    const runtime = join(bin, `runtime-${n++}`)
+    mkdirSync(path)
+    mkdirSync(x11)
+    mkdirSync(join(runtime, "gdm"), { recursive: true })
+    writeFileSync(join(runtime, "gdm", "Xauthority"), "")
+    for (const name of commands) {
+      writeFileSync(
+        join(path, name),
+        `#!/bin/sh\nprintf '${name} %s display %s auth %s\\n' "$*" "$DISPLAY" "$XAUTHORITY" >> "${log}"\n`,
+      )
+      chmodSync(join(path, name), 0o755)
+    }
+    for (const name of sockets) writeFileSync(join(x11, name), "")
+    return {
+      ...fakes,
+      env: { PATH: path, ...env },
+      platform: "linux" as const,
+      runtime,
+      x11,
+    }
+  }
+  const opened = async () => {
+    for (let i = 0; i < 100 && !logged().includes("display"); i++) await Bun.sleep(20)
+    return logged()
+  }
+
+  test("each browser is picked by its command in order: Helium, Chrome, Chromium, then Firefox, and Brave or Edge alone finds none", async () => {
+    const picks: [string[], Browser["name"] | null][] = [
+      [["firefox", "chromium", "google-chrome-stable", "helium"], "Helium"],
+      [["firefox", "chromium-browser", "google-chrome"], "Chrome"],
+      [["firefox", "chromium"], "Chromium"],
+      [["firefox"], "Firefox"],
+      [["brave-browser", "microsoft-edge"], null],
+    ]
+    for (const [commands, name] of picks) {
+      const started = await startSetup(
+        { email: EMAIL },
+        { ...linux(commands, ["X1"]), data: fresh() },
+      )
+      if (!started.ok) throw new Error(started.message)
+      expect(started.browser?.name ?? null).toBe(name)
+    }
+  })
+
+  test("a browser opens the sign-in detached on a fresh profile, on the one X display this user owns with gdm's auth file", async () => {
+    const data = fresh()
+    const deps = linux(["helium", "firefox"], ["X1"])
+    const started = await startSetup({ email: EMAIL }, { ...deps, data })
+    if (!started.ok) throw new Error(started.message)
+    writeFileSync(log, "")
+    expect(await openPrivate(started.id, deps)).toEqual({
+      browser: { app: "Helium", name: "Helium" },
+      ok: true,
+    })
+    const line = await opened()
+    const profile = profileIn(line)
+    expect(profile).toStartWith(join(bin, "playground-sign-in-"))
+    expect(line).toBe(
+      `helium --user-data-dir=${profile} --no-first-run ${started.url} display :1 auth ${join(deps.runtime, "gdm", "Xauthority")}\n`,
+    )
+    await submitCode(started.id, "made-up-code", who, { ...fakes, data })
+    expect(existsSync(profile)).toBe(false)
+  })
+
+  test("Firefox opens on a fresh profile of its own, on the display the environment names", async () => {
+    const deps = linux(["firefox"], [], { DISPLAY: ":7" })
+    const started = await startSetup({ email: EMAIL }, { ...deps, data: fresh() })
+    if (!started.ok) throw new Error(started.message)
+    writeFileSync(log, "")
+    expect(await openPrivate(started.id, deps)).toMatchObject({ browser: { name: "Firefox" } })
+    const line = await opened()
+    expect(line).toBe(
+      `firefox -profile ${profileIn(line)} -no-remote ${started.url} display :7 auth \n`,
+    )
+  })
+
+  test("two X sockets, or none, name no display, so nothing opens and the page offers the link to copy", async () => {
+    for (const sockets of [["X0", "X1"], []]) {
+      const deps = linux(["helium"], sockets)
+      const started = await startSetup({ email: EMAIL }, { ...deps, data: fresh() })
+      if (!started.ok) throw new Error(started.message)
+      expect(started.browser).toBeNull()
+      writeFileSync(log, "")
+      expect(await openPrivate(started.id, deps)).toEqual({ browser: null, ok: true })
+      expect(logged()).toBe("")
     }
   })
 })

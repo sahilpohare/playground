@@ -187,6 +187,8 @@ exit 0
     "docker": "#!/bin/bash\necho 0\n",
     "cmux": "#!/bin/bash\nexit 1\n",
     "claude": "#!/bin/bash\nexit 1\n",
+    # the supervisor's bunx portless get finds no package in the scratch checkout, so it runs the portless first on PATH: this one names a made-up URL and refuses the rest
+    "portless": "#!/bin/bash\n[ \"$1\" = get ] && { echo \"https://$2.localhost\"; exit 0; }\nexit 1\n",
 }
 
 

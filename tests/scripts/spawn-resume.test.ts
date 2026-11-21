@@ -14,14 +14,12 @@ import {
 import { dirname, join } from "node:path"
 
 import {
-  bin,
   capacityLog,
   execLine,
   herdrPin,
   launchAfterRm,
   launchOf,
   lw,
-  opened,
   placing,
   projectOf,
   ranIn,
@@ -30,7 +28,6 @@ import {
   script,
   spawn,
   transcript,
-  usage,
 } from "./spawn-fake"
 
 // Every case runs spawn.sh, which starts fake processes and waits on them; one took 19.9s on the loaded runner box, so each gets twice that.
@@ -611,7 +608,9 @@ describe("restore resumes the herdr sessions its resume files list", () => {
       undefined,
       held(4242),
     )
-    expect(r.out).toBe("another restore is running (pid 4242)\n")
+    expect(r.out).toBe(
+      "a restore is already running (pid 4242), so this one stops; nothing is wrong\n",
+    )
     expect(r.code).toBe(1)
     expect(placing(r).filter((c) => c[1] === "run")).toEqual([])
     expect(readlinkSync(lw(r.home, "resume", ".restore.lock"))).toBe(
@@ -639,8 +638,12 @@ describe("restore resumes the herdr sessions its resume files list", () => {
     expect(r.out).toBe("")
   })
 
-  test("it takes no other words", async () => {
-    const r = await spawn(["restore", "worker-a"], [], {})
+  test.each([
+    ["a name", ["worker-a"]],
+    ["--harness", ["--harness", "codex"]],
+    ["--priority", ["--priority"]],
+  ])("it takes no other words: %s", async (_, words) => {
+    const r = await spawn(["restore", ...words], [], {})
     expect(r.code).toBe(2)
     expect(r.err).toContain("restore takes no other words")
   })
@@ -742,7 +745,6 @@ describe("close ends a herdr session by closing the pane it opened (#994)", () =
       opened({ runtime: "made-up" }),
       "does not read herdr",
     ],
-    ["a session with no runtime pin", {}, opened({ runtime: null }), "does not read herdr"],
     ["a session with no resume record", {}, opened({ record: null }), "has no resume record"],
     [
       "a server name that is not a word",
@@ -789,6 +791,55 @@ describe("close ends a herdr session by closing the pane it opened (#994)", () =
     expect(r.roster).toBeUndefined()
   })
 
+  test("a session whose start stopped before its runtime pin closes by its record and its one labelled pane, writing the pin first (#2112)", async () => {
+    const r = await spawn(
+      ["close", "worker-x"],
+      [],
+      {},
+      undefined,
+      undefined,
+      opened({ runtime: null }),
+    )
+    expect(r.err).toBe("")
+    expect(r.code).toBe(0)
+    expect(r.out).toBe("closed worker-x (pane w2:p3 on factory)\n")
+    expect(closes(r)).toEqual([["pane", "close", "w2:p3"]])
+    expect(r.rosterLog).toEqual(["set worker-x status=ended"])
+    expect(readFileSync(lw(r.home, "runtimes", "worker-x"), "utf8")).toBe("herdr\n")
+  })
+
+  test.each([
+    ["no resume record", opened({ runtime: null, record: null }), "it has no resume record"],
+    [
+      "no pane with its label",
+      opened({ runtime: null, panes: [{ label: "worker-y", pane_id: "w2:p4" }] }),
+      "no pane on the herdr server factory carries the label worker-x",
+    ],
+    [
+      "two panes with its label",
+      opened({
+        runtime: null,
+        panes: [
+          { label: "worker-x", pane_id: "w2:p3" },
+          { label: "worker-x", pane_id: "w2:p5" },
+        ],
+      }),
+      "2 panes on the herdr server factory carry the label worker-x",
+    ],
+  ])(
+    "a session with no runtime pin and %s is refused with that reason, and no pin is written (#2112)",
+    async (_, setup, said) => {
+      const r = await spawn(["close", "worker-x"], [], {}, undefined, undefined, setup)
+      expect(r.code).toBe(1)
+      expect(r.err).toContain("spawn.sh refuses worker-x: ")
+      expect(r.err).toContain(said)
+      expect(r.err).toContain("and it has no runtime pin")
+      expect(closes(r)).toEqual([])
+      expect(r.roster).toBeUndefined()
+      expect(existsSync(lw(r.home, "runtimes", "worker-x"))).toBe(false)
+    },
+  )
+
   test.each([
     ["working", {}, "status=working"],
     ["parked", { hold: "#12" }, "status=parked hold=#12"],
@@ -817,14 +868,19 @@ describe("close ends a herdr session by closing the pane it opened (#994)", () =
 
   test.each([
     ["no name", ["close"]],
-    ["another word", ["close", "worker-x", "worker-y"]],
+    [
+      "a word past the session id",
+      ["close", "worker-x", "a1b2c3d4-0000-4000-8000-0000000000a1", "worker-y"],
+    ],
     ["an option", ["close", "worker-x", "--runtime", "herdr"]],
     ["a size", ["close", "worker-x", "--size", "small"]],
-  ])("it takes a session's name alone, so %s is usage", async (_, args) => {
+    ["--harness", ["close", "worker-x", "--harness", "codex"]],
+    ["--priority", ["close", "worker-x", "--priority"]],
+  ])("it takes a session's name and its session id alone, so %s is usage", async (_, args) => {
     const r = await spawn(args, [], {}, undefined, undefined, opened())
     expect(r.code).toBe(2)
-    expect(r.err).toContain("close takes a session's name alone")
-    expect(r.err).toContain("--runtime herdr    with any mode but restore or close,")
+    expect(r.err).toContain("close takes a session's name, and its session id to pick one")
+    expect(r.err).toContain("--runtime herdr    with any mode but restore, close or read,")
     expect(closes(r)).toEqual([])
     expect(r.roster).toBeUndefined()
   })

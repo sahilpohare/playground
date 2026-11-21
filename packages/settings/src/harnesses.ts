@@ -1,6 +1,6 @@
-// The harnesses a session runs in: each one's id and the backends it takes, a backend being a model setting of its harness (GLM is Claude Code on Z.ai's models.glm), its default first. Codex runs the first dispatcher alone (spawn.sh --harness codex).
+// The harnesses a session runs in: each one's id and the backends it takes, a backend being a model setting of its harness (GLM is Claude Code on Z.ai's models.glm, local is Claude Code on the local model on this machine's loopback), its default first. Codex runs the first dispatcher alone (spawn.sh --harness codex).
 export const HARNESSES = [
-  { backends: ["claude", "glm"], id: "claude-code" },
+  { backends: ["claude", "glm", "local"], id: "claude-code" },
   { backends: ["openai"], id: "codex" },
 ] as const
 
@@ -10,6 +10,9 @@ export type Backend = Harness["backends"][number]
 
 // The model a template names for GLM, which spawn.sh's --backend glm runs on models.glm.
 export const GLM_MODEL = "glm"
+
+// The model a template names for the local model, which spawn.sh's --backend local runs on this machine's loopback.
+export const LOCAL_MODEL = "local"
 
 // A session's backend pin as spawn.sh writes it under backends/<name>: its harness, then its backend.
 export const pinText = (harness: HarnessId, backend: Backend) => `${harness} ${backend}`

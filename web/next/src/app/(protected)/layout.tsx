@@ -99,7 +99,7 @@ export default async function Layout({ children }: { children: React.ReactNode }
         opensPreview
         stats={<DashboardStats />}
         header={<DashboardDispatchers rows={dispatcherSlotsOf(await readHealth())} />}
-        nav={<DashboardNav />}
+        nav={<DashboardNav account={session.user.login ?? session.user.id} />}
         footer={<DashboardFooter />}
       >
         <OwnerMenuProvider canAccessConsole={reachesConsole(session.user)} machine={machine}>

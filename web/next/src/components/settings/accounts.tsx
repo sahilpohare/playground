@@ -1,5 +1,6 @@
 "use client"
 
+import { BACKEND_MAKERS } from "@packages/config/console"
 import { RiDeleteBinLine } from "@remixicon/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import * as React from "react"
@@ -24,15 +25,19 @@ import { Switch } from "@/components/ui/switch"
 import { toast } from "@/components/ui/toast"
 import { ACCOUNTS_QUERY_KEY, type AccountRow, accountWords, readAccounts } from "@/lib/accounts"
 import { apiClient, unwrap } from "@/lib/api/client"
+import { useMakerIcon } from "@/lib/model-icons"
 import { markOwn } from "@/lib/own-account"
-import { PROVIDER_ICONS } from "@/lib/status-icons"
 import { useAccount } from "@/lib/system"
 
-const ICONS = { claude: PROVIDER_ICONS.anthropic, glm: PROVIDER_ICONS.zai }
+// An account's maker's icon, its place kept empty while it is read.
+function AccountIcon({ provider }: { provider: keyof typeof BACKEND_MAKERS }) {
+  const Icon = useMakerIcon(BACKEND_MAKERS[provider])
+  return Icon ? <Icon /> : <span className="size-4" />
+}
 
 const KEY = "usage.accounts"
 
-// Settings > Accounts: every Claude and GLM account the factory spends, each with whether its token is kept, Add account and Remove, and on a Claude row an Own account switch, whose account the login flip spends at a fifth unless it resets within a day; the token is pasted once and goes to the Keychain, never back to the page. While the first read is pending it holds its space empty, never a placeholder box.
+// Settings > Accounts: every Claude and GLM account the factory spends, each with whether its token is kept, Add account and Remove, and on a Claude row an Own account switch, whose account the login flip spends at a fifth unless it resets within a day; the token is pasted once and goes to this computer's secret store, never back to the page. While the first read is pending it holds its space empty, never a placeholder box.
 export function Accounts() {
   const { data, error, isPending } = useQuery({
     queryKey: ACCOUNTS_QUERY_KEY,
@@ -120,11 +125,10 @@ export function Accounts() {
         <ItemGroup className="gap-2">
           {accounts.map((row) => {
             const words = accountWords(row, login?.email)
-            const Icon = ICONS[row.provider]
             return (
               <Item key={`${row.provider}:${row.key}`} variant="outline" size="sm">
                 <ItemMedia variant="icon">
-                  <Icon />
+                  <AccountIcon provider={row.provider} />
                 </ItemMedia>
                 <ItemContent>
                   <ItemTitle>{words.title}</ItemTitle>
@@ -184,7 +188,7 @@ export function Accounts() {
           if (!open) setRemoving(null)
         }}
         title={`Remove ${title}?`}
-        description="It leaves the accounts your sessions spend, and its token leaves this Mac's Keychain."
+        description="It leaves the accounts your sessions spend, and its token leaves this computer's secret store."
         action="Remove"
         variant="destructive"
         pending={remove.isPending}

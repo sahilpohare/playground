@@ -63,27 +63,32 @@ const syncScope = async (data: string, scope: string, slug: string, run: Run): P
     if (done.code !== 0) throw new Error(`${scope}: git ${args[0]} failed: ${done.err}`)
     return done.out
   }
-  if (extGit(dir, ["remote", "set-url", "origin", where.url]).code !== 0)
-    git("remote", "add", "origin", where.url)
-  git("fetch", "-q", "origin")
-  withLock(data, () => {
-    if (extGit(dir, ["rev-parse", "-q", "--verify", "origin/main"]).code !== 0) return
-    // a rebase commits again, so a machine with no git identity (a fresh runner) takes writeFiles' committer, and one with its own keeps it
-    const committer = Object.fromEntries(
-      [
-        ["user.name", "GIT_COMMITTER_NAME", "Playground"],
-        ["user.email", "GIT_COMMITTER_EMAIL", "playground"],
-      ]
-        .filter(([key]) => extGit(dir, ["config", key!]).code !== 0)
-        .map(([, name, value]) => [name!, value!]),
-    )
-    if (extGit(dir, ["rebase", "-q", "origin/main"], committer).code === 0) return
-    extGit(dir, ["rebase", "--abort"])
-    throw new Error(
-      `${scope}: its commits do not rebase onto ${slug}'s; nothing pushed, so resolve it by hand in ${dir}`,
-    )
-  })
-  git("push", "-q", "origin", "HEAD:main")
+  // every git write here, the fetch and the push included, runs under the one lock, which lifts this scope's folder of a locked root for it
+  withLock(
+    data,
+    () => {
+      if (extGit(dir, ["remote", "set-url", "origin", where.url]).code !== 0)
+        git("remote", "add", "origin", where.url)
+      git("fetch", "-q", "origin")
+      if (extGit(dir, ["rev-parse", "-q", "--verify", "origin/main"]).code !== 0) return
+      // a rebase commits again, so a machine with no git identity (a fresh runner) takes writeFiles' committer, and one with its own keeps it
+      const committer = Object.fromEntries(
+        [
+          ["user.name", "GIT_COMMITTER_NAME", "Playground"],
+          ["user.email", "GIT_COMMITTER_EMAIL", "playground"],
+        ]
+          .filter(([key]) => extGit(dir, ["config", key!]).code !== 0)
+          .map(([, name, value]) => [name!, value!]),
+      )
+      if (extGit(dir, ["rebase", "-q", "origin/main"], committer).code === 0) return
+      extGit(dir, ["rebase", "--abort"])
+      throw new Error(
+        `${scope}: its commits do not rebase onto ${slug}'s; nothing pushed, so resolve it by hand in ${dir}`,
+      )
+    },
+    { scopes: [scope] },
+  )
+  withLock(data, () => git("push", "-q", "origin", "HEAD:main"), { scopes: [scope] })
   return `${scope} synced with ${slug} at ${git("rev-parse", "--short", "HEAD")}`
 }
 

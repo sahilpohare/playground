@@ -58,7 +58,7 @@ export const storeSecret = (
   )
   // a failed command shows in its exit or its error output, whichever security -i gives
   if (run.status !== 0 || run.error || run.stderr.trim())
-    throw new Error(`the Keychain refused the ${service} item for ${key}`)
+    throw new Error(`the secret store refused the ${service} item for ${key}`)
 }
 
 // Whether the item was there to remove.

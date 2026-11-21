@@ -1,6 +1,6 @@
-// The verdicts a Playground PR's gates and the Dashboard read, in one module both import, so a format change or a stricter reading cannot leave one reader behind. Every verdict comment is posted as the repo's owner. Two kinds, each a comment's first line: the reviewer's score, which pr:merge gates on, and the tester's word on its drive, which the Dashboard shows.
+// The verdicts a Playground PR's gates and the Dashboard read, in one module both import, so a format change or a stricter reading cannot leave one reader behind. Every verdict comment is posted as the repo's owner. Three kinds, each a comment's first line: the reviewer's score, which pr:merge gates on, the tester's word on its drive, which pr:merge gates a web/next diff on and the Dashboard shows, and the new-user gate's word, which pr:merge gates an installer or first-run diff on.
 
-export type GateName = "review" | "tester"
+export type GateName = "new-user" | "review" | "tester"
 
 // round and score: a review's.
 export type Verdict = {
@@ -20,7 +20,10 @@ const REVIEW = /^##\s*ReviewBot\s*·\s*round\s+(\d+):\s*(\d)\/5\s+at\s+([0-9a-f]
 // ## TesterBot · PASS at 69a6a4c · ...
 const TESTER = /^##\s*TesterBot\s*·\s*(PASS|FAIL)\s+at\s+([0-9a-f]{7,40})/i
 
-// Pure: the verdict a comment's first line carries, a review or a tester's word, null for any other comment.
+// ## NewUserGate · INCONCLUSIVE at 69a6a4c · 6 of 7 passed, 1 inconclusive; 7. Usage: ...
+const NEW_USER = /^##\s*NewUserGate\s*·\s*(PASS|FAIL|INCONCLUSIVE)\s+at\s+([0-9a-f]{7,40})/i
+
+// Pure: the verdict a comment's first line carries, a review, a tester's word or the new-user gate's, null for any other comment.
 export function verdictOf(body: string): Verdict | null {
   const line = body.trimStart().split("\n")[0]?.trim() ?? ""
   const review = REVIEW.exec(line)
@@ -32,6 +35,16 @@ export function verdictOf(body: string): Verdict | null {
       pass: score === "5",
       round: Number(round),
       score: Number(score),
+      text: line,
+    }
+  }
+  const newUser = NEW_USER.exec(line)
+  if (newUser) {
+    const [, word = "", at = ""] = newUser
+    return {
+      at: at.toLowerCase(),
+      gate: "new-user",
+      pass: word.toUpperCase() === "PASS",
       text: line,
     }
   }

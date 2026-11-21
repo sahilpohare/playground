@@ -403,6 +403,65 @@ describe.skipIf(!dockerUp())("the thread store", () => {
     expect(await store.seedFixtureThreads(untouchable, { kind: "refused", reason: "no" })).toBe(0)
   })
 
+  test("a fresh fixture stack seeds the made-up threads at start and says so on one line", async () => {
+    await reset()
+    const dir = join(mkdtempSync(join(tmpdir(), "threads-start-")), "fixture")
+    const saved = process.env.PLAYGROUND_FIXTURE_DIR
+    process.env.PLAYGROUND_FIXTURE_DIR = dir
+    const lines: string[] = []
+    const said = console.error
+    console.error = (line: unknown) => lines.push(String(line))
+    try {
+      expect(await store.seedFixtureThreadsAtStart(db)).toBe(7)
+      expect(lines).toEqual(["fixture: 7 made-up threads seeded at start"])
+    } finally {
+      console.error = said
+      if (saved === undefined) delete process.env.PLAYGROUND_FIXTURE_DIR
+      else process.env.PLAYGROUND_FIXTURE_DIR = saved
+    }
+  })
+
+  test("a fixture stack whose table already holds a thread seeds nothing at start", async () => {
+    await reset()
+    await thread("zzz9", "2026-10-20T10:00:00.000Z")
+    const dir = join(mkdtempSync(join(tmpdir(), "threads-start-full-")), "fixture")
+    const saved = process.env.PLAYGROUND_FIXTURE_DIR
+    process.env.PLAYGROUND_FIXTURE_DIR = dir
+    const lines: string[] = []
+    const said = console.error
+    console.error = (line: unknown) => lines.push(String(line))
+    try {
+      expect(await store.seedFixtureThreadsAtStart(db)).toBe(0)
+      expect(lines).toEqual([])
+      const [{ value }] = await admin`select count(*)::int as value from thread`
+      expect(value).toBe(1)
+    } finally {
+      console.error = said
+      if (saved === undefined) delete process.env.PLAYGROUND_FIXTURE_DIR
+      else process.env.PLAYGROUND_FIXTURE_DIR = saved
+      await reset()
+    }
+  })
+
+  test("a stack reading the live machine never seeds at start", async () => {
+    const untouchable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error("the database was touched")
+        },
+      },
+    ) as typeof db
+    const saved = process.env.PLAYGROUND_LIVE_READS
+    process.env.PLAYGROUND_LIVE_READS = "true"
+    try {
+      expect(await store.seedFixtureThreadsAtStart(untouchable)).toBe(0)
+    } finally {
+      if (saved === undefined) delete process.env.PLAYGROUND_LIVE_READS
+      else process.env.PLAYGROUND_LIVE_READS = saved
+    }
+  })
+
   test("a fixture stack seeds the shipped threads over its ingested transcript: 6 open across 2 pages, one pinned on top, and a change survives a second seed", async () => {
     await reset()
     const dir = join(mkdtempSync(join(tmpdir(), "threads-fixture-")), "fixture")

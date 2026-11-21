@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises"
 
-import { folderName } from "@packages/config/console"
+import { folderName, LOCAL_SERVED } from "@packages/config/console"
 import {
   getSessionNames,
   isEndedStatus,
@@ -10,6 +10,7 @@ import {
   seatOf,
   setSessionNames,
 } from "@packages/config/kinds"
+import type { LocalModel } from "@packages/config/org"
 import { env } from "@packages/env/api-hono"
 import { dataDir } from "@packages/env/data-dir"
 import { readSessionNames } from "@packages/settings"
@@ -23,12 +24,14 @@ import {
   readHerdr,
   readStates,
   restoring,
+  sshLaunches,
   withHerdrState,
 } from "@/lib/dashboard/herdr"
+import { localModel, withLocalModel } from "@/lib/dashboard/local-model"
 import {
-  processStarts,
   readRegistry,
   registeredSessionsOf,
+  registeredStarts,
   type Registry,
   registryOf,
 } from "@/lib/dashboard/peers"
@@ -96,7 +99,7 @@ export type FeedItem =
     }
   | { at: string; kind: "question"; questions: FeedQuestion[]; requestId: string }
 
-// The dispatcher runs the dashboard rather than one task, so its first ask (from a long-resumed session) says nothing about what it does now. The planner, the builder, ops and the optimizer are managers under it, by the roster's kind or else by their sessions.names names, an alias in sessions.aliases, or `optimizer`, as is any agent the roster lists with the manager role. The factory names the rest by role: `runner-<sin>` is a dedicated long-running session (one keeps the dashboard on the newest canary), `worker-<sin>` a bounded chore, and `reviewer-<sin>` and `tester-<sin>` the sessions that check a worker's pull request, which the sidebar nests under it; the roster's runner or worker role places a session of any name. A `probe-<what>` is a throwaway test, and a session with any other name is outside the factory: both are other.
+// The dispatcher runs the dashboard rather than one task, so its first ask (from a long-resumed session) says nothing about what it does now. The planner, the builder, ops and the optimizer are managers under it, by the roster's kind or else by their sessions.names names, an alias in sessions.aliases, or `optimizer`, as is any agent the roster lists with the manager role. The factory names the rest by role: `runner-<sin>` is a dedicated long-running session (one keeps the dashboard on its branch's newest head), `worker-<sin>` a bounded chore, and `reviewer-<sin>` and `tester-<sin>` the sessions that check a worker's pull request, which the sidebar nests under it; the roster's runner or worker role places a session of any name. A `probe-<what>` is a throwaway test, and a session with any other name is outside the factory: both are other.
 export type Role = "dispatcher" | "manager" | "other" | "runner" | "worker"
 
 // The machine's managers' names (sessions.names and sessions.aliases), set before any name is placed or the dispatcher named.
@@ -197,6 +200,8 @@ const rankOf = (worker: { name: string; role: Role }): number => {
   return worker.role === "manager" ? 0 : 1
 }
 
+export type LocalLoad = { label: string; reason?: string; state: "failed" | "loading" }
+
 export type Worker = {
   // Set on the session the roster seats as the assistant (rosterFacts), whose view gets a chat as a dispatcher's does.
   assistant?: true
@@ -217,6 +222,12 @@ export type Worker = {
   lastActiveAt: string | null
   lifecycle: string
   light: Light
+  // A hosted session's load of a local model a pick started: loading until its server serves it and the session switches, or failed in plain words; absent when none, and the next model pick clears it.
+  localLoad?: LocalLoad
+  // The repo id the local model server serves as local (its /v1/models root, local-model.ts), set on a session whose model is local while that server names one.
+  localModel?: string
+  // A hosted session's local models (org.ts), which its composer's menu offers beside the cloud ones; absent when config names none.
+  localModels?: LocalModel[]
   // Set while its Claude login has expired, as its transcript's API error or ops-unstick's read of its pane says: Add account, then a restart, clears it.
   loginExpired?: true
   // The model id its newest reply came from (claude-opus-5-5); null when none is known.
@@ -225,6 +236,8 @@ export type Worker = {
   // A hosted session's permission mode, as its composer's picker shows it and the owner changes it.
   permissionMode?: HostedMode
   questions: Question[]
+  // Set on a probe spawn.sh started with --ssh, whose claude runs on another machine: its transcript is there, so its view shows none, and the dashboard neither types into it (deliver()) nor restarts it.
+  remote?: true
   role: Role
   sessionId: string
   startedAt: string | null
@@ -482,7 +495,7 @@ export const rosterFacts = (
   ),
 })
 
-// What proves a session record live (herdr's, as herdrRecords() shapes it), read once per refresh: Claude's registry, when each registered pid's process started (null when ps could not be run), and the transcripts folder of the Claude config that registry belongs to.
+// What proves a session record live (herdr's, as herdrRecords() shapes it), read once per refresh: Claude's registry, when each registered pid's process started in the form its file records it (registeredStarts in peers.ts; null when ps could not be run), and the transcripts folder of the Claude config that registry belongs to.
 export type LiveProof = { projects: string; registry: Registry; starts: Map<number, string> | null }
 
 // Pure: whether a session record is a Claude or Codex session running now. A record outlives its session's end at the pid it stored, which macOS hands to the next process that starts (a record whose session ended yesterday read live as another program's pid, a needsInput row with a red light). Claude writes a registry file at its pid while it runs, naming its session and when its process started; a clean exit removes the file, a crash leaves it. So the record is live only when the file at its pid names its session and that pid's process started when the file says, which a reused pid's never did. A file mid-rewrite, a registry or ps that cannot be read (proof null with neither), or a session under another Claude config, whose registry this one cannot see, leaves the record's word standing.
@@ -491,6 +504,8 @@ export function isLiveRecord(record: Json, proof: LiveProof | null): boolean {
   if (!sessionId || record.stored_pid_exists !== true) return false
   // A Codex record's harness comes from its launch record (codexLaunches), and its proof is the codex process herdr found in its pane's foreground this read.
   if (record.agent === "codex") return true
+  // An --ssh probe's claude registers on the other machine, so its proof is the ssh its launch record names, which herdr found in its pane's foreground this read (sshProcessOf).
+  if (record.remote === true) return true
   if (record.agent !== "claude") return false
   if (!proof || proof.registry === null) return true
   const transcript = str(record.transcript_path)
@@ -604,6 +619,7 @@ export function composeWorkers(
       model: read.model,
       name,
       questions: [],
+      ...(record.remote === true && { remote: true as const }),
       role,
       sessionId,
       startedAt: str(record.started_at) || null,
@@ -745,11 +761,19 @@ export async function listLive(): Promise<Live> {
   const [files, servers] = await Promise.all([readRegistry(), readHerdr()])
   const registry = registryOf(files)
   const records = {
-    sessions: herdrRecords(servers, registry, new Date().toISOString(), codexLaunches()),
+    sessions: herdrRecords(
+      servers,
+      registry,
+      new Date().toISOString(),
+      codexLaunches(),
+      sshLaunches(servers.flatMap((read) => read.panes.flatMap((pane) => pane.label ?? []))),
+    ),
   }
   const workspaces = { workspaces: herdrWorkspaces(servers) }
-  const starts = await processStarts(
-    [...(registry ?? [])].flatMap(([pid, entry]) => (entry?.procStart ? [pid] : [])),
+  const starts = await registeredStarts(
+    [...(registry ?? [])].flatMap(([pid, entry]) =>
+      entry?.procStart ? [{ pid, procStart: entry.procStart }] : [],
+    ),
   )
   // Every read below sees live sessions alone, so an ended session's record never reaches a row, a light, a picker or a needs-you count.
   const proven = liveRecords(records, { projects: projectsDir(), registry, starts })
@@ -769,7 +793,7 @@ export async function listLive(): Promise<Live> {
   const sessions = withHerdrState(proven, states, (id) => reads.get(id)?.turnAt ?? null)
   const facts = rosterFacts(roster?.roster ?? null)
   const names = new Map([...reads].map(([id, read]) => [id, read?.name ?? null]))
-  const live = composeWorkers(
+  const composed = composeWorkers(
     sessions,
     workspaces,
     tasks,
@@ -778,6 +802,10 @@ export async function listLive(): Promise<Live> {
     reads,
     Date.now(),
     activity,
+  )
+  const live = withLocalModel(
+    composed,
+    composed.workers.some((w) => w.model === LOCAL_SERVED) ? await localModel() : null,
   )
   const held = live.workers.map((w) => ({
     name: w.name,

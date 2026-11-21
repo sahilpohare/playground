@@ -41,6 +41,11 @@ Grep every surface for each changed path, command, or symbol; every hit is a can
 rg -n "<changed-path-or-command>" web/next/content/docs README.md AGENTS.md .agents/dashboard .agents/skills .agents/testing.md scripts/README.md scripts/hooks/README.md web/next/docs.config.ts
 ```
 
+A term whose meaning changes (a behaviour, a rule, what a command does) is also written in other words, which a grep on its name misses.
+Read each doc line the first grep hits, note every other wording it uses for the same rule, and grep each wording too: a grep for `slots gate` leads to lines that say `free run slot` and `run-slot lane free`, and each of those takes its own grep.
+One PR's grep on a rule's name alone missed three such lines, which took two review rounds.
+Done when every wording has had its grep and each hit on the old meaning is fixed.
+
 ## 3. Sync, coupled surfaces included
 
 Fix each hit in the same change. Before the first edit to an agent-facing surface (a `SKILL.md` or a file beside it, `AGENTS.md`, an `.agents/dashboard` file, `.agents/testing.md`, `scripts/README.md` or `scripts/hooks/README.md`, a `docs/<bucket>/<name>.md` page), call the Skill tool with `writing-for-agents` when it is installed, and follow it; that page also follows `.agents/writing-docs.md` where that file exists. Three couplings are easy to miss:

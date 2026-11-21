@@ -1,6 +1,6 @@
 import { type Group } from "./_shared"
 
-// A reviewer of an outside author's PR running a skill's script by its path whose shebang runs bun (or any runner but one that reads no folder's files, such as bun-canary or an env -S line read as another word), which reads files from the folder it runs in before the script: from any folder but the main checkout's own tree (the PR's clone at any depth, with or without a bunfig.toml or an env file, a scratch folder outside every work tree, a folder the hook cannot read), for both skill roots, the data folder's installed skills and the main checkout's extensions.
+// A reviewer of an outside author's PR running a skill's script by its path whose shebang runs bun (or any runner but one that reads no folder's files, such as bun-canary or an env -S line read as another word), which reads files from the folder it runs in before the script: from any folder but the main checkout's own tree (the PR's clone at any depth, with or without a bunfig.toml or an env file, a scratch folder outside every work tree, a folder the hook cannot read), for the main checkout's extensions, and for the data folder's installed skills, which read mode runs from no folder since #1280.
 const STATE = "code-review-loop/scripts/state"
 const PYSCRIPT = "code-review-loop/scripts/script"
 const scripts = (data: string, main: string) => ({
@@ -67,7 +67,7 @@ export const groups: Group[] = [
     folders: ["outside clone", "outside clone with an env file", "scratch folder"],
     guards: ["no-outside-pr-code"],
     rows: ({ DATA, MAIN }) => {
-      const { core, installed, pyInstalled } = scripts(DATA, MAIN)
+      const { core, pyInstalled } = scripts(DATA, MAIN)
       return [
         [
           "an installed skill's python script by its path",
@@ -79,10 +79,8 @@ export const groups: Group[] = [
   },
 ]
 
-// The forms the guard lets run: a bun script from the main checkout's own tree, whose bunfig.toml and env file are the factory's, and a runner that reads no file from the folder it runs in.
+// The forms the guard lets run: a core skill's bun script from the main checkout's own tree, whose bunfig.toml and env file are the factory's, and a core skill's script whose runner reads no file from the folder it runs in.
 export const allowed = [
-  "an installed skill's bun script from the main checkout's tree",
   "a core skill's bun script from the main checkout's tree",
-  "an installed skill's python script by its path",
   "a core skill's node script by its path",
 ]

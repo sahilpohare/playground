@@ -98,8 +98,12 @@ except (OSError, ValueError):
 now = time.time()
 seen = state.setdefault("seen", {})
 current = factory_login(state.get("factory"), ACCOUNTS, (state.get("split") or {}).get("shares") or {}, SERVICE) or acct  # the account the factory's sessions run on (spawn.sh --account), the pool rule beat.py carries
-# a usage.json run.py took from a probe already came from seen, and stamping it again would stop run.py's next probe
-if acct in ACCOUNTS and u.get("source") != "token/ratelimit-headers":
+# a usage.json run.py took from a probe already came from seen, and stamping it again would stop run.py's next probe; a stored reading 15 minutes old or more, as while the stored login's token has expired, is no fresh reading either, so its seen entry stays with its seat probe, which spawn.sh's own-login start reads; one with no writtenAt is no fresh reading
+try:
+    stale = time.time() - datetime.datetime.fromisoformat(str(u["writtenAt"]).replace("Z", "+00:00")).timestamp() >= 15 * 60
+except (KeyError, TypeError, ValueError):
+    stale = True
+if acct in ACCOUNTS and u.get("source") != "token/ratelimit-headers" and not stale:
     last, seen[acct] = seen.get(acct) or {}, {"at": now}
     for key, win in (("five", five), ("week", week)):  # a window the reading lacks keeps its last one, so a short read is no switch
         fresh = win.get("used_percentage") is not None

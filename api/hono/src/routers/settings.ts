@@ -18,6 +18,7 @@ import {
   validationErrorResponses,
 } from "@/lib/error"
 import { dataDir } from "@/lib/sessions/paths"
+import { oneWords } from "@/lib/store/one-word"
 import { authMiddleware, guardWrites, requireConsoleRole, type StoreVariables } from "@/middlewares"
 import { done, invalid, notFound, responses, whoOf, whyFields } from "@/routers/store"
 
@@ -36,7 +37,7 @@ export const settingsRouter = new Hono<{ Variables: StoreVariables }>()
     describeRoute({
       tags: ["Settings"],
       description:
-        "Every setting a piece defines, with its default and aliases, every row set at a scope, the values a session of your login reads (a job's row over its registry entry), and the settings' schemaVersion; a masked key's value (wa.device, wa.owner) shows its last 4 characters alone",
+        "Every setting a piece defines, with its default and aliases, every row set at a scope, the values a session of your login reads (a job's row over its registry entry), and the settings' schemaVersion; a masked key's value (wa.alert, wa.device, wa.owner) shows its last 4 characters alone",
       ...responses(),
     }),
     async (c) => {
@@ -89,7 +90,7 @@ export const settingsRouter = new Hono<{ Variables: StoreVariables }>()
     describeRoute({
       tags: ["Settings"],
       description:
-        "Set a setting at a scope with a reason; its key's schema checks the value, and a secret-shaped value is refused; the answer gives a masked key's value by its last 4 characters alone",
+        "Set a setting at a scope with a reason; its key's schema checks the value, and a secret-shaped value is refused; the answer gives a masked key's value by its last 4 characters alone, and for owner.names each one-word entry with the tracked files trace-count's ownerName kind counts it in (oneWords)",
       ...responses(validationErrorResponses),
     }),
     sValidator(
@@ -103,7 +104,12 @@ export const settingsRouter = new Hono<{ Variables: StoreVariables }>()
         setSetting(dataDir(), { ...input, key: c.req.param("key") }, await whoOf(c, input)),
       )
       return c.json({
-        data: { key: set.key, scope: set.scope, value: shownValue(set.key, set.value) },
+        data: {
+          key: set.key,
+          ...(set.key === "owner.names" && { oneWords: await oneWords(set.value as string[]) }),
+          scope: set.scope,
+          value: shownValue(set.key, set.value),
+        },
       })
     },
   )

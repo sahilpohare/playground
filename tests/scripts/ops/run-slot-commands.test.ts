@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { SCRIPT, stop, dirs, machine, runSlot } from "./run-slot-fake"
+import { SCRIPT, dirs, machine, runSlot } from "./run-slot-fake"
 
 // a check waits on its run's exit or a line it prints, so the timeout only catches a hang: 60s, twice the slowest case under SLOW_CHILD=1.5 but local CI's, which sets its own
 setDefaultTimeout(60_000)
@@ -365,6 +365,8 @@ describe("can-take", () => {
 
 // dispatcher, 18 Oct: a committed test, type check, lint or build runs on the runner host through ci.sh exec, and falls back to a slot here
 describe("the runner host", () => {
+  // four test files, past the quick lane's three, so the run is the box's to take
+  const FOUR = ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts", "tests/d.test.ts"]
   // A stub ci.sh that logs its arguments and exits with `rc`, and a stub bun that logs what the Mac ran, answering the settings reader and a check-types dry run with nothing.
   const box = (rc: number, off?: string) => {
     const m = machine()
@@ -403,21 +405,50 @@ describe("the runner host", () => {
   }
 
   test("a bun test goes to the box and its exit code comes back", async () => {
-    const r = await box(3)(["bun", "test", "tests/x.test.ts"])
+    const r = await box(3)(["bun", "test", ...FOUR])
     expect(r.code).toBe(3)
-    expect(r.box).toBe(`exec ${r.root} -- bun test tests/x.test.ts\n`)
+    expect(r.box).toBe(`exec ${r.root} -- bun test ${FOUR.join(" ")}\n`)
     expect(r.mac).toBe("")
-    expect(r.log).toContain(`start worker-x ${r.root} bun test tests/x.test.ts`)
+    expect(r.log).toContain(`start worker-x ${r.root} bun test ${FOUR.join(" ")}`)
     expect(r.log).toContain("end worker-x rc=3")
   })
 
+  // #2529: the box route comes after the quick lane, so a short run stays in its quick slot here and the box takes the heavy ones
+  for (const argv of [
+    ["bun", "test", "tests/x.test.ts"],
+    ["bun", "run", "test:file", "tests/x.test.ts", "tests/y.test.ts"],
+    ["bun", "run", "format:check"],
+  ])
+    test(`${argv.join(" ")} takes the quick lane here, never the box`, async () => {
+      const r = await box(0)(argv)
+      expect(r.box).toBe("")
+      expect(r.mac).toBe(`${argv.slice(1).join(" ")}\n`)
+      expect(r.err).toContain("worker-x holds run-slot-quick")
+    })
+
   test("a run the box cannot take (255) waits for a slot here", async () => {
-    const r = await box(255)(["bun", "test", "tests/x.test.ts"])
+    const r = await box(255)(["bun", "test", ...FOUR])
     expect(r.code).toBe(0)
     expect(r.box).not.toBe("")
-    expect(r.mac).toBe("test tests/x.test.ts\n")
+    expect(r.mac).toBe(`test ${FOUR.join(" ")}\n`)
     expect(r.err).toContain("the runner host could not take it")
     expect(r.err).toContain("worker-x holds run-slot")
+  })
+
+  // PG-2368: the box gets no PLAYGROUND_REPO, so test:file there could not refuse a relative path from the factory's main checkout
+  test("a test:file from the factory's main checkout stays here, and one from another checkout goes to the box", async () => {
+    const run = box(0)
+    const here = await run(["bun", "run", "test:file", ...FOUR], {
+      PLAYGROUND_REPO: run.root,
+    })
+    expect(here.box).toBe("")
+    expect(here.mac).toBe(`run test:file ${FOUR.join(" ")}\n`)
+    const elsewhere = join(run.root, "elsewhere")
+    mkdirSync(elsewhere)
+    const other = await run(["bun", "run", "test:file", ...FOUR], {
+      PLAYGROUND_REPO: elsewhere,
+    })
+    expect(other.box).toBe(`exec ${other.root} -- bun run test:file ${FOUR.join(" ")}\n`)
   })
 
   // builder, 19 Oct: a Mac rerun of a red seen only on the box
@@ -517,7 +548,7 @@ describe("the runner host", () => {
     expect(r.code).toBe(2)
     expect(r.box).toBe("")
     expect(r.err).toContain(`pass --cwd ${realpathSync(other)}`)
-    const own = await run(["bun", "test", join(run.root, "tests", "x.test.ts")])
+    const own = await run(["bun", "test", join(run.root, "tests", "x.test.ts"), ...FOUR])
     expect(own.box).toContain(" -- bun test ")
   })
 
@@ -529,9 +560,9 @@ describe("the runner host", () => {
     ["bun", "run", "--cwd", "/x/worktrees/a", "test:file", "tests/a.test.ts"],
     ["bun", "--cwd=/x/worktrees/a", "run", "test:file", "tests/a.test.ts"],
   ])
-    test(`${argv.join(" ")} goes to the box`, async () => {
-      const r = await box(0)(argv)
-      expect(r.box).toContain(` -- ${argv.join(" ")}`)
+    test(`${argv.join(" ")} goes to the box with three more files`, async () => {
+      const r = await box(0)([...argv, ...FOUR.slice(1)])
+      expect(r.box).toContain(` -- ${[...argv, ...FOUR.slice(1)].join(" ")}`)
       expect(r.mac).toBe("")
     })
 

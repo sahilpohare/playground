@@ -40,7 +40,7 @@ const pageLine = z.object({
   title: z.string().min(1),
 })
 
-// A page the Pages tab deleted: its file, and when; the reader drops the file's record, and a later line for it keeps it again.
+// A page the Pages tab deleted, or `playground page --remove` removed: its file, and when; the reader drops the file's record, and a later line for it keeps it again.
 const tombstoneLine = z.strictObject({
   at: z.iso.datetime(),
   deleted: z.literal(true),

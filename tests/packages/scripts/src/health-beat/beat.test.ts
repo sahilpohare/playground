@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -9,6 +9,7 @@ import {
   readBeat,
   type Reading,
 } from "../../../../../packages/scripts/src/health-beat/beat"
+import { procDir } from "../../../../scripts/fixtures/proc"
 
 const scratch = mkdtempSync(join(tmpdir(), "health-beat-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
@@ -17,7 +18,6 @@ const AT = new Date("2026-11-01T18:05:00Z")
 
 const reading = (over: Partial<Reading> = {}): Reading => ({
   at: AT,
-  battery: { pct: 84, state: "charging" },
   cores: 12,
   down: [],
   freeMin: 8,
@@ -48,7 +48,7 @@ describe("memoryPasses, spawn.sh's memory gate", () => {
 })
 
 describe("beatText", () => {
-  test("prints the header in the owner's zone, then the version and build, the Mac, memory, sessions, ops jobs and battery", () => {
+  test("prints the header in the owner's zone, then the version and build, the Mac, memory, sessions and ops jobs", () => {
     expect(beatText(reading())).toBe(
       [
         "*Health, 6:05 pm UTC*",
@@ -58,7 +58,6 @@ describe("beatText", () => {
         "✅ Memory: pressure 1 (normal), 64% free",
         "✅ Sessions: 5 working, 3 idle, 0 stuck",
         "✅ Ops jobs: 9 ok",
-        "🔋 84%, charging",
       ].join("\n"),
     )
     expect(beatText(reading({ zone: "Asia/Kolkata" })).split("\n")[0]).toBe(
@@ -78,10 +77,9 @@ describe("beatText", () => {
     )
   })
 
-  test("warns on a load5 over 15, a stuck or failed session and a late ops job, and reads an unknown battery or CPU as ?", () => {
+  test("warns on a load5 over 15, a stuck or failed session and a late ops job, and reads an unknown CPU as ?", () => {
     const lines = beatText(
       reading({
-        battery: null,
         idlePct: null,
         late: ["ops-sweep", "ops-tick"],
         load5: 15.6,
@@ -91,7 +89,6 @@ describe("beatText", () => {
     expect(lines[3]).toBe("⚠️ Mac: load 16 on 12 cores, ?% CPU idle")
     expect(lines[5]).toBe("⚠️ Sessions: 2 working, 0 idle, 2 stuck")
     expect(lines[6]).toBe("⚠️ Ops jobs: 9 ok, late: ops-sweep, ops-tick")
-    expect(lines[7]).toBe("🔋 ?")
   })
 
   test("warns on an ops job that is down, beside any late one", () => {
@@ -105,7 +102,7 @@ describe("beatText", () => {
 })
 
 describe("readBeat", () => {
-  test("reads the Mac through ops-machine, the sessions of the last 2 hours, each job's heartbeat but a disabled one's, a job with no readable heartbeat as down, and the battery", async () => {
+  test("reads the Mac through ops-machine, the sessions of the last 2 hours, each job's heartbeat but a disabled one's and a job with no readable heartbeat as down", async () => {
     const data = join(scratch, "data")
     const ops = join(data, "ops")
     const states = join(data, "session-state")
@@ -171,11 +168,6 @@ describe("readBeat", () => {
           code: 0,
           out: "CPU usage: 10.0% user, 5.0% sys, 85.0% idle\nCPU usage: 30.5% user, 9.0% sys, 60.5% idle\n",
         }
-      if (argv[0] === "pmset")
-        return {
-          code: 0,
-          out: "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t72%; discharging; 5:10 remaining present: true\n",
-        }
       return { code: 1, out: "" }
     }
     const got = await readBeat({
@@ -189,7 +181,6 @@ describe("readBeat", () => {
     })
     expect(got).toEqual({
       at: AT,
-      battery: { pct: 72, state: "discharging" },
       cores: 12,
       down: ["ops-never", "ops-broken", "ops-empty"],
       freeMin: 8,
@@ -207,5 +198,44 @@ describe("readBeat", () => {
       sessions: { idle: 1, stuck: 1, working: 2 },
       zone: "UTC",
     })
+  })
+})
+
+// Linux's top has no -l, so the idle share comes from two /proc/stat reads a wait apart, and with neither it reads as unknown, never 0 (#2201).
+describe("the idle share where top has no -l", () => {
+  const saved = process.env.PLAYGROUND_PROC
+  afterAll(() => {
+    process.env.PLAYGROUND_PROC = saved
+  })
+  const linux = async (argv: string[]) =>
+    argv[0] === "top"
+      ? { code: 1, out: "top: unknown option 'l'\n" }
+      : argv[0] === "sysctl"
+        ? { code: 255, out: `sysctl: cannot stat /proc/sys/${argv[2]!.replaceAll(".", "/")}\n` }
+        : { code: 1, out: "" }
+  const read = (wait: () => Promise<void>) =>
+    readBeat({
+      at: AT,
+      data: join(scratch, "linux"),
+      freeMin: 8,
+      portless: join(scratch, "no-portless"),
+      repo: join(scratch, "repo"),
+      run: linux,
+      wait,
+      zone: "UTC",
+    })
+
+  test("reads /proc/stat twice", async () => {
+    const dir = procDir({ cores: 20, idle: 37.5, load5: 4 }, [], [["stat"]])
+    process.env.PLAYGROUND_PROC = dir
+    const got = await read(async () =>
+      renameSync(join(dir, "later", "1", "stat"), join(dir, "stat")),
+    )
+    expect(got).toMatchObject({ cores: 20, idlePct: 37.5, load5: 4 })
+  })
+
+  test("reads unknown when /proc/stat does not move between the reads", async () => {
+    process.env.PLAYGROUND_PROC = procDir()
+    expect(await read(async () => {})).toMatchObject({ idlePct: null })
   })
 })

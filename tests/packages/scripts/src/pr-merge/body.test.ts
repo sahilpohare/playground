@@ -97,7 +97,7 @@ describe("bodyRefusal", () => {
   })
 })
 
-// PG-693: AGENTS.md's Shipping step 1 asks the Evidence to name each touched doc, and the gate now reads it
+// PG-693: .agents/shipping.md asks the Evidence to name each touched doc, and the gate now reads it
 describe("bodyRefusal, given the PR's changed files", () => {
   const named = (line: string) =>
     SKILL_BODY.replace(
@@ -199,6 +199,58 @@ describe("bodyRefusal, reading the Evidence's A/B line", () => {
     expect(bodyRefusal(fenced)).toContain("A/B:")
     expect(bodyRefusal(without.replace("**After:** one.", "**After:** one, A/B: none."))).toContain(
       "A/B:",
+    )
+  })
+})
+
+// PG-2493: an Evidence line still reading TBD cost a review round each on #2482 and #2462, so the gate refuses it before round 1
+describe("bodyRefusal, reading TBD in the Evidence", () => {
+  const BEFORE = "- **Before:** two rows. **After:** one."
+  const evidence = (line: string) => SKILL_BODY.replace(BEFORE, `${BEFORE}\n${line}`)
+
+  test("refuses TBD in any case in the Evidence, naming its line", () => {
+    for (const word of ["TBD", "tbd", "Tbd"]) {
+      const line = `- Touched tests: ${word}`
+      expect(bodyRefusal(evidence(line))).toBe(
+        `its body's Evidence holds TBD: "${line}"; write what was measured, or say what is pending and when`,
+      )
+    }
+  })
+
+  test("passes TBD outside the Evidence", () => {
+    expect(
+      bodyRefusal(
+        SKILL_BODY.replace(
+          "The board reads each PR once.",
+          "The board reads each PR once; its colour is TBD.",
+        ),
+      ),
+    ).toBeNull()
+    expect(
+      bodyRefusal(
+        SKILL_BODY.replace("**Blast Radius:** board", "**Blast Radius:** board, its reach TBD"),
+      ),
+    ).toBeNull()
+  })
+
+  test("passes an Evidence line that says a check is pending after merge", () => {
+    expect(
+      bodyRefusal(
+        evidence("- The ship's smoke test: pending after merge, read by the merge train."),
+      ),
+    ).toBeNull()
+  })
+
+  test("passes TBD in inline code or a fence in the Evidence, and a word that only holds it", () => {
+    expect(bodyRefusal(evidence("- The gate now refuses `TBD` here."))).toBeNull()
+    expect(bodyRefusal(evidence("```text\nTBD\n```"))).toBeNull()
+    expect(bodyRefusal(evidence("- TBDs and xtbd are other words."))).toBeNull()
+  })
+
+  test("refuses a line that names `TBD` in inline code and still says TBD as bare text", () => {
+    const line = "- The gate refuses `TBD`; this line's own count is still TBD."
+    expect(bodyRefusal(evidence(line))).toBe(
+      `its body's Evidence holds TBD: "${line}"; write what was measured, or say what is pending and when`,
     )
   })
 })

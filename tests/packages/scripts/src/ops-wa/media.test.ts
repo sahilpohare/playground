@@ -9,6 +9,7 @@ import {
   mediaDir,
   modelPath,
   type Run,
+  stdoutRun,
   transcriber,
 } from "../../../../../packages/scripts/src/ops-wa/media"
 
@@ -37,6 +38,18 @@ describe("where a photo or voice note is kept", () => {
   ])("%s is kept as .%s", (mime, extension) => {
     expect(extensionOf(mime)).toBe(extension)
   })
+
+  test.each([
+    ["application/pdf", "Report.PDF", "pdf"],
+    ["application/x-made-up", "plan.docx", "docx"],
+    ["application/pdf", "no extension", "pdf"],
+    [undefined, "no extension", "bin"],
+  ])(
+    "%s named %s is kept as .%s: the name's own extension wins, lowercased",
+    (mime, name, extension) => {
+      expect(extensionOf(mime, name)).toBe(extension)
+    },
+  )
 
   test("each one is a new file, mode 600, in a folder of mode 700", async () => {
     const dir = join(scratch(), "wa", "media")
@@ -141,5 +154,16 @@ describe("reading a voice note on this Mac", () => {
       )(note),
     ).toBeUndefined()
     expect(existsSync(`${note}.wav`)).toBe(false)
+  })
+})
+
+describe("whisper-cli's run", () => {
+  test("keeps stdout's words alone, so the model-load log whisper-cli writes to stderr never reaches the note's line", async () => {
+    const heard = await stdoutRun(10_000)([
+      "sh",
+      "-c",
+      "echo 'whisper_init_from_file: loading model' >&2; printf ' ship it'; echo 'system_info: n_threads = 4' >&2",
+    ])
+    expect(heard).toEqual({ code: 0, out: " ship it" })
   })
 })

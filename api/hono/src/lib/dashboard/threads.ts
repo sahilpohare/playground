@@ -120,7 +120,7 @@ export async function patchThread(
   return row ? toThread(row) : null
 }
 
-// A fixture stack's threads, written by bun run ingest once it has read the fixture's transcripts: each thread missing is added, and each message it names is tagged once read, so a change made from the dashboard stays. Any other source writes nothing, so made-up threads never reach the live dashboard's database.
+// A fixture stack's threads, written by bun run ingest once it has read the fixture's transcripts and by the API's start while the table is empty (seedFixtureThreadsAtStart): each thread missing is added, and each message it names is tagged once read, so a change made from the dashboard stays. Any other source writes nothing, so made-up threads never reach the live dashboard's database.
 export async function seedFixtureThreads(
   db: Database,
   source: DashboardSource = currentSource(),
@@ -158,6 +158,17 @@ export async function seedFixtureThreads(
     }
   }
   return threads.length
+}
+
+// A fresh fixture stack's threads from its first load: an empty thread table takes the fixture's threads and says so on one line; a full table and any other source write nothing, so a restart never replays them and made-up rows never reach the live dashboard's database.
+export async function seedFixtureThreadsAtStart(db: Database): Promise<number> {
+  const source = currentSource()
+  if (source.kind !== "fixture") return 0
+  const [row] = await db.select({ value: count() }).from(thread)
+  if ((row?.value ?? 0) > 0) return 0
+  const threads = await seedFixtureThreads(db, source)
+  if (threads > 0) console.error(`fixture: ${threads} made-up threads seeded at start`)
+  return threads
 }
 
 // what a person, a peer or a launch prompt said, as read.ts's FIRST_ASK reads a message, so the session's own reply that opens with the same words is passed over

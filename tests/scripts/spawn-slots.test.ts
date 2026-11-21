@@ -64,6 +64,31 @@ describe("the slots gate admits a new worker only when run-slot has room for its
     expect(capacityLog(r)).toEqual([expect.objectContaining({ verdict: "pass" })])
   })
 
+  // a reads-only worker reads code and never takes a run-slot lane, so a full room leaves it be (#833)
+  test("a --reads-only worker start passes a full room and its row records reads-only, while a plain one is refused (#833)", async () => {
+    const r = await start([...worker, "--reads-only"], 4, 12)
+    expect(r.code).toBe(0)
+    expect(capacityLog(r)).toEqual([
+      expect.objectContaining({
+        readings: expect.objectContaining({ reads_only: true }),
+        verdict: "pass",
+      }),
+    ])
+    const plain = await start(worker, 4, 12)
+    expect(plain.code).not.toBe(0)
+    expect(plain.err).toContain("the slots gate holds it")
+  })
+
+  test.each([
+    ["a runner", ["runner", "runner-x", "b.md"]],
+    ["a reviewer", ["column", "reviewer", "reviewer-x", "worker-x", "w1:p2", "b.md", "--pr", "1"]],
+  ])("--reads-only on %s start is refused as a worker's flag alone", async (_, args) => {
+    const r = await start([...args, "--reads-only"], 0, 0)
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain("--reads-only is for a worker")
+  })
+
   // run-slot's queue full, as on 6 Nov's urgent start: the free lanes lack the load units, and 8 runs wait.
   const fullQueue = slots(2, 8, 3)
   const standing = (home: string) => writeFileSync(join(home, ".playground", "priority.json"), "{}")
@@ -153,6 +178,81 @@ describe("the slots gate admits a new worker only when run-slot has room for its
         verdict: "pass",
       }),
     ])
+  })
+
+  // a session's own window, as playground priority on writes it, passes only the start it names, as run-slot's queue reads it (#2491)
+  const ownWindow = (home: string, session: string) =>
+    writeFileSync(
+      join(home, ".playground", `priority-${session}.json`),
+      `${JSON.stringify({ by: "dispatcher", reason: "the owner's ask", session, since: "2026-11-16T22:00:00.000Z" }, null, 2)}\n`,
+    )
+  const passedOn = (r: Awaited<ReturnType<typeof urgent>>, file: string) => {
+    expect(r.code).toBe(0)
+    expect(capacityLog(r)).toEqual([
+      expect.objectContaining({
+        readings: expect.objectContaining({
+          priority: expect.stringMatching(
+            new RegExp(`/\\.playground/${file.replaceAll(".", "\\.")}$`),
+          ),
+        }),
+        verdict: "pass",
+      }),
+    ])
+  }
+  const refusedWith = (r: Awaited<ReturnType<typeof urgent>>, why: string) => {
+    expect(r.code).not.toBe(0)
+    expect(placing(r)).toEqual([])
+    expect(r.err).toContain("--priority starts only on a priority file that passes it, and none in")
+    expect(r.err).toContain(why)
+    expect(r.err).toContain('playground priority on worker-brave-otter --reason "<why>" opens one')
+  }
+
+  test("a --priority start is refused while only another session's window stands (#2491)", async () => {
+    const r = await urgent([...worker, "--priority"], (home) => {
+      fullQueue(home)
+      ownWindow(home, "probe-y")
+    })
+    refusedWith(r, "priority-probe-y.json is probe-y's own window")
+  })
+
+  test("and passes on its own window, though another session's sorts ahead of it (#2491)", async () => {
+    const r = await urgent([...worker, "--priority"], (home) => {
+      fullQueue(home)
+      ownWindow(home, "probe-y")
+      ownWindow(home, "aaa-probe")
+      ownWindow(home, "worker-brave-otter")
+    })
+    passedOn(r, "priority-worker-brave-otter.json")
+  })
+
+  test("and passes on a shared file beside another session's window (#2491)", async () => {
+    const r = await urgent([...worker, "--priority"], (home) => {
+      fullQueue(home)
+      ownWindow(home, "aaa-probe")
+      writeFileSync(join(home, ".playground", "priority-acme.json"), '{ "org": "acme" }\n')
+    })
+    passedOn(r, "priority-acme.json")
+  })
+
+  // a window cut short or emptied mid-write has lost its session line, so a file that is no JSON object passes no start, whatever its name; one that names a session outside run-slot's shape passes none either, since the queue ranks it for none
+  test.each([
+    ["an empty", "", "is no JSON object"],
+    [
+      "a truncated",
+      '{\n  "by": "dispatcher",\n  "reason": "x",\n  "session": "worker-brave',
+      "is no JSON object",
+    ],
+    [
+      "a one-line",
+      `${JSON.stringify({ by: "dispatcher", reason: "x", session: "worker-brave-otter", since: "2026-11-16T22:00:00.000Z" })}\n`,
+      "names a session but is no window in playground priority on's shape",
+    ],
+  ])("%s priority-worker-brave-otter.json refuses its own start (#2491)", async (_, text, why) => {
+    const r = await urgent([...worker, "--priority"], (home) => {
+      fullQueue(home)
+      writeFileSync(join(home, ".playground", "priority-worker-brave-otter.json"), text)
+    })
+    refusedWith(r, `priority-worker-brave-otter.json ${why}`)
   })
 
   test.each([

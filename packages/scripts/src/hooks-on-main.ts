@@ -73,6 +73,17 @@ export async function missingOn(root: string, ref: string): Promise<string[]> {
 
 if (import.meta.main) {
   const root = (await git(".", "rev-parse", "--show-toplevel")).stdout.trim() || "."
+  // the runner host's run clone is a fresh git init with no origin, so main cannot be read there; GitHub CI's checkout has one, so under CI no origin fails
+  if ((await git(root, "remote", "get-url", "origin")).code !== 0) {
+    if (process.env.CI) {
+      console.log("FAIL the checkout has no origin to read main from, which CI's checkout has")
+      process.exit(1)
+    }
+    console.log(
+      "SKIP the checkout has no origin to read main from; GitHub CI and a local run check it",
+    )
+    process.exit(0)
+  }
   // a shallow checkout carries no origin/main, so fetch it, and fail below when even that does not read
   if (!(await reads(root, "origin/main")))
     await git(root, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")

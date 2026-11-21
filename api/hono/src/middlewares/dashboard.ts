@@ -54,7 +54,7 @@ export const refuseAgent = createMiddleware<{ Variables: Session }>(async (c, ne
   await next()
 })
 
-const READS = new Set(["GET", "HEAD", "OPTIONS"])
+export const READS = new Set(["GET", "HEAD", "OPTIONS"])
 
 // A write types into sessions that bypass permission prompts, so before anything else it must come from the dashboard's own web origin, which a form or fetch on another localhost port cannot claim, over a loopback connection. Mounted on "/*" by method in every owner-rung router, so a write added later is guarded with no change here; a GET is never guarded, so a GET must never write.
 export const guardWrites = createMiddleware(async (c, next) => {

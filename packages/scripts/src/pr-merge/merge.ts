@@ -7,11 +7,13 @@ import { dataDir } from "@packages/env/data-dir"
 import type { LockStore } from "@packages/redis"
 
 import { endMergedLive } from "../../../../scripts/ops/optimizer/auto_end"
+import { ghSkipped } from "../gh-read"
 import { sendAs } from "../ops-job/job"
 import { factoryRepoOf } from "../playground/setting"
-import { bareTokens, templatePlaceholders } from "./body"
+import { bareTokens, ownerAsk, templatePlaceholders } from "./body"
 import {
   BASE,
+  GATE_CODE,
   gatesOf,
   marksReady,
   mergeLine,
@@ -33,7 +35,10 @@ export type RunResult = { code: number; stderr: string; stdout: string }
 // Runs gh with these arguments; a test hands in a stub, as the Usage app's prs.ts does.
 export type Run = (args: string[]) => Promise<RunResult>
 
+// gh, skipped while the gh-auth beat's fresh result reads failed (ghSkipped), so the train never floods a broken gh.
 export const runGh: Run = async (args) => {
+  const skipped = ghSkipped()
+  if (skipped) return { code: 1, stderr: skipped, stdout: "" }
   const proc = Bun.spawn(["gh", ...args], { stderr: "pipe", stdin: "ignore", stdout: "pipe" })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -58,10 +63,33 @@ export type Local = {
   ended?: Ended
   git?: Run
   lockRoot?: string
+  shipNow?: ShipNow
   store?: LockStore | null
   types?: TypeSteps
   typesBudgetMs?: number
 }
+
+// Sends Ops the ship-now line for a merged PR that carries the `ship-now` label and that shipNowLine ships.
+export type ShipNow = (line: string) => Promise<unknown>
+
+// Pure: the release rule's ship-now for a merged PR: a fix( title, or a Links line naming the owner's ask (ownerAsk), ships with the line Ops reads, which the release skill keys on; any other answers with the rule's line and no ship.
+export const shipNowLine = (
+  n: number,
+  sha: string,
+  pr: { body?: string; title?: string },
+): { line: string; ship: boolean } =>
+  /^fix\(/.test(pr.title ?? "") || ownerAsk(pr.body ?? "")
+    ? {
+        line: `#${n} carries ship-now and merged at ${sha}: ship canary now by the release skill, unless a ship you are already running pinned a canary that holds ${sha}.`,
+        ship: true,
+      }
+    : {
+        line: `#${n} carries ship-now but starts no ship: its title opens no fix( and its Links holds no line opening "Owner ask:" with an Inbox #i id, a PG issue or the owner's quoted words (extensions/core/rules/release.md).`,
+        ship: false,
+      }
+
+// The live send, for the pr:merge and pr:train commands alone: one line to the ops lead through the ops relay.
+export const liveShipNow: ShipNow = (line) => sendAs("ops-ship")("ops", line)
 
 // Ends a merged PR's worker, reviewer and tester, given the PR's URL and its merge sha.
 export type Ended = (url: string, sha: string) => Promise<void>
@@ -100,15 +128,35 @@ export async function readQueue(path: string): Promise<number[]> {
     .filter((n) => Number.isInteger(n) && n > 0)
 }
 
+// Fetches PR n's head into this checkout: its pull ref, else, while GitHub has not made that ref yet (one PR had only its merge ref 6 minutes after it opened), its head branch on origin, refused unless its tip is the head the gates judge, so a moved or same-named branch never stands in for it.
+export async function fetchHead(git: Run, n: number, head: string, branch: string): Promise<void> {
+  const pull = await git(["fetch", "--quiet", "origin", `refs/pull/${n}/head`])
+  if (pull.code === 0) return
+  if (!pull.stderr.includes("couldn't find remote ref"))
+    throw new Error(`git fetch exited ${pull.code}: ${pull.stderr.trim()}`)
+  const fetched = await git(["fetch", "--quiet", "origin", `refs/heads/${branch}`])
+  if (fetched.code !== 0)
+    throw new Error(
+      `refs/pull/${n}/head is missing, and git fetch of its branch ${branch} exited ${fetched.code}: ${fetched.stderr.trim()}`,
+    )
+  const tip = (await git(["rev-parse", "FETCH_HEAD"])).stdout.trim()
+  if (tip !== head)
+    throw new Error(
+      `refs/pull/${n}/head is missing, and its branch ${branch} is at ${tip.slice(0, 7) || "nothing"}, not the head ${head.slice(0, 7)}`,
+    )
+}
+
 // canary now, and the tree of the head merged with it: from this checkout's git, after fetching canary and the PR's head. A merge that conflicts has no tree (null), and names its files.
 async function mergeOf(
   git: Run,
   n: number,
   head: string,
+  branch: string,
 ): Promise<{ canary: string; conflicts: string[] | null; mergeTree: string | null }> {
-  const fetched = await git(["fetch", "--quiet", "origin", BASE, `refs/pull/${n}/head`])
+  const fetched = await git(["fetch", "--quiet", "origin", BASE])
   if (fetched.code !== 0)
     throw new Error(`git fetch exited ${fetched.code}: ${fetched.stderr.trim()}`)
+  await fetchHead(git, n, head, branch)
   const canary = await git(["rev-parse", `origin/${BASE}`])
   if (canary.code !== 0) throw new Error(`git rev-parse origin/${BASE} exited ${canary.code}`)
   const merged = parseMergeTree(
@@ -119,6 +167,15 @@ async function mergeOf(
     conflicts: merged && !merged.clean ? [...new Set(merged.files)] : null,
     mergeTree: merged?.clean ? merged.tree : null,
   }
+}
+
+// Each GATE_CODE file whose working copy in this checkout, uncommitted edits included, differs from canary's tip, after mergeOf fetched it, each path read from the checkout's top (`:(top)`) whatever folder git runs in; a diff that cannot run throws, as a failed fetch does.
+export async function gateCodeOf(git: Run, canary: string): Promise<string[]> {
+  const paths = GATE_CODE.map((path) => `:(top)${path}`)
+  const diff = await git(["diff", "--name-only", canary, "--", ...paths])
+  if (diff.code !== 0)
+    throw new Error(`git diff of the gate code exited ${diff.code}: ${diff.stderr.trim()}`)
+  return diff.stdout.split("\n").filter(Boolean)
 }
 
 // The gate's own folders, whose code, docs and tests name sample tokens (SUITE_LINE), so the grep leaves them out and a sample stays unfound.
@@ -188,19 +245,29 @@ export const gh = async (run: Run, args: string[]): Promise<string> => {
 export const repoOf = async (run: Run, repo?: string): Promise<string> =>
   repo || gh(run, ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
 
-// The files PR n changes; a renamed file counts by both paths, so canary's edit to its old path, which git's merge carries onto the new one, reads as the PR's.
-async function filesOf(run: Run, repo: string, n: number): Promise<string[]> {
-  return (
-    await gh(run, [
-      "api",
-      `repos/${repo}/pulls/${n}/files`,
-      "--paginate",
-      "--jq",
-      ".[] | .filename, (.previous_filename // empty)",
-    ])
-  )
-    .split("\n")
-    .filter(Boolean)
+// The files PR n changes; a renamed file counts by both paths, so canary's edit to its old path, which git's merge carries onto the new one, reads as the PR's. removed: each file the diff deletes a line from, and each renamed file's old path, which the checks gate reads for a refused-forms row; a line with no tab is a file's name alone.
+async function filesOf(
+  run: Run,
+  repo: string,
+  n: number,
+): Promise<{ files: string[]; removed: string[] }> {
+  const files: string[] = []
+  const removed: string[] = []
+  const rows = await gh(run, [
+    "api",
+    `repos/${repo}/pulls/${n}/files`,
+    "--paginate",
+    "--jq",
+    '.[] | [.filename, (.previous_filename // ""), (.deletions // 0)] | @tsv',
+  ])
+  for (const row of rows.split("\n").filter(Boolean)) {
+    const [name = "", previous = "", deletions = "0"] = row.split("\t")
+    files.push(name)
+    if (previous) files.push(previous)
+    if (Number(deletions) > 0) removed.push(name)
+    if (previous) removed.push(previous)
+  }
+  return { files, removed }
 }
 
 // Everything the gates read about one PR, from gh: its state, head and base, the files its diff touches, every comment with its author, how far canary is ahead of its head, the state of each PR its body says it is stacked on, and its merge with canary now.
@@ -218,18 +285,21 @@ export async function factsOf(
       "-R",
       repo,
       "--json",
-      "author,baseRefName,body,headRefOid,isDraft,state,statusCheckRollup",
+      "author,baseRefName,body,headRefName,headRefOid,isDraft,labels,state,statusCheckRollup,title",
     ]),
   ) as {
     author: { login: string } | null
     baseRefName: string
     body: string
+    headRefName: string
     headRefOid: string
     isDraft: boolean
+    labels?: { name: string }[] | null
     state: string
     statusCheckRollup: Check[] | null
+    title?: string
   }
-  const [files, comments, ahead, held] = await Promise.all([
+  const [{ files, removed }, comments, ahead, held] = await Promise.all([
     filesOf(run, repo, n),
     commentsOf(run, repo, n),
     gh(run, ["api", `repos/${repo}/compare/${view.headRefOid}...${BASE}`, "--jq", ".ahead_by"]),
@@ -252,7 +322,8 @@ export async function factsOf(
       ]).catch((error: Error) => `unreadable: ${error.message}`),
     })),
   )
-  const { canary, conflicts, mergeTree } = await mergeOf(git, n, view.headRefOid)
+  const { canary, conflicts, mergeTree } = await mergeOf(git, n, view.headRefOid, view.headRefName)
+  const gateCode = await gateCodeOf(git, canary)
   const lost = await lostLines(git, `origin/${BASE}`, view.headRefOid, mergeTree)
   const template = await git(["show", `${view.headRefOid}:${PR_TEMPLATE}`])
   const placeholders = template.code === 0 ? templatePlaceholders(template.stdout) : []
@@ -272,15 +343,19 @@ export async function factsOf(
     conflicts,
     draft: view.isDraft,
     files,
+    gateCode,
     head: view.headRefOid,
     held,
+    labels: (view.labels ?? []).map((label) => label.name),
     lost,
     mergeTree,
     n,
     owner,
     parents,
     placeholders,
+    removed,
     state: view.state,
+    title: view.title,
     unfound,
   }
 }
@@ -487,12 +562,16 @@ export async function prMerge(
   const store = await storeOf(local, cli)
   let outcome: Outcome
   let head = ""
+  let labels: string[] = []
+  let pr: { body?: string; title?: string } = {}
   try {
     const lock = await takeLock(lockRoot, n, { store })
     if ("holder" in lock) return { gates: [], holder: lock.holder, kind: "locked" }
     try {
       const facts = await factsOf(run, name, n, git)
       head = facts.head
+      labels = facts.labels ?? []
+      pr = { body: facts.body, title: facts.title }
       outcome = await mergeAt(run, name, n, facts, options, {
         budgetMs: local.typesBudgetMs,
         git,
@@ -514,6 +593,16 @@ export async function prMerge(
       outcome.sha,
       local.ended ?? (cli ? liveEnded : undefined),
     )
+    const shipNow = local.shipNow ?? (cli ? liveShipNow : undefined)
+    const ship = labels.includes("ship-now") ? shipNowLine(n, outcome.sha, pr) : null
+    if (ship && !ship.ship) console.error(ship.line)
+    if (shipNow && ship?.ship) {
+      await shipNow(ship.line).catch((err: unknown) =>
+        console.error(
+          `telling ops to ship #${n} failed: ${err instanceof Error ? err.message : err}`,
+        ),
+      )
+    }
   }
   return outcome
 }

@@ -31,11 +31,15 @@ Done when both have printed in this session.
 
 Use the default headless mode. `--headed` sends physical pointer and key events, which move the owner's own pointer and focus, so it is the owner's alone: when a task needs it, tell your manager the one command for the owner to run with `!`. The `no-desktop-owner-app` hook refuses `--headed` in every session, and its refusal names that same route.
 
-Done when every command in the session runs headless.
+A task that needs a window reads the screen lock first, `ioreg -n Root -d1 | grep CGSSessionScreenIsLocked`: while the screen is locked every window read times out for every app (`launch --activate` fails with "CoreGraphics window inventory deadline elapsed"), so such a task runs only while the screen is unlocked. When the target app already runs with no window, a headless `agent-desktop launch` or a background `open -g` of its pane makes none, so there is no tree to act on (measured on System Settings). Such a task takes `launch --activate`, which takes the owner's focus, so it runs only when the owner is present and has said yes to the focus change, or as the owner's own action; the brief says so before the worker starts. With that yes, it activates only in an idle window: `HIDIdleTime` from `ioreg -c IOHIDSystem` at 1800 s or more, read again just before the activate, and the task stops, cancelling any open sheet and closing the app, once idle drops under 60 s.
+
+Done when every command in the session runs headless, or a task that needs a window ran unlocked, with the owner's yes, in an idle window.
 
 ## 4. Leave the owner's apps alone
 
 Name only apps off the owner's list in a snapshot, act, launch or close, matching a name in any case and with or without `.app`. Read the list with `bun "$PLAYGROUND_REPO/packages/scripts/src/playground/guard-list.ts" no-desktop-owner-app desktop-owner-apps`, which prints it as JSON. On any answer that is not a printed list (an exit 2, an unset `$PLAYGROUND_REPO`, no `bun`), **stop** and tell your manager, since there is no list to trust. The owner's login extension fills the list, which changes only by the owner's Approve on an `apps` decision your manager posts (`.agents/dashboard/asks.md`); the `no-desktop-owner-app` hook refuses a command that names a listed app, its refusal naming the two routes: the owner runs the command with `!`, or takes the app off the list.
+
+To watch the owner's desktop on Linux without touching it, such as a browser's tab switches or the clicks before them, read [WATCH.md](WATCH.md) first.
 
 Done when every app the session's commands name is off the list the reader printed.
 

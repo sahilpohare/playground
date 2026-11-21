@@ -4,6 +4,7 @@ import { join, resolve } from "node:path"
 
 import { mainCheckout } from "../../packages/scripts/src/main-checkout"
 import "../../packages/env/src/aliases"
+import { input } from "./input"
 import { guardList, isStrings } from "./lists"
 import {
   type Env,
@@ -398,7 +399,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text())
+  const reason = await check(await input("no-desktop-owner-app", "guard"))
   if (reason) {
     console.error(reason)
     process.exit(2)

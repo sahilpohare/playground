@@ -13,7 +13,7 @@ runs:
     # the .deb files alone: apt leaves root's lock and _apt's partial/ beside them, which the runner user's tar cannot read
     - name: Restore zsh's packages
       id: zsh-debs
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/.cache/zsh-debs/*.deb
         key: ${{ steps.zsh-key.outputs.key }}
@@ -51,7 +51,7 @@ runs:
     # a cache saved on a PR serves that PR alone, so zsh-cache.yml saves one on canary, which every PR reads as its base's
     - name: Save zsh's packages
       if: steps.zsh.outputs.fetched == 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/.cache/zsh-debs/*.deb
         key: ${{ steps.zsh-key.outputs.key }}

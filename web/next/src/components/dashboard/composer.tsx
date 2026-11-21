@@ -36,6 +36,7 @@ import { comparable, submittable } from "@/lib/outbox"
 import { insertPaste } from "@/lib/paste"
 import { markInserted, watchPastes } from "@/lib/paste-log"
 import { setTypedReply, typedReply } from "@/lib/reply"
+import { localLoadLine } from "@/lib/session-setting"
 import { matchSkills, offersSkills, pickSkill, slashToken } from "@/lib/skill-menu"
 
 const COARSE = "(pointer: coarse)"
@@ -254,6 +255,7 @@ function WritableComposer({ threadId, worker }: { threadId?: string; worker: Wor
     event.currentTarget.form?.requestSubmit()
   }
   const reply = main ? typedReply(text, items ?? []) : null
+  const loadLine = localLoadLine(worker.localLoad)
   // the list marks the item the words name
   const typedRef = reply?.ref
   const typedTitle = reply?.title
@@ -338,8 +340,17 @@ function WritableComposer({ threadId, worker }: { threadId?: string; worker: Wor
             >
               {/* at rest, the same border as the music player's card and the floating bars; a focused box still lights its border */}
               <InputGroup className="border-border">
-                {attachments.chips.length || reply ? (
+                {attachments.chips.length || reply || loadLine ? (
                   <InputGroupAddon align="block-start" className="flex-col items-start gap-2">
+                    {loadLine && (
+                      <Badge
+                        role="status"
+                        variant={loadLine.failed ? "destructive" : "secondary"}
+                        className="h-auto max-w-full text-left whitespace-normal"
+                      >
+                        {loadLine.text}
+                      </Badge>
+                    )}
                     {reply && (
                       <Badge variant="secondary" className="max-w-full">
                         <RiReplyLine aria-hidden />

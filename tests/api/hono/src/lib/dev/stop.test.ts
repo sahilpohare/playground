@@ -200,6 +200,9 @@ describe("the stack and its groups", () => {
     { pgid: 6000, pid: 6001, ppid: 1 },
   ]
   const record = { pgid: 4100, pid: 4123 }
+  // who adopts an orphan: pid 1 alone, as on macOS, or with the user's systemd --user (pid 1500), as on a Linux desktop
+  const PID1 = new Set([1])
+  const LINUX = new Set([1, 1500])
 
   test("the stack is the launcher and all that descends from it, whatever group each sits in", () => {
     expect([...stackOf(procs, 4123)].sort()).toEqual([4123, 4130, 4200, 4210, 4300, 4310])
@@ -210,18 +213,25 @@ describe("the stack and its groups", () => {
   })
 
   test("what started the launcher, and the stack itself, are no strangers", () => {
-    expect(strangers(procs, record, () => false)).toEqual([])
+    expect(strangers(procs, record, () => false, PID1)).toEqual([])
   })
 
   test("an orphan counts only when it runs from this checkout", () => {
     const orphaned = [...procs, { pgid: 4300, pid: 4350, ppid: 1 }]
-    expect(strangers(orphaned, record, (pid) => pid === 4350)).toEqual([])
-    expect(strangers(orphaned, record, () => false)).toEqual([4350])
+    expect(strangers(orphaned, record, (pid) => pid === 4350, PID1)).toEqual([])
+    expect(strangers(orphaned, record, () => false, PID1)).toEqual([4350])
+  })
+
+  // #2402: on Linux the user's systemd --user adopts the orphan, so its parent reads that manager, not pid 1
+  test("an orphan the user manager adopted counts as one, once that manager is a reaper given", () => {
+    const orphaned = [...procs, { pgid: 4300, pid: 4350, ppid: 1500 }]
+    expect(strangers(orphaned, record, (pid) => pid === 4350, LINUX)).toEqual([])
+    expect(strangers(orphaned, record, (pid) => pid === 4350, PID1)).toEqual([4350])
   })
 
   test("anything else in those groups is a stranger, such as a sibling the shell started", () => {
     expect(
-      strangers([...procs, { pgid: 4100, pid: 4160, ppid: 4100 }], record, () => true),
+      strangers([...procs, { pgid: 4100, pid: 4160, ppid: 4100 }], record, () => true, PID1),
     ).toEqual([4160])
   })
 })

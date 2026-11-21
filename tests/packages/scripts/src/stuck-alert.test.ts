@@ -10,12 +10,14 @@ import {
   callKey,
   callOf,
   detailOf,
+  forwardLine,
   lastWords,
   managerFor,
   pendingCalls,
   transcriptOf,
   waiterLive,
   waiterPidPath,
+  waiterSince,
 } from "../../../../packages/scripts/src/stuck-alert"
 
 const AGENTS = [
@@ -209,6 +211,17 @@ describe("an alert to a manager with no alerts-wait running", () => {
     })
   })
 
+  test("a line for a manager whose waiter is down goes on through Ops, and Ops' own through the dispatcher", () => {
+    expect(forwardLine("dispatcher", "a made-up line")).toEqual({
+      text: "dispatcher has no playground alerts-wait running, so it hears this only from the relay: send it to dispatcher by SendMessage now.\na made-up line",
+      to: "ops",
+    })
+    expect(forwardLine("ops", "a made-up line")).toEqual({
+      text: "ops has no playground alerts-wait running, so it hears this only from the relay: send it to ops by SendMessage now.\na made-up line",
+      to: "dispatcher",
+    })
+  })
+
   test("with Ops' waiter down too, Ops' copy names Ops' own restart", () => {
     const [, ops] = alertLines("m4n7pq-builder", "x is stuck", false, false)
     expect(ops!.text).toEndWith(
@@ -310,5 +323,23 @@ describe("an alert to a manager with no alerts-wait running", () => {
     const old = new Date(NOW.getTime() - 6 * 60_000)
     utimesSync(cursor, old, old)
     expect(await waiterLive(outbox, "planner", NOW)).toBe(false)
+  })
+
+  test("a waiter counts from a time when its pid runs, or it handed over an alert at or after that time", async () => {
+    const box = join(outbox, "since")
+    mkdirSync(join(box, "alerts-wait"), { recursive: true })
+    const since = NOW.getTime() - 60_000
+    expect(await waiterSince(box, "dispatcher", since)).toBe(false)
+    const cursor = join(box, "alerts-wait", "dispatcher")
+    writeFileSync(cursor, "100")
+    const before = new Date(since - 1000)
+    utimesSync(cursor, before, before)
+    expect(await waiterSince(box, "dispatcher", since)).toBe(false)
+    const after = new Date(since + 1000)
+    utimesSync(cursor, after, after)
+    expect(await waiterSince(box, "dispatcher", since)).toBe(true)
+    utimesSync(cursor, before, before)
+    writeFileSync(waiterPidPath(box, "dispatcher"), String(process.pid))
+    expect(await waiterSince(box, "dispatcher", since)).toBe(true)
   })
 })

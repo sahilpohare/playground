@@ -1,11 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 
 import { GUARD_SETTING_KEYS } from "../../../packages/settings/src/guard-keys"
 import { check, GUARD_KEYS, guarded } from "../../../scripts/hooks/no-extensions-write"
 import { overBaseline, stepsOf } from "./pace"
+import { as, pinPlatform } from "./platform"
 
 // A home whose data folder holds an extensions root, with a list, policy.json and a scope's sources, as a machine with extensions has.
 const HOME = mkdtempSync(join(tmpdir(), "no-extensions-write-"))
@@ -31,6 +32,7 @@ symlinkSync(ROOT, LINK)
 symlinkSync(ROOT, join(DATA, "store"))
 symlinkSync(DATA, join(HOME, "pg"))
 afterAll(() => rmSync(HOME, { force: true, recursive: true }))
+pinPlatform("darwin")
 
 const ENV = { HOME }
 const CHECKOUT = join(import.meta.dir, "..", "..", "..")
@@ -158,8 +160,26 @@ describe("a direct write into the extensions root is refused, naming the owner's
     ["git -C a scope checkout", `git -C ${SCOPE} checkout HEAD~1 -- lists`],
     ["git diff --output into the root", `git diff --output=${LIST}`],
     ["through run-slot", `~/.playground/ops/run-slot.sh w -- rm ${LIST}`],
+    [
+      "a write inside run-slot's words, in the scope its own cd names",
+      `~/.playground/ops/run-slot.sh w -- bash -c 'cd ${SCOPE} && touch f'`,
+    ],
     ["through bash -c", `bash -c "rm ${LIST}"`],
     ["through env", `env FOO=1 rm ${LIST}`],
+    // #2397: a runner's folder option hides no delete, since its program reads in the folder the option names
+    ["a relative path past bun run's --cwd", `bun run --cwd ${DATA} rm -rf extensions`],
+    [
+      "a relative path past bun run's --cwd in a variable",
+      `D=${DATA}; bun run --cwd $D rm -rf extensions`,
+    ],
+    ["a relative path past bunx's --cwd", `bunx --cwd=${DATA} rm -rf extensions`],
+    ["a relative path past bun exec's --cwd", `bun exec --cwd ${DATA} 'rm -rf extensions'`],
+    ["a relative path past bun run's --cwd attached", `bun run --cwd=${DATA} rm -rf extensions`],
+    ["a relative path past pnpm's --dir", `pnpm --dir ${DATA} exec rm -rf extensions`],
+    ["a relative path past pnpm's --dir attached", `pnpm --dir=${DATA} exec rm -rf extensions`],
+    ["a relative path past pnpm exec's own -C", `pnpm exec -C ${DATA} rm -rf extensions`],
+    ["a relative path past pnpm dlx's -C", `pnpm dlx -C ${DATA} rm -rf extensions`],
+    ["a relative path past pnpm's -C", `pnpm -C ${DATA} exec rm -rf extensions`],
   ])("%s", async (_, command) => {
     const reason = await bash(command)
     expect(reason).toContain("no-extensions-write hook refuses")
@@ -482,6 +502,16 @@ describe("a direct write into the extensions root is refused, naming the owner's
 
   test("a Bash call whose cwd is already inside the root runs no writer", async () => {
     expect(await bash("node -e 'x'", SCOPE)).toContain("no-extensions-write hook refuses")
+  })
+
+  test("a write after a run-slot call whose words cd away lands in the shell's own folder", async () => {
+    const slot = "~/.playground/ops/run-slot.sh w --"
+    expect(await bash(`${slot} cd /tmp; touch f`, SCOPE)).toContain(
+      "no-extensions-write hook refuses",
+    )
+    expect(await bash(`${slot} pushd /tmp; touch f`, SCOPE)).toContain(
+      "no-extensions-write hook refuses",
+    )
   })
 
   // zsh's ~- is the folder it last left, so an OLDPWD assignment keeps it in the root, and a popd that lands back leaves it unread
@@ -978,6 +1008,14 @@ describe("a quoted argument is read as a command line only where a program runs 
       "echo 'rm -rf ~/.playground/extensions/.no-such-folder' | pkexec cat",
     ],
     [
+      "zsh's dash modifier ahead of a harmless program",
+      "echo 'rm -rf ~/.playground/extensions/.no-such-folder' | - ls",
+    ],
+    [
+      "cat reading the text from stdin by its lone dash",
+      "echo 'rm -rf ~/.playground/extensions/.no-such-folder' | cat -",
+    ],
+    [
       "env's lone dash ahead of a harmless program",
       "echo 'rm -rf ~/.playground/extensions/.no-such-folder' | env - ls",
     ],
@@ -1152,23 +1190,23 @@ describe("a quoted argument is read as a command line only where a program runs 
     ],
     [
       "awk's output sorted into a git hook by sort -o",
-      "awk '$3 ~ /runner/' /dev/null | sort -o .git/hooks/pre-commit",
+      "awk '$3 ~ \"runner\"' /dev/null | sort -o .git/hooks/pre-commit",
     ],
     [
       "awk's output written into a git hook by uniq's second file",
-      "awk '$3 ~ /runner/' /dev/null | uniq - .git/hooks/pre-commit",
+      "awk '$3 ~ \"runner\"' /dev/null | uniq - .git/hooks/pre-commit",
     ],
     [
       "awk's output sorted through a compress program",
-      "awk '$3 ~ /runner/' /dev/null | sort --compress-program=sh",
+      "awk '$3 ~ \"runner\"' /dev/null | sort --compress-program=sh",
     ],
     [
       "awk's output sorted into a git hook by an abbreviated --out",
-      "awk '$3 ~ /runner/' /dev/null | sort --out=.git/hooks/pre-commit",
+      "awk '$3 ~ \"runner\"' /dev/null | sort --out=.git/hooks/pre-commit",
     ],
     [
       "awk's output sorted through an abbreviated --comp",
-      "awk '$3 ~ /runner/' /dev/null | sort --comp=sh",
+      "awk '$3 ~ \"runner\"' /dev/null | sort --comp=sh",
     ],
     [
       "a script named awk in the folder given a removal",
@@ -1208,7 +1246,7 @@ describe("a quoted argument is read as a command line only where a program runs 
     ],
     [
       "awk after a printf, which keeps canary's reading",
-      "printf '%s\\n' '/sh -c/p'; awk '$3 ~ /runner/' /dev/null",
+      "printf '%s\\n' '/sh -c/p'; awk '$3 ~ \"runner\"' /dev/null",
     ],
     [
       "sed -i '' inserting a removal into a git hook",
@@ -1620,9 +1658,28 @@ describe("a quoted argument is read as a command line only where a program runs 
       expect(await at(command, cwd)).toContain("no-extensions-write hook refuses")
   })
 
+  // PG-2173: an awk program with no string, no | and nothing awkRuns finds prints its input alone, as grep does, so its ~ is no path on a line read whole
+  test.each([
+    ["sorted into a git hook by sort -o", "| sort -o .git/hooks/pre-commit"],
+    ["written into a git hook by uniq's second file", "| uniq - .git/hooks/pre-commit"],
+    ["sorted through a compress program", "| sort --compress-program=sh"],
+  ])("awk's input-only output %s runs", async (_, tail) => {
+    for (const cwd of [...homes, join(homedir(), "x", ".claude", "worktrees", "y")])
+      expect(await at(`awk '$3 ~ /runner/' /dev/null ${tail}`, cwd)).toBeUndefined()
+  })
+  test("an awk program printing a string into a git hook stays refused", async () => {
+    for (const cwd of homes)
+      expect(
+        await at(
+          `awk 'BEGIN{print "rm -rf ~/.play*/extensions/.no-such-folder"}' > .git/hooks/pre-commit`,
+          cwd,
+        ),
+      ).toContain("no-extensions-write hook refuses")
+  })
+
   // #1599: a refusal of a command that shows no write routes to the lead as a likely false positive, while one that writes keeps the owner's route
   test("a refusal of a command that shows no write asks for a false-positive report", async () => {
-    const reason = await at("lsof -nP | awk 'NR>1 {print $2}'", homedir())
+    const reason = await at("lsof -nP | awk 'NR>1 {print $2/1}'", homedir())
     expect(reason).toContain(
       "If this command writes nothing, report it to your lead as a false positive.",
     )
@@ -1760,6 +1817,176 @@ describe("a quoted argument is read as a command line only where a program runs 
   )
 })
 
+// #1887: a perl edit's script, a browser eval's script, a commit message and a jq filter are text no shell runs, so each runs from the home on a line read whole, beside the same programs' ordinary calls, which ran before too
+describe("text no program runs as a shell line stays text on a line read whole", () => {
+  test.each([
+    [
+      "an in-place perl edit holding a parenthesised conditional",
+      `perl -pi -e 's/\\(a \\? b\\)/(a ? c : "")/' ${WORK}/f`,
+    ],
+    ["an in-place perl edit by -i and -pe", `perl -i -pe 's/(a)/b/' ${WORK}/f`],
+    ["a browser eval holding ?? beside a sleep", "sleep 1; agent-browser eval 'a?.b ?? 1'"],
+    [
+      "a browser eval by session beside a sleep",
+      "sleep 1; agent-browser --session t eval 'a ?? 1'",
+    ],
+    ["a jq alternative in a loop", `for p in 1 2; do gh api x --jq '"\\(.a)/\\(.b // "-")"'; done`],
+    [
+      "a jq alternative beside an assignment",
+      `h=$(gh api x --jq .sha); gh api x --jq '(.b // "-")'`,
+    ],
+    ["a perl reader", `perl -ne 'print if /a/' ${WORK}/f`],
+    ["an in-place sed", `sed -i '' 's/a/b/' ${WORK}/f`],
+    ["a plain browser eval", "agent-browser eval 'document.title'"],
+    ["a gh read", "gh api x --jq .sha"],
+    ["a plain commit", 'git commit -q -m "a b"'],
+    [
+      "a read-only sed's address range beside another call (PG-1931)",
+      `bun x.ts; sed -n '/^if (import.meta.main)/,/^}/p' ${WORK}/f`,
+    ],
+    [
+      "a playground call whose reason holds a regex (PG-1931)",
+      `playground ext score login x 5 --reason "matches /^(\\d+)(?: (\\S+) \\S+)?/ now"`,
+    ],
+    [
+      "a reason attached by =, holding a regex (PG-1931)",
+      `playground ext score login x 5 --reason="/^(\\d+)(?: (\\S+))?/ x"`,
+    ],
+  ])("%s runs", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    ["an in-place perl edit of a file in the root", `perl -pi -e 's/a/b/' ${LIST}`],
+    ["a browser eval whose output a shell runs", `sleep 1; agent-browser eval 'a ?? 1' | sh`],
+    [
+      "an in-place sed of a file in the root beside another call",
+      `bun x.ts; sed -i '' 's/a/b/' ${LIST}`,
+    ],
+    [
+      "a sed w command writing into the root beside another call",
+      `bun x.ts; sed -n 'w ${LIST}' ${WORK}/f`,
+    ],
+    ["a read-only sed's file in the root beside another call", `bun x.ts; sed -n '/(a)/p' ${LIST}`],
+    [
+      "a read-only sed's glob in the root beside another call",
+      `bun x.ts; sed -n '/(a)/p' ${ROOT}/*/x.md`,
+    ],
+    ["a reason that names the root", `playground ext score login x 5 --reason "see ${LIST}"`],
+  ])("%s is still refused", async (_, command) => {
+    expect(await bash(command)).toContain("no-extensions-write hook ")
+  })
+
+  // a commit's message holds a bare cd, which the shell reads as a cd to the process's home, so these run from a worktree under it
+  const tree = join(homedir(), "x", ".claude", "worktrees", "y")
+  const fromTree = (command: string) =>
+    check(JSON.stringify({ cwd: tree, tool_input: { command }, tool_name: "Bash" }), {
+      HOME: homedir(),
+    })
+  const message = '-m "x" -m "y\ncd && make || true, then . ./env"'
+  test("a commit by -C to the folder the shell is in, its message holding a cd line, runs", async () => {
+    expect(await fromTree(`git -C ${tree} commit -q ${message}`)).toBeUndefined()
+    expect(await fromTree(`git -C ~/x/.claude/worktrees/y commit -q ${message}`)).toBeUndefined()
+  })
+  test.each([
+    ["another folder", `git -C /tmp commit -q ${message}`],
+    ["a relative folder", `git -C y commit -q ${message}`],
+    ["the folder by a variable", `git -C "$PWD" commit -q ${message}`],
+    ["the folder with -c beside it", `git -c x.y=z -C ${tree} commit -q ${message}`],
+  ])(
+    "a commit by -C to %s, its message holding a cd line, is still refused",
+    async (_, command) => {
+      expect(await fromTree(command)).toContain("no-extensions-write hook ")
+    },
+  )
+})
+
+// PG-2173: an awk program with no write or run feature, an in-place sed's edit script and agent-browser's wait --fn expression are data for their program, so a regex or a > in one is no glob, path or redirect on a line read whole
+describe("a listed program's single-quoted text stays text on a line read whole", () => {
+  test.each([
+    [
+      "an awk regex range beside an assignment",
+      `f=${WORK}/notes.md; awk '/^# .*a/,/^# .*b/' $f | head -40`,
+    ],
+    [
+      "an awk regex range beside a writing redirect",
+      `awk '/^## .*(a)/{p=1} p' ${WORK}/notes.md; echo x >> ${WORK}/log.md`,
+    ],
+    [
+      "an in-place sed of parenthesised addresses beside a writing redirect",
+      `sed -i '' '/item 5 (a, after item 4)/d; /item 5 note: carry it/d' ${WORK}/queue.md; echo "$(date -u +%FT%TZ) x" >> ${WORK}/notes.md`,
+    ],
+    [
+      "an in-place sed of a file through a variable the line holds",
+      `F=${WORK}/f; bun x.ts; sed -i '' '/x (a)/d' "$F"`,
+    ],
+    [
+      "a browser wait --fn holding a >",
+      `agent-browser wait --fn 'document.getElementsByTagName("p").length > 2'`,
+    ],
+    [
+      "a browser wait --fn after a valued option",
+      `agent-browser --session s wait --fn 'document.getElementsByTagName("p").length > 2'`,
+    ],
+    [
+      "a grep regex beside a writing redirect",
+      `grep -nE '^## .*(a) x' ${WORK}/f; echo x >> ${WORK}/log.md`,
+    ],
+    [
+      "an rg regex beside a writing redirect",
+      `rg -n '^## .*(a) x' ${WORK}; echo x >> ${WORK}/log.md`,
+    ],
+    [
+      "a jq filter beside a writing redirect",
+      `jq -r '.a | select(.b > 1)' ${WORK}/x.json; echo x >> ${WORK}/log.md`,
+    ],
+  ])("%s runs", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    ["an awk print > into the root", `bun x.ts; awk '/^# .*a/{print > "${LIST}"}' ${WORK}/f`],
+    ["an awk print | to a command", `bun x.ts; awk '/^# .*a/{print | "cat > ${LIST}"}' ${WORK}/f`],
+    ["an awk getline from a command", `bun x.ts; awk 'BEGIN{"rm ${LIST}" | getline}'`],
+    ["an awk system()", `bun x.ts; awk '/^# .*a/{system("rm ${LIST}")}' ${WORK}/f`],
+    ["an awk regex holding a |, read as today", `bun x.ts; awk '/^## .*(a|b)/' ${WORK}/f`],
+    [
+      "an awk print > to a relative file, read as today",
+      `bun x.ts; awk '/^# .*a/{print > "x"}' ${WORK}/f`,
+    ],
+    ["a sed w to a relative file, read as today", `bun x.ts; sed -i '' '/(a) .*/w x' ${WORK}/f`],
+    ["an awk program from a file", `bun x.ts; awk -f ${LIST} ${WORK}/f`],
+    ["an in-place sed w into the root", `bun x.ts; sed -i '' '/^# .*a/w ${LIST}' ${WORK}/f`],
+    ["an in-place sed s///w into the root", `bun x.ts; sed -i '' 's/(a)/b/w ${LIST}' ${WORK}/f`],
+    ["an in-place sed of a file in the root", `bun x.ts; sed -i '' '/(a) .*/d' ${LIST}`],
+    [
+      "an in-place sed of a quoted variable the hook does not hold",
+      `bun x.ts; sed -i '' '/x (a)/d' "$F"`,
+    ],
+    ["an in-place sed of a variable the hook does not hold", `bun x.ts; sed -i '' '/x (a)/d' $F`],
+    ["an in-place sed of a substitution", `bun x.ts; sed -i '' '/x (a)/d' $(echo f)`],
+    ["an in-place sed of a quoted substitution", `bun x.ts; sed -i '' '/x (a)/d' "$(echo f)"`],
+    ["an in-place sed of a backtick substitution", "bun x.ts; sed -i '' '/x (a)/d' `echo f`"],
+    ["a sh -c writing the root", `bun x.ts; sh -c 'echo x > ${LIST}'`],
+    ["a browser wait --fn naming the root", `sleep 1; agent-browser wait --fn 'a > ${LIST}'`],
+    ["an awk program naming the root", `sleep 1; awk '/x/, / > ${LIST}/' ${WORK}/f`],
+    [
+      "a browser wait --fn whose output a shell runs",
+      `agent-browser wait --fn 'a > ${HOME}/.play*/extensions/policy.json' | sh`,
+    ],
+    [
+      "an unlisted program given the same regex",
+      `bun x.ts; node x.js '/^# .*a/,/^# .*b/' ${WORK}/f`,
+    ],
+    [
+      "an unlisted browser subcommand given the same text",
+      `agent-browser type '#a' 'document.getElementsByTagName("p").length > 2'`,
+    ],
+  ])("%s is still refused", async (_, command) => {
+    expect(await bash(command)).toContain("no-extensions-write hook ")
+  })
+})
+
 describe("a read of the root, and writes elsewhere, run", () => {
   test.each([
     ["cat of a list", `cat ${LIST}`],
@@ -1844,13 +2071,193 @@ describe("a write the hook can place outside the root runs, after a cd it cannot
   test.each([
     ["rm of a relative path after a cd to a literal path", "cd /tmp/x && rm -rf build"],
     ["a reader after a cd to a variable", `cd "$X"; ls`],
-    [
-      "a program after a cd to the checkout's top",
-      `cd "$(git rev-parse --show-toplevel)" && bun test`,
-    ],
     ["git status after a cd to a variable", `cd "$X" && git status`],
     ["a redirect to an absolute path after a cd to a variable", `cd "$X"; echo x > /tmp/y`],
     ["rm of an absolute path after a cd to a variable", `cd "$X"; rm -rf /tmp/scratch-dir`],
+    [
+      "rm under xargs fed an absolute path after a cd to a variable",
+      `cd "$X"; echo /tmp/scratch-dir | xargs rm -rf`,
+    ],
+    [
+      "touch under xargs fed an absolute path after a cd to a variable",
+      `cd "$X"; echo /tmp/y | xargs touch`,
+    ],
+    [
+      "a reader under xargs fed a relative name after a cd to a variable",
+      `cd "$X"; echo notes.txt | xargs wc -l`,
+    ],
+    ["a reader under xargs fed by ls after a cd to a variable", `cd "$X"; ls | xargs cat`],
+    ["a find listing with no path after a cd to a variable", `cd "$X"; find -name x`],
+    ["BSD find -x on an absolute path after a cd to a variable", `cd "$X"; find -x /tmp/a -delete`],
+    [
+      "BSD find -xd clustered on an absolute path after a cd to a variable",
+      `cd "$X"; find -xd /tmp/a -delete`,
+    ],
+    ["BSD find -E on an absolute path after a cd to a variable", `cd "$X"; find -E /tmp/a -delete`],
+    [
+      "BSD find -f naming an absolute path after a cd to a variable",
+      `cd "$X"; find -f /tmp/x -delete`,
+    ],
+    [
+      "BSD find -x then -f naming an absolute path after a cd to a variable",
+      `cd "$X"; find -x -f /tmp/x -delete`,
+    ],
+    [
+      "a reader under xargs -a reading an absolute list after a cd to a variable",
+      `cd "$X" && xargs -a /tmp/list wc -l`,
+    ],
+    ["a writer under xargs -a with no cd, as canary reads it", "xargs -a /tmp/list touch"],
+    [
+      "a test run under xargs -a with no cd, as canary reads it",
+      "xargs -a /tmp/touched.txt bun run --cwd /tmp/tree test:file > /tmp/t.log 2>&1",
+    ],
+    ["a writer under xargs -E with absolute words and no cd", "echo /tmp/x | xargs -E -a touch"],
+    // xargs' options that leave where its words land alone, each with absolute words after a cd to a variable
+    ...[
+      "-0",
+      "-E END",
+      "-e",
+      "--eof=END",
+      "-P 2 -n1",
+      "--process-slot-var S",
+      "-p -t -r -x -n1",
+    ].map((options): [string, string] => [
+      `rm under xargs ${options} fed an absolute path after a cd to a variable`,
+      `cd "$X" && echo /tmp/x | xargs ${options} rm -r`,
+    ]),
+    [
+      "a reader under every option xargs reads after a cd to a variable",
+      `cd "$X" && echo .x | xargs -0 -E END -P 2 -n1 -t wc -l`,
+    ],
+    [
+      "find -fprint to an absolute file after a cd to a variable",
+      `cd "$X"; find /tmp/a -fprint /tmp/out`,
+    ],
+    [
+      "find -newer a relative file, a read, after a cd to a variable",
+      `cd "$X"; find /tmp/a -newer .x -print`,
+    ],
+    [
+      "rm under xargs fed a quoted absolute path after a cd to a variable",
+      `cd "$X" && echo "'/tmp/x'" | xargs rm -rf`,
+    ],
+    [
+      "rm under xargs -0 fed a name whose quotes it keeps, so it names no root",
+      `echo ".play'ground'/extensions" | xargs -0 rm -r`,
+    ],
+    [
+      "rm under xargs fed a relative name by printf -- with no cd",
+      "printf -- 'sub' | xargs rm -rf",
+    ],
+    ["printf -v of a dash-led value after --", "printf -v v -- '-delete'"],
+    [
+      "a printer under xargs with no xargs after it after a cd to a variable",
+      `cd "$X"; echo notes | xargs echo`,
+    ],
+    [
+      "rm under xargs fed a relative name with no cd, so the hook knows the folder it lands in",
+      "echo build | xargs rm -rf",
+    ],
+    [
+      "a writer under xargs fed a program's output with no -a or cd, as on canary",
+      "git ls-files | xargs sed -i s/a/b/",
+    ],
+    // PG-2094: a program on neither list under xargs writing nothing or only absolute paths after a cd to a variable, and an in-place edit after a cd to a literal path
+    [
+      "an in-place sed under xargs fed an absolute path after a cd to a variable",
+      `cd "$X" && echo /tmp/f | xargs sed -i '' s/a/b/`,
+    ],
+    [
+      "perl -pi under xargs fed an absolute path after a cd to a variable",
+      `cd "$X" && echo /tmp/f | xargs perl -pi -e s/a/b/`,
+    ],
+    [
+      "chmod under xargs fed absolute paths after a cd to a variable",
+      `cd "$X" && echo /tmp/f /tmp/g | xargs chmod +x`,
+    ],
+    [
+      "a sed that only prints under xargs after a cd to a variable",
+      `cd "$X" && grep -l a f | xargs sed -n p`,
+    ],
+    [
+      "a sed with no -i under xargs after a cd to a variable",
+      `cd "$X" && grep -l a f | xargs sed s/a/b/`,
+    ],
+    [
+      "a perl that only prints under xargs after a cd to a variable",
+      `cd "$X" && grep -l a f | xargs perl -ne print`,
+    ],
+    [
+      "an in-place sed under xargs after a cd to a literal path",
+      "cd /tmp && grep -l a f | xargs sed -i s/a/b/",
+    ],
+    // PG-2104: after a cd to a variable, a program that writes nothing (a reader, a printer, a builtin, a read of git or portless, a shell whose script is a read), git on a literal folder, a writer after a cd to a literal path or with no cd, and any program after a cd or env -C through a variable the line sets to a literal absolute path
+    ["cat after a cd to a variable", `cd "$X" && cat f`],
+    ["grep after a cd to a variable", `cd "$X" && grep -rn a .`],
+    ["head and wc after a cd to a variable", `cd "$X" && head -5 f && wc -l f`],
+    ["pwd and ls after a cd to a variable", `cd "$X" && pwd && ls -la`],
+    ["a cd below a cd to a variable, then ls", `cd "$X" && cd sub && ls`],
+    ["git log after a cd to a variable", `cd "$X" && git log --oneline -5`],
+    ["git diff after a cd to a variable", `cd "$X" && git diff --stat`],
+    ["git show after a cd to a variable", `cd "$X" && git show HEAD`],
+    ["git rev-parse after a cd to a variable", `cd "$X" && git rev-parse HEAD`],
+    ["git on a literal folder after a cd to a variable", `cd "$X" && git -C /tmp/r checkout -- f`],
+    ["git rm on a literal folder after a cd to a variable", `cd "$X"; git -C /tmp/x rm -r .`],
+    [
+      "git on a literal folder with a work tree of the root after a cd to a variable",
+      `cd "$X" && git -C /tmp/r --work-tree=/ checkout -- f`,
+    ],
+    [
+      "git on a literal folder with a git folder by it after a cd to a variable",
+      `cd "$X" && git -C /tmp/r --git-dir=.git checkout -- f`,
+    ],
+    ["sleep and date after a cd to a variable", `cd "$X" && sleep 1 && date -u`],
+    ["basename and dirname after a cd to a variable", `cd "$X" && basename "$PWD" && dirname a/b`],
+    ["echo and printf after a cd to a variable", `cd "$X" && echo hi && printf "%s\n" x`],
+    ["ex in script mode after a cd to a literal path", "cd /tmp/x && ex -sc 'wq' f"],
+    ["patch after a cd to a literal path", "cd /tmp/x && patch -p1 < /tmp/d"],
+    ["git checkout of a path after a cd to a literal path", "cd /tmp/x && git checkout -- f"],
+    ["bun run with no cd", "bun run build"],
+    [
+      "cut and tr in a substitution after a cd to a variable",
+      `cd "$X"; x=$(echo a | cut -c1 | tr a b)`,
+    ],
+    ["a for loop of echoes after a cd to a variable", `cd "$X"; for f in a b; do echo $f; done`],
+    [
+      "read in a while loop after a cd to a variable",
+      `cd "$X"; while read -r l; do echo "$l"; done < /tmp/f`,
+    ],
+    [
+      "portless get by bunx after a cd to a variable",
+      `cd "$X" && bunx portless get api.playground`,
+    ],
+    ["a shell's inline read after a cd to a variable", `cd "$X" && bash -c "ls"`],
+    ["a shell fed a read after a cd to a variable", `cd "$X" && echo ls | sh`],
+    ["a shell script after a cd to a literal path", "cd /tmp/x && bash s.sh"],
+    [
+      "a build under run-slot's env -C of a variable the line sets to a literal absolute path",
+      `W=/tmp/x; ~/.playground/ops/run-slot.sh a -- /usr/bin/env -C $W bun run test`,
+    ],
+    [
+      "a build after a cd to a variable the line sets to a literal absolute path",
+      `W=/tmp/x; cd "$W" && bun run test`,
+    ],
+    [
+      "patch after an unquoted cd to a variable the line sets to a literal absolute path",
+      `W=/tmp/x; cd $W && patch -p1 < /tmp/d`,
+    ],
+    [
+      "a build under env -C of a variable the line sets to a literal absolute path",
+      `W=/tmp/x; env -C "$W" bun run test`,
+    ],
+    [
+      "cp after a cd to a variable the line sets to a literal absolute path",
+      `W=/tmp/x; cd "$W" && cp a b`,
+    ],
+    [
+      "a build after a cd to a variable built from a literal absolute one",
+      `W=/tmp/x; T="$W/sub"; cd "$T" && bun test`,
+    ],
     ["cp of a relative file to an absolute path after a cd to a variable", `cd "$X"; cp a /tmp/b`],
     [
       "a redirect to a file the line holds after a cd to a variable",
@@ -2019,6 +2426,40 @@ describe("a write the hook can place outside the root runs, after a cd it cannot
       "GNU find by its g name in capitals printing names after a cd to a variable",
       `cd "$X"; GFIND /tmp/x -name x`,
     ],
+    // #1340: a program on neither list whose writes the hook places outside the root
+    ["an in-place sed of an absolute file", `cd "$X"; sed -i '' s/a/b/ /tmp/p.json`],
+    ["an in-place perl of an absolute file", `cd "$X"; perl -pi -e s/a/b/ /tmp/p.json`],
+    ["a sed that edits nothing in place", `cd "$X"; sed s/a/b/ notes.txt`],
+    ["chmod of an absolute file", `cd "$X"; chmod 644 /tmp/p`],
+    ["chmod by a symbolic mode of an absolute file", `cd "$X"; chmod u+x /tmp/p`],
+    ["truncate of an absolute file", `cd "$X"; truncate -s 0 /tmp/p`],
+    ["shred of an absolute file", `cd "$X"; shred -u /tmp/p`],
+    ["tar extracting into an absolute folder", `cd "$X"; tar -xf /tmp/a.tar -C /tmp/out`],
+    ["tar listing an archive", `cd "$X"; tar -tf /tmp/a.tar`],
+    ["curl's -o to an absolute file", `cd "$X"; curl -o /tmp/p https://example.com`],
+    ["curl printing to its output", `cd "$X"; curl -s https://example.com`],
+    ["sort's -o to an absolute file", `cd "$X"; sort -o /tmp/p /tmp/a`],
+    ["sort printing to its output", `cd "$X"; sort notes.txt`],
+    ["git rm in an absolute -C", `cd "$X"; git -C /tmp/repo rm -q p`],
+    ["a bare mktemp", `cd "$X"; mktemp`],
+    ["mktemp of a template in the temp folder", `cd "$X"; mktemp -t x.XXXX`],
+    ["mktemp of a template in an absolute folder", `cd "$X"; mktemp -p /tmp/scratch x.XXXX`],
+    ["chmod under xargs of an absolute file", `cd "$X"; echo /tmp/q | xargs chmod 644 /tmp/p`],
+    ["GNU chmod of an absolute file", `cd "$X"; gchmod 644 /tmp/p`],
+    ["sort's shortened --output to an absolute file", `cd "$X"; sort --outp /tmp/p /tmp/a`],
+    ["tar's -f before its -C", `cd "$X"; tar -x -f /tmp/a.tar -C /tmp/out`],
+    ["old-style tar with its -C", `cd "$X"; tar xfC /tmp/a.tar /tmp/out`],
+    ["macOS tar's --cd to an absolute folder", `cd "$X"; tar -xf /tmp/a.tar --cd /tmp/out`],
+    ["sort's one-letter --output to an absolute file", `cd "$X"; sort --o /tmp/p /tmp/a`],
+    ["macOS chmod's dash-led mode of an absolute file", `cd "$X"; chmod -w /tmp/p`],
+    ["curl sending a cookie", `cd "$X"; curl --cookie a=b https://example.com`],
+    ["curl with an attached -X value", `cd "$X"; curl -XPOST https://example.com`],
+    ["macOS mktemp -t beside an absolute template", `cd "$X"; mktemp -t x /tmp/scratch/y.XXXX`],
+    ["curl's --trace to an absolute file", `cd "$X"; curl --trace /tmp/t https://example.com`],
+    [
+      "git rm of a pathspec file in an absolute -C",
+      `cd "$X"; git -C /tmp/repo rm --pathspec-from-file=/tmp/list`,
+    ],
   ])("%s", async (_, command) => {
     expect(await bash(command, WORK)).toBeUndefined()
   })
@@ -2028,6 +2469,106 @@ describe("a write the hook can place outside the root runs, after a cd it cannot
     ["a reader after a cd to a variable", `cd "$X"; cat policy.json`],
   ])("%s, from the root", async (_, command) => {
     expect(await bash(command, ROOT)).toBeUndefined()
+  })
+})
+
+describe("a writer's file a cd's && chain sets to a literal runs past the chain, read as that literal (PG-2161)", () => {
+  test.each([
+    ["a copy", `cd /tmp && f=/tmp/out.txt; cp /tmp/a "$f"`],
+    ["a tee", `cd /tmp && f=/tmp/out.txt; echo x | tee "$f"`],
+    ["a move", `cd /tmp && f=/tmp/out.txt; mv /tmp/a "$f"`],
+    ["a copy by the braced read", `cd /tmp && f=/tmp/out.txt; cp /tmp/a "\${f}"`],
+    ["a copy after a pushd", `pushd /tmp && f=/tmp/out.txt; cp /tmp/a "$f"`],
+    ["an in-place sed", `cd /tmp && f=/tmp/out.txt; sed -i '' s/a/b/ "$f"`],
+    ["an in-place sed with no suffix", `cd /tmp && f=/tmp/out.txt; sed -i s/a/b/ "$f"`],
+    ["an in-place perl", `cd /tmp && f=/tmp/out.txt; perl -pi -e s/a/b/ "$f"`],
+  ])("%s", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    [
+      "a copy by a literal the session's environment also sets",
+      `cd /tmp && f=/tmp/out.txt; cp /tmp/a "$f"`,
+    ],
+  ])("%s stays refused", async (_, command) => {
+    const raw = JSON.stringify({ cwd: HOME, tool_input: { command }, tool_name: "Bash" })
+    expect(await check(raw, { ...ENV, f: `${ROOT}/x` })).toBeDefined()
+  })
+
+  test.each([
+    [
+      "a cd through it, which an empty value leaves in the root",
+      `cd /tmp && d=/tmp; cd "$d"; cp /tmp/a x`,
+    ],
+  ])("%s stays refused, from the root", async (_, command) => {
+    expect(await bash(command, ROOT)).toBeDefined()
+  })
+})
+
+describe("a tool an array holds, run with an argument the reader cannot read, changes no variable (PG-2161)", () => {
+  test("a write through a held name after it", async () => {
+    expect(
+      await bash(
+        `A=(agent-browser --session w); S=/tmp/s; "\${A[@]}" eval "$(cat $S/m.js)"; "\${A[@]}" screenshot --full $S/a.png`,
+        WORK,
+      ),
+    ).toBeUndefined()
+  })
+})
+
+describe("a call the reader parses whole keeps its verdict beside the unread-folder rule (PG-2106)", () => {
+  test("a runner chain nested 10 deep, three options each, is judged within a bound", async () => {
+    const chain = Array.from({ length: 10 }, (_, i) => `npx --a${i} a --b${i} b --c${i} c`).join(
+      " ",
+    )
+    const started = performance.now()
+    expect(await bash(`${chain} cowsay hi`, WORK)).toBeUndefined()
+    expect(performance.now() - started).toBeLessThan(3000)
+  })
+
+  test.each([
+    ["a relative cd after a held absolute one", `W=/opt/w; cd "$W" && cd sub && ex -sc wq f`],
+    ["a held absolute cd after a cd to a variable", `W=/opt/w; cd "$X" && cd "$W" && ex -sc wq f`],
+    ["an absolute cd after a cd to a variable", `cd "$X" && cd /tmp && ex -sc wq f`],
+    ["a bare cd after a cd to a variable", `cd "$X" && cd && ex -sc wq f`],
+    ["sed printing lines after a cd to a variable", `cd "$X" && sed -n 1,40p f`],
+    ["sed's substitution after a cd to a variable", `cd "$X" && sed 's/a/b/' f`],
+    ["perl printing matches after a cd to a variable", `cd "$X" && perl -ne 'print if /x/' f`],
+    ["perl's substitution after a cd to a variable", `cd "$X" && perl -pe 's/a/b/' f`],
+    [
+      "git grep's extended pattern after a cd to a variable",
+      `cd "$X" && git grep --extended-regexp x`,
+    ],
+    ["git diff as text after a cd to a variable", `cd "$X" && git diff --text`],
+    [
+      "bun's version behind arch under bunx's --cwd",
+      `bunx --cwd=${CLI_DIR}/../../.. arch -arm64 bun --cwd=scripts/src/playground --version`,
+    ],
+    ["a package runner's tool", "bunx cowsay hi"],
+    ["a build", "bun run build"],
+    ["bunx bun in a --cwd", `bunx bun --cwd ${CHECKOUT}/packages test`],
+    ["bunx bun's version in the CLI's folder", `bunx bun --cwd=${CLI_DIR} --version`],
+    ["bun x bun's build in a --cwd", `bun x --cwd ${CHECKOUT}/packages bun run build`],
+    ["npx bun's dev", "npx bun run dev"],
+    [
+      "bun's version in a --cwd under bunx's",
+      `bunx --cwd ${CHECKOUT}/packages bun --cwd scripts/src/playground --version`,
+    ],
+    ["npx's help with -y", "npx -y inscope@0.18.0 --help"],
+    ["bun's script with no env file", "bun --no-env-file packages/scripts/src/x.ts"],
+    ["a quiet build", "bun run --silent build"],
+    ["npx -y before a tool", "npx -y prettier --check ."],
+    ["bun's evaluated script", "bun -e 'console.log(1)'"],
+  ])("%s", async (_, command) => {
+    expect(await bash(command, WORK)).toBeUndefined()
+  })
+
+  test.each([
+    ["find naming the CLI's file", "find . -name cli.ts"],
+    ["xargs cat of the CLI's file", "echo cli.ts | xargs cat"],
+  ])("%s, in the CLI's folder", async (_, command) => {
+    expect(await bash(command, CLI_DIR)).toBeUndefined()
   })
 })
 
@@ -2085,6 +2626,34 @@ describe("a playground CLI call that changes what a guard reads is refused, nami
       `bun --cwd ${CLI_DIR} cli.ts ext put login list x /tmp/l.json --reason y`,
     ],
     [
+      "ext put by bunx bun in its --cwd",
+      `bunx --cwd=${CLI_DIR} bun cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
+      "ext put by bun x bun in a --cwd read from bun's own",
+      `bun --cwd=${join(CLI_DIR, "..")} x --cwd=playground bun cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
+      "ext put by bunx bun in a --cwd read from the one before",
+      `bunx --cwd=${join(CHECKOUT, "packages")} --cwd=scripts/src/playground bun cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
+      "ext put by a bun that bunx starts, its --cwd read from the runner's",
+      `bunx --cwd=${join(CHECKOUT, "packages")} bun --cwd=scripts/src/playground cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
+      "ext put by a bun that npx starts in its own --cwd",
+      `npx bun --cwd=${CLI_DIR} cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
+      "ext put by a bun in its own --cwd that npx starts under bunx",
+      `bunx npx bun --cwd=${CLI_DIR} cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
+      "ext put by a bun that bun run starts in its own --cwd",
+      `bun run bun --cwd=${CLI_DIR} cli.ts ext put login list x /tmp/l.json --reason y`,
+    ],
+    [
       "ext put by bun on cli with no extension",
       `bun ${CLI_DIR}/cli ext put login list x /tmp/l.json --reason y`,
     ],
@@ -2127,6 +2696,9 @@ describe("a playground CLI call that changes what a guard reads is refused, nami
       "settings set of usage.keychainService",
       "playground settings set usage.keychainService x --reason x",
     ],
+    ["settings set of wa.device", "playground settings set wa.device +15550100002 --reason x"],
+    ["settings set of wa.owner", "playground settings set wa.owner +15550100001 --reason x"],
+    ["settings reset of wa.owner", "playground settings reset wa.owner --reason x"],
     [
       "settings set of glm.readOnlyLoad5",
       "playground settings set glm.readOnlyLoad5 99 --reason x",
@@ -2137,6 +2709,72 @@ describe("a playground CLI call that changes what a guard reads is refused, nami
     ],
     ["settings reset of a guard key", "playground settings reset glm.readOnlyLoad5 --reason x"],
     ["settings set of a key the hook cannot read", 'playground settings set "$KEY" 1 --reason x'],
+    [
+      "settings set with the owner's message flag in a quoted word",
+      `playground settings set wa.alert +15550100444 "--from-owner-msg own1"`,
+    ],
+    [
+      "settings set chained after one from the owner's message",
+      "playground settings set ui.theme dark --from-owner-msg own1 && playground settings set wa.alert +15550100444 --reason x",
+    ],
+    [
+      "settings set with the owner's message flag and no id",
+      "playground settings set wa.alert +15550100444 --reason x --from-owner-msg",
+    ],
+    [
+      "settings set with the owner's message flag and an empty id",
+      `playground settings set wa.alert +15550100444 --reason x --from-owner-msg ""`,
+    ],
+    [
+      "settings set with the owner's message flag and a reason, which a CLI from before the flag writes",
+      "playground settings set wa.alert +15550100444 --from-owner-msg own1 --reason x",
+    ],
+    [
+      "settings set with the owner's message flag, a reason and a scope",
+      "playground settings set wa.alert +15550100444 --from-owner-msg own1 --reason x --scope acme",
+    ],
+    [
+      "settings set with the owner's message flag and a by",
+      "playground settings set wa.alert +15550100444 --from-owner-msg own1 --by owner",
+    ],
+    [
+      "settings set with the owner's message flag and a third word",
+      "playground settings set wa.alert +15550100444 extra --from-owner-msg own1",
+    ],
+    [
+      "settings reset with the owner's message flag",
+      "playground settings reset wa.alert --from-owner-msg own1",
+    ],
+    [
+      "settings set with the owner's message id the hook cannot read",
+      'playground settings set wa.alert +15550100444 --from-owner-msg "$ID"',
+    ],
+    [
+      "settings set proposed with a reason, which writes",
+      "playground settings set wa.replyPolicy x --propose --reason x",
+    ],
+    [
+      "settings set proposed with a scope",
+      "playground settings set wa.replyPolicy x --propose --scope acme",
+    ],
+    [
+      "settings set proposed with the owner's message flag",
+      "playground settings set wa.replyPolicy x --propose --from-owner-msg own1",
+    ],
+    [
+      "settings set proposed with a third word",
+      "playground settings set wa.replyPolicy x extra --propose",
+    ],
+    ["settings set proposed with no value", "playground settings set wa.replyPolicy --propose"],
+    ["settings reset proposed", "playground settings reset wa.replyPolicy --propose"],
+    [
+      "settings set with the propose flag in a quoted word",
+      `playground settings set wa.replyPolicy x "--propose --reason x"`,
+    ],
+    [
+      "settings set chained after a proposal",
+      "playground settings set wa.replyPolicy x --propose && playground settings set wa.owner +15550100001 --reason x",
+    ],
     ["migrate", "playground migrate --archive /tmp/a --pre-squash abc --org acme"],
     ["uninstall --purge", "playground uninstall --purge"],
     ["a command word the hook cannot read", 'playground "$CMD" put login list x /tmp/l.json'],
@@ -2275,6 +2913,18 @@ describe("a playground CLI call that no guard reads runs", () => {
     ["settings why", "playground settings why ext.links"],
     ["settings set of a key no guard reads", "playground settings set ui.theme dark --reason x"],
     ["settings reset of a key no guard reads", "playground settings reset ui.theme --reason x"],
+    [
+      "settings set of a guard key from the owner's message, which only asks ops-wa",
+      "playground settings set wa.replyPolicy 'factory status' --from-owner-msg own1",
+    ],
+    [
+      "settings set of a guard key proposed to the owner, which only asks ops-wa",
+      "playground settings set wa.replyPolicy 'factory status' --propose",
+    ],
+    [
+      "settings set of a guard key proposed to the owner, the flag before the value",
+      "playground settings set wa.guestPolicy --propose 'status only'",
+    ],
     ["settings import-jobs --dry-run", "playground settings import-jobs /tmp/jobs.json --dry-run"],
     ["rules", "playground rules voice"],
     ["uninstall without --purge", "playground uninstall"],
@@ -2370,6 +3020,13 @@ describe("the gated keys are every key the guards read", () => {
   test("spawn.sh's code root is gated", async () => {
     expect(await read("scripts/spawn.sh")).toContain("setting_text paths.codeRoot")
     expect(GUARD_KEYS.has("paths.codeRoot")).toBe(true)
+  })
+
+  test("yard.logReaders, the bots this Mac answers a read of the dispatcher's log for, is gated (#2032)", async () => {
+    expect(GUARD_KEYS.has("yard.logReaders")).toBe(true)
+    expect(
+      await bash(`playground settings set yard.logReaders '{"x[bot]":"dm"}' --reason r`),
+    ).toContain("no-extensions-write hook refuses")
   })
 })
 
@@ -2589,7 +3246,7 @@ describe("the Ops lead's tuning of a guard setting", () => {
     JSON.stringify({
       values: {
         "jobs.opsAlways": job({ enabled: true, schedule: { always: true } }),
-        "jobs.opsAwake": job({ enabled: true, schedule: { every: 300 } }),
+        "jobs.opsMachine": job({ enabled: true, schedule: { every: 300 } }),
         "jobs.opsOrg": job({ enabled: true, schedule: { every: 60 } }),
       },
     }),
@@ -2601,8 +3258,8 @@ describe("the Ops lead's tuning of a guard setting", () => {
       "me",
       {
         "jobs.opsAlways": { enabled: true },
-        "jobs.opsAwake": { enabled: true },
         "jobs.opsDesk": { enabled: true },
+        "jobs.opsMachine": { enabled: true },
       },
     ],
     ["acme", { "jobs.opsOrg": { enabled: true } }],
@@ -2648,7 +3305,7 @@ describe("the Ops lead's tuning of a guard setting", () => {
     ["glm.readOnlyLoad5 to a new limit", "playground settings set glm.readOnlyLoad5 20 --reason r"],
     [
       "a job's interval, its stored row otherwise as it stands",
-      `playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "the interval of a registry job no scope stores a row for",
@@ -2685,27 +3342,27 @@ describe("the Ops lead's tuning of a guard setting", () => {
     ["a reset of glm.readOnlyLoad5", "playground settings reset glm.readOnlyLoad5 --reason r"],
     [
       "a job turned off with its interval",
-      `playground settings set jobs.opsAwake '{"enabled":false,"schedule":{"every":600}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"enabled":false,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's row that drops a field",
-      `playground settings set jobs.opsAwake '{"schedule":{"every":600}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's row that adds a command",
-      `playground settings set jobs.opsAwake '{"command":"x","enabled":true,"schedule":{"every":300}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"command":"x","enabled":true,"schedule":{"every":300}}' --reason r`,
     ],
     [
       "a number in a job's config",
-      `playground settings set jobs.opsAwake '{"config":{"timeout":5},"enabled":true,"schedule":{"every":300}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"config":{"timeout":5},"enabled":true,"schedule":{"every":300}}' --reason r`,
     ],
     [
       "a job's interval that is no positive integer",
-      `playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":1.5}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":1.5}}' --reason r`,
     ],
     [
       "a job's whole rendered row with a new interval, which would pin the registry's fields",
-      `playground settings set jobs.opsAwake '{"callsModel":false,"command":"bun run x","cwd":"{checkout}","description":"a job","enabled":true,"runtime":"launchd","schedule":{"every":600}}' --reason r`,
+      `playground settings set jobs.opsMachine '{"callsModel":false,"command":"bun run x","cwd":"{checkout}","description":"a job","enabled":true,"runtime":"launchd","schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job whose rendered schedule is no interval, moved to one",
@@ -2725,9 +3382,9 @@ describe("the Ops lead's tuning of a guard setting", () => {
     ],
     [
       "a job's row at a scope",
-      `playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --scope acme --reason r`,
+      `playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --scope acme --reason r`,
     ],
-    ["a reset of a job", "playground settings reset jobs.opsAwake --reason r"],
+    ["a reset of a job", "playground settings reset jobs.opsMachine --reason r"],
     ["import-jobs", "playground settings import-jobs /tmp/jobs.json --reason r"],
     [
       "live.branch, a key naming what a guard allows",
@@ -2740,31 +3397,31 @@ describe("the Ops lead's tuning of a guard setting", () => {
     ],
     [
       "a job's interval with PLAYGROUND_LOGIN set before it, which moves the set to another scope",
-      `PLAYGROUND_LOGIN=acme playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `PLAYGROUND_LOGIN=acme playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's interval after an export of PLAYGROUND_LOGIN",
-      `export PLAYGROUND_LOGIN=acme; playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `export PLAYGROUND_LOGIN=acme; playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's interval under env with PLAYGROUND_LOGIN",
-      `env PLAYGROUND_LOGIN=acme playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `env PLAYGROUND_LOGIN=acme playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's interval with another data folder",
-      `PLAYGROUND_DATA_DIR=/tmp/other playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `PLAYGROUND_DATA_DIR=/tmp/other playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's interval with another home",
-      `HOME=/tmp/other playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `HOME=/tmp/other playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's interval after a sourced file, which may export the login",
-      `. ./login.sh; playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r`,
+      `. ./login.sh; playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r`,
     ],
     [
       "a job's interval in a subshell",
-      `(playground settings set jobs.opsAwake '{"enabled":true,"schedule":{"every":600}}' --reason r)`,
+      `(playground settings set jobs.opsMachine '{"enabled":true,"schedule":{"every":600}}' --reason r)`,
     ],
     [
       "glm.readOnlyLoad5 with PLAYGROUND_LOGIN set before it",
@@ -2773,4 +3430,815 @@ describe("the Ops lead's tuning of a guard setting", () => {
   ])("the Ops lead is refused %s", async (_, command) => {
     expect(await ops(command)).toContain("no-extensions-write hook refuses playground settings")
   })
+})
+
+// An ops job row that names an extension script: the write lands outside the root, and only its text names the root.
+describe("a write outside the root whose text names an extension script runs, and one into the root stays refused", () => {
+  const JOBS = join(DATA, "ops", "jobs.json")
+  const SCRIPT = join(SCOPE, "skills", "vault", "scripts", "vault.py")
+
+  test.each([
+    ["a Write of jobs.json", "Write", { content: `{"command":"${SCRIPT}"}`, file_path: JOBS }],
+    [
+      "an Edit of jobs.json",
+      "Edit",
+      { file_path: JOBS, new_string: `"${SCRIPT}"`, old_string: '"x"' },
+    ],
+  ])("%s", async (_, name, input) => {
+    expect(await tool(name, input)).toBeUndefined()
+  })
+
+  test.each([
+    ["jq to a file beside jobs.json", `jq '.jobs[0].command = "${SCRIPT}"' ${JOBS} > ${JOBS}.new`],
+    ["a heredoc to cat into jobs.json", `cat > ${JOBS} <<'EOF'\n{"command":"${SCRIPT}"}\nEOF`],
+    ["a heredoc to tee into jobs.json", `tee ${JOBS} <<'EOF'\n{"command":"${SCRIPT}"}\nEOF`],
+    [
+      "an unquoted heredoc to tee into jobs.json",
+      `tee ${JOBS} <<EOF\n{"command":"${SCRIPT}"}\nEOF`,
+    ],
+    [
+      "a heredoc to tee -a into jobs.json, quiet",
+      `tee -a ${JOBS} > /dev/null <<'EOF'\n{"command":"${SCRIPT}"}\nEOF`,
+    ],
+  ])("%s", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    [
+      "a Write into the root",
+      "Write",
+      { content: `{"command":"${SCRIPT}"}`, file_path: join(ROOT, "policy.json") },
+    ],
+  ])("%s is refused", async (_, name, input) => {
+    expect(await tool(name, input)).toContain("no-extensions-write hook refuses")
+  })
+
+  test.each([
+    [
+      "a heredoc to tee into the root",
+      `tee ${ROOT}/policy.json <<'EOF'\n{"command":"${SCRIPT}"}\nEOF`,
+    ],
+    ["a heredoc to tee into jobs.json and the root", `tee ${JOBS} ${LIST} <<'EOF'\n[]\nEOF`],
+    ["a heredoc to tee piped into a shell", `tee ${JOBS} <<'EOF' | sh\ntouch ${LIST}\nEOF`],
+    [
+      "a heredoc to tee piped into python",
+      `tee ${JOBS} <<'EOF' | python3\nopen("${LIST}", "w")\nEOF`,
+    ],
+    [
+      "a heredoc to tee into a shell's process substitution",
+      `tee >(sh) <<'EOF'\ntouch ${LIST}\nEOF`,
+    ],
+    ["a heredoc to tee into a shell's stdin", `tee /dev/stdout <<'EOF' | bash\ntouch ${LIST}\nEOF`],
+    [
+      "a heredoc to python naming the root",
+      `python3 - <<'EOF'\nopen("${JOBS}", "w").write("${SCRIPT}")\nEOF`,
+    ],
+    ["sed -i of jobs.json naming the root", `sed -i '' 's#x#${SCRIPT}#' ${JOBS}`],
+  ])("%s is refused", async (_, command) => {
+    expect(await bash(command)).toContain("no-extensions-write hook refuses")
+  })
+})
+
+// #2140: grep that xargs starts reads its pattern as a pattern, as a direct grep does; bun -e run from the data folder keeps its refusal, which names the form that runs
+describe("an xargs-led grep and bun -e from the data folder", () => {
+  const PATTERN = `"refuses x in $HOME/.playground"`
+  const WORKING = "run bun -e from a worktree, with absolute paths built from process.env.HOME."
+
+  test.each([
+    ["grep under xargs", `ls /tmp | xargs grep -h -o ${PATTERN}`],
+    ["grep under xargs -0", `ls /tmp | xargs -0 grep -h ${PATTERN}`],
+    ["grep under xargs -n 1", `ls /tmp | xargs -n 1 grep -h ${PATTERN}`],
+    ["grep under xargs -I {}", `ls /tmp | xargs -I {} grep -h ${PATTERN} {}`],
+    ["grep under xargs -J %", `ls /tmp | xargs -J % grep -h ${PATTERN} %`],
+    ["grep by a system path under xargs", `ls /tmp | /usr/bin/xargs /usr/bin/grep -h ${PATTERN}`],
+    ["a direct grep", `grep -c ${PATTERN} /tmp/x.log`],
+    [
+      "grep under xargs with a redirect into the data folder",
+      `ls /tmp | xargs grep -h ${PATTERN} > $HOME/.playground/out`,
+    ],
+    ["bun -e testing a regex from a worktree", `bun -e 'console.log(/round [2-5]: /.test("x"))'`],
+    [
+      "bun -e reading a file from a worktree",
+      `bun -e 'console.log((await Bun.file("roster.json").json()).length)'`,
+    ],
+  ])("%s runs from a worktree", async (_, command) => {
+    expect(await bash(command, WORK)).toBeUndefined()
+  })
+
+  test.each([
+    [
+      "grep under xargs with a redirect into the root",
+      `ls /tmp | xargs grep -h ${PATTERN} > $HOME/.playground/extensions/out`,
+    ],
+    ["cp under xargs into the data folder", "ls /tmp | xargs cp -t $HOME/.playground"],
+    ["tee under xargs into the root", "ls /tmp | xargs tee $HOME/.playground/extensions/x"],
+    [
+      "sed -i under xargs on a file in the root",
+      "ls /tmp | xargs sed -i s/a/b/ $HOME/.playground/extensions/x",
+    ],
+    ["grep under xargs through env", `ls /tmp | xargs env grep -h ${PATTERN}`],
+    ["grep under an xargs flag off its list", `ls /tmp | xargs -Q grep -h ${PATTERN}`],
+    ["a grep of the shell's folder under xargs", `ls /tmp | xargs ./grep -h ${PATTERN}`],
+    ["grep under xargs with a variable set", `ls /tmp | GREP=1 xargs grep -h ${PATTERN}`],
+    ["grep under xargs piped into a shell", `ls /tmp | xargs grep -h ${PATTERN} | sh`],
+    [
+      "grep under xargs with a shortened --process-slot-var",
+      `ls /tmp | xargs --process-slot=PATH grep -h ${PATTERN}`,
+    ],
+    [
+      "perl -i on a file in the root, its script holding an xargs-led grep",
+      `perl -0pi -e 's/(a)/ls \\/tmp | xargs grep -h x \\$HOME\\/.playground\\/extensions\\/policy.json $1/' $HOME/.playground/extensions/x.json`,
+    ],
+  ])("%s stays refused", async (_, command) => {
+    expect(await bash(command, WORK)).toContain("no-extensions-write hook refuses")
+  })
+
+  test("perl -i on a relative file in the root, its script holding an xargs-led grep, stays refused", async () => {
+    expect(
+      await bash(`perl -0pi -e 's/(a)/ls \\/tmp | xargs grep -h x $1/' extensions/x.json`, DATA),
+    ).toContain("no-extensions-write hook refuses")
+  })
+
+  test.each([
+    ["bun -e testing a regex", `bun -e 'console.log(/round [2-5]: /.test("x"))'`],
+    [
+      "bun -e reading a file by a relative path",
+      `bun -e 'console.log((await Bun.file("roster.json").json()).length)'`,
+    ],
+  ])("%s from the data folder stays refused, naming the form that runs", async (_, command) => {
+    expect(await bash(command, DATA)).toContain(WORKING)
+  })
+
+  test("bun -e writing into the root by a relative path keeps the owner's route", async () => {
+    const reason = await bash(`bun -e 'await Bun.write("extensions/x", "")'`, DATA)
+    expect(reason).toContain("the dispatcher hands the owner the command")
+    expect(reason).not.toContain(WORKING)
+  })
+})
+
+describe("on Linux a bare cp, ln, mv, install and sed read as GNU's builds (PG-2204)", () => {
+  test.each([
+    ["cp of a variable GNU may read as its target folder", "cp $X /tmp/y"],
+    ["cp of a quoted variable GNU may read as its target folder", `cp "$S" /tmp/y`],
+    ["ln of a variable GNU may read as its target folder", "ln $X /tmp/y"],
+    ["ln -s of a variable GNU may read as its target folder", "ln -s $X /tmp/y"],
+    ["cp of a substitution GNU may read as its target folder", "cp $(cat /tmp/a) /tmp/y"],
+    ["cp of a backtick substitution GNU may read as its target folder", "cp `cat /tmp/a` /tmp/y"],
+  ])("%s is refused on Linux and allowed on macOS", async (_, command) => {
+    expect(await as("linux", () => bash(command))).toContain("no-extensions-write hook refuses")
+    expect(await as("darwin", () => bash(command))).toBeUndefined()
+  })
+
+  test.each([
+    ["an in-place sed beside another call", `bun x.ts; sed -i '/(a) .*/d' ${WORK}/f`],
+    [
+      "an in-place sed of an absolute file after a cd to a variable",
+      `cd "$X"; sed -i s/a/b/ /tmp/p.json`,
+    ],
+  ])(
+    "GNU sed's script after a bare -i: %s is allowed on Linux and refused on macOS",
+    async (_, command) => {
+      expect(await as("linux", () => bash(command))).toBeUndefined()
+      expect(await as("darwin", () => bash(command))).toContain("no-extensions-write hook refuses")
+    },
+  )
+
+  // #2320: macOS read each script as a glob in /, and a glob there whose first segment matches no name of / reaches no root
+  test.each([
+    [
+      "an in-place sed of a file through a variable the line holds",
+      `F=${WORK}/f; bun x.ts; sed -i '/x (a)/d' "$F"`,
+    ],
+    [
+      "an in-place sed of parenthesised addresses beside a writing redirect",
+      `sed -i '/item 5 (a, after item 4)/d; /item 5 note: carry it/d' ${WORK}/queue.md; echo "$(date -u +%FT%TZ) x" >> ${WORK}/notes.md`,
+    ],
+  ])(
+    "GNU sed's script after a bare -i: %s is allowed on Linux and on macOS",
+    async (_, command) => {
+      expect(await as("linux", () => bash(command))).toBeUndefined()
+      expect(await as("darwin", () => bash(command))).toBeUndefined()
+    },
+  )
+
+  test.each([
+    ["cp into the root as its target folder", `cp -t ${ROOT} /tmp/f`],
+    ["cp into the root by its long target option", `cp --target-directory=${ROOT} /tmp/f`],
+    [
+      "cp into the root by its long target option and the next word",
+      `cp --target-directory ${ROOT} /tmp/f`,
+    ],
+    ["ln into the root as its target folder", `ln -t ${ROOT} /tmp/f`],
+    ["ln -s into the root as its target folder", `ln -s -t ${ROOT} /tmp/f`],
+    ["mv into the root as its target folder", `mv -t ${ROOT} /tmp/f`],
+    ["install into the root as its target folder", `install -t ${ROOT} /tmp/f`],
+    ["cp with its target folder after an operand", `cp /tmp/f -t ${ROOT}`],
+    ["mv with its target folder after an operand", `mv /tmp/f -t ${ROOT}`],
+    ["cp to a file in the root", `cp /tmp/f ${ROOT}/x`],
+    ["an in-place GNU-form sed of a file in the root", `bun x.ts; sed -i '/(a) .*/d' ${LIST}`],
+  ])("%s stays refused on both", async (_, command) => {
+    for (const platform of ["darwin", "linux"] as const)
+      expect(await as(platform, () => bash(command))).toContain("no-extensions-write hook refuses")
+  })
+
+  test("cp to a literal path elsewhere stays allowed on both", async () => {
+    for (const platform of ["darwin", "linux"] as const)
+      expect(await as(platform, () => bash("cp /tmp/f /tmp/y"))).toBeUndefined()
+  })
+
+  // POSIXLY_CORRECT can reach a call by a route the hook does not carry, so on Linux a later dashed word is judged as a file too, as GNU reads it with the variable set; each route made GNU coreutils 9.4's mkdir write where its variable named
+  test.each([
+    [
+      "a remover's option after its first operand after a cd to a variable",
+      `cd "$X"; rm /tmp/x -f`,
+    ],
+    ["a writer's value option after its first operand", `mkdir /tmp/x -m "$M"`],
+    ["a prefix on a shell's -c", `POSIXLY_CORRECT=1 bash -c 'mkdir /tmp/x -m "$M"'`],
+    ["a prefix on sh's -c", `POSIXLY_CORRECT=1 sh -c 'mkdir /tmp/x -m "$M"'`],
+    ["env's prefix on a shell's -c", `env POSIXLY_CORRECT=1 bash -c 'mkdir /tmp/x -m "$M"'`],
+    ["a prefix on a shell reading stdin", `echo 'mkdir /tmp/x -m "$M"' | POSIXLY_CORRECT=1 bash`],
+    ["a prefix on eval", `POSIXLY_CORRECT=1 eval 'mkdir /tmp/x -m "$M"'`],
+    ["a prefix on a function call", `f() { mkdir /tmp/x -m "$M"; }; POSIXLY_CORRECT=1 f`],
+    [
+      "a := default then an export",
+      `: \${POSIXLY_CORRECT:=1}; export POSIXLY_CORRECT; mkdir /tmp/x -m "$M"`,
+    ],
+    ["an export of a word the hook cannot read", `export "$V"; mkdir /tmp/x -m "$M"`],
+    ["a sourced file", `. /tmp/env.sh; mkdir /tmp/x -m "$M"`],
+    ["BASH_ENV on a shell's -c", `BASH_ENV=/tmp/e bash -c 'mkdir /tmp/x -m "$M"'`],
+    [
+      "a prefix on a shell's -c holding a remover after a cd",
+      `POSIXLY_CORRECT=1 bash -c 'cd "$X"; rm /tmp/x -f'`,
+    ],
+    [
+      "a prefix on a shell's -c holding touch -r",
+      `POSIXLY_CORRECT=1 bash -c 'touch /tmp/x -r "$D"'`,
+    ],
+    ["a prefix on the call itself", `POSIXLY_CORRECT=1 mkdir /tmp/x -m "$M"`],
+  ])("a later dashed word under %s stays refused on Linux", async (_, command) => {
+    expect(await as("linux", () => bash(command))).toContain("no-extensions-write hook refuses")
+  })
+
+  // GNU chmod takes its mode from a dash-led word or --reference, so its first operand is then a file: GNU coreutils 9.4 turned a file named 644 from 644 to 444
+  test.each([
+    ["an octal word after a dash mode", `cd "$X"; chmod 644 -w`],
+    ["an octal word before a dash mode", `cd "$X"; chmod -w 644`],
+    ["an octal word before a two-letter dash mode", `cd "$X"; chmod 644 -wx`],
+    ["a symbolic word beside a dash mode", `cd "$X"; chmod u+x -w`],
+    ["an octal word after --reference", `cd "$X"; chmod --reference=/tmp/r 644`],
+    ["an octal word after an = mode option", `cd "$X"; chmod -=r 644`],
+    ["an octal word after a bare = mode option", `cd "$X"; chmod -= 644`],
+    ["an octal word after --reference's --ref prefix", `cd "$X"; chmod --ref=/tmp/r 644`],
+    ["an octal word after --reference's --refer prefix", `cd "$X"; chmod --refer=/tmp/r 644`],
+    ["an octal word after a + mode option", `cd "$X"; chmod -+w 644`],
+    ["an octal word after a , mode option", `cd "$X"; chmod -,u+w 644`],
+    ["an octal word after a digit mode option", `cd "$X"; chmod -0 644`],
+  ])("chmod of %s after a cd to a variable stays refused on Linux", async (_, command) => {
+    expect(await as("linux", () => bash(command))).toContain("no-extensions-write hook refuses")
+  })
+
+  test.each([
+    ["chmod of an absolute file past its mode", `cd "$X"; chmod 644 /tmp/f`],
+    ["chmod of an absolute file past a dash mode", `cd "$X"; chmod -w /tmp/f`],
+    ["chmod of an absolute file past a non-mode option", `cd "$X"; chmod -R 644 /tmp/f`],
+    // GNU coreutils 9.4 exits 1 on -M, an option it does not know, before it writes
+    ["install with macOS's metalog option", `cd "$X"; install -Mlog x /tmp/y`],
+  ])("%s after a cd to a variable is allowed on Linux", async (_, command) => {
+    expect(await as("linux", () => bash(command))).toBeUndefined()
+  })
+
+  test.each([
+    ["install -d of no folder past a suffix from a variable", `install -d -S "$D"`],
+    ["install -d of no folder past a group from a variable", `install -d -Tg "$D"`],
+    ["install -d with a target folder from a variable past -D", `install -d -Dt "$D"`],
+    ["install -d with a target folder from a variable past -T", `install -d -Tt "$D"`],
+    ["install -d of a folder with a target folder from a variable", `install -d -Dt "$D" x`],
+    ["install -d of no folder past macOS's -x and a group from a variable", `install -d -Dxg "$D"`],
+    ["install -d of no folder past macOS's -h and a group from a variable", `install -d -hg "$D"`],
+    ["install -d of no folder past macOS's -l and a group from a variable", `install -d -lg "$D"`],
+  ])(
+    "%s, which only a GNU check after its parse stops, stays refused on Linux",
+    async (_, command) => {
+      expect(await as("linux", () => bash(command))).toContain("no-extensions-write hook refuses")
+    },
+  )
+
+  test("GNU sed's glob script after a bare -i edits a work file on Linux and stays refused on a file in the root", async () => {
+    expect(await as("linux", () => bash(`sed -i '/a*b/d' ${WORK}/a.ts`))).toBeUndefined()
+    expect(await as("linux", () => bash(`sed -i '/a*b/d' ${LIST}`))).toContain(
+      "no-extensions-write hook refuses",
+    )
+  })
+})
+
+// #2158: an xargs replace string that sits in the program's arguments alone leaves the program typed, so each keeps canary's verdict
+describe("an xargs replace string outside the program word keeps the call's verdict", () => {
+  test.each([
+    ["grep under a plain xargs", "ls /tmp | xargs grep -l x"],
+    ["echo under xargs -I{}", "echo a | xargs -I{} echo {}"],
+    ["cat under xargs -I %", "echo a | xargs -I % cat %"],
+    ["cp to a folder of the worktree under xargs -J %", "echo a | xargs -J % cp % out/"],
+    ["a sh -c script holding xargs' -I{} string", "echo a | xargs -I{} sh -c 'echo {}'"],
+    ["cat under nice under xargs -J %", "echo a | xargs -J % nice cat %"],
+    [
+      "echo under env -S with xargs' -I % string in its arguments",
+      "echo a | xargs -I % env -S 'echo %'",
+    ],
+    [
+      "cat under env -S with xargs' -J % string as its argument",
+      "echo a | xargs -J % env -S cat %",
+    ],
+    ["echo under xargs -I % from input holding a quote", 'echo "it\'s" | xargs -I % echo %'],
+    ["echo under xargs -n1", "echo a b | xargs -n1 echo"],
+    ["echo under an xargs -I zz inside xargs -I %", "echo a | xargs -I % xargs -I zz echo %"],
+  ])("%s runs from a worktree", async (_, command) => {
+    expect(await bash(command, WORK)).toBeUndefined()
+  })
+
+  test("cp into the root under xargs -J % stays refused", async () => {
+    expect(await bash("echo a | xargs -J % cp % $HOME/.playground/extensions/", WORK)).toContain(
+      "no-extensions-write hook refuses",
+    )
+  })
+})
+
+// #2198: GNU xargs' input options, and a replace option at the end of a cluster of flags, beside a typed program leave it typed, so each keeps canary's verdict
+describe("an xargs input option beside a typed program keeps the call's verdict", () => {
+  test.each([
+    ["echo under xargs -d,", "printf 'a,b' | xargs -d, echo"],
+    ["echo under xargs --delimiter given apart", "printf 'a,b' | xargs --delimiter , echo"],
+    ["echo under xargs -d, fed a program's name", "printf 'a,playground' | xargs -d, echo"],
+    ["grep under xargs -0 fed by find -print0", "find . -print0 | xargs -0 grep -l x"],
+    ["echo under xargs -a of a process substitution", "xargs -a <(echo a) echo"],
+    ["echo under a shortened --arg=", "xargs --arg=/tmp/list echo"],
+    ["echo under xargs -d, -I %", "printf 'a,b' | xargs -d, -I % echo %"],
+    ["cat under xargs -0I %", "printf a | xargs -0I % cat %"],
+    ["cat under nice under xargs -rJ %", "echo a | xargs -rJ % nice cat %"],
+    ["echo under a shortened --repl=%", "echo a | xargs --repl=% echo %"],
+  ])("%s runs from a worktree", async (_, command) => {
+    expect(await bash(command, WORK)).toBeUndefined()
+  })
+
+  test("cp into the root under xargs -rJ % stays refused", async () => {
+    expect(await bash("echo a | xargs -rJ % cp % $HOME/.playground/extensions/", WORK)).toContain(
+      "no-extensions-write hook refuses",
+    )
+  })
+})
+
+// #2248: a printer's text written into a file of the folder core.hooksPath names is judged as text written into .git/hooks is, while the same text into another file of that repo keeps canary's verdict; git answers with every GIT_ variable dropped, and a folder git cannot answer for reads as a hook folder
+describe("an echo into the folder core.hooksPath names is judged as one into a git hook (PG-2248)", () => {
+  const repo = (name: string, hooks: string) => {
+    const dir = join(HOME, name)
+    mkdirSync(join(dir, hooks), { recursive: true })
+    mkdirSync(join(dir, "notes"), { recursive: true })
+    const git = (...args: string[]) =>
+      Bun.spawnSync(["git", "-C", dir, ...args], { stderr: "ignore", stdout: "ignore" })
+    git("init", "-q")
+    git("config", "core.hooksPath", hooks)
+    return dir
+  }
+  const REPO = repo("hooked", "githooks")
+  const OTHER = repo("hooked-other", "h2")
+  const BROKEN = repo("hooked-broken", "githooks")
+  writeFileSync(join(BROKEN, ".git", "config"), "[core\n")
+  // a repo whose core.hooksPath names a folder not made yet
+  const LATER = join(HOME, "hooked-later")
+  mkdirSync(LATER)
+  Bun.spawnSync(["git", "-C", LATER, "init", "-q"])
+  Bun.spawnSync(["git", "-C", LATER, "config", "core.hooksPath", "newhooks"])
+
+  test.each([
+    ["by its path", `echo 'touch ~/.playground/extensions/x' > ${REPO}/githooks/pre-commit`, HOME],
+    ["from the repo", "echo 'touch ~/.play*/extensions/x' > githooks/pre-commit", REPO],
+  ])("an echo of the data folder into it %s is refused", async (_, command, cwd) => {
+    expect(await bash(command, cwd)).toContain("no-extensions-write hook refuses")
+  })
+
+  test("an echo of the data folder into another file of the repo runs", async () => {
+    expect(
+      await bash("echo 'touch ~/.playground/extensions/x' > notes/run.sh", REPO),
+    ).toBeUndefined()
+  })
+
+  test("a GIT_DIR in the hook's environment leaves the repo's own hook folder read", async () => {
+    const before = process.env.GIT_DIR
+    process.env.GIT_DIR = join(REPO, ".git")
+    try {
+      expect(
+        await bash(`echo 'touch ~/.playground/extensions/x' > ${OTHER}/h2/pre-commit`),
+      ).toContain("no-extensions-write hook refuses")
+    } finally {
+      if (before === undefined) delete process.env.GIT_DIR
+      else process.env.GIT_DIR = before
+    }
+  })
+
+  test.each([
+    [
+      "made by a mkdir before it",
+      "mkdir hooked-later/newhooks && echo 'touch ~/.playground/extensions/x' > hooked-later/newhooks/pre-commit",
+    ],
+    [
+      "made after a cd into the repo",
+      "cd hooked-later && mkdir -p newhooks && echo 'touch ~/.playground/extensions/x' > newhooks/pre-commit",
+    ],
+  ])("an echo of the data folder into the hook folder %s is refused", async (_, command) => {
+    expect(await bash(command)).toContain("no-extensions-write hook refuses")
+  })
+
+  test("an echo of the data folder into another folder the same line makes runs", async () => {
+    expect(
+      await bash(
+        "mkdir hooked-later/other && echo 'touch ~/.playground/extensions/x' > hooked-later/other/x.sh",
+      ),
+    ).toBeUndefined()
+  })
+
+  test("an echo of the data folder into a repo whose config git cannot read is refused", async () => {
+    expect(
+      await bash(`echo 'touch ~/.playground/extensions/x' > ${BROKEN}/notes/run.sh`),
+    ).toContain("no-extensions-write hook refuses")
+  })
+
+  test("a copy into a repo whose config git cannot read, on a line whose other text holds a remover, runs", async () => {
+    expect(await bash(`rm -f old.log; cp notes.txt ${BROKEN}/notes/run.sh`)).toBeUndefined()
+  })
+})
+
+// #2258: a command that writes, moves or copies into a hook file takes every text on its line as the hook's text, and a copy's source file the hook can read on disk as well
+describe("hook text that reaches a hook by another path", () => {
+  const FILES = join(HOME, "hook-sources")
+  mkdirSync(FILES, { recursive: true })
+  writeFileSync(join(FILES, "names.sh"), "#!/bin/sh\ntouch ~/.playground/extensions/x\n")
+  writeFileSync(join(FILES, "removes.sh"), "#!/bin/sh\nrm old.log\n")
+  writeFileSync(join(FILES, "plain.sh"), "#!/bin/sh\nbun test\n")
+  mkdirSync(join(HOME, "scripts", "hooks"), { recursive: true })
+  writeFileSync(join(HOME, "scripts", "hooks", "pre-commit"), "#!/bin/sh\nbun test\n")
+  // each held text and its near twins as a file's text: as written, in a comment, after a header line, and joined across a backslash-newline
+  const TWINS = (text: string, joined: string) => [text, `# ${text}`, `#!/bin/sh\n${text}`, joined]
+  const HELD = [
+    ...TWINS("touch ~/.playground/extensions/x", "touch ~/.playground/ext\\\nensions/x"),
+    ...TWINS("rm -rf build", "r\\\nm -rf build"),
+  ].map((text, k) => {
+    const file = join(FILES, `held-${k}.sh`)
+    writeFileSync(file, `${text}\n`)
+    const folder = join(FILES, `held-folder-${k}`)
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, "pre-commit"), `${text}\n`)
+    return { file, folder, k }
+  })
+  const COPIED = join(HOME, "copied-on-the-line")
+  // a copy into a hook whose source the hook reads by another way than an operand: stdin from a file, a piped reader, a file the line wrote first, a variable, a folder
+  const SHAPES: [string, (file: string, folder: string, cwd: string) => string][] = [
+    ["dd's stdin from a file", (file) => `dd of=.git/hooks/pre-commit < ${file}`],
+    ["a copy of /dev/stdin from a file", (file) => `cp /dev/stdin .git/hooks/pre-commit < ${file}`],
+    ["a reader piped into dd", (file) => `cat ${file} | dd of=.git/hooks/pre-commit`],
+    [
+      "a file an earlier copy on the line wrote",
+      (file) => `cp ${file} ${COPIED} && cp ${COPIED} .git/hooks/pre-commit`,
+    ],
+    ["a source in a variable", (file) => `F=${file}; cp "$F" .git/hooks/pre-commit`],
+    ["a folder copied into the hook folder", (_, folder) => `cp -R ${folder}/ .git/hooks/`],
+    ["a glob copied into the hook folder", (_, folder) => `cp ${folder}/* .git/hooks/`],
+    [
+      "a glob of a name's start copied into the hook folder",
+      (_, folder) => `cp ${folder}/pre* .git/hooks/`,
+    ],
+    ["a glob copied into the hook folder by -t", (_, folder) => `cp -t .git/hooks ${folder}/*`],
+    ["a glob moved into the hook folder", (_, folder) => `mv ${folder}/* .git/hooks/`],
+    ["a glob installed into the hook folder", (_, folder) => `install ${folder}/* .git/hooks/`],
+    [
+      "a one-character glob copied into a hook",
+      (_, folder) => `cp ${folder}/pre-commi? .git/hooks/pre-commit`,
+    ],
+    [
+      "a brace list copied into the hook folder",
+      (_, folder) => `cp ${folder}/{pre-commit,x} .git/hooks/`,
+    ],
+    [
+      "a relative symbolic link into a hook",
+      (file, _, cwd) => `ln -s ${relative(join(cwd, ".git", "hooks"), file)} .git/hooks/pre-commit`,
+    ],
+    [
+      "a relative symbolic link forced into a hook",
+      (file, _, cwd) =>
+        `ln -sf ${relative(join(cwd, ".git", "hooks"), file)} .git/hooks/pre-commit`,
+    ],
+    [
+      "a relative symbolic link made in the hook folder",
+      (_, folder, cwd) =>
+        `ln -s ${relative(join(cwd, ".git", "hooks"), join(folder, "pre-commit"))} .git/hooks/`,
+    ],
+  ]
+  test.each(
+    SHAPES.flatMap(([shape, form]) =>
+      HELD.flatMap(({ file, folder, k }) =>
+        [HOME, DATA, WORK].map((cwd) => [shape, k, cwd, form(file, folder, cwd)] as const),
+      ),
+    ),
+  )(
+    "a copy into a git hook by %s (held text %i, from %s) is refused",
+    async (_, __, cwd, command) => {
+      expect(await bash(command, cwd)).toContain("no-extensions-write hook refuses")
+    },
+  )
+
+  test.each([
+    ["cp", "cp hook-sources/names.sh .git/hooks/pre-commit"],
+    ["mv", "mv hook-sources/names.sh .git/hooks/pre-commit"],
+    ["install", "install -m 755 hook-sources/names.sh .git/hooks/pre-commit"],
+    ["ln -s", `ln -s ${FILES}/names.sh .git/hooks/pre-commit`],
+    ["cp -t", "cp -t .git/hooks hook-sources/names.sh"],
+    ["dd if=", "dd if=hook-sources/names.sh of=.git/hooks/pre-commit"],
+    ["a read-only sed", "sed 's/a/b/' hook-sources/names.sh > .git/hooks/pre-commit"],
+    ["a read-only perl", "perl -pe 's/a/b/' hook-sources/names.sh > .git/hooks/pre-commit"],
+  ])(
+    "a file whose text names the data folder, copied into a git hook by %s, is refused",
+    async (_, command) => {
+      expect(await bash(command)).toContain("copied from a file whose text names")
+    },
+  )
+
+  test("a file whose text holds a remover, copied into a git hook, is refused", async () => {
+    expect(await bash("cp hook-sources/removes.sh .git/hooks/pre-commit")).toContain(
+      "written with rm, which a hook file may not hold",
+    )
+  })
+
+  test.each([
+    ["a plain file copied into a git hook", "cp hook-sources/plain.sh .git/hooks/pre-commit"],
+    ["a plain file moved into a git hook", "mv hook-sources/plain.sh .git/hooks/pre-commit"],
+    [
+      "a read-only sed of a plain file into a git hook",
+      "sed 's/a/b/' hook-sources/plain.sh > .git/hooks/pre-commit",
+    ],
+    ["a file that names the data folder copied into a note", "cp hook-sources/names.sh notes.sh"],
+    ["a source the hook cannot find copied into a git hook", "cp no-such.sh .git/hooks/pre-commit"],
+    ["a file named rm, not there, copied into a git hook", "cp rm .git/hooks/pre-commit"],
+    [
+      "a script named for rmdir, not there, copied into a git hook",
+      "cp scripts/rmdir.sh .git/hooks/pre-commit",
+    ],
+    [
+      "a plain file piped into dd into a git hook",
+      "cat hook-sources/plain.sh | dd of=.git/hooks/pre-commit",
+    ],
+    [
+      "a plain file fed to dd into a git hook",
+      "dd of=.git/hooks/pre-commit < hook-sources/plain.sh",
+    ],
+    [
+      "a relative symbolic link to the repo's plain hook script",
+      "ln -s ../../scripts/hooks/pre-commit .git/hooks/pre-commit",
+    ],
+    [
+      "an echo of a home folder in upper case into a git hook",
+      "echo 'touch ~/NOTES/x' > .git/hooks/pre-commit",
+    ],
+  ])("%s runs", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test("a line that names the data folder in one command and writes a hook in another is refused, a known limit", async () => {
+    expect(
+      await bash("ls ~/.playground/extensions; echo 'bun test' > .git/hooks/pre-commit"),
+    ).toContain("on a line whose other text names")
+  })
+
+  test("a bash -c that pipes the data folder into a git hook by dd is refused", async () => {
+    expect(
+      await bash(`bash -c "echo 'touch ~/.playground/extensions/x' | dd of=.git/hooks/pre-commit"`),
+    ).toContain("no-extensions-write hook refuses")
+  })
+
+  test("an in-place sed whose replacement text holds a move into a git hook runs", async () => {
+    expect(
+      await bash(`sed -i '' '3s|.*|"mv a.sh .git/hooks/pre-commit"|' notes.ts`, WORK),
+    ).toBeUndefined()
+  })
+
+  test("an in-place perl whose script is longer than a file name can be keeps its refusal of a file in the root", async () => {
+    expect(
+      await bash(`perl -0pi -e 's/${"a".repeat(2000)}/b/' ${join(ROOT, "policy.json")}`),
+    ).toContain("no-extensions-write hook refuses")
+  })
+
+  test("a line that runs a remover in one command and writes a hook in another is refused, a known limit", async () => {
+    const reason = await bash("rm -f old.log; echo 'bun test' > .git/hooks/pre-commit")
+    expect(reason).toContain("on a line whose other text holds rm")
+    expect(reason).toContain("Run the hook's write as a call of its own")
+  })
+
+  test("a line that removes a tracked file with git rm and copies a plain file into a hook is refused, a known limit", async () => {
+    expect(
+      await bash("git rm old.txt && cp hook-sources/plain.sh .git/hooks/pre-commit"),
+    ).toContain("on a line whose other text holds")
+  })
+})
+
+// #2320: a glob in / reaches the root only through a name / holds that it may match, read from the listing check() is handed, so no verdict depends on what a machine's / holds
+describe("a glob in / is judged by the names / holds", () => {
+  const listed = (command: string, names: string[]) =>
+    check(
+      JSON.stringify({
+        cwd: HOME,
+        hook_event_name: "PreToolUse",
+        tool_input: { command },
+        tool_name: "Bash",
+      }),
+      ENV,
+      undefined,
+      () => names,
+    )
+
+  test("the same glob runs beside no name it may match and is refused beside one", async () => {
+    expect(await listed("cp a /e?c/x", ["bin", "home", "usr"])).toBeUndefined()
+    expect(await listed("cp a /e?c/x", ["bin", "etc", "home"])).toContain("a glob in /")
+  })
+
+  test.each([
+    "cp a /h*/x",
+    "cp a /?ome/x",
+    "cp a /HOM?/x",
+    "cp a /[h]ome/x",
+    "cp a /[!x]ome/x",
+    "cp a '/[]h]ome/x'",
+    "cp a '/[[:alpha:]]ome/x'",
+    "cp a '/(x|h)ome/x'",
+    "cp a '/@(home)/x'",
+    "cp a '/+(home)/x'",
+    "cp a '/{x,h}ome/x'",
+    "cp a '/*~x/x'",
+    "cp a '/x#*/x'",
+  ])("%s, which may match home, is refused", async (command) => {
+    expect(await listed(command, ["home"])).toContain("no-extensions-write hook refuses")
+  })
+
+  test.each(["cp a '/__[A-Z]+__/x'", "cp a '/[a-z]+@x*/x'", "cp a /x*y/x"])(
+    "%s, which matches no name, runs",
+    async (command) => {
+      expect(await listed(command, ["home"])).toBeUndefined()
+    },
+  )
+})
+
+// #2522: a glob-option switch on a line ssh runs remotely or feeds a remote shell is refused by its own reason, whatever its spelling, rather than read name by name
+describe("a glob-option switch on a remote or fed line", () => {
+  const SWITCH =
+    /refuses a glob-option switch \(.+\) on a line a remote shell runs.*wider than the risk on purpose.*drop the option, or run the line locally/
+
+  test.each([
+    "ssh box 'shopt -s dotglob; touch */extensions/x'",
+    "ssh box 'GLOBIGNORE=x; touch ?playground/extensions/y'",
+    "ssh box 'setopt g_l_o_b_d_o_t_s; touch ?playground/extensions/y'",
+    `ssh box "shopt -s dot''glob; touch ?playground/extensions/y"`,
+    `ssh box "zsh -4 -c 'touch ?playground/extensions/y'"`,
+    "ssh box 'shopt -s $(echo dot)glob; touch ?playground/extensions/y'",
+    "ssh box 'options[glob${x}dots]=on; touch ?playground/extensions/y'",
+    `ssh box 'bash -O $1 -c "touch ?playground/extensions/y"'`,
+    `ssh box "env BASHOPTS=dotglob bash -c 'touch ?playground/extensions/y'"`,
+    "ssh box 'GLOBIGNOR\\\nE=x; touch ?playground/extensions/y'",
+    "ssh box bash -s <<'EOF'\nGLOBIGNOR\\\nE=x\ntouch ?playground/extensions/y\nEOF",
+    `printf 'shopt -s dot%sglob\\ntouch ?playground/extensions/y\\n' '' | ssh box bash`,
+    "ssh box 'touch *(D)/extensions/x'",
+    "ssh box 'FIGNORE=x; touch ?playground/extensions/y'",
+    "ssh box 'setopt EXTENDED_GLOB; ls'",
+    "ssh box 'set -euo pipefail -o globdots; touch ?playground/extensions/y'",
+    "ssh box 'set -o pipefail -o KSH_GLOB; touch ?playground/extensions/y'",
+    "ssh box 'bash -o pipefail -O extglob -c \"touch ?playground/extensions/y\"'",
+    "ssh -o SetEnv=BASHOPTS=dotglob box 'touch */extensions/x'",
+    "ssh -oSetEnv=GLOBIGNORE=x box 'touch ?playground/extensions/y'",
+    "ssh -o 'SetEnv FIGNORE=x' box 'touch ?playground/extensions/y'",
+    "ssh -o setenv=BASHOPTS=dotglob box bash -s <<'EOF'\ntouch */extensions/x\nEOF",
+    "ssh -o SendEnv=BASHOPTS box 'touch */extensions/x'",
+    "ssh box 'touch *1*(D)/extensions/x'",
+  ])("%s is refused as a switch", async (command) => {
+    expect(await bash(command)).toMatch(SWITCH)
+  })
+
+  test.each([
+    "shopt -s dotglob; ssh box uptime",
+    "ssh box 'ls */notes'",
+    "echo 'df -h' | ssh box bash",
+    `ssh spark-9dfb 'python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"'`,
+    "ssh box 'set -euo pipefail; ls */notes'",
+    "ssh box 'set -o pipefail; ls'",
+    "ssh box 'set -e -o nounset -o errexit; uptime'",
+    "ssh box 'bash -o pipefail -c \"ls */notes\"'",
+    "ssh box bash -s <<'EOF'\nset -euo pipefail\nls */notes\nEOF",
+    "echo 'set -euo pipefail; uptime' | ssh box bash",
+    "ssh -o SetEnv=LANG=C box uptime",
+    "ssh -o SendEnv=LANG box 'ls */notes'",
+    "ssh box bash -s <<'EOF'\nawk '{ print (a[2]-a[1])*100/(b[2]-b[1]) }' f\nEOF",
+    "ssh box 'set -opipefail; uptime'",
+    "ssh box 'bash --login -c uptime'",
+    "ssh box './run.sh -o out.txt'",
+    "ssh box 'bash deploy.sh --verbose -o x'",
+    `ssh box 'bash -c "tar -xOf a.tar f | wc -l"'`,
+  ])("%s, with no switch on its remote side, runs", async (command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each(["ssh -o 'SendEnv=BASH*' box 'touch */extensions/x'", "ssh -o SetEnv=$V box uptime"])(
+    "%s, a SetEnv or SendEnv the hook cannot read, is refused",
+    async (command) => {
+      expect(await bash(command)).toMatch(
+        /an ssh -o SetEnv or SendEnv of .+, a value or pattern the hook cannot read/,
+      )
+    },
+  )
+
+  // a qualifier after a * a digit follows is no switch, so its line counts dots as on, and a dot-led link in the home into the root is still judged; this home holds one, ~/.p1 to the data folder
+  describe("a * a digit follows, then a qualifier", () => {
+    const home = mkdtempSync(join(tmpdir(), "no-extensions-write-digit-"))
+    mkdirSync(join(home, ".playground", "extensions", "hooks"), { recursive: true })
+    writeFileSync(join(home, ".playground", "extensions", "policy.json"), "{}\n")
+    symlinkSync(join(home, ".playground"), join(home, ".p1"))
+    afterAll(() => rmSync(home, { force: true, recursive: true }))
+    const at = (command: string) =>
+      check(
+        JSON.stringify({
+          cwd: home,
+          hook_event_name: "PreToolUse",
+          tool_input: { command },
+          tool_name: "Bash",
+        }),
+        { HOME: home },
+      )
+
+    test.each(["ssh box 'touch *1/extensions/x(D)'", "ssh box 'touch *1/extensions/x(N)'"])(
+      "%s reaches the root through ~/.p1 and is refused",
+      async (command) => {
+        expect(await at(command)).toMatch(/refuses touch on .+, a glob in/)
+      },
+    )
+
+    test.each([
+      "ssh box 'awk \"{ print (a[2]-a[1])*100/(b[2]-b[1]) }\" f'",
+      "ssh box 'touch *1(D)/notes/x'",
+    ])("%s reaches nothing in the root and runs", async (command) => {
+      expect(await at(command)).toBeUndefined()
+    })
+  })
+
+  test.each([
+    "ssh box 'bash -xO extglob -c \"touch ?playground/extensions/y\"'",
+    "ssh box 'set -Oe; touch ?playground/extensions/y'",
+    "ssh box 'set -oextendedglob; touch ?playground/extensions/y'",
+    `ssh box "zsh --extendedglob -c 'touch ?playground/extensions/y'"`,
+    `ssh box "zsh --extended-glob -c 'touch ?playground/extensions/y'"`,
+    `ssh box "bash --rcfile x -c 'touch ?playground/extensions/y'"`,
+    `ssh box "zsh -oextendedglob -c 'touch ?playground/extensions/y'"`,
+    "ssh box 'set -oe extendedglob; touch ?playground/extensions/y'",
+    `ssh box 'bash -c "set -o extendedglob; touch ?playground/extensions/y"'`,
+    `ssh box 'bash -c -O extglob "touch ?playground/extensions/y"'`,
+    `ssh box 'zsh -c -o extendedglob "touch ?playground/extensions/y"'`,
+    `ssh box 'rbash -O extglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'rzsh -o extendedglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'bash-5.2 -O extglob -c "touch ?playground/extensions/y"'`,
+    "ssh box 'set -$o extendedglob; touch ?playground/extensions/y'",
+    "ssh box 'set --extendedglob; touch ?playground/extensions/y'",
+    "ssh box 'set --dot-glob; touch ?playground/extensions/y'",
+    "ssh box 'set -o dot-glob; touch ?playground/extensions/y'",
+    "ssh box 'set globdot; touch ?playground/extensions/y'",
+    `ssh box 'bash >/dev/null -O extglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'bash > /dev/null -O extglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'zsh 2>&1 -o extendedglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'bash >| x -O extglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'bash &>x -O extglob -c "touch ?playground/extensions/y"'`,
+    "ssh box 'set >x -o extendedglob; touch ?playground/extensions/y'",
+    `ssh box 'bash {fd}>/dev/null -O extglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'zsh >! log -o extendedglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'zsh >>! log -o extendedglob -c "touch ?playground/extensions/y"'`,
+    `ssh box 'zsh {fd}>/dev/null -4 -c "touch ?playground/extensions/y"'`,
+    `ssh box 'zsh >! log -4 -c "touch ?playground/extensions/y"'`,
+  ])(
+    "%s, an option a shell reads by any of its spellings, is refused as a switch",
+    async (command) => {
+      expect(await bash(command)).toMatch(SWITCH)
+    },
+  )
+
+  test("its reason names the one form of a shell's options that runs", async () => {
+    expect(await bash("ssh box 'zsh --extended-glob -c uptime'")).toEndWith(
+      "a shell's options run there only as a cluster with no O or 4, and a -o or a long option (--login) naming errexit, errtrace, functrace, login, noclobber, noprofile, norc, nounset, pipefail, verbose, xtrace, as in set -euo pipefail",
+    )
+  })
+
+  test.each([
+    "ssh box 'cat /etc/bash-completion.d/git'",
+    "ssh box 'ls ~/zsh-config'",
+    "ssh box 'kubectl config set-context x'",
+    "ssh box 'bash 2>&1 -e -c uptime'",
+    "ssh box 'bash > log -euo pipefail -c uptime'",
+    "ssh box 'bash {fd}>/dev/null -euo pipefail -c uptime'",
+    "ssh box 'zsh >! log -e -c uptime'",
+  ])(
+    "%s, a shell's name inside a longer word or a redirect before strict mode, runs",
+    async (command) => {
+      expect(await bash(command)).toBeUndefined()
+    },
+  )
 })

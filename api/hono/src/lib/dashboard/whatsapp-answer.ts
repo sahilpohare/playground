@@ -10,16 +10,25 @@ import { answerItem, type Deliver, getItem, itemTag } from "./inbox"
 // The folder ops-wa writes the owner's WhatsApp answer to: inside the one no-raw-wa keeps every session out of, so a file there is ops-wa's alone (ADR 0024).
 export const answersDir = (data: string) => join(data, "whatsapp", "answers")
 
-const answerFile = z.strictObject({
-  action: z.enum(["approve", "deny"]),
-  id: z.uuid(),
-  option: z.number().int().min(0).optional(),
-})
+const answerFile = z.union([
+  z.strictObject({
+    action: z.enum(["approve", "deny"]),
+    id: z.uuid(),
+    option: z.number().int().min(0).optional(),
+  }),
+  // a draft's Send from the owner's own chat, with the owner's words in place of the draft's when given, and seen, the draft's updatedAt as it went there, so changed words are refused
+  z.strictObject({
+    action: z.literal("send"),
+    id: z.uuid(),
+    seen: z.iso.datetime().optional(),
+    text: z.string().min(1).optional(),
+  }),
+])
 
 type Answered = { line: string; ok: true } | { message: string; ok: false }
 const refuse = (message: string): Answered => ({ message, ok: false })
 
-// `bun run ask whatsapp <file>`: the owner's answer from WhatsApp, read from a file ops-wa wrote and deleted once read, so it answers once, through answerItem and deliver() as the Inbox's own Approve and Deny do, recorded as from WhatsApp; only a factory-scoped ask decision with one question takes one.
+// `bun run ask whatsapp <file>`: the owner's answer from WhatsApp, read from a file ops-wa wrote and deleted once read, so it answers once, through answerItem and deliver() as the Inbox's own Approve, Deny and Send do, recorded as from WhatsApp; only a factory-scoped ask decision with one question takes an Approve or a Deny, and only a draft with no files a Send.
 export async function whatsappAnswer(
   db: Database,
   path: string,
@@ -47,14 +56,20 @@ export async function whatsappAnswer(
   }
   const item = await getItem(db, parsed.id)
   if (!item) return refuse("no inbox item with that id")
-  if (!factoryAsk(item))
+  if (parsed.action === "send" ? item.kind !== "draft" : !factoryAsk(item))
     return refuse(
-      "only a factory-scoped ask decision with one question takes an answer from WhatsApp",
+      parsed.action === "send"
+        ? "only a draft is sent from WhatsApp"
+        : "only a factory-scoped ask decision with one question takes an answer from WhatsApp",
     )
+  if (parsed.action === "send" && "attachments" in item.preview && item.preview.attachments?.length)
+    return refuse("a draft with files is sent only from the Inbox")
   const result = await answerItem(
     db,
     item.id,
-    { action: parsed.action, option: parsed.option },
+    parsed.action === "send"
+      ? { action: "send", seen: parsed.seen, text: parsed.text }
+      : { action: parsed.action, option: parsed.option },
     { actor: { label: "WhatsApp" }, deliver, dispatcher, via: "whatsapp" },
   )
   return result.ok

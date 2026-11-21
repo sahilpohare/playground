@@ -1304,6 +1304,17 @@ describe("isLiveRecord", () => {
     }
   })
 
+  test("a Linux procStart, clock ticks since boot, proves the record live while its pid's ticks match, and a reused pid gone", () => {
+    const text = JSON.stringify({ pid: 95475, procStart: "1801742", sessionId: "s-greed" })
+    const registry = registryOf([{ pid: 95475, text }])
+    expect(isLiveRecord(running, proof({ registry, starts: new Map([[95475, "1801742"]]) }))).toBe(
+      true,
+    )
+    expect(isLiveRecord(running, proof({ registry, starts: new Map([[95475, "2900000"]]) }))).toBe(
+      false,
+    )
+  })
+
   test("a registry file caught mid-rewrite leaves the record's word standing for its pid alone", () => {
     const registry = new Map([[95475, null]])
     expect(isLiveRecord(running, proof({ registry }))).toBe(true)

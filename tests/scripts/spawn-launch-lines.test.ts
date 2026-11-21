@@ -43,6 +43,10 @@ const CASES: Record<string, Case> = {
     args: ["worker", "worker-brave-otter", "b.md", "--backend", "glm"],
     name: "worker-brave-otter",
   },
+  "a worker on a local model": {
+    args: ["worker", "worker-brave-otter", "b.md", "--backend", "local"],
+    name: "worker-brave-otter",
+  },
   "a reviewer column": {
     args: ["column", "reviewer", "reviewer-x", "worker-x", "w1:p2", "r.md", "--pr", "1"],
     name: "reviewer-x",
@@ -61,6 +65,11 @@ const CASES: Record<string, Case> = {
     args: ["resume", "worker-brave-otter", root],
     name: "worker-brave-otter",
     pin: "glm",
+  },
+  "a resume pinned on a local model": {
+    args: ["resume", "worker-brave-otter", root],
+    name: "worker-brave-otter",
+    pin: "claude-code local",
   },
   "a resume with --backend claude and no pin": {
     args: ["resume", "worker-brave-otter", root, "--backend", "claude"],
@@ -96,7 +105,7 @@ describe("a resume from a pin naming its harness runs the old pin's launch line"
       h.backends.map((backend) => [h.id, backend] as const),
     ),
   )("%s %s", async (harness, backend) => {
-    const label = `a resume pinned on ${backend === "glm" ? "GLM" : "Claude"}`
+    const label = `a resume pinned on ${backend === "glm" ? "GLM" : backend === "local" ? "a local model" : "Claude"}`
     const c = CASES[label]!
     const r = await spawn(c.args, [], {}, undefined, {
       name: c.name,

@@ -5,13 +5,14 @@ import { site } from "@packages/config/site"
 import { dataDirOf } from "@packages/env/data-dir"
 
 import { type DashboardSource, currentSource, readFixtureMachine } from "@/lib/dashboard/fixture"
+import { CA_POLICY, chromiumSteps, readCaTrust, trustedWhere } from "@/lib/dev/ca-trust"
 import { FALLBACK_PORT, isFallback, portlessDir, proxyDown, proxyPort } from "@/lib/dev/proxy"
 import { type FixId, fixtureFixed } from "@/lib/onboard/fix-ids"
 import { machine, type Reader } from "@/lib/onboard/machine"
 import type { SetupState } from "@/lib/setup/app"
 import { hasLogin } from "@/lib/store/extensions"
 
-// The first run's checks, read by the API for the chat pane and Settings' Things to fix (the harnesses Alpha runs on have their own cards, harness.ts): each row says what is there and what is missing, a missing row names the fix the app runs for it (fix-ids.ts) or says in plain words what happens instead, and no row's words name a command. Every probe is a fixed argv from COMMANDS or a fixed path, each only reports, and nothing comes from a request; a fixture stack runs none and answers its fixture's rows.
+// The first run's checks, read by the API for the chat pane and Settings' Things to fix (the harnesses Alpha runs on have their own cards, harness.ts): each row says what is there and what is missing, a missing row names the fix the app runs for it (fix-ids.ts) or says in plain words what happens instead, and no row's words name a command. Every probe is a fixed argv from COMMANDS, certutil's read of a Firefox profile found on disk (ca-trust.ts) or a fixed path, each only reports, and nothing comes from a request; a fixture stack runs none and answers its fixture's rows.
 
 export type Check = {
   action: { id: FixId | "settings"; label: string } | null
@@ -175,8 +176,12 @@ const homebrewCheck = (reader: Reader): Check => {
   }
 }
 
-// portless: its proxy runs by the dev launcher's own rule (proxyDown), on 443 or, while that is down, on 1355, which needs no password; the app sets up 443 (the proxy fix, which trusts the CA too) and trusts the CA (the trust fix) on the owner's click, any password going to macOS's own window, and reports a stopped proxy, which no running stack can show.
-const portlessCheck = async (reader: Reader, env: Env): Promise<Check> => {
+// portless: its proxy runs by the dev launcher's own rule (proxyDown), on 443 or, while that is down, on 1355, which needs no password; the app sets up 443 (the proxy fix, which trusts the CA too) and trusts the CA (the trust fix) on the owner's click, any password going to the OS's own window, and reports a stopped proxy, which no running stack can show.
+const portlessCheck = async (
+  reader: Reader,
+  env: Env,
+  platform: NodeJS.Platform,
+): Promise<Check> => {
   const need = "the Dashboard's https address"
   const row = (detail: string, note: string, action: Action | null = null): Check => ({
     action,
@@ -198,7 +203,7 @@ const portlessCheck = async (reader: Reader, env: Env): Promise<Check> => {
         )
       : row(
           "not on 443",
-          `The Dashboard's web address runs on port ${FALLBACK_PORT} for now. Set it up here, and it drops the port number; your Mac asks for your password in its own window.`,
+          `The Dashboard's web address runs on port ${FALLBACK_PORT} for now. Set it up here, and it drops the port number; ${platform === "linux" ? "your computer" : "your Mac"} asks for your password in its own window.`,
           { id: "proxy", label: "Set up the web address" },
         )
   const ca = join(dir, "ca.pem")
@@ -209,6 +214,42 @@ const portlessCheck = async (reader: Reader, env: Env): Promise<Check> => {
       { id: "trust", label: "Trust the certificate" },
     )
   return okRow("portless", need, "ready")
+}
+
+// Linux's browsers, which trust portless's CA only from their own stores (ca-trust.ts): MISSING while a Firefox profile does not, with the ca-trust fix; optional with no certutil to read it, which the app cannot install, so first run never waits on a tool for a browser the owner may not use; optional while a Chromium-family browser is on PATH that the chromium-ca policy does not cover, whose own import no file shows, so the row names it.
+const certificateCheck = async (reader: Reader, env: Env): Promise<Check | null> => {
+  const ca = join(portlessDir(env), "ca.pem")
+  if (env.PORTLESS === "0" || !reader.exists(ca)) return null
+  const read = await readCaTrust(
+    ca,
+    env.HOME || homedir(),
+    reader,
+    reader.exists(CA_POLICY) ? CA_POLICY : null,
+  )
+  const need = "the Dashboard in your browser"
+  const chromium = read.chromium.length > 0 ? ` ${chromiumSteps(read.chromium, ca)}` : ""
+  const row = (
+    status: Check["status"],
+    detail: string,
+    note: string,
+    action: Action | null = null,
+  ): Check => ({ action, detail, name: "Certificate", need, note, status })
+  if (read.untrusted.length > 0 && !read.certutil)
+    return row(
+      "optional",
+      "certutil not found",
+      `Firefox cannot be set to trust the local web proxy's certificate until your distro's NSS tools are installed (libnss3-tools on Debian and Ubuntu, nss-tools on Fedora). Install them, then trust it here.${chromium}`,
+    )
+  if (read.untrusted.length > 0)
+    return row(
+      "MISSING",
+      `not trusted in ${read.untrusted.length} Firefox profile${read.untrusted.length === 1 ? "" : "s"}`,
+      `Firefox does not trust the local web proxy's certificate yet. Trust it here, then restart Firefox if it is open.${chromium}`,
+      { id: "ca-trust", label: "Trust it in Firefox" },
+    )
+  if (read.chromium.length > 0)
+    return row("optional", "check your browser", chromiumSteps(read.chromium, ca))
+  return okRow("Certificate", need, trustedWhere(read))
 }
 
 // Settings: a login named by Set up settings, whose step comes after these checks, so its row never holds them back.
@@ -239,6 +280,14 @@ const databaseCheck = (database: "ok" | SetupState, docker: Check | undefined): 
     docker?.status === "ok"
       ? ({ id: "database", label: "Start the database" } as const)
       : ({ id: "pglite", label: "Start without Docker" } as const)
+  if (database.status === "failed" && database.exposed) {
+    return row(
+      "MISSING",
+      database.reason,
+      "Other devices on your network can reach this database. Moving it keeps its data and lets only this Mac reach it.",
+      { id: "database", label: "Move the database onto this Mac alone" },
+    )
+  }
   return database.status === "failed"
     ? row("MISSING", database.reason, "Starting the database did not finish.", start)
     : row("MISSING", "not started", `${site.name} keeps its data in a database on this Mac.`, start)
@@ -262,26 +311,31 @@ type Read = {
   database: "ok" | SetupState
   env?: Env
   login?: () => boolean
+  platform?: NodeJS.Platform
   reader?: Reader
   source?: DashboardSource
 }
 
-// Every row in order: the machine's tools with Homebrew and portless among them (or a fixture's made-up ones, PLAYGROUND_ONBOARD_MISSING picking its missing set, read on a fixture stack alone), the database after docker, and Settings last.
+// Every row in order: the machine's tools with Homebrew and portless among them, on Linux the browsers' certificate (or a fixture's made-up ones, PLAYGROUND_ONBOARD_MISSING picking its missing set, read on a fixture stack alone), the database after docker, and Settings last.
 export async function onboardChecks({
   database,
   env = process.env,
   login = () => hasLogin(),
+  platform = process.platform,
   reader = machine,
   source = currentSource(),
 }: Read): Promise<Check[]> {
   const rows =
     source.kind === "live"
-      ? await Promise.all([
-          ...TOOLS.map((tool) => toolCheck(tool, reader, env)),
-          homebrewCheck(reader),
-          portlessCheck(reader, env),
-          settingsCheck(login),
-        ])
+      ? (
+          await Promise.all([
+            ...TOOLS.map((tool) => toolCheck(tool, reader, env)),
+            homebrewCheck(reader),
+            portlessCheck(reader, env, platform),
+            platform === "linux" ? certificateCheck(reader, env) : null,
+            settingsCheck(login),
+          ])
+        ).filter((row): row is Check => row !== null)
       : fixtureRows(env)
   const byName = (a: Check, b: Check) =>
     a.name === "Settings" ? 1 : b.name === "Settings" ? -1 : a.name.localeCompare(b.name)

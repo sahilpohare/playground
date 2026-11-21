@@ -17,6 +17,9 @@ import {
 
 const by = (login: string, body: string) => ({ author: { login }, body })
 const NOW = new Date("2026-10-31T12:00:00Z")
+// GitHub's totalCount counts the whole timeline and ignores itemTypes, so a row that read it would show fp61
+const forcePushes = { filteredCount: 1, totalCount: 61 }
+const noForcePush = { filteredCount: 0, totalCount: 61 }
 
 const pr = (over: Partial<Pr> = {}): Pr => ({
   allCommits: { totalCount: 4 },
@@ -35,7 +38,7 @@ const pr = (over: Partial<Pr> = {}): Pr => ({
   mergedAt: "2026-10-31T11:30:00Z",
   number: 12,
   state: "MERGED",
-  timelineItems: { totalCount: 1 },
+  timelineItems: forcePushes,
   title: "fix(PG-12): a title",
   ...over,
 })
@@ -47,7 +50,7 @@ test("a merged PR reads its first commit to merge, commits, force pushes, the ow
   ])
 })
 
-test("an open PR counts to now, rows sort by number, a PR with no commit reads its gap as -, and comments past one read are named", () => {
+test("an open PR counts to now, rows sort by number, a PR with no commit reads its gap as -, a PR with no force push reads fp0 however long its timeline (#2441), and comments past one read are named", () => {
   const open = pr({ mergedAt: null, number: 30, state: "OPEN" })
   const empty = pr({
     comments: { nodes: [], totalCount: 140 },
@@ -55,9 +58,10 @@ test("an open PR counts to now, rows sort by number, a PR with no commit reads i
     mergedAt: null,
     number: 7,
     state: "CLOSED",
+    timelineItems: noForcePush,
   })
   expect(rowsOf([open, empty], "acme", NOW).slice(1)).toEqual([
-    "7\tC\t-\t-\t-\tc4\tfp1\tr0\t[]\tt0/0\tfix(PG-12): a title",
+    "7\tC\t-\t-\t-\tc4\tfp0\tr0\t[]\tt0/0\tfix(PG-12): a title",
     "30\tO\t10:00\t-\t120m\tc4\tfp1\tr2\t[1:3 2:5]\tt1/2\tfix(PG-12): a title",
     "#7: read 0 of 140 comments, so later verdicts are missing from its row",
   ])
@@ -89,7 +93,7 @@ test("the search reads the factory's PRs updated since a time, and the query pag
     "firstCommit",
     "hasNextPage",
     "mergedAt",
-    "timelineItems",
+    "timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 1) { filteredCount }",
     "totalCount",
   ])
     expect(QUERY).toContain(field)

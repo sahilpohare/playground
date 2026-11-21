@@ -13,8 +13,9 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
-import { ourPlists, uninstall } from "../../../../../packages/scripts/src/playground/uninstall"
+import { ourJobFiles, uninstall } from "../../../../../packages/scripts/src/playground/uninstall"
 import type { Run } from "../../../../../packages/scripts/src/playground/update"
+import { userSystemctl } from "../../../../../packages/scripts/src/user-systemctl"
 
 const scratch = mkdtempSync(join(tmpdir(), "playground-uninstall-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
@@ -81,6 +82,7 @@ const install = () => {
     database: "playground-dashboard-db",
     home,
     log: (line: string) => said.push(line),
+    platform: "darwin" as const,
     repo,
     run,
     stacks: [join(repo, ".claude", "worktrees", "dashboard")],
@@ -88,13 +90,13 @@ const install = () => {
   return { agents, base, calls, data, home, repo, said }
 }
 
-test("ourPlists takes the LaunchAgents that run from the checkout or the data folder, and no other", () => {
+test("ourJobFiles takes the LaunchAgents that run from the checkout or the data folder, and no other", () => {
   const { agents, data, repo } = install()
-  expect(ourPlists(agents, repo, data)).toEqual([
+  expect(ourJobFiles(agents, repo, data)).toEqual([
     join(agents, "com.playground.ops-awake.plist"),
     join(agents, "com.playground.ops-tick.plist"),
   ])
-  expect(ourPlists(join(scratch, "no-agents"), repo, data)).toEqual([])
+  expect(ourJobFiles(join(scratch, "no-agents"), repo, data)).toEqual([])
 })
 
 describe("uninstall", () => {
@@ -191,6 +193,29 @@ describe("uninstall", () => {
       await uninstall({ ...base, claude: false, confirm: async () => true, purge: false }),
     ).toBe(0)
     expect(calls.some((argv) => argv[0] === "claude")).toBe(false)
+  })
+
+  // #2203: Linux has no LaunchAgents; each job is a systemd user unit in ~/.config/systemd/user
+  test("on Linux disables and removes the systemd user units that run from the checkout or the data folder, and no other", async () => {
+    const { base, calls, home, repo, said } = install()
+    const units = join(home, ".config", "systemd", "user")
+    write(
+      join(units, "com.playground.ops-tick.service"),
+      `[Service]\nExecStart="/b/bun" "${repo}/packages/scripts/src/ops-tick/cli.ts"\n`,
+    )
+    write(join(units, "syncthing.service"), '[Service]\nExecStart="/usr/bin/syncthing"\n')
+    expect(
+      await uninstall({ ...base, confirm: async () => true, platform: "linux", purge: false }),
+    ).toBe(0)
+    // #2314: each call finds the user's bus from a pane with no XDG_RUNTIME_DIR, as userSystemctl builds it
+    expect(calls.filter((argv) => argv.includes("systemctl"))).toEqual([
+      userSystemctl(["disable", "--now", "com.playground.ops-tick.service"]),
+      userSystemctl(["daemon-reload"]),
+    ])
+    expect(existsSync(join(units, "com.playground.ops-tick.service"))).toBe(false)
+    expect(existsSync(join(units, "syncthing.service"))).toBe(true)
+    expect(calls.some((argv) => argv[0] === "launchctl")).toBe(false)
+    expect(said).toContain(`removed ${join(units, "com.playground.ops-tick.service")}`)
   })
 
   test("a second run finds nothing left and still exits 0", async () => {

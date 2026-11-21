@@ -15,6 +15,7 @@ import {
 } from "../../../../../../web/next/src/components/dashboard/app-sidebar"
 import { ROW_BOX } from "../../../../../../web/next/src/components/shell/row-box"
 import { SidebarMenu, SidebarProvider } from "../../../../../../web/next/src/components/ui/sidebar"
+import { drawingOf, keepMakerIcon } from "../../../../../../web/next/src/lib/model-icons"
 import { calm, FIVE, glm, NOW } from "../../lib/system.test"
 import { tipsOf } from "../../tooltips"
 
@@ -67,7 +68,6 @@ const iconTints = (html: string) =>
   iconTags(html).map((tag) =>
     [...classesOf(tag)].find((t) => /^text-(success|caution|destructive|inactive)$/.test(t)),
   )
-const itemTag = (html: string) => /<li [^>]*>/.exec(html)?.[0] ?? ""
 const srText = (html: string) =>
   [...html.matchAll(/<span class="sr-only">(.*?)<\/span>/g)].map(([, text]) => text).join(" ")
 const readingTints = (html: string) =>
@@ -334,6 +334,10 @@ describe("DispatcherUsage", () => {
   })
 })
 
+// Z.ai's vendored logo, as the GLM windows lead with it.
+const zaiMark = `data:image/svg+xml;base64,${Buffer.from('<svg><path fill="currentColor" d="M0 0"/></svg>').toString("base64")}`
+keepMakerIcon("zai", drawingOf(zaiMark))
+
 // GLM usage shows as Claude usage does.
 describe("DispatcherUsage for GLM", () => {
   const glmUsage = (read: Read, logo = false) =>
@@ -344,7 +348,6 @@ describe("DispatcherUsage for GLM", () => {
         /data-level="[^"]*"[^>]*><svg.*?<\/svg><span aria-hidden="true">([^<]*)<\/span>/g,
       ),
     ].map(([, v]) => v)
-  const zaiMark = 'viewBox="0 0 40 40"'
 
   test("the week, then the 5-hour window, from the GLM credits, green, orange and red by the Claude windows' levels", () => {
     expect(readingTints(glmUsage(fresh((r) => void (r.zai = glm(5, 41)))))).toEqual([
@@ -380,6 +383,8 @@ describe("DispatcherUsage for GLM", () => {
   test("on a row not GLM's own, the GLM windows lead with Z.ai's mark; on GLM's own row its logo already says so", () => {
     const read = fresh((r) => void (r.zai = glm(5, 41)))
     expect(glmUsage(read, true)).toContain(zaiMark)
+    // muted as the row's other logos are, not the text's own colour
+    expect(glmUsage(read, true)).toMatch(/<svg[^>]*class="text-muted-foreground size-3 shrink-0"/)
     expect(glmUsage(read)).not.toContain(zaiMark)
     expect(render(createElement(DispatcherUsage, { now: NOW, read }))).not.toContain(zaiMark)
   })
@@ -434,7 +439,7 @@ describe("the dispatcher's row with none live", () => {
         trailing: createElement(DispatcherUsage, { logo: true, now: NOW, provider: "zai", read }),
       }),
     )
-    expect(html).toContain('viewBox="0 0 40 40"')
+    expect(html).toContain(zaiMark)
     expect(srText(html)).toContain("GLM usage: GLM week 5% used")
   })
 
@@ -658,5 +663,42 @@ describe("Playground's row", () => {
       taskId: null,
     }
     expect(row([], { tasks: [task] })).not.toContain('data-sidebar="menu-action"')
+  })
+})
+
+// The header's readings sum the cluster as the System table does, so the owner's two 20-core machines read on 40 cores (#2425).
+describe("headerIcons over a cluster", () => {
+  const spark = (name: string, diskFree = 30) => ({
+    down: null,
+    name,
+    reading: {
+      cores: 20,
+      disk: { freeBytes: diskFree * 1024 ** 3, totalBytes: 3755 * 1024 ** 3 },
+      load: [10, 10, 10] as [number, number, number],
+      memory: { totalBytes: 128 * 1024 ** 3, usedBytes: 64 * 1024 ** 3 },
+      swap: { totalBytes: 16 * 1024 ** 3, usedBytes: 0 },
+    },
+  })
+  test("the disk icon shows the cluster's free space, orange on its fullest machine, which its hover names beside each machine's part", () => {
+    const read = fresh((r) => {
+      r.machines = [spark("spark-a566", 3470), spark("spark-9dfb", 30)]
+    })
+    const disk = icons(read).icons.find((i) => i.key === "disk")!
+    expect(disk.value).toBe("3T")
+    expect(disk.hover).toBe(
+      "Disk 3500 GB free; spark-9dfb disk 30 GB free, under the 50 GB warning level\nspark-a566 3470 + spark-9dfb 30 GB free",
+    )
+  })
+
+  test("the load icon's number and hover are both machines', each named", () => {
+    const read = fresh((r) => {
+      r.machines = [spark("spark-a566"), spark("spark-9dfb")]
+      r.cpu = { cores: 20, load: [10, 10, 10] }
+    })
+    const cpu = icons(read).icons.find((i) => i.key === "cpu")!
+    expect(cpu.value).toBe("20")
+    expect(cpu.hover).toBe(
+      "Load 20 on 40 cores, 5 min., below the 0.8 a core warning level on each machine\nspark-a566 10 on 20 + spark-9dfb 10 on 20 cores, 5 min.",
+    )
   })
 })

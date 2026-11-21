@@ -1,10 +1,11 @@
-// PreToolUse hook, acting for a factory session alone (role.ts): refuses a call that reaches the data folder's whatsapp/, which holds ops-wa's linked device (its auth state, its socket and the owner's messages), so no session can copy the device or write to anyone but the owner past playground wa send (ADR 0023). It reads Bash, the file tools and Grep and Glob; playground wa send names no path there, so it runs.
+// PreToolUse hook, acting for a factory session alone (role.ts): refuses a call that reaches the data folder's whatsapp/, which holds ops-wa's linked device (its auth state, its socket and the owner's messages), so no session can copy the device or write past playground wa send and wa alert, which reach the owner and the alert number alone (ADR 0023, ADR 0028). It reads Bash, the file tools and Grep and Glob; playground wa send names no path there, so it runs. It also refuses a line queued as ops-wa or ops-dm-watch, the jobs whose relayed lines carry the owner's words: a notify.sh call with either job, and a call that reaches either job's queue file.
 import { realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { resolve } from "node:path"
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
 import { eachInput } from "./codex"
+import { input } from "./input"
 import { fromFactory } from "./role"
 import {
   knownVariables,
@@ -13,6 +14,8 @@ import {
   places,
   program,
   run,
+  shellOperand,
+  SHELLS,
   visible,
   type Env,
   type Visit,
@@ -23,6 +26,12 @@ type Environment = Record<string, string | undefined>
 
 const refuse = (what: string) =>
   `no-raw-wa hook refuses ${what}: the data folder's whatsapp/ holds ops-wa's linked device, its auth state, its socket and the owner's messages, which no session reads or writes. To write to the owner on WhatsApp, run playground wa send <absolute file>; to see ops-wa's state, read its row on the System page.`
+
+const refuseJob = (what: string) =>
+  `no-raw-wa hook refuses ${what}: the relay tags each line with its queue's job, and a line tagged [ops-wa] or [ops-dm-watch] reads as the owner's own words, so only ops-wa and ops-dm-watch queue under those jobs. Queue your line under your own job, notify.sh <your job> <text>, or tell your manager with SendMessage.`
+
+// The jobs whose lines carry the owner's words: ops-wa's WhatsApp and ops-dm-watch's Slack DM.
+const OWNER_JOBS = new Set(["dm-watch", "wa"])
 
 // Programs that read a folder's files all the way down, so naming a folder above whatsapp/ reaches it too.
 const RECURSIVE = new Set(["ack", "ag", "ditto", "find", "rg", "rsync", "tar"])
@@ -44,6 +53,22 @@ const targetsOf = (environment: Environment): string[] => {
     real = resolve(realpathSync(dataDirOf(environment)), "whatsapp")
   } catch {}
   return [...new Set([typed, real].map((p) => p.toLowerCase()))]
+}
+
+// The owner-word jobs' queue files in the data folder's outbox, as typed and as its links resolve, in lower case.
+const queuesOf = (environment: Environment): string[] => {
+  const data = dataDirOf(environment)
+  let real = data
+  try {
+    real = realpathSync(data)
+  } catch {}
+  return [
+    ...new Set(
+      [data, real].flatMap((d) =>
+        [...OWNER_JOBS].map((job) => resolve(d, "ops", "outbox", `ops-${job}.jsonl`).toLowerCase()),
+      ),
+    ),
+  ]
 }
 
 const segments = (path: string) => resolve(path).toLowerCase().split("/").filter(Boolean)
@@ -73,6 +98,15 @@ const namesTarget = (command: string, targets: string[]) => {
   )
 }
 
+// The text net for the owner-word jobs: a notify.sh call that names either job, or either job's queue file, as typed.
+const namesOwnerJob = (command: string) => {
+  const text = command.replace(/["'\\]/g, "").toLowerCase()
+  return (
+    /notify\.sh\s+(?:dm-watch|wa)(?![\w.-])/.test(text) ||
+    /outbox\/+ops-(?:dm-watch|wa)\.jsonl/.test(text)
+  )
+}
+
 // A word as the shell runs it: one the lexer could not read is lexed again with the variables the call has set by then, else it stays unread.
 const readOf = (word: Word, at: Env): { glob?: boolean; value: string } | undefined => {
   if (!marked(word.value)) return word
@@ -86,17 +120,37 @@ const readOf = (word: Word, at: Env): { glob?: boolean; value: string } | undefi
 const recursive = (name: string, args: Word[]) =>
   RECURSIVE.has(name) || args.some((a) => RECURSIVE_WITH[name]?.test(a.value))
 
+// A notify.sh call's job word, run as the program or as a shell's script, whose job is an owner-word one or one the hook cannot read.
+const ownerJob = (name: string, args: Word[], at: Env): string | undefined => {
+  let rest = args
+  if (SHELLS.has(name)) {
+    const { inline, operand } = shellOperand(args, name)
+    if (inline || !operand || program(operand.value) !== "notify.sh") return
+    rest = args.slice(args.indexOf(operand) + 1)
+  } else if (program(name) !== "notify.sh") return
+  if (!rest[0]) return
+  const job = readOf(rest[0], at)
+  if (!job) return refuseJob("a notify.sh call whose job it cannot read")
+  if (OWNER_JOBS.has(job.value)) return refuseJob(`a notify.sh call as ops-${job.value}`)
+}
+
 async function judgeBash(command: string, cwd: string | undefined, environment: Environment) {
   const targets = targetsOf(environment)
   if (namesTarget(command, targets)) return refuse("a command naming whatsapp/ in the data folder")
+  if (namesOwnerJob(command)) return refuseJob("a command naming an owner-word job's queue")
+  const queues = queuesOf(environment)
   const env: Env = {
     cwd,
     files: new Map(),
     known: knownVariables(command, environment, cwd),
     process: environment,
     vars: new Map(),
+    // a shell running notify.sh as its script file is judged by the job word it hands it
+    visitShells: true,
   }
   const visit: Visit = async (cmd, { args, first, name }, at) => {
+    const job = ownerJob(name, args, at)
+    if (job || SHELLS.has(name)) return job
     const words = [
       ...(first ? [first] : []),
       ...args,
@@ -117,6 +171,8 @@ async function judgeBash(command: string, cwd: string | undefined, environment: 
           const stands = worst(path, targets, !!word.glob)
           if (stands === "inside")
             return refuse(`${visible(word.value)}, which reaches whatsapp/ in the data folder`)
+          if (worst(path, queues, !!word.glob) === "inside")
+            return refuseJob(`${visible(word.value)}, an owner-word job's queue`)
           if (stands === "above" && recursive(program(name), args))
             return refuse(
               `${name} through ${visible(word.value)}, which reads whatsapp/ in the data folder on its way down`,
@@ -148,6 +204,8 @@ async function inspect(raw: string, environment: Environment) {
     const path = input?.file_path ?? input?.notebook_path
     if (typeof path === "string" && worst(path, targets) === "inside")
       return refuse(`a ${tool} of ${path}`)
+    if (typeof path === "string" && worst(path, queuesOf(environment)) === "inside")
+      return refuseJob(`a ${tool} of ${path}, an owner-word job's queue`)
     return
   }
   if (tool === "Grep" || tool === "Glob") {
@@ -179,7 +237,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-raw-wa", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

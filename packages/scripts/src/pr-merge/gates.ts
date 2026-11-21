@@ -2,6 +2,7 @@
 
 import { atHead, verdictsOf, type GateName, type Verdict } from "@packages/config/verdicts"
 
+import { newUserFiles } from "../new-user-gate/paths"
 import { bodyRefusal } from "./body"
 import type { Lost } from "./lost"
 
@@ -28,7 +29,7 @@ export type Gate = { detail: string; name: string; ok: boolean }
 export const REQUIRED_CHECKS = ["Audit, Lint, and Build", "test"]
 
 // The workflow each required check's job runs in, so a run that finished without that job reads apart from one GitHub has yet to start.
-const REQUIRED_WORKFLOWS: Record<string, string> = {
+export const REQUIRED_WORKFLOWS: Record<string, string> = {
   "Audit, Lint, and Build": "auto-check-build",
   test: "auto-test",
 }
@@ -51,9 +52,13 @@ export type PrFacts = {
   comments: Comment[]
   draft: boolean
   files: string[]
+  // Each gate code file (GATE_CODE) whose copy in the checkout pr:merge runs from differs from canary's tip, which the code gate refuses; left out in a test, which skips that gate.
+  gateCode?: string[]
   head: string
   // Why held-prs.json holds the PR, or null when it is not held.
   held: string | null
+  // The PR's label names; a `ship-now` one sends Ops the ship-now line once it merges, where shipNowLine ships it; absent only in a test.
+  labels?: string[]
   // The lines canary added that a merge of canary into the PR dropped from git's own merge and the squash still lacks, or why they could not be read (lostLines).
   lost: Lost
   // The PR's number.
@@ -61,9 +66,13 @@ export type PrFacts = {
   owner: string
   // Each PR the body says it is stacked on (parentsOf) with its GitHub state, or why the state did not read; set wherever the body is read, [] for none.
   parents?: { n: number; state: string }[]
+  // Each path the diff deletes a line from, and each renamed file's old path, from the same files read; left out in a test, which skips the checks gate.
+  removed?: string[]
   // The pr template's own placeholders, read at the head, which the body gate refuses in the body's prose; left out in a test, which skips that check.
   placeholders?: string[]
   state: string
+  // The PR's title, whose fix( opening ships a ship-now PR (shipNowLine); absent only in a test.
+  title?: string
   // The body's bare all-caps tokens that no file at the head holds outside the gate's own folders (unfoundTokens), which the body gate refuses; left out in a test, which skips that check.
   unfound?: string[]
 }
@@ -72,18 +81,23 @@ export const BASE = "canary"
 
 // Pure: the newest verdict per gate at the head, from the owner's comments only, oldest comment first so a later one replaces an earlier.
 export function verdictsAt(facts: Pick<PrFacts, "comments" | "head" | "owner">) {
-  const newest = new Map<GateName, Verdict>()
+  const newest = new Map<GateName, Verdict & { body: string }>()
   const sorted = [...facts.comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   for (const comment of sorted) {
     if (comment.author.toLowerCase() !== facts.owner.toLowerCase()) continue
     for (const verdict of verdictsOf(comment.body))
       if (atHead(verdict.at, facts.head))
-        newest.set(verdict.gate, { ...verdict, createdAt: comment.createdAt, url: comment.url })
+        newest.set(verdict.gate, {
+          ...verdict,
+          body: comment.body,
+          createdAt: comment.createdAt,
+          url: comment.url,
+        })
   }
   return newest
 }
 
-const PASSED = new Set(["NEUTRAL", "SKIPPED", "SUCCESS"])
+export const PASSED = new Set(["NEUTRAL", "SKIPPED", "SUCCESS"])
 
 // gitGuardian: the head must carry a GitGuardian check (a head it never started on ran no secret scan); outsideAuthor: the one login besides the repo's owner whose PR may merge, named on purpose.
 export type GateOptions = { gitGuardian?: boolean; outsideAuthor?: string }
@@ -201,7 +215,7 @@ function upToDate(facts: PrFacts): Gate {
         ok: true,
       }
     : {
-        detail: `${behind} and conflicts with it; merge ${BASE} in, then the new head needs its checks and a 5/5`,
+        detail: `${behind} and conflicts with it; merge ${BASE} in, then the new head needs its checks, a 5/5 and each PASS its diff calls for`,
         name,
         ok: false,
       }
@@ -314,6 +328,103 @@ function reviewGate(facts: PrFacts): Gate {
   }
 }
 
+// Pure: the newest tester's word on the head, for a diff that touches web/next/, since a UI change merges only once its tester has driven it; null for any other diff.
+function testerGate(facts: PrFacts): Gate | null {
+  if (!facts.files.some((path) => path.startsWith("web/next/"))) return null
+  const tester = verdictsAt(facts).get("tester")
+  if (tester)
+    return {
+      detail: tester.pass ? tester.text : `newest tester verdict is not a pass: ${tester.text}`,
+      name: "tester",
+      ok: tester.pass,
+    }
+  const sha = facts.head.slice(0, 7)
+  return {
+    detail: `a web/next diff waits for its tester's drive: missing ## TesterBot · PASS at ${sha} from ${facts.owner}; spawn or resume the PR's tester, which posts ## TesterBot · PASS at ${sha}`,
+    name: "tester",
+    ok: false,
+  }
+}
+
+// Pure: the newest new-user gate's word on the head, for a diff that touches what a new user meets first (NEW_USER_PATHS), since a broken installer shows nowhere else before a ship; INCONCLUSIVE refuses like FAIL; null for any other diff.
+function newUserGate(facts: PrFacts): Gate | null {
+  const matched = newUserFiles(facts.files)
+  if (matched.length === 0) return null
+  const ran = verdictsAt(facts).get("new-user")
+  if (ran)
+    return {
+      detail: ran.pass ? ran.text : `newest new-user gate verdict is not a pass: ${ran.text}`,
+      name: "new-user",
+      ok: ran.pass,
+    }
+  return {
+    detail: `${matched.join(", ")} waits for the new-user gate: missing ## NewUserGate · PASS at ${facts.head.slice(0, 7)} from ${facts.owner}; run ~/.playground/ops/run-slot.sh <your name> -- bun run gate:new-user ${facts.head} --pr ${facts.n}`,
+    name: "new-user",
+    ok: false,
+  }
+}
+
+// The files the gates are read from: a checkout whose copy differs from canary's tip would judge a PR by other gates than the train, which runs from a worktree reset to origin/canary.
+export const GATE_CODE = [
+  "packages/config/src/verdicts.ts",
+  "packages/scripts/src/new-user-gate/paths.ts",
+  "packages/scripts/src/pr-merge",
+]
+
+// Pure: the code gate, which passes only when the checkout pr:merge runs from holds canary's own gate code, uncommitted edits included.
+export function codeGate(differs: string[]): Gate {
+  return differs.length === 0
+    ? { detail: `this checkout's gate code is ${BASE}'s`, name: "code", ok: true }
+    : {
+        detail: `this checkout's gate code differs from origin/${BASE}'s (${differs.join(", ")}); run pr:merge from a checkout on origin/${BASE}, or let merge-on-ready land it`,
+        name: "code",
+        ok: false,
+      }
+}
+
+// The checks that judge a PR, any change to which counts: CI's workflows and actions, the gate code (GATE_CODE) and the refused-forms harness; a path ending in / is a folder, any other a file or folder; the refused-forms rows count by a deleted line (REFUSED_FORMS)
+export const CHECK_CODE = [
+  ".github/actions/",
+  ".github/workflows/",
+  ...GATE_CODE,
+  "tests/scripts/hooks/fixtures/refused-forms.ts",
+  "tests/scripts/hooks/refused-forms.test.ts",
+]
+const under = (path: string, entry: string) =>
+  entry.endsWith("/") ? path.startsWith(entry) : path === entry || path.startsWith(`${entry}/`)
+export const REFUSED_FORMS = "tests/scripts/hooks/fixtures/refused-forms/"
+// A 5/5 verdict's line naming one reviewed check change, one path a line, in backticks or bare.
+const REVIEWED_CHANGE = /^[\s>*-]*Reviewed check change:\s*`?([^`\s]+)`?\s*$/gim
+
+// Pure: each changed path that is a check judging the PR, once each, sorted.
+export const checkChangesOf = (files: string[], removed: string[]): string[] =>
+  [
+    ...new Set([
+      ...files.filter((path) => CHECK_CODE.some((entry) => under(path, entry))),
+      ...removed.filter((path) => path.startsWith(REFUSED_FORMS)),
+    ]),
+  ].sort()
+
+// Pure: the checks gate, since a change can never edit the check that judges it unseen: a PR changing one merges only once its 5/5 at the head names each such path in a `Reviewed check change: <path>` line; null where the facts read no removed list.
+function checksGate(facts: PrFacts): Gate | null {
+  if (!facts.removed) return null
+  const changes = checkChangesOf(facts.files, facts.removed)
+  if (changes.length === 0)
+    return { detail: "the PR changes no check that judges it", name: "checks", ok: true }
+  const review = verdictsAt(facts).get("review")
+  const named = new Set(
+    review?.pass ? [...review.body.matchAll(REVIEWED_CHANGE)].map((line) => line[1]) : [],
+  )
+  const missing = changes.filter((path) => !named.has(path))
+  return missing.length === 0
+    ? { detail: `its 5/5 names each check change: ${changes.join(", ")}`, name: "checks", ok: true }
+    : {
+        detail: `the PR changes a check that judges it (${changes.join(", ")}): its 5/5 at ${facts.head.slice(0, 7)} does not name ${missing.join(", ")} in a \`Reviewed check change: <path>\` line`,
+        name: "checks",
+        ok: false,
+      }
+}
+
 // Pure: every gate, in the order a PR meets them, each saying what it found at the head. The PR merges only when every one is ok.
 export function gatesOf(facts: PrFacts, { gitGuardian, outsideAuthor }: GateOptions = {}): Gate[] {
   const gates: Gate[] = [
@@ -342,6 +453,7 @@ export function gatesOf(facts: PrFacts, { gitGuardian, outsideAuthor }: GateOpti
       ok: facts.base === BASE,
     },
   ]
+  if (facts.gateCode) gates.push(codeGate(facts.gateCode))
   const parent = parentGate(facts)
   if (parent) gates.push(parent)
   gates.push(upToDate(facts), keepsCanary(facts.lost))
@@ -358,5 +470,11 @@ export function gatesOf(facts: PrFacts, { gitGuardian, outsideAuthor }: GateOpti
     )
   }
   gates.push(reviewGate(facts))
+  const checks = checksGate(facts)
+  if (checks) gates.push(checks)
+  const tester = testerGate(facts)
+  if (tester) gates.push(tester)
+  const newUser = newUserGate(facts)
+  if (newUser) gates.push(newUser)
   return gates
 }

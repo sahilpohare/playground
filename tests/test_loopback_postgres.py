@@ -5,9 +5,8 @@
 reachable from the network, and an agent copies whatever command the repo gives it. So in
 every text file the repo holds:
 
-- nothing runs pglaunch, which has no loopback flag, but first run's database step: the owner
-  chose pglaunch as it is for that one step, so its one call, pinned to pglaunch@5.5.7, is
-  admitted in api/hono/src/lib/setup/container.ts alone.
+- nothing runs pglaunch, which has no loopback flag; first run's database step starts its
+  container with docker run on 127.0.0.1 too.
 - every `docker run` or `docker create` that publishes Postgres's 5432 or Redis's 6379
   binds it to 127.0.0.1, and none publishes a Postgres or Redis image's every port with -P.
 - every short-syntax compose `ports:` entry for 5432 or 6379 binds 127.0.0.1 (flow lists and
@@ -33,9 +32,6 @@ PGLAUNCH = re.compile(
     r"\b(?:bunx|bun x|npx|pnpx|pnpm dlx|pnpm exec|npm exec|yarn dlx)(?:\s+-\S+)*\s+pglaunch\b"
     r"|(?:^|[\s`$(;&|])pglaunch(?:\s+-|\s*$)"
 )
-# first run's database step, the one file that may run pglaunch, and only at this exact version
-PINNED_FILE = "api/hono/src/lib/setup/container.ts"
-UNPINNED = re.compile(r"\bpglaunch(?!@5\.5\.7\b)")
 DATABASE_IMAGE = re.compile(r"postgres|pgvector|postgis|redis|valkey")
 # Postgres's and Redis's container ports
 PORTS = {"5432", "6379"}
@@ -140,7 +136,7 @@ def compose_publishes(text):
 def problems_in(rel, text):
     found = []
     for n, line in commands(text):
-        if PGLAUNCH.search(line) and (rel != PINNED_FILE or UNPINNED.search(line)):
+        if PGLAUNCH.search(line):
             found.append(f"{rel}:{n}: runs pglaunch, which publishes on 0.0.0.0 and has no loopback flag yet; "
                          "use docker run -p 127.0.0.1::5432")
         for publish in docker_publishes(line):
@@ -168,6 +164,7 @@ def self_test():
         ("api/hono/src/lib/setup/container.ts", "// `bunx pglaunch -k -n <name>`"),
         ("api/hono/src/lib/setup/container.ts", "// `bunx --bun pglaunch@5.5.8 -k -n <name>`"),
         ("api/hono/src/lib/setup/container.ts", "// `bunx --bun pglaunch@5.5.7 -k`, then `npx pglaunch -k`"),
+        ("api/hono/src/lib/setup/container.ts", "bunx --bun pglaunch@5.5.7 -k -n playground-db"),
         ("doc.md", "docker run -d -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:alpine"),
         ("doc.md", "docker run -d -p 5432 postgres:alpine"),
         ("doc.md", "docker run -d --publish=0.0.0.0:5433:5432/tcp postgres"),
@@ -201,7 +198,6 @@ def self_test():
         ("doc.md", "docker port playground-a-db 5432    # 127.0.0.1:<port>"),
         ("doc.md", "- **db:** Start local postgres on loopback only, and fail on pglaunch or a wide publish (#48)"),
         ("doc.md", "`pglaunch` publishes on every interface; it can come back once its loopback default ships"),
-        ("api/hono/src/lib/setup/container.ts", "// runs `bunx --bun pglaunch@5.5.7 -k -n <name>` from the checkout"),
         ("docker-compose.yml", 'services:\n  db:\n    ports:\n      - "127.0.0.1:5432:5432"'),
         ("docker-compose.yml", 'services:\n  api:\n    ports:\n      - "127.0.0.1:4000:4000"'),
         ("docker-compose.yml", 'services:\n  db:\n    expose:\n      - "5432"'),

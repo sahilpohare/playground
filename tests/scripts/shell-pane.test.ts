@@ -69,12 +69,17 @@ const PATHS: Paths = {
 const OWN_ROWS: Record<string, string[]> = {
   "no-false-green": ["bun run test | grep pass"],
   "no-linear-ticket": [`cp /dev/null ${join(dataDir(), "ticket-approvals")}/`],
+  "no-live-sign-in": ["curl -X POST https://api.playground.localhost/api/v1/onboard/sign-in"],
   "no-mac-web-build": ["docker compose build web"],
   "no-main-checkout": [`touch ${join(MAIN, "made-up-file")}`],
   "no-off-palette-label": [`gh label create made-up --color 123456`],
   "no-ours-merge": ["git merge -s ours origin/canary"],
+  "no-outside-pr-code": ["bun test"],
+  "no-prepare-write": ["gh pr create --fill"],
   "no-prompt-stop": ["rmdir $HOME/$s"],
+  "no-protected-push": [`git push https://github.com/${UNSET_REPOS.public[0]}.git main`],
   "no-public-leak": [`gh pr comment 1 --repo ${UNSET_REPOS.public[0]} --body "$X"`],
+  "no-raw-vercel": ["vercel env pull"],
   "no-raw-wa": [`cat ${join(dataDir(), "whatsapp", "made-up.json")}`],
   "no-unslotted-run": ["bun run test"],
 }
@@ -93,11 +98,33 @@ git(GLM_REPO, "commit", "-q", "--allow-empty", "-m", "base")
 mkdirSync(join(GLM_REPO, "web", "next", "src"), { recursive: true })
 writeFileSync(join(GLM_REPO, "web", "next", "src", "x.ts"), "x\n")
 git(GLM_REPO, "add", ".")
+// A registry and roster that mark the launcher's session prepare-only, for no-prepare-write's case to run under.
+const PREPARE = join(SCRATCH, "prepare")
+mkdirSync(join(PREPARE, "sessions"), { recursive: true })
+mkdirSync(join(PREPARE, "playground"))
+writeFileSync(
+  join(PREPARE, "sessions", "0.json"),
+  JSON.stringify({ name: "worker-made-up-1", sessionId: "s-shell-pane-test" }),
+)
+writeFileSync(
+  join(PREPARE, "playground", "roster.json"),
+  JSON.stringify({ agents: [{ mode: "prepare", name: "worker-made-up-1" }] }),
+)
 // The folder a guard's case runs in, where it is not the worktree.
 const CWDS: Record<string, string> = { "no-glm-heavy-path": GLM_REPO }
 // The environment a guard's case runs in beyond the session's role, set on the process, since run calls each check() with its own defaults.
 const ENVS: Record<string, Record<string, string>> = {
   "no-extension-repo-write": { PLAYGROUND_DATA_DIR: SYNCED },
+  // a reviewer whose row names no PR, which read mode holds, read from a scratch registry and data folder
+  "no-outside-pr-code": {
+    CLAUDE_CONFIG_DIR: join(SCRATCH, "outside-pr", "claude"),
+    PLAYGROUND_DATA_DIR: join(SCRATCH, "outside-pr", "playground"),
+    PLAYGROUND_ROLE: "reviewer",
+  },
+  "no-prepare-write": {
+    CLAUDE_CONFIG_DIR: PREPARE,
+    PLAYGROUND_DATA_DIR: join(PREPARE, "playground"),
+  },
 }
 
 // Runs `body` with `vars` set on the process, an undefined one unset, then puts each back.

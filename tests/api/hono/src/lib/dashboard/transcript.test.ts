@@ -19,6 +19,7 @@ import {
   sentIn,
   shownTasks,
   subagentPath,
+  TAIL_CEILING,
   taskOf,
   toolSummary,
   type SessionTask,
@@ -523,6 +524,62 @@ describe("readTail and readTask", () => {
     const path = join(dir, "partial.jsonl")
     writeFileSync(path, `${human("done", "h9")}\n{"type":"user","uuid":"x`)
     expect((await readTail(path, 10)).map((e) => e.text)).toEqual(["done"])
+  })
+
+  const shot = (bytes: number) =>
+    line({
+      type: "user",
+      uuid: "shot",
+      timestamp: "2026-10-06T10:00:02.000Z",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/png", data: "A".repeat(bytes) },
+              },
+            ],
+          },
+        ],
+      },
+    })
+  const progress = (i: number) =>
+    line({ type: "progress", uuid: `g${i}`, data: { blob: "p".repeat(10_000) } })
+
+  test("a last line longer than the window still shows the steps before it", async () => {
+    const path = join(dir, "big-last.jsonl")
+    writeFileSync(path, `${human("early", "h1")}\n${shot(700_000)}\n`)
+    expect((await readTail(path, 10)).map((e) => e.kind)).toEqual(["human", "result"])
+  })
+
+  test("a window of bookkeeping lines alone still shows the steps before it", async () => {
+    const path = join(dir, "progress-tail.jsonl")
+    const lines = [human("early", "h1"), ...Array.from({ length: 60 }, (_, i) => progress(i))]
+    writeFileSync(path, `${lines.join("\n")}\n`)
+    expect((await readTail(path, 10)).map((e) => e.text)).toEqual(["early"])
+  })
+
+  test("a window that holds a step reads no further back", async () => {
+    const path = join(dir, "holds-a-step.jsonl")
+    const lines = [
+      human("old", "h0"),
+      ...Array.from({ length: 60 }, (_, i) => progress(i)),
+      human("new", "h1"),
+    ]
+    writeFileSync(path, `${lines.join("\n")}\n`)
+    expect((await readTail(path, 10)).map((e) => e.text)).toEqual(["new"])
+  })
+
+  test("a step further back than TAIL_CEILING is not read", async () => {
+    const path = join(dir, "past-ceiling.jsonl")
+    const count = Math.ceil(TAIL_CEILING / 10_000) + 1
+    const lines = [human("early", "h1"), ...Array.from({ length: count }, (_, i) => progress(i))]
+    writeFileSync(path, `${lines.join("\n")}\n`)
+    expect(await readTail(path, 10)).toEqual([])
   })
 })
 

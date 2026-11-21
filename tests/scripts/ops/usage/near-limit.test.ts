@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { scratchEnv } from "../../../scratch-env"
+
 const script = join(import.meta.dir, "../../../../scripts/ops/usage/near-limit.py")
 const scratch = mkdtempSync(join(tmpdir(), "near-limit-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
@@ -36,12 +38,9 @@ def setting(key):
     JSON.stringify({ account: "stored@example.org", rate_limits: {} }),
   )
   writeFileSync(join(stubs, "security"), "#!/bin/sh\necho made-up-token\n", { mode: 0o755 })
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: home,
+  const env = scratchEnv(home, {
     PATH: `${stubs}:${process.env.PATH}`,
-  }
-  delete env.CLAUDE_CONFIG_DIR
+  })
   const child = Bun.spawn(["python3", "-I", script], { env, stderr: "pipe", stdout: "pipe" })
   const [err] = await Promise.all([new Response(child.stderr).text(), child.exited])
   expect(err).toBe("")

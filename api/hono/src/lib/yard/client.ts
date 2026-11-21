@@ -22,6 +22,7 @@ export const postSchema = z.strictObject({
 })
 
 export const pageSchema = z.strictObject({
+  after: z.string().min(1).optional(),
   before: z.iso.datetime().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   parent: z.string().min(1).optional(),
@@ -35,6 +36,14 @@ const waitingSchema = z.object({
 })
 
 const meSchema = z.object({ login: z.string(), owner: z.boolean() })
+
+const botSchema = z.object({
+  createdAt: z.iso.datetime(),
+  dm: z.string(),
+  login: z.string(),
+  name: z.string(),
+  readsLog: z.boolean(),
+})
 
 export const yardClient = (base: string, token: string, request: YardFetch = fetch) => {
   const call = async <T extends z.ZodType>(
@@ -62,6 +71,11 @@ export const yardClient = (base: string, token: string, request: YardFetch = fet
     return parsed.data
   }
   return {
+    addBot: (name: string) =>
+      call("/bots", z.object({ bot: botSchema, secret: z.string() }), {
+        body: { name },
+        method: "POST",
+      }),
     channels: async () =>
       (await call("/channels", z.object({ channels: z.array(channelSchema) }))).channels,
     me: () => call("/me", meSchema),
@@ -96,6 +110,18 @@ export const yardClient = (base: string, token: string, request: YardFetch = fet
           method: "POST",
         },
       ),
+    revokeBot: async (name: string) =>
+      (
+        await call(`/bots/${encodeURIComponent(name)}`, z.object({ bot: botSchema }), {
+          method: "DELETE",
+        })
+      ).bot,
+    // this token's swap of itself for secret, a new one of its own kind the Mac made (rotate.ts)
+    swapToken: (secret: string) =>
+      call("/tokens/swap", z.object({ token: z.object({ id: z.string(), name: z.string() }) }), {
+        body: { secret },
+        method: "POST",
+      }),
     waiting: async ({ after, since }: { after?: string; since: string }) =>
       (
         await call(

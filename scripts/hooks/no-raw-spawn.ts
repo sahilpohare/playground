@@ -1,7 +1,8 @@
-// PreToolUse hook: refuses a Claude Code session not started through scripts/spawn.sh, since only spawn.sh holds the factory to its capacity gate (load, memory, slots for a new worker, and usage). It refuses every cmux call but its help and version, cmux in any case and by any path or a program it cannot read followed by one of cmux's session commands, since every session runs in herdr and no factory session calls cmux; a `claude --resume` or `--continue`; and every herdr call but its reads and a scratch world of the session's own, herdr by any path or a program it cannot read followed by a herdr group, since herdr's socket has no access control.
+// PreToolUse hook: refuses a Claude Code session not started through scripts/spawn.sh, since only spawn.sh holds the factory to its capacity gate, whose gates playbook's SPAWN.md lists under Capacity gate. It refuses every cmux call but its help and version, cmux in any case and by any path or a program it cannot read followed by one of cmux's session commands, since every session runs in herdr and no factory session calls cmux; a `claude --resume` or `--continue`; and every herdr call but its reads and a scratch world of the session's own, herdr by any path or a program it cannot read followed by a herdr group, since herdr's socket has no access control.
 import "../../packages/env/src/aliases"
 import { join, resolve, sep } from "node:path"
 
+import { input } from "./input"
 import { fromFactory } from "./role"
 import {
   type Env,
@@ -387,7 +388,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-raw-spawn", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

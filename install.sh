@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs Playground: curl -fsSL <raw URL>/install.sh | bash
-# It installs every missing tool it can in one run, each through its project's own installer, and ends with a "Left for you" list of what it could not do, each with the one command that does it.
+# It installs every missing tool it can in one run, each through its project's own installer (on Linux only those that need no root: bun, claude, the pinned herdr and uv), and ends with a "Left for you" list of what it could not do, each with the one command that does it.
 # It waits only where it cannot act alone (Homebrew's password, Docker Desktop's first open, gh auth login, Claude's sign-in, the Mac's password for portless's proxy service), and only with a terminal; without one each goes on the list.
 # Every step checks before it acts, so a second run changes nothing. PLAYGROUND_DIR names the install folder; --check (or PLAYGROUND_INSTALL=0) prints what is missing and changes nothing.
 set -euo pipefail
@@ -118,7 +118,7 @@ ensure_brew() {
   return 1
 }
 
-# One tool by its doctor name, each from its project's own installer; 0 once the tool is there.
+# One tool by its doctor name, each from its project's own installer; 0 once the tool is there. Off a Mac a tool that needs the system's packages or Docker Engine returns 1, so its fix goes on the list.
 install_tool() {
   case "$1" in
     bun)
@@ -135,6 +135,7 @@ install_tool() {
       ;;
     docker)
       has docker && return 0
+      [ "$OS" = Darwin ] || return 1
       ensure_brew && brew install --cask docker </dev/null || return 1
       has docker && return 0
       if [ -n "$TTY" ]; then
@@ -145,25 +146,36 @@ install_tool() {
       fi
       return 0
       ;;
-    gh | git | node | uv)
+    gh | git | node)
       has "$1" && return 0
+      [ "$OS" = Darwin ] || return 1
       ensure_brew && brew install "$1" </dev/null && has "$1"
       ;;
     python3)
       has python3 && return 0
+      [ "$OS" = Darwin ] || return 1
       ensure_brew && brew install python </dev/null && has python3
+      ;;
+    uv)
+      has uv && return 0
+      if [ "$OS" = Darwin ]; then
+        ensure_brew && brew install uv </dev/null && has uv
+      else
+        # on_path writes the startup line, so uv's installer writes none of its own
+        curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh && on_path "$HOME/.local/bin" && has uv
+      fi
       ;;
     *) return 1 ;;
   esac
 }
 
-# Each tool given as name<TAB>fix, in order: in --check, or off a Mac, its fix goes on the list; else it is installed, and on a failure its fix goes on the list and the run carries on.
+# Each tool given as name<TAB>fix, in order: in --check its fix goes on the list; else it is installed, and on a failure its fix goes on the list and the run carries on.
 install_all() {
   local name fix
   while IFS=$'\t' read -r name fix <&3; do
     [ -n "$name" ] || continue
     ! listed "$name" || continue
-    if [ -n "$CHECK" ] || [ "$OS" != Darwin ]; then
+    if [ -n "$CHECK" ]; then
       case "$fix" in brew\ *) [ "$OS" != Darwin ] || has brew || [ -n "${BREW_NOTED:-}" ] || { left "Homebrew: $HOMEBREW"; BREW_NOTED=1; } ;; esac
       left "$name: $fix"
     elif ! install_tool "$name"; then
@@ -357,6 +369,7 @@ main() {
 
   # git, node and bun come first, since the clone needs git, doctor's own list runs on bun, and the build and the Dashboard run on node; doctor checks node's version.
   FIRST=$'git\tbrew install git\nnode\tbrew install node\nbun\tcurl -fsSL https://bun.sh/install | bash'
+  [ "$OS" = Darwin ] || FIRST=$'git\tyour distro\'s git package, such as sudo apt install git\nnode\tinstall Node from https://nodejs.org/en/download\nbun\tcurl -fsSL https://bun.sh/install | bash'
   install_all 3< <(printf '%s\n' "$FIRST" | while IFS=$'\t' read -r name fix; do has "$name" || printf '%s\t%s\n' "$name" "$fix"; done)
 
   if [ -n "$CHECK" ]; then
@@ -386,11 +399,12 @@ main() {
   [ "$OS" = Darwin ] && service=$'\n'"  $PORTLESS_PLIST  portless's proxy service, installed with sudo, and its certificate in the System keychain"
   cat <<EOF
 Playground installs into $DIR. Outside it, it writes only in:
-  $HOME/.bun/bin             the playground command
+  $HOME/.bun/bin             the playground command, and on Linux the secret store as security
   $HOME/.playground          the data folder: your extensions, the brief templates, the ops scripts and the skill sets
   Claude Code's user settings  the home skill set, installed with claude plugin install
+  $HOME/.claude.json  Claude Code's yes to trusting $DIR, the one its folder question records
   $startup  a PATH line for each tool it installs off your PATH, once$service
-Every ops job starts off but the Dashboard's own and the usage read, so nothing goes into $HOME/Library/LaunchAgents.
+Every ops job starts off but the Dashboard's own, the usage read and, on a Mac, keep-awake, so nothing goes into $HOME/Library/LaunchAgents.
 EOF
 
   # A clone goes through the gh login when there is one, else git clones it over https. Either clones main, the shipped branch, whatever the repo's default is.
@@ -441,11 +455,22 @@ EOF
   on_path "$HOME/.bun/bin" BUN_INSTALL
   # With gh signed in, your extensions get their private repo and your login's folder; without it they stay on this machine, and doctor says sync is off.
   ext_init
+  # Running this installer is the choice to run the code it cloned, so it records Claude Code's yes for that checkout alone, which covers the leads worktree the dispatcher starts in; spawn.sh asks every other folder through first run's Trust this folder.
+  local trusted=0 why
+  if ! why=$("$BUN" --no-env-file "$DIR/packages/scripts/src/playground/claude-trust.ts" "$DIR" 2>&1); then
+    trusted=1
+    left "Claude Code's trust of $DIR: $why; run playground, then click Trust this folder on Claude Code's card in first run"
+  fi
+  echo "$why"
   local proxy=0
   proxy_service || proxy=1
   finish
   if [ "$proxy" -ne 0 ]; then
     echo "The Dashboard's local address is not set up, so playground does not start yet: run bash $DIR/install.sh again in a terminal to set it up and start it."
+    exit 1
+  fi
+  if [ "$trusted" -ne 0 ]; then
+    echo "Then run: playground, and click Trust this folder on Claude Code's card in first run, so the dispatcher can start."
     exit 1
   fi
   if "$BUN" --no-env-file "$DOCTOR" --tools >/dev/null; then

@@ -45,7 +45,7 @@
     "backlog": [
       "P2b: the stream folds newlines in multi-line messages",
       "An ETA beside every working agent",
-      "Fix: pglaunch publishes on every interface"
+      "Guard: first run's database must publish on loopback alone"
     ],
     "updatedAt": "2026-10-05T22:10:00Z"
   }
@@ -66,6 +66,7 @@
   `schedule` is when a runner runs, `always` or a 5-field cron (`0 5 * * *`), which its sidebar row's tooltip holds.
   `ticket` (a Linear ID, such as `FIX-1234`) is the ticket the agent works on, which its sidebar row shows before its title.
   `worker` is a reviewer's or tester's own worker, by its full name, set when the worker spawns it, so its row nests under that worker whatever the two are named.
+  `item` is the extension item `assign`'s `item=` last gave a reviewer or tester, `<scope>/<kind>/<key>`, which the dashboard does not read.
   `prs` lists every PR a reviewer or tester serves, its `pr` among them, a PR not yet opened as its issue's URL, and an extension item it scores as `<scope>/<kind>/<key>`, which the dashboard shows nowhere and its restart passes on through `--pr` beside a pull request.
   roster.ts gives a checker's row a new entry only beside a live `worker`; `roster.ts assign` adds each next PR, and `spawn.sh --pr` sets an ended row's `prs` and `pr` (the first pull URL named) and joins a live row's `prs`, giving a row with no `pr` the first pull URL named;
   auto-end (`scripts/ops/optimizer/auto_end.ts`) keeps the checker while any of them is open, and the dashboard's restart reads `pr` and `prs` to pass `--pr` (`restartPrs()` in `api/hono/src/lib/dashboard/restart.ts`).

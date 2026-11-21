@@ -1,5 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -22,16 +32,21 @@ import {
   askCli,
   checkAnswer,
   closedPayload,
+  type CloneRun,
   inboxCount,
   inboxInputSchema,
   type Delivery,
+  type ExtRun,
   grantArgv,
   type InboxApps,
+  type InboxRoot,
+  type PeerSeams,
   type InboxItem,
   inboxOrder,
   isGo,
   proposalsOf,
   quietIds,
+  rootRun,
   runResult,
   savesDraft,
   secretInputSchema,
@@ -42,17 +57,34 @@ import {
 } from "../../../../../../api/hono/src/lib/dashboard/inbox"
 import { uploadSpec } from "../../../../../../api/hono/src/lib/dashboard/slack-upload"
 import { KEYCHAIN_ITEM_NAMES } from "../../../../../../api/hono/src/lib/keychain-items"
+import {
+  peerCopyArgv,
+  peerInstallArgv,
+  peerReadArgv,
+  peerStepArgv,
+} from "../../../../../../api/hono/src/lib/system/peer-root"
+import { installArgv, repoScripts, stepArgv } from "../../../../../../api/hono/src/lib/system/root"
 import { keychain } from "../../../../../../api/hono/src/lib/yard/keychain"
 import {
   ANSWER_LEAD,
   CLOCKS_STOPPED_AT,
+  INSTALL_TEXT,
   payloadOf,
+  ROOT_STEPS,
 } from "../../../../../../packages/config/src/inbox"
 import { RELAY_ANSWER_KINDS } from "../../../../../../packages/message/src/index"
+import {
+  peerRecordArgv,
+  readRecord,
+  rootEntries,
+} from "../../../../../../packages/scripts/src/machine-record/record"
+import type { Run } from "../../../../../../packages/scripts/src/ops-tick/tick"
+import { extInitCheck, extVerb } from "../../../../../../packages/scripts/src/playground/ext-init"
+import type { Io } from "../../../../../../packages/scripts/src/playground/store"
 import { writeFiles } from "../../../../../../packages/settings/src/folder"
 import { GUARD_SETTING_KEYS } from "../../../../../../packages/settings/src/guard-keys"
-import { judgeItem, putItem } from "../../../../../../packages/settings/src/items"
-import { loginPath } from "../../../../../../packages/settings/src/rendered"
+import { importLists, judgeItem, putItem } from "../../../../../../packages/settings/src/items"
+import { GUARD_LISTS, loginPath, scopeDir } from "../../../../../../packages/settings/src/rendered"
 import {
   readSetting,
   resetSetting,
@@ -927,6 +959,13 @@ describe("an answer", () => {
       ref: 44,
       title: "Accept",
     })
+    const cloning = item({
+      id: "mno",
+      kind: "decision",
+      preview: CLONE as never,
+      ref: 45,
+      title: "Clone",
+    })
     const read = (ref: number) => `playground ask get #i${ref} --ack`
     const ack = (ref: number) => `playground ask ack #i${ref} --link <https url>`
     const ackOrWhy = (ref: number) => `${ack(ref)}, or --no-link "<why>" when it leaves no page`
@@ -1087,6 +1126,16 @@ describe("an answer", () => {
         {
           accepted: { exitCode: 0, line: "rev 9b8c7d6 is accepted" },
           close: 'playground ask ack #i44 --no-link "<why>"',
+          next: "nothing",
+          verb: "pick",
+        },
+      ],
+      [
+        cloning,
+        { at: AT, choice: "approve", cloned: { exitCode: 0, line: "cloned" } },
+        {
+          cloned: { exitCode: 0, line: "cloned" },
+          close: 'playground ask ack #i45 --no-link "<why>"',
           next: "nothing",
           verb: "pick",
         },
@@ -1474,6 +1523,322 @@ describe("a grant decision (PG-658)", () => {
   })
 })
 
+const ROOT_STEP = {
+  step: "bwrap-userns",
+  type: "root",
+  why: "Claude Code's sandbox cannot start here",
+}
+const ROOT_INSTALL = { step: "install", type: "root", why: "No root step is installed yet" }
+
+describe("a root step decision (PG-2433)", () => {
+  test("names install or one listed step, and takes no argument, path or command from its card", () => {
+    expect(inboxInputSchema.safeParse(decision(ROOT_STEP)).success).toBe(true)
+    expect(inboxInputSchema.safeParse(decision(ROOT_INSTALL)).success).toBe(true)
+    const takes = (change: object) =>
+      inboxInputSchema.safeParse(decision({ ...ROOT_STEP, ...change })).success
+    for (const change of [
+      { step: "apt-install" },
+      { step: "/usr/local/lib/playground/root/bwrap-userns" },
+      { step: "bwrap-userns --rm" },
+      { args: ["--rm"] },
+      { command: "id" },
+      { path: "/tmp/x" },
+      { scripts: [{ name: "bwrap-userns", sha256: `${"a".repeat(63)}'` }] },
+      { scripts: [{ name: "bwrap-userns", sha256: `$(id)${"a".repeat(59)}` }] },
+      { scripts: [{ name: "evil", sha256: "a".repeat(64) }] },
+      { why: "" },
+    ]) {
+      expect(takes(change), JSON.stringify(change)).toBe(false)
+    }
+  })
+
+  test("is approved, denied or cleared as it reads, never edited", () => {
+    const open = { kind: "decision", preview: ROOT_STEP, status: "open" } as never
+    expect(checkAnswer(open, { action: "edit", text: "run it with --force" })).toEqual({
+      message: "This decision is approved or denied as it reads",
+    })
+    expect(checkAnswer(open, { action: "approve" })).toMatchObject({ status: "approved" })
+  })
+
+  test("a step runs its installed script only once the check passes, and a refused check runs nothing", async () => {
+    const calls: string[][] = []
+    const run = async (argv: string[]) => {
+      calls.push(argv)
+      return { code: 0, err: "", out: "bwrap may now make a user namespace" }
+    }
+    const data = mkdtempSync(join(tmpdir(), "root-record-"))
+    const seams = {
+      data,
+      peers: [],
+      secret: () => ({ read: async () => null, remove: async () => {} }),
+    }
+    const preview = inboxInputSchema.parse(decision(ROOT_STEP)).preview as InboxRoot
+    const refused = "/usr/local/lib/playground is not owned by root: approve a new install card"
+    expect(await rootRun(run, preview, async () => refused, seams)).toEqual({
+      exitCode: 1,
+      line: refused,
+    })
+    expect(calls).toHaveLength(0)
+    expect((await readRecord(data)).entries).toEqual([])
+    expect(await rootRun(run, preview, async () => undefined, seams)).toEqual({
+      exitCode: 0,
+      line: "bwrap may now make a user namespace",
+    })
+    expect(calls).toEqual([stepArgv("bwrap-userns")])
+    // PG-2538: what the step wrote goes into this machine's record, with its undo
+    expect((await readRecord(data)).entries).toMatchObject([
+      { by: "the Inbox", path: "/etc/apparmor.d/bwrap", undo: ROOT_STEPS["bwrap-userns"].undo },
+    ])
+  })
+
+  test("a record that cannot be written leaves a step's run as it was, and says why in the log (PG-2538)", async () => {
+    const data = mkdtempSync(join(tmpdir(), "root-record-"))
+    writeFileSync(join(data, "machine-record.json"), "{ not json")
+    const seams = {
+      data,
+      peers: [],
+      secret: () => ({ read: async () => null, remove: async () => {} }),
+    }
+    const preview = inboxInputSchema.parse(decision(ROOT_STEP)).preview as InboxRoot
+    const held = console.error
+    const lines: string[] = []
+    console.error = (...args: unknown[]) => lines.push(args.map(String).join(" "))
+    try {
+      expect(
+        await rootRun(
+          async () => ({ code: 0, err: "", out: "ok" }),
+          preview,
+          async () => undefined,
+          seams,
+        ),
+      ).toEqual({ exitCode: 0, line: "ok" })
+    } finally {
+      console.error = held
+    }
+    expect(lines).toEqual([
+      expect.stringContaining(
+        "this machine's record of its root bwrap-userns failed, so its next check names those paths",
+      ),
+    ])
+  })
+
+  test("a run stopped at ROOT_TIMEOUT_MS reads in plain words, not an empty line", async () => {
+    const preview = inboxInputSchema.parse(decision(ROOT_STEP)).preview as InboxRoot
+    const killed = async () => ({ code: 143, err: "", out: "" })
+    expect(await rootRun(killed, preview, async () => undefined)).toEqual({
+      exitCode: 143,
+      line: "the password window got no answer in 5 minutes, so nothing ran as root",
+    })
+  })
+})
+
+describe("a root step on another machine (PG-2434)", () => {
+  const PEER = { name: "spark-test", target: "me@spark-test" }
+  const SERVICE = "playground-spark-test-sudo"
+  const CLONE = "~/code/playground"
+  // PG-2538: the peer's own record add, its entries on stdin, which ends every run that put a path there
+  const RECORD = peerRecordArgv(undefined, PEER.target, CLONE, "add")
+  const recorded = (input: string | undefined) =>
+    (JSON.parse(input ?? "[]") as { path: string }[]).map((entry) => entry.path)
+  // a password holding what a shell or a log would bend, so a leak shows whole
+  const MARKER = "pw-MARKER-7f3a'$(id)"
+  const ok = { code: 0, err: "", out: "" }
+  type Call = { argv: string[]; input?: string }
+  const seams = (held: string | null = MARKER, sticks = false) => {
+    let value = held
+    const removed: string[] = []
+    const peerSeams: PeerSeams = {
+      clone: CLONE,
+      peers: [PEER],
+      secret: (service) => ({
+        read: async () => value,
+        remove: async () => {
+          removed.push(service)
+          if (!sticks) value = null
+        },
+      }),
+    }
+    return { peerSeams, removed }
+  }
+  const install = async () =>
+    inboxInputSchema.parse(
+      decision({ ...ROOT_INSTALL, machine: "spark-test", scripts: await repoScripts() }),
+    ).preview as InboxRoot
+  const recorder = (answer: (call: Call) => Promise<typeof ok>) => {
+    const calls: Call[] = []
+    const run = async (argv: string[], input?: string) => {
+      calls.push({ argv, input })
+      return answer({ argv, input })
+    }
+    return { calls, run }
+  }
+  const logged = async (fn: () => Promise<unknown>) => {
+    const lines: string[] = []
+    const held = [console.log, console.error]
+    console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "))
+    console.error = console.log
+    try {
+      return { lines, result: await fn() }
+    } finally {
+      ;[console.log, console.error] = held
+    }
+  }
+
+  test("names a machine, never a host, and its card keeps no CA", () => {
+    expect(
+      inboxInputSchema.safeParse(decision({ ...ROOT_STEP, machine: "spark-test" })).success,
+    ).toBe(true)
+    for (const machine of ["me@spark-test", "-oProxyCommand=id", ""])
+      expect(inboxInputSchema.safeParse(decision({ ...ROOT_STEP, machine })).success, machine).toBe(
+        false,
+      )
+  })
+
+  test("an install copies, then sends the password on sudo's stdin alone, then deletes it", async () => {
+    const { peerSeams, removed } = seams()
+    const { calls, run } = recorder(async ({ argv }) =>
+      argv[0] === "ssh" && argv.at(-1)?.startsWith("sudo")
+        ? { ...ok, out: "installed bwrap-userns, chromium-ca in /usr/local/lib/playground/root" }
+        : ok,
+    )
+    const preview = await install()
+    const { lines, result } = await logged(() => rootRun(run, preview, undefined, peerSeams))
+    expect(result).toEqual({
+      exitCode: 0,
+      line: `installed bwrap-userns, chromium-ca in /usr/local/lib/playground/root; deleted ${SERVICE}`,
+    })
+    expect(calls.map((call) => call.argv)).toEqual([
+      ...peerCopyArgv(PEER, undefined),
+      peerInstallArgv(PEER, undefined, preview.scripts ?? []),
+      RECORD,
+    ])
+    expect(calls.slice(0, 3).map((call) => call.input)).toEqual([
+      undefined,
+      undefined,
+      `${MARKER}\n`,
+    ])
+    expect(recorded(calls[3]?.input)).toEqual(
+      rootEntries("install", { now: new Date(), peer: true }).map((entry) => entry.path),
+    )
+    expect(removed).toEqual([SERVICE])
+    expect(lines).toEqual([`inbox: spark-test's install ran; deleted ${SERVICE}`])
+  })
+
+  test("the password reaches no argv, line or log, and is deleted once, on a failure, a timeout and a throw", async () => {
+    const echoes = `sudo: ${MARKER}: incorrect password attempt`
+    const cases: [string, (call: Call) => Promise<typeof ok>, RegExp][] = [
+      [
+        "exit 1",
+        async ({ input }) => (input ? { code: 1, err: echoes, out: MARKER } : ok),
+        /incorrect password/,
+      ],
+      [
+        "timeout",
+        async ({ input }) => (input ? { code: 143, err: echoes, out: "" } : ok),
+        /no answer in 5 minutes/,
+      ],
+      [
+        "throw",
+        async ({ input }) => {
+          if (input) throw new Error(`spawn failed: ${MARKER}`)
+          return ok
+        },
+        /spawn failed/,
+      ],
+      ["no ssh", async () => ({ code: 255, err: `ssh: ${MARKER}`, out: "" }), /could not reach/],
+    ]
+    for (const [name, answer, line] of cases) {
+      const { peerSeams, removed } = seams()
+      const { calls, run } = recorder(answer)
+      const { lines, result } = await logged(async () =>
+        rootRun(run, await install(), undefined, peerSeams),
+      )
+      const text = JSON.stringify({ lines, result })
+      expect(text.includes("pw-MARKER"), name).toBe(false)
+      expect(JSON.stringify(calls.map((call) => call.argv)).includes("pw-MARKER"), name).toBe(false)
+      expect(calls.filter((call) => call.input !== undefined).length, name).toBeLessThanOrEqual(1)
+      expect((result as { line: string }).line, name).toMatch(line)
+      expect((result as { line: string }).line, name).toEndWith(`deleted ${SERVICE}`)
+      expect((result as { exitCode: number }).exitCode, name).not.toBe(0)
+      expect(removed, name).toEqual([SERVICE])
+    }
+  })
+
+  test("with no password kept, nothing runs; a delete that fails says so and reads failed", async () => {
+    const none = seams(null)
+    const quiet = recorder(async () => ok)
+    expect(await rootRun(quiet.run, await install(), undefined, none.peerSeams)).toEqual({
+      exitCode: 1,
+      line: `spark-test's admin password is not in ${SERVICE}: post a secret card for it, then approve again`,
+    })
+    expect(quiet.calls).toEqual([])
+    const stuck = seams(MARKER, true)
+    const { result } = await logged(async () =>
+      rootRun(recorder(async () => ok).run, await install(), undefined, stuck.peerSeams),
+    )
+    expect(result).toMatchObject({
+      exitCode: 1,
+      line: `could not delete ${SERVICE}: remove it by hand`,
+    })
+  })
+
+  test("a step reads its installed script first and runs it only when it is root's own and current", async () => {
+    const { peerSeams } = seams()
+    const preview = inboxInputSchema.parse(decision({ ...ROOT_STEP, machine: "spark-test" }))
+      .preview as InboxRoot
+    const sha = (await repoScripts()).find((script) => script.name === "bwrap-userns")?.sha256
+    const path = "/usr/local/lib/playground/root/bwrap-userns"
+    const read = (sum: string) =>
+      [
+        "root 755 directory /usr/local/lib/playground",
+        "root 755 directory /usr/local/lib/playground/root",
+        `root 755 regular file ${path}`,
+        `${sum}  ${path}`,
+      ].join("\n")
+    const current = recorder(async ({ argv }) =>
+      argv.includes("stat")
+        ? { ...ok, out: read(sha ?? "") }
+        : { ...ok, out: "bwrap may now make a user namespace" },
+    )
+    expect(await rootRun(current.run, preview, undefined, peerSeams)).toEqual({
+      exitCode: 0,
+      line: "bwrap may now make a user namespace",
+    })
+    expect(current.calls.map((call) => call.argv)).toEqual([
+      peerReadArgv(PEER, undefined, "bwrap-userns"),
+      peerStepArgv(PEER, undefined, "bwrap-userns"),
+      RECORD,
+    ])
+    expect(current.calls.slice(0, 2).every((call) => call.input === undefined)).toBe(true)
+    expect(recorded(current.calls[2]?.input)).toEqual(["/etc/apparmor.d/bwrap"])
+    const stale = recorder(async () => ({ ...ok, out: read("b".repeat(64)) }))
+    expect(await rootRun(stale.run, preview, undefined, peerSeams)).toEqual({
+      exitCode: 1,
+      line: `${path} is an older copy: approve a new install card`,
+    })
+    expect(stale.calls).toHaveLength(1)
+    const denied = recorder(async ({ argv }) =>
+      argv.includes("stat") ? { ...ok, out: read(sha ?? "") } : { code: 126, err: "", out: "" },
+    )
+    expect(await rootRun(denied.run, preview, undefined, peerSeams)).toMatchObject({
+      exitCode: 126,
+      line: "that machine's rule did not let it run, so nothing ran as root: approve a new install card for it",
+    })
+  })
+
+  test("a machine org.cluster does not name runs nothing", async () => {
+    const { peerSeams } = seams()
+    const { calls, run } = recorder(async () => ok)
+    const preview = inboxInputSchema.parse(decision({ ...ROOT_STEP, machine: "elsewhere" }))
+      .preview as InboxRoot
+    expect(await rootRun(run, preview, undefined, peerSeams)).toEqual({
+      exitCode: 1,
+      line: "elsewhere is not a machine this Dashboard reaches",
+    })
+    expect(calls).toEqual([])
+  })
+})
+
 describe("an apps decision (PG-658)", () => {
   const apps = (change: Partial<InboxApps> = {}) => ({ ...APPS, ...change }) as InboxApps
 
@@ -1714,6 +2079,62 @@ describe("an own decision (PG-1162)", () => {
     expect(checkAnswer(open, { action: "deny" })).toMatchObject({ status: "denied" })
     expect(checkAnswer(open, { action: "edit", text: "another account" })).toHaveProperty("message")
     expect(RELAY_ANSWER_KINDS as readonly string[]).not.toContain("own")
+  })
+})
+
+const CLONE = {
+  repos: [
+    {
+      folder: "/made/up/data/extensions/made-up-me",
+      repo: "made-up-me/playground-made-up-me",
+      scope: "made-up-me",
+    },
+  ],
+  type: "clone",
+  why: "This new machine has no extensions yet",
+}
+const CLONE_TOOLS = {
+  folder: "/made/up/data/extensions/made-up-tools",
+  repo: "made-up-me/playground-made-up-tools",
+  scope: "made-up-tools",
+}
+
+describe("a clone decision (PG-2205)", () => {
+  const takes = (change: object) =>
+    inboxInputSchema.safeParse(decision({ ...CLONE, ...change })).success
+
+  test("carries 1 to 20 repos, each its owner/name, its scope and the folder it fills, and why", () => {
+    expect(takes({})).toBe(true)
+    expect(takes({ repos: [...CLONE.repos, CLONE_TOOLS] })).toBe(true)
+  })
+
+  test("refuses no repos, more than 20, a repo that is no owner/name, a relative folder, core, two repos for one scope, no why and any other field", () => {
+    const one = CLONE.repos[0]!
+    const many = Array.from({ length: 21 }, (_, at) => ({
+      folder: `/made/up/data/extensions/made-up-${at}`,
+      repo: `made-up-me/playground-made-up-${at}`,
+      scope: `made-up-${at}`,
+    }))
+    for (const change of [
+      { repos: [] },
+      { repos: many },
+      { repos: [{ ...one, repo: "playground-made-up-me" }] },
+      { repos: [{ ...one, repo: "--upload-pack=x/y" }] },
+      { repos: [{ ...one, folder: "extensions/made-up-me" }] },
+      { repos: [{ ...one, scope: "core" }] },
+      { repos: [one, { ...CLONE_TOOLS, scope: one.scope }] },
+      { why: "" },
+      { more: [] },
+    ]) {
+      expect(takes(change), JSON.stringify(change)).toBe(false)
+    }
+  })
+
+  test("is approved, denied or cleared as it reads, never edited, and stays off the relay", () => {
+    const open = { kind: "decision", preview: CLONE, status: "open" } as never
+    expect(checkAnswer(open, { action: "deny" })).toMatchObject({ status: "denied" })
+    expect(checkAnswer(open, { action: "edit", text: "another repo" })).toHaveProperty("message")
+    expect(RELAY_ANSWER_KINDS as readonly string[]).not.toContain("clone")
   })
 })
 
@@ -2112,6 +2533,62 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect(calls).toHaveLength(1)
     })
 
+    test("a Send whose files shared took its words with them, so the poster's line closes the item and holds no words to post again (PG-1921)", async () => {
+      const posted = await filedDraft()
+      const typed: Delivery[] = []
+      const { upload } = recorder()
+      await store.answerItem(
+        db,
+        posted.id,
+        { action: "send", text: "the fix is live today" },
+        { actor, deliver: async (delivery) => (typed.push(delivery), delivered()), upload },
+      )
+      const payload = payloadOf(typed[0]?.text ?? "")
+      expect(payload).toMatchObject({ go: true, next: "close", verb: "send" })
+      expect(payload?.close).toContain(`--link "${THREAD}"`)
+      expect(payload).not.toHaveProperty("text")
+    })
+
+    test("a Send whose words hold a mention or a URL takes them with its files too, so the poster posts no second message (PG-1983)", async () => {
+      for (const words of [
+        "@Merritt the fix is live",
+        "the fix is live: https://example.com/fix",
+      ]) {
+        const posted = await filedDraft()
+        const typed: Delivery[] = []
+        const { upload } = recorder()
+        await store.answerItem(
+          db,
+          posted.id,
+          { action: "send", text: words },
+          { actor, deliver: async (delivery) => (typed.push(delivery), delivered()), upload },
+        )
+        const payload = payloadOf(typed[0]?.text ?? "")
+        expect(payload).toMatchObject({ go: true, next: "close", verb: "send" })
+        expect(payload).not.toHaveProperty("text")
+      }
+    })
+
+    test("a Send that shared no files, as a fixture stack's counts 0, still hands the poster its words", async () => {
+      const posted = await filedDraft()
+      const typed: Delivery[] = []
+      await store.answerItem(
+        db,
+        posted.id,
+        { action: "send", text: "the fix is live today" },
+        {
+          actor,
+          deliver: async (delivery) => (typed.push(delivery), delivered()),
+          upload: async () => 0,
+        },
+      )
+      expect(payloadOf(typed[0]?.text ?? "")).toMatchObject({
+        next: "carry-out",
+        text: "the fix is live today",
+        verb: "send",
+      })
+    })
+
     test("Approve of a slack decision with files uploads them too", async () => {
       const posted = await post(decision({ ...SLACK, attachments: FILES }))
       const { calls, upload } = recorder()
@@ -2169,8 +2646,48 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
               text: true,
             },
           ],
+          text: "hi",
           thread: "1700000000.000100",
         })
+      })
+
+      test("carries the owner's changed words in place of the draft's (PG-1921)", async () => {
+        const shot = await kept(PNG, "before.png", "image")
+        const posted = await post({
+          from: "ops",
+          kind: "draft",
+          preview: { attachments: [shot], link: THREAD, text: "hi", to: "@Merritt" },
+          title: "Tell Merritt",
+        })
+        await store.answerItem(db, posted.id, { action: "send", text: "hi there" }, { actor })
+        expect(await uploadSpec(db, posted.id, read)).toHaveProperty("text", "hi there")
+      })
+
+      test("carries words that hold a mention or a URL, which dm upload resolves (PG-1983)", async () => {
+        const shot = await kept(PNG, "before.png", "image")
+        for (const text of ["@Merritt hi", "hi (@merritt.lee)", "see https://example.com"]) {
+          const posted = await post({
+            from: "ops",
+            kind: "draft",
+            preview: { attachments: [shot], link: THREAD, text, to: "@Merritt" },
+            title: "Tell Merritt",
+          })
+          await store.answerItem(db, posted.id, { action: "send" }, { actor })
+          expect(await uploadSpec(db, posted.id, read)).toHaveProperty("text", text)
+        }
+        const mail = await post({
+          from: "ops",
+          kind: "draft",
+          preview: {
+            attachments: [shot],
+            link: THREAD,
+            text: "mail me at a@b.example",
+            to: "@Merritt",
+          },
+          title: "Tell Merritt",
+        })
+        await store.answerItem(db, mail.id, { action: "send" }, { actor })
+        expect(await uploadSpec(db, mail.id, read)).toHaveProperty("text", "mail me at a@b.example")
       })
 
       test("refuses an id naming no item, a channel, a thread or a path, so no caller picks the place or the file", async () => {
@@ -2482,7 +2999,12 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
     })
     expect(moved).toMatchObject({ item: { preview: { text: "80%" }, status: "done" }, ok: true })
     await store.dismissItems(db, [update.id])
-    expect(await store.editItem(db, update.id, progress)).toMatchObject({
+    expect(
+      await store.editItem(db, update.id, {
+        ...progress,
+        preview: { outcome: "finding", text: "80%" },
+      }),
+    ).toMatchObject({
       code: "CONFLICT",
       ok: false,
     })
@@ -2605,6 +3127,166 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
         code: "CONFLICT",
         ok: false,
       })
+    })
+  })
+
+  describe("an edit after the owner's Done brings the update back, so a thread keeps one card (PG-1926)", () => {
+    const progress = (text: string) => ({
+      from: "builder",
+      kind: "update",
+      preview: { outcome: "finding", text },
+      title: "Round 2",
+    })
+
+    test("an edit that changes a Done card's text brings it back to the list unread", async () => {
+      const update = await post(progress("40%"))
+      expect(await store.dismissItems(db, [update.id])).toBe(1)
+      const done = await store.getItem(db, update.id)
+      expect(done?.readAt).not.toBeNull()
+      expect(store.inboxCount([done!])).toBe(0)
+      const edited = await store.editItem(db, update.id, progress("80%"))
+      expect(edited).toMatchObject({
+        item: { answer: null, preview: { text: "80%" }, readAt: null },
+        ok: true,
+        reopened: true,
+      })
+      if (!edited.ok) return
+      expect(store.inboxCount([edited.item])).toBe(1)
+      // a second Done sends it back, and the next edit brings it back again
+      expect(await store.dismissItems(db, [update.id])).toBe(1)
+      expect(await store.editItem(db, update.id, progress("100%"))).toMatchObject({
+        ok: true,
+        reopened: true,
+      })
+    })
+
+    test("an edit that changes nothing leaves a Done card on Done", async () => {
+      const update = await post(progress("40%"))
+      await store.dismissItems(db, [update.id])
+      const done = await store.getItem(db, update.id)
+      expect(await store.editItem(db, update.id, progress("40%"))).toMatchObject({
+        code: "CONFLICT",
+        ok: false,
+      })
+      expect(await store.getItem(db, update.id)).toEqual(done)
+    })
+
+    test("an edit to a card still in the list edits it as before, its read mark kept", async () => {
+      const update = await post(progress("40%"))
+      await store.markRead(db, [update.id])
+      const read = await store.getItem(db, update.id)
+      const edited = await store.editItem(db, update.id, progress("80%"))
+      expect(edited).toMatchObject({ item: { answer: null, readAt: read?.readAt }, ok: true })
+      expect(edited).not.toHaveProperty("reopened")
+    })
+
+    test("an update reads status done from the start, which is no owner Done, so an edit reopens nothing", async () => {
+      const update = await post(progress("40%"))
+      expect(update).toMatchObject({ answer: null, readAt: null, status: "done" })
+      const edited = await store.editItem(db, update.id, progress("80%"))
+      expect(edited).toMatchObject({ item: { answer: null, readAt: null }, ok: true })
+      expect(edited).not.toHaveProperty("reopened")
+    })
+
+    test("a dismissed or resolved update stays closed to an edit", async () => {
+      const dismissed = await post(progress("40%"))
+      expect(
+        await store.answerItem(db, dismissed.id, { action: "dismiss" }, { actor }),
+      ).toMatchObject({ ok: true })
+      expect(await store.editItem(db, dismissed.id, progress("80%"))).toMatchObject({
+        code: "CONFLICT",
+        ok: false,
+      })
+      const resolved = await post(progress("40%"))
+      expect(await store.resolveItem(db, resolved.id, { by: "builder" })).toMatchObject({
+        ok: true,
+      })
+      expect(await store.editItem(db, resolved.id, progress("80%"))).toMatchObject({
+        code: "CONFLICT",
+        ok: false,
+      })
+    })
+  })
+
+  describe("ask new edits a same-title update in place, never a second card (PG-2298)", () => {
+    const update = (title: string, text: string, from = "builder") => ({
+      from,
+      kind: "update",
+      preview: { outcome: "finding", text },
+      title,
+    })
+    const again = async (input: object) => {
+      const result = await store.postOrEdit(db, input)
+      if (!result.ok) throw new Error(result.message)
+      return result
+    }
+
+    test("a second update with the same poster and title edits the first, its id and ref kept", async () => {
+      const first = await post(update("PG-2298 twin", "40%"))
+      const second = await again(update("PG-2298 twin", "80%"))
+      expect(second).toMatchObject({ edited: true, item: { id: first.id, ref: first.ref } })
+      expect((await store.getItem(db, first.id))?.preview).toMatchObject({ text: "80%" })
+    })
+
+    test("a twin the owner sent to Done comes back unread", async () => {
+      const first = await post(update("PG-2298 done twin", "40%"))
+      await store.dismissItems(db, [first.id])
+      const second = await again(update("PG-2298 done twin", "80%"))
+      expect(second).toMatchObject({
+        edited: true,
+        item: { answer: null, id: first.id, readAt: null },
+        reopened: true,
+      })
+    })
+
+    test("an unchanged repeat returns the twin as it is and writes nothing, on the list or on Done", async () => {
+      const open = await post(update("PG-2298 same twin", "40%"))
+      expect(await again(update("PG-2298 same twin", "40%"))).toMatchObject({
+        item: { id: open.id },
+        unchanged: true,
+      })
+      expect(await store.getItem(db, open.id)).toEqual(open)
+      await store.dismissItems(db, [open.id])
+      const done = await store.getItem(db, open.id)
+      expect(await again(update("PG-2298 same twin", "40%"))).toMatchObject({
+        item: { id: open.id },
+        unchanged: true,
+      })
+      expect(await store.getItem(db, open.id)).toEqual(done)
+    })
+
+    test("a dismissed or resolved twin, or one from another poster, leaves the new update a card of its own", async () => {
+      const dismissed = await post(update("PG-2298 dismissed twin", "40%"))
+      await store.answerItem(db, dismissed.id, { action: "dismiss" }, { actor })
+      const afterDismiss = await again(update("PG-2298 dismissed twin", "80%"))
+      expect(afterDismiss.item.id).not.toBe(dismissed.id)
+      expect(afterDismiss).not.toHaveProperty("edited")
+      const resolved = await post(update("PG-2298 resolved twin", "40%"))
+      await store.resolveItem(db, resolved.id, { by: "builder" })
+      expect((await again(update("PG-2298 resolved twin", "80%"))).item.id).not.toBe(resolved.id)
+      const mine = await post(update("PG-2298 other poster", "40%"))
+      expect((await again(update("PG-2298 other poster", "40%", "ops"))).item.id).not.toBe(mine.id)
+    })
+
+    test("a twin is matched in the thread the repeat names, and a thread no item has is still refused", async () => {
+      const { createThread } = await import("../../../../../../api/hono/src/lib/dashboard/threads")
+      const threadId = await createThread(db, "PG-2298 thread")
+      const filed = await store.postOrEdit(db, update("PG-2298 threaded twin", "40%"), threadId)
+      if (!filed.ok) throw new Error(filed.message)
+      const inThread = await store.postOrEdit(db, update("PG-2298 threaded twin", "80%"), threadId)
+      expect(inThread).toMatchObject({ edited: true, item: { id: filed.item.id } })
+      const unthreaded = await again(update("PG-2298 threaded twin", "80%"))
+      expect(unthreaded.item.id).not.toBe(filed.item.id)
+      expect(
+        await store.postOrEdit(db, update("PG-2298 threaded twin", "90%"), "no-such-thread"),
+      ).toMatchObject({ code: "NOT_FOUND", ok: false })
+    })
+
+    test("a decision with the same poster and title posts a second card, as before", async () => {
+      const first = await post({ ...decision(PREVIEWS.budget), title: "PG-2298 decision" })
+      const second = await again({ ...decision(PREVIEWS.budget), title: "PG-2298 decision" })
+      expect(second.item.id).not.toBe(first.id)
+      expect(second).not.toHaveProperty("edited")
     })
   })
 
@@ -2854,6 +3536,108 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       const done = await store.getItem(db, posted.id)
       expect(done?.answer).toEqual({ dismissedAt: expect.any(String) })
       expect(await listed(posted.id)).toMatchObject({ archived: false, snoozed: false })
+    })
+
+    test("an update marked Done archives onto the Archive shelf, archivedAt set and dismissedAt cleared (PG-1909)", async () => {
+      const posted = await update()
+      await store.dismissItems(db, [posted.id])
+      const archived = await store.answerItem(db, posted.id, { action: "archive" }, { actor })
+      if (!archived.ok) throw new Error(archived.message)
+      expect(archived.item.answer).toEqual({ archivedAt: expect.any(String) })
+      expect(await listed(posted.id)).toEqual({ archived: true, items: false, snoozed: false })
+    })
+
+    test("an answered card marked Done archives onto the Archive shelf alone, out of In progress, and its poster's close keeps it there (PG-1909)", async () => {
+      const posted = await post(decision(PREVIEWS.ship))
+      await store.answerItem(db, posted.id, { action: "deny" }, { actor })
+      await store.dismissItems(db, [posted.id])
+      const archived = await store.answerItem(db, posted.id, { action: "archive" }, { actor })
+      if (!archived.ok) throw new Error(archived.message)
+      expect(archived.item.status).toBe("denied")
+      expect(archived.item.answer).toMatchObject({ archivedAt: expect.any(String), choice: "deny" })
+      expect(archived.item.answer).not.toHaveProperty("dismissedAt")
+      expect(await listed(posted.id)).toEqual({ archived: true, items: false, snoozed: false })
+      expect((await store.ackItem(db, posted.id)).ok).toBe(true)
+      expect(await listed(posted.id)).toEqual({ archived: true, items: false, snoozed: false })
+      const back = await store.answerItem(db, posted.id, { action: "unarchive" }, { actor })
+      expect(back.ok && back.item.answer).not.toHaveProperty("archivedAt")
+      expect(await listed(posted.id)).toMatchObject({ archived: false })
+    })
+
+    test("a go its poster still carries out, In progress, refuses Archive until it is on Done (PG-1909)", async () => {
+      const posted = await post(decision(PREVIEWS.ship))
+      await store.answerItem(db, posted.id, { action: "approve" }, { actor })
+      expect(await store.answerItem(db, posted.id, { action: "archive" }, { actor })).toMatchObject(
+        { code: "CONFLICT", ok: false },
+      )
+      expect(await listed(posted.id)).toEqual({ archived: false, items: true, snoozed: false })
+      await store.dismissItems(db, [posted.id])
+      const archived = await store.answerItem(db, posted.id, { action: "archive" }, { actor })
+      expect(archived.ok).toBe(true)
+      expect(await listed(posted.id)).toEqual({ archived: true, items: false, snoozed: false })
+    })
+
+    test("a go the Dashboard carried out itself, on Done, archives (PG-1909)", async () => {
+      const posted = await post(decision(ACCEPT))
+      const accept = async () => ({ code: 0, err: "", out: "rev 9b8c7d6 is accepted" })
+      const ran = await store.answerItem(
+        db,
+        posted.id,
+        { action: "approve", seen: posted.updatedAt },
+        { accept, actor },
+      )
+      expect(ran.ok && ran.item.answer).toMatchObject({ accepted: { exitCode: 0 } })
+      const archived = await store.answerItem(db, posted.id, { action: "archive" }, { actor })
+      expect(archived.ok).toBe(true)
+      expect(await listed(posted.id)).toEqual({ archived: true, items: false, snoozed: false })
+    })
+
+    test("a waiting card that carries an earlier failed send still archives, as before (PG-1909)", async () => {
+      const posted = await post(decision(PREVIEWS.ship))
+      const writer = new SQL(url, { max: 1 })
+      try {
+        await writer`update inbox_item set delivery = ${JSON.stringify({ code: "LOST", reason: "lost", status: "failed" })}::text::jsonb where id = ${posted.id}`
+      } finally {
+        await writer.close()
+      }
+      const archived = await store.answerItem(db, posted.id, { action: "archive" }, { actor })
+      expect(archived.ok && archived.item).toMatchObject({
+        delivery: { status: "failed" },
+        status: "open",
+      })
+      expect(await store.settleItem(db, posted.id)).toMatchObject({ ok: true })
+    })
+
+    test("an answered card whose send failed refuses Archive, as before (PG-1909)", async () => {
+      const posted = await post(decision(PREVIEWS.ship))
+      await store.answerItem(db, posted.id, { action: "deny" }, { actor })
+      const writer = new SQL(url, { max: 1 })
+      try {
+        await writer`update inbox_item set delivery = ${JSON.stringify({ code: "LOST", reason: "lost", status: "failed" })}::text::jsonb where id = ${posted.id}`
+      } finally {
+        await writer.close()
+      }
+      expect(await store.answerItem(db, posted.id, { action: "archive" }, { actor })).toMatchObject(
+        {
+          code: "CONFLICT",
+          ok: false,
+        },
+      )
+      expect(await store.dismissItems(db, [posted.id])).toBe(1)
+    })
+
+    test("an item the owner dismissed still refuses Archive (PG-1909)", async () => {
+      const dismissedUpdate = await update()
+      await store.answerItem(db, dismissedUpdate.id, { action: "dismiss" }, { actor })
+      const dismissedAnswer = await post(decision(PREVIEWS.ship))
+      await store.answerItem(db, dismissedAnswer.id, { action: "deny" }, { actor })
+      await store.answerItem(db, dismissedAnswer.id, { action: "dismiss" }, { actor })
+      for (const { id } of [dismissedUpdate, dismissedAnswer]) {
+        expect(await store.answerItem(db, id, { action: "archive" }, { actor })).toMatchObject({
+          code: "CONFLICT",
+          ok: false,
+        })
+      }
     })
 
     test("Dismiss on a waiting decision, draft or secret sets it aside as clear did, telling its poster so, and sends it to Done marked dismissed", async () => {
@@ -4549,9 +5333,20 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
         Object.assign(console, console_)
       }
       expect(sink.calls).toHaveLength(0)
-      expect(security).toHaveLength(1)
+      // the write, then the old relay item's delete and a swap's pending one's, so a later read keeps this token
+      expect(security).toHaveLength(3)
       expect(security[0]?.argv).toEqual(["security", "-i"])
       expect(security[0]?.input).toContain(`-w "${token}"`)
+      expect(security.slice(1).map((one) => one.argv)).toEqual(
+        ["playground-yard-relay", "playground-yard-pending"].map((service) => [
+          "security",
+          "delete-generic-password",
+          "-s",
+          service,
+          "-a",
+          "owner",
+        ]),
+      )
       expect(provided.ok && provided.item.answer).toMatchObject({
         choice: "provided",
         results: [{ environment: "Keychain", exitCode: 0, line: "saved" }],
@@ -5341,6 +6136,356 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
     })
   })
 
+  describe("a root step decision's Approve (PG-2433)", () => {
+    const pkexec = (ran: Partial<{ code: number; err: string; out: string }> = {}) => {
+      const calls: string[][] = []
+      let release = () => {}
+      const held = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const root = async (argv: string[]) => {
+        calls.push(argv)
+        await held
+        return { code: 0, err: "", out: "", ...ran }
+      }
+      return { calls, release, root }
+    }
+    const landed = async (id: string) => {
+      for (let i = 0; i < 100; i++) {
+        const item = await store.getItem(db, id)
+        if (item?.answer && "rooted" in item.answer) return item
+        await Bun.sleep(20)
+      }
+      throw new Error("no rooted result")
+    }
+
+    test("an install card is posted with each script's hash as this checkout holds it, and refuses a list that differs", async () => {
+      const posted = await post(decision(ROOT_INSTALL))
+      expect(posted.preview).toMatchObject({ scripts: await repoScripts() })
+      const stale = { name: "bwrap-userns", sha256: "a".repeat(64) }
+      expect(
+        await store.postItem(db, decision({ ...ROOT_INSTALL, scripts: [stale] })),
+      ).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(
+        await store.postItem(db, decision({ ...ROOT_STEP, scripts: await repoScripts() })),
+      ).toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: "A root step's card lists no scripts and no CA",
+      })
+    })
+
+    test("Approve returns at once while the password window waits, then records the result and tells the poster", async () => {
+      const posted = await post(decision(ROOT_INSTALL))
+      const run = pkexec({ out: "installed bwrap-userns in /usr/local/lib/playground/root" })
+      const sent: Delivery[] = []
+      const answered = await store.answerItem(
+        db,
+        posted.id,
+        { action: "approve", seen: posted.updatedAt },
+        {
+          actor,
+          deliver: async (delivery) => {
+            sent.push(delivery)
+            return { at: "2026-11-03T20:00:00.000Z", ok: true, sessionId: "s1" }
+          },
+          root: run.root,
+        },
+      )
+      expect(answered.ok && answered.item.status).toBe("approved")
+      expect(answered.ok && answered.item.answer).not.toHaveProperty("rooted")
+      expect(sent).toHaveLength(0)
+      run.release()
+      const item = await landed(posted.id)
+      // the argv pkexec gets holds the very program text the card shows, and the card's frozen hashes
+      expect(run.calls).toEqual([
+        installArgv(
+          (posted.preview as { scripts: { name: "bwrap-userns"; sha256: string }[] }).scripts,
+        ),
+      ])
+      expect(run.calls[0]![4]).toBe(INSTALL_TEXT)
+      expect(item.answer).toMatchObject({
+        rooted: { exitCode: 0, line: "installed bwrap-userns in /usr/local/lib/playground/root" },
+      })
+      for (let i = 0; i < 100 && sent.length === 0; i++) await Bun.sleep(20)
+      expect(payloadOf(sent[0]?.text ?? "")).toMatchObject({
+        next: "nothing",
+        rooted: { exitCode: 0 },
+        type: "root",
+      })
+    })
+
+    test("a root card for a machine org.cluster does not name is refused at post (PG-2434)", async () => {
+      for (const preview of [ROOT_INSTALL, ROOT_STEP])
+        expect(
+          await store.postItem(db, decision({ ...preview, machine: "spark-test" })),
+        ).toMatchObject({
+          code: "VALIDATION_ERROR",
+          message: "spark-test is not a machine this Dashboard reaches",
+        })
+    })
+
+    test("a cluster machine whose name no secret store item can take is refused at post, not at Approve (PG-2434)", async () => {
+      const { org } = await import("../../../../../../api/hono/src/lib/org")
+      const peers = org.cluster.peers as { name: string; target: string }[]
+      peers.push(
+        { name: "spark.lab", target: "me@spark-lab" },
+        { name: "spark-test", target: "me@spark-test" },
+      )
+      try {
+        for (const preview of [ROOT_INSTALL, ROOT_STEP])
+          expect(
+            await store.postItem(db, decision({ ...preview, machine: "spark.lab" })),
+          ).toMatchObject({
+            code: "VALIDATION_ERROR",
+            message: "spark.lab has no name a secret store item can take",
+          })
+        const posted = await post(decision({ ...ROOT_INSTALL, machine: "spark-test" }))
+        expect(posted.preview).toMatchObject({ machine: "spark-test", step: "install" })
+        expect(posted.preview).not.toHaveProperty("ca")
+      } finally {
+        peers.splice(-2, 2)
+      }
+    })
+
+    test("an install card pins this machine's CA, refuses another, and its Approve passes the CA's path with the pin (PG-2458)", async () => {
+      const state = mkdtempSync(join(tmpdir(), "inbox-ca-"))
+      const made = Bun.spawnSync([
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:prime256v1",
+        "-nodes",
+        "-keyout",
+        join(state, "ca-key.pem"),
+        "-out",
+        join(state, "ca.pem"),
+        "-subj",
+        "/CN=inbox test CA",
+        "-days",
+        "1",
+      ])
+      expect(made.exitCode).toBe(0)
+      const der = Bun.spawnSync([
+        "openssl",
+        "x509",
+        "-in",
+        join(state, "ca.pem"),
+        "-outform",
+        "DER",
+      ])
+      const pin = new Bun.CryptoHasher("sha256").update(der.stdout).digest("hex")
+      const held = process.env.PORTLESS_STATE_DIR
+      process.env.PORTLESS_STATE_DIR = state
+      try {
+        const posted = await post(decision(ROOT_INSTALL))
+        expect(posted.preview).toMatchObject({ ca: { sha256: pin } })
+        expect(
+          await store.postItem(db, decision({ ...ROOT_INSTALL, ca: { sha256: "c".repeat(64) } })),
+        ).toMatchObject({
+          code: "VALIDATION_ERROR",
+          message: "An install card's CA is this machine's; post it with none to fill it",
+        })
+        expect(
+          await store.postItem(db, decision({ ...ROOT_STEP, ca: { sha256: pin } })),
+        ).toMatchObject({ message: "A root step's card lists no scripts and no CA" })
+        const run = pkexec()
+        run.release()
+        await store.answerItem(
+          db,
+          posted.id,
+          { action: "approve", seen: posted.updatedAt },
+          { actor, root: run.root },
+        )
+        await landed(posted.id)
+        expect(run.calls[0]!.slice(-2)).toEqual([join(state, "ca.pem"), pin])
+      } finally {
+        if (held === undefined) delete process.env.PORTLESS_STATE_DIR
+        else process.env.PORTLESS_STATE_DIR = held
+        rmSync(state, { force: true, recursive: true })
+      }
+    })
+
+    test("a closed password window is recorded in plain words", async () => {
+      const posted = await post(decision(ROOT_INSTALL))
+      const run = pkexec({ code: 126 })
+      run.release()
+      await store.answerItem(
+        db,
+        posted.id,
+        { action: "approve", seen: posted.updatedAt },
+        { actor, root: run.root },
+      )
+      expect((await landed(posted.id)).answer).toMatchObject({
+        rooted: { exitCode: 126, line: "you closed the password window, so nothing ran as root" },
+      })
+    })
+
+    test("Approve needs seen; with no runner, as on a stack showing test data, it is refused; Deny runs nothing", async () => {
+      const posted = await post(decision(ROOT_STEP))
+      const run = pkexec()
+      expect(
+        await store.answerItem(db, posted.id, { action: "approve" }, { actor, root: run.root }),
+      ).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(
+        await store.answerItem(
+          db,
+          posted.id,
+          { action: "approve", seen: posted.updatedAt },
+          { actor },
+        ),
+      ).toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: "This dashboard runs nothing as root: it shows test data, or runs off Linux",
+      })
+      expect((await store.getItem(db, posted.id))?.status).toBe("open")
+      await store.answerItem(db, posted.id, { action: "deny" }, { actor, root: run.root })
+      expect(run.calls).toHaveLength(0)
+    })
+
+    test("a run an API restart cut off ends at the next start as failed, its poster told once", async () => {
+      const posted = await post(decision(ROOT_INSTALL))
+      const at = new Date("2026-11-03T20:00:00.000Z")
+      // the run never returns, as one the old process took with it
+      await store.answerItem(
+        db,
+        posted.id,
+        { action: "approve", seen: posted.updatedAt },
+        { actor, now: at, root: () => new Promise(() => {}) },
+      )
+      const sent: Delivery[] = []
+      const telling = {
+        actor,
+        deliver: async (delivery: Delivery) => {
+          sent.push(delivery)
+          return { at: "2026-11-03T20:07:00.000Z", ok: true as const, sessionId: "s1" }
+        },
+      }
+      // a card claimed at this start's own instant is this process's to run
+      expect((await store.endLostRoots(db, at, telling)).map((one) => one.id)).not.toContain(
+        posted.id,
+      )
+      const started = new Date(at.getTime() + 1)
+      const ended = await store.endLostRoots(db, started, telling)
+      expect(ended.map((item) => item.id)).toContain(posted.id)
+      expect((await store.getItem(db, posted.id))?.answer).toMatchObject({
+        rooted: { exitCode: 1, line: store.ROOT_LOST_LINE },
+      })
+      expect(sent).toHaveLength(1)
+      expect(payloadOf(sent[0]!.text)).toMatchObject({
+        rooted: { exitCode: 1, line: store.ROOT_LOST_LINE },
+        type: "root",
+      })
+      // the next start ends nothing twice
+      expect((await store.endLostRoots(db, started, telling)).map((one) => one.id)).not.toContain(
+        posted.id,
+      )
+      expect(sent).toHaveLength(1)
+    })
+
+    test("a peer install a restart cut off has its password deleted at the next start, and its card says so (PG-2434)", async () => {
+      const service = "playground-spark-test-sudo"
+      for (const [at, deletes, line] of [
+        [new Date("2026-11-05T20:00:00.000Z"), true, `deleted ${service}`],
+        [
+          new Date("2026-11-06T20:00:00.000Z"),
+          false,
+          `could not delete ${service}: remove it by hand`,
+        ],
+      ] as const) {
+        const posted = await post(decision(ROOT_INSTALL))
+        await store.answerItem(
+          db,
+          posted.id,
+          { action: "approve", seen: posted.updatedAt },
+          { actor, now: at, root: () => new Promise(() => {}) },
+        )
+        // the card as a peer install, written past postItem's checks, so its run is the one the restart cut off
+        const writer = new SQL(url, { max: 1 })
+        await writer`update inbox_item set preview = jsonb_set(preview, '{machine}', '"spark-test"') where id = ${posted.id}`
+        await writer.close()
+        const kept = new Map([[service, "pw-left-behind"]])
+        const removed: string[] = []
+        const secret = (name: string) => ({
+          read: async () => kept.get(name) ?? null,
+          remove: async () => {
+            removed.push(name)
+            if (deletes) kept.delete(name)
+          },
+        })
+        const ended = await store.endLostRoots(db, new Date(at.getTime() + 1), undefined, secret)
+        const rooted = { exitCode: 1, line: `${store.ROOT_LOST_LINE}; ${line}` }
+        expect(ended.find((item) => item.id === posted.id)?.answer).toMatchObject({ rooted })
+        expect((await store.getItem(db, posted.id))?.answer).toMatchObject({ rooted })
+        expect(removed).toEqual([service])
+        expect(kept.has(service)).toBe(!deletes)
+      }
+    })
+
+    test("a cut-off peer install whose card write throws leaves the next one's password deleted (#2535)", async () => {
+      const at = new Date("2026-11-07T20:00:00.000Z")
+      const services = ["playground-spark-one-sudo", "playground-spark-two-sudo"]
+      const ids: string[] = []
+      for (const machine of ["spark-one", "spark-two"]) {
+        const posted = await post(decision(ROOT_INSTALL))
+        await store.answerItem(
+          db,
+          posted.id,
+          { action: "approve", seen: posted.updatedAt },
+          { actor, now: at, root: () => new Promise(() => {}) },
+        )
+        const writer = new SQL(url, { max: 1 })
+        await writer`update inbox_item set preview = jsonb_set(preview, '{machine}', to_jsonb(${machine}::text)) where id = ${posted.id}`
+        await writer.close()
+        ids.push(posted.id)
+      }
+      const kept = new Map(services.map((service) => [service, "pw-left-behind"]))
+      // the first of these cards to reach its own write throws there, as a database write that fails
+      let armed = false
+      const order: string[] = []
+      const secret = (name: string) => {
+        if (services.includes(name)) {
+          order.push(name)
+          armed = order.length === 1
+        }
+        return {
+          read: async () => kept.get(name) ?? null,
+          remove: async () => {
+            kept.delete(name)
+          },
+        }
+      }
+      const failing = new Proxy(db, {
+        get: (target, key, receiver) =>
+          key === "update" && armed
+            ? () => {
+                armed = false
+                throw new Error("write failed")
+              }
+            : Reflect.get(target, key, receiver),
+      })
+      const ended = await store.endLostRoots(failing, new Date(at.getTime() + 1), undefined, secret)
+      expect(order).toHaveLength(2)
+      const second = order[1]!
+      const card = ids[services.indexOf(second)]!
+      const rooted = { exitCode: 1, line: `${store.ROOT_LOST_LINE}; deleted ${second}` }
+      expect(ended.find((item) => item.id === card)?.answer).toMatchObject({ rooted })
+      expect((await store.getItem(db, card))?.answer).toMatchObject({ rooted })
+      expect(kept.has(second)).toBe(false)
+      expect(ended.map((item) => item.id)).toEqual(expect.arrayContaining(ids))
+    })
+
+    test("the API ends lost root runs once at its start on a stack that reads this machine, and the Inbox's read writes nothing", async () => {
+      const read = (path: string) =>
+        Bun.file(join(import.meta.dir, "../../../../../../api/hono/src", path)).text()
+      const local = await read("local.ts")
+      expect(local).toMatch(/if \(readsLive\(\)\) \{\n  endLostRoots\(db, new Date\(\),/)
+      expect(await read("routers/inbox.ts")).not.toContain("endLostRoots")
+    })
+  })
+
   describe("an apps decision's Approve (PG-658)", () => {
     const owner = (
       list: string[] | null,
@@ -5535,6 +6680,50 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
         `the owner approved it in the Inbox (#i${posted.ref})`,
       )
     })
+
+    test("a wa.alert card's Approve stands in for that number's first message, and a set any other way seeds nothing (#2748)", async () => {
+      const data = folder()
+      const number = "+15550100003"
+      const card = { ...GUARD, key: "wa.alert", scope: "made-up-me", value: number }
+      const posted = await post(decision(card))
+      expect((await approve(posted.id, posted.updatedAt, data)).ok).toBe(true)
+      const seed = join(data, "whatsapp", "alert-seed.json")
+      expect(JSON.parse(readFileSync(seed, "utf8"))).toEqual({ at: expect.any(Number), number })
+      expect(statSync(seed).mode & 0o777).toBe(0o600)
+      expect(statSync(join(data, "whatsapp")).mode & 0o777).toBe(0o700)
+      const other = folder()
+      const who = { actor: "test", author: "owner", inboxRef: null, reason: "by hand" }
+      expect(
+        setSetting(other, { key: "wa.alert", scope: "made-up-me", value: number }, who).ok,
+      ).toBe(true)
+      expect(existsSync(join(other, "whatsapp", "alert-seed.json"))).toBe(false)
+    })
+
+    test("a wa.alert card's Approve seeds the number when it was already set by hand, as the README says (#2748)", async () => {
+      const data = folder()
+      const number = "+15550100003"
+      const who = { actor: "test", author: "owner", inboxRef: null, reason: "by hand" }
+      expect(
+        setSetting(data, { key: "wa.alert", scope: "made-up-me", value: number }, who).ok,
+      ).toBe(true)
+      const seed = join(data, "whatsapp", "alert-seed.json")
+      expect(existsSync(seed)).toBe(false)
+      const card = { ...GUARD, key: "wa.alert", scope: "made-up-me", value: number }
+      const posted = await post(decision(card))
+      expect((await approve(posted.id, posted.updatedAt, data)).ok).toBe(true)
+      expect(JSON.parse(readFileSync(seed, "utf8"))).toEqual({ at: expect.any(Number), number })
+    })
+
+    test.each(["wa.device", "wa.owner"])(
+      "a %s card's Approve sets the number, so first run's WhatsApp setup works through the Inbox (PG-2821)",
+      async (key) => {
+        const data = folder()
+        const number = "+15550100004"
+        const posted = await post(decision({ ...GUARD, key, scope: "made-up-me", value: number }))
+        expect((await approve(posted.id, posted.updatedAt, data)).ok).toBe(true)
+        expect(readSetting(data, key)?.rows).toEqual([{ key, scope: "made-up-me", value: number }])
+      },
+    )
 
     test("a card its poster changed after the owner read it cannot be approved with the old reading", async () => {
       const data = folder()
@@ -5905,6 +7094,379 @@ describe.skipIf(!dockerUp())("the inbox store", () => {
       expect((await store.getItem(db, unseen.id))?.status).toBe("open")
       expect(writes(data)).toBe(before)
       expect(rows(data)).toEqual(ACCOUNTS)
+    })
+  })
+  describe("a clone decision's post and Approve (PG-2205)", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "inbox-clone-"))
+    afterAll(() => rmSync(scratch, { force: true, recursive: true }))
+    const ME = "made-up-me"
+    let n = 0
+    const git = (cwd: string, ...args: string[]) =>
+      Bun.spawnSync(["git", ...args], { cwd, stderr: "pipe", stdout: "pipe" })
+    // the checkout's guard lists, read alone: the seed copies them into the scratch login repo
+    const LISTS = join(import.meta.dir, "../../../../../../extensions/core/lists")
+    // A new machine: a data folder with no extensions root yet, and a scratch bare repo with one commit (settings.json and any files given) standing in for each private GitHub repo a fake gh shows, signed in as made-up-me; no real repo is read or made.
+    const machine = (
+      slugs = [`${ME}/playground-${ME}`, `${ME}/playground-made-up-tools`],
+      files: Record<string, string> = {},
+      lists = LISTS,
+    ) => {
+      const at = join(scratch, `${n++}`)
+      const data = join(at, "data")
+      const repos = new Map<string, string>()
+      for (const slug of slugs) {
+        const bare = join(at, `${slug.replace("/", "-")}.git`)
+        const work = join(at, `${slug.replace("/", "-")}-work`)
+        mkdirSync(work, { recursive: true })
+        git(at, "init", "-q", "--bare", "-b", "main", bare)
+        git(work, "init", "-q", "-b", "main")
+        for (const [path, text] of Object.entries({ "settings.json": "{}\n", ...files })) {
+          mkdirSync(dirname(join(work, path)), { recursive: true })
+          writeFileSync(join(work, path), text)
+        }
+        git(work, "add", "-A")
+        git(
+          work,
+          "-c",
+          "user.name=made-up",
+          "-c",
+          "user.email=made-up",
+          "commit",
+          "-q",
+          "-m",
+          "seed",
+        )
+        git(work, "push", "-q", bare, "HEAD:main")
+        repos.set(slug, bare)
+      }
+      const ghCalls: string[] = []
+      const gh: Run = async (argv) => {
+        ghCalls.push(argv.join(" "))
+        const [cmd, area, verb, slug = ""] = argv
+        if (cmd !== "gh") return { code: 1, out: "" }
+        if (area === "api") return { code: 0, out: `${ME}\n` }
+        if (area === "repo" && verb === "view" && repos.has(slug))
+          return { code: 0, out: `PRIVATE ${repos.get(slug)}\n` }
+        return { code: 1, out: "" }
+      }
+      const calls: string[][] = []
+      // `playground ext <args>` as runCli runs it: off a terminal with no --yes, so it makes no repo; init --dry-run prints its JSON, and a refusal its error with exit 1
+      const run: ExtRun = async (args) => {
+        calls.push(args)
+        const lines: string[] = []
+        const io = { data, out: (line: string) => lines.push(line) } as unknown as Io
+        try {
+          if (args[0] === "init" && args[1] === "--dry-run")
+            return { code: 0, err: "", out: JSON.stringify(await extInitCheck(data, gh)) }
+          const code = await extVerb(args[0] as "add" | "init", args.slice(1), io, gh, NO)
+          return { code, err: "", out: lines.join("\n") }
+        } catch (error) {
+          return { code: 1, err: `playground ext: ${(error as Error).message}`, out: "" }
+        }
+      }
+      const clone: CloneRun = { lists, run }
+      return { calls, clone, data, ghCalls }
+    }
+    const approveWith = (id: string, clone: CloneRun, data: string) =>
+      store.answerItem(
+        db,
+        id,
+        { action: "approve" },
+        {
+          actor,
+          clone,
+          settingsData: data,
+        },
+      )
+    const made = (ghCalls: string[]) => ghCalls.filter((call) => call.startsWith("gh repo create"))
+    const NO = async () => false
+    const card = (data: string, scopes = [ME, "made-up-tools"]) => ({
+      repos: scopes.map((scope) => ({
+        folder: scopeDir(data, scope),
+        repo: `${ME}/playground-${scope}`,
+        scope,
+      })),
+      type: "clone",
+      why: "This new machine has no extensions yet",
+    })
+    const postClone = async (preview: object, data?: string) => {
+      const posted = await store.postItem(db, decision(preview), undefined, undefined, data)
+      if (!posted.ok) throw new Error(posted.message)
+      return posted.item
+    }
+    // chflags off PATH, as on Linux, whose machines take no lock on the extensions root: git alone, by a link in a folder of its own
+    const linuxPath = () => {
+      const bin = join(scratch, `bin-${n++}`)
+      mkdirSync(bin)
+      symlinkSync(Bun.which("git")!, join(bin, "git"))
+      return bin
+    }
+
+    test("a card naming each repo and the folder it fills in this machine's extensions posts; a folder that is not its scope's there, or no data folder to read, is refused", async () => {
+      const { data } = machine()
+      expect((await store.postItem(db, decision(card(data)), undefined, undefined, data)).ok).toBe(
+        true,
+      )
+      const before = (await store.openItems(db)).length
+      const elsewhere = card(data)
+      elsewhere.repos[1]!.folder = join(scratch, "elsewhere", "made-up-tools")
+      for (const [preview, folder] of [
+        [elsewhere, data],
+        [card(data), undefined],
+      ] as const) {
+        expect(
+          await store.postItem(db, decision(preview), undefined, undefined, folder),
+          JSON.stringify(preview),
+        ).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      }
+      expect((await store.openItems(db)).length).toBe(before)
+    })
+
+    test("Approve clones each repo into the data folder's extensions root, the login's by ext init and the rest by ext add, making no repo and with no chflags on PATH, and records the line under cloned", async () => {
+      const { calls, clone, data } = machine()
+      const posted = await postClone(card(data), data)
+      const path = process.env.PATH
+      process.env.PATH = linuxPath()
+      let answered: Awaited<ReturnType<typeof store.answerItem>>
+      try {
+        answered = await store.answerItem(
+          db,
+          posted.id,
+          { action: "approve" },
+          {
+            actor,
+            clone,
+            settingsData: data,
+          },
+        )
+      } finally {
+        process.env.PATH = path
+      }
+      expect(answered.ok && answered.item.status).toBe("approved")
+      expect(calls).toEqual([
+        ["init", "--dry-run"],
+        ["init"],
+        ["add", "made-up-tools", `${ME}/playground-made-up-tools`],
+      ])
+      expect(readFileSync(loginPath(data), "utf8")).toBe(`${ME}\n`)
+      for (const scope of [ME, "made-up-tools"])
+        expect(existsSync(join(scopeDir(data, scope), ".git", "HEAD")), scope).toBe(true)
+      const seeded = GUARD_LISTS.filter((name) => existsSync(join(LISTS, `${name}.json`)))
+      for (const name of seeded)
+        expect(
+          JSON.parse(readFileSync(join(scopeDir(data, ME), "lists", `${name}.json`), "utf8")),
+          name,
+        ).toEqual(JSON.parse(readFileSync(join(LISTS, `${name}.json`), "utf8")))
+      // core ships no no-public-leak list, so the line names it as still missing
+      const missing = GUARD_LISTS.filter((name) => !seeded.includes(name))
+      expect(missing).toContain("no-public-leak")
+      expect((await store.getItem(db, posted.id))?.answer).toMatchObject({
+        cloned: {
+          exitCode: 0,
+          line: `${ME}/playground-${ME} into ${scopeDir(data, ME)}, ${ME}/playground-made-up-tools into ${scopeDir(data, "made-up-tools")}; seeded ${seeded.length} of the guards' lists, kept 0 already there; still missing: ${missing.join(", ")}`,
+        },
+      })
+    })
+
+    test("the seed keeps a list the login's repo already holds, and a second seed changes nothing", async () => {
+      const KEPT = '["made-up-kept"]\n'
+      const { clone, data } = machine(undefined, { "lists/slack-cleared.json": KEPT })
+      const posted = await postClone(card(data), data)
+      await approveWith(posted.id, clone, data)
+      const seeded = GUARD_LISTS.filter(
+        (name) => name !== "slack-cleared" && existsSync(join(LISTS, `${name}.json`)),
+      )
+      expect((await store.getItem(db, posted.id))?.answer).toMatchObject({
+        cloned: {
+          exitCode: 0,
+          line: expect.stringContaining(
+            `; seeded ${seeded.length} of the guards' lists, kept 1 already there`,
+          ),
+        },
+      })
+      const listFile = join(scopeDir(data, ME), "lists", "slack-cleared.json")
+      expect(readFileSync(listFile, "utf8")).toBe(KEPT)
+      const head = () => git(scopeDir(data, ME), "rev-parse", "HEAD").stdout.toString().trim()
+      const before = head()
+      const again = importLists(
+        data,
+        LISTS,
+        false,
+        { actor: actor.email, author: "owner", inboxRef: null, reason: "a second seed" },
+        true,
+      )
+      expect(again.ok).toBe(true)
+      expect(again.ok && again.lines.filter((line) => !line.startsWith("- "))).toEqual(
+        GUARD_LISTS.filter((name) => name === "slack-cleared" || seeded.includes(name)).map(
+          (name) => `= list ${ME} ${name} kept`,
+        ),
+      )
+      expect(head()).toBe(before)
+      expect(readFileSync(listFile, "utf8")).toBe(KEPT)
+    })
+
+    test("a seed that fails after the clone keeps the clone and records which part failed", async () => {
+      const lists = join(scratch, `lists-${n++}`)
+      mkdirSync(lists)
+      // a list holding a URL with a password, built at run time, which the seed refuses
+      writeFileSync(
+        join(lists, "slack-cleared.json"),
+        JSON.stringify([`https://made-up:${"x".repeat(8)}@example.com`]),
+      )
+      const { clone, data } = machine(undefined, {}, lists)
+      const posted = await postClone(card(data), data)
+      await approveWith(posted.id, clone, data)
+      const answer = (await store.getItem(db, posted.id))?.answer as unknown as {
+        cloned: { exitCode: number; line: string }
+      }
+      expect(answer.cloned.exitCode).toBe(1)
+      expect(answer.cloned.line).toStartWith(
+        `cloned ${ME}/playground-${ME} into ${scopeDir(data, ME)}, ${ME}/playground-made-up-tools into ${scopeDir(data, "made-up-tools")}; seeding the guards' lists failed: `,
+      )
+      expect(answer.cloned.line).toContain("a URL with a password")
+      for (const scope of [ME, "made-up-tools"])
+        expect(existsSync(join(scopeDir(data, scope), ".git", "HEAD")), scope).toBe(true)
+      expect(existsSync(join(scopeDir(data, ME), "lists", "slack-cleared.json"))).toBe(false)
+    })
+
+    test("refuses on a machine whose extensions root already holds a repo's folder: as it is posted, and at Approve before anything runs or is recorded", async () => {
+      const { calls, clone, data } = machine()
+      const posted = await postClone(card(data), data)
+      mkdirSync(scopeDir(data, "made-up-tools"), { recursive: true })
+      const refused = await store.postItem(db, decision(card(data)), undefined, undefined, data)
+      expect(refused).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(!refused.ok && refused.message).toContain(scopeDir(data, "made-up-tools"))
+      const approved = await store.answerItem(
+        db,
+        posted.id,
+        { action: "approve" },
+        {
+          actor,
+          clone,
+          settingsData: data,
+        },
+      )
+      expect(approved).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(!approved.ok && approved.message).toContain(scopeDir(data, "made-up-tools"))
+      expect(calls).toEqual([])
+      expect((await store.getItem(db, posted.id))?.status).toBe("open")
+      expect(existsSync(scopeDir(data, ME))).toBe(false)
+    })
+
+    test("a first repo other than the one ext init would clone for gh's login clones nothing, its line saying why", async () => {
+      const { calls, clone, data } = machine([`${ME}/playground-made-up-tools`])
+      const posted = await postClone(card(data, ["made-up-tools"]), data)
+      await store.answerItem(
+        db,
+        posted.id,
+        { action: "approve" },
+        {
+          actor,
+          clone,
+          settingsData: data,
+        },
+      )
+      expect(calls).toEqual([["init", "--dry-run"]])
+      expect((await store.getItem(db, posted.id))?.answer).toMatchObject({
+        cloned: { exitCode: 1 },
+      })
+      expect(existsSync(scopeDir(data, "made-up-tools"))).toBe(false)
+    })
+
+    test("a first repo not on GitHub clones nothing and makes no repo, since ext init answers no off a terminal", async () => {
+      const { calls, clone, data, ghCalls } = machine([])
+      const posted = await postClone(card(data, [ME]), data)
+      await approveWith(posted.id, clone, data)
+      expect(calls).toEqual([["init", "--dry-run"]])
+      expect((await store.getItem(db, posted.id))?.answer).toMatchObject({
+        cloned: {
+          exitCode: 1,
+          line: `${ME}/playground-${ME} is not on GitHub, so nothing was cloned`,
+        },
+      })
+      expect(made(ghCalls)).toEqual([])
+      expect(existsSync(scopeDir(data, ME))).toBe(false)
+    })
+
+    test("a later repo not on GitHub stops the clone there, making no repo: the line names the repos cloned and those not, and a second card for them is refused, naming the folders already there", async () => {
+      const { calls, clone, data, ghCalls } = machine([`${ME}/playground-${ME}`])
+      const posted = await postClone(card(data), data)
+      await approveWith(posted.id, clone, data)
+      expect(calls.map((args) => args[0])).toEqual(["init", "init", "add"])
+      expect(made(ghCalls)).toEqual([])
+      const answer = (await store.getItem(db, posted.id))?.answer as unknown as { cloned: object }
+      expect(answer.cloned).toMatchObject({ exitCode: 1 })
+      expect(JSON.stringify(answer.cloned)).toContain(
+        `cloned ${ME}/playground-${ME} into ${scopeDir(data, ME)}; ${ME}/playground-made-up-tools failed: `,
+      )
+      expect(existsSync(join(scopeDir(data, ME), ".git", "HEAD"))).toBe(true)
+      expect(existsSync(scopeDir(data, "made-up-tools"))).toBe(false)
+      const again = await store.postItem(db, decision(card(data)), undefined, undefined, data)
+      expect(again).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(!again.ok && again.message).toContain(scopeDir(data, ME))
+    })
+
+    test("Approve checks the card again as it runs: a stored card past 20 repos, or one whose folder is not its scope's here, runs nothing", async () => {
+      const { calls, clone, data } = machine()
+      const many = await postClone(card(data), data)
+      const twentyOne = {
+        ...card(data),
+        repos: Array.from({ length: 21 }, (_, at) => ({
+          folder: scopeDir(data, `made-up-${at}`),
+          repo: `${ME}/playground-made-up-${at}`,
+          scope: `made-up-${at}`,
+        })),
+      }
+      const moved = await postClone(card(data), data)
+      const away = card(data)
+      away.repos[0]!.folder = join(scratch, "elsewhere", ME)
+      for (const [item, preview] of [
+        [many, twentyOne],
+        [moved, away],
+      ] as const) {
+        // written past postItem's checks, as a row changed after it was posted
+        const writer = new SQL(url, { max: 1 })
+        await writer`update inbox_item set preview = ${JSON.stringify(preview)}::text::jsonb where id = ${item.id}`
+        await writer.close()
+        expect(await approveWith(item.id, clone, data), item.id).toMatchObject({
+          code: "VALIDATION_ERROR",
+          ok: false,
+        })
+        expect((await store.getItem(db, item.id))?.status).toBe("open")
+      }
+      expect(calls).toEqual([])
+    })
+
+    test("Deny and Later run nothing, and a dashboard with no runner refuses Approve", async () => {
+      const { calls, clone, data } = machine()
+      const denied = await postClone(card(data), data)
+      await store.answerItem(
+        db,
+        denied.id,
+        { action: "deny" },
+        {
+          actor,
+          clone,
+          settingsData: data,
+        },
+      )
+      const later = await postClone(card(data), data)
+      await store.answerItem(
+        db,
+        later.id,
+        { action: "clear" },
+        {
+          actor,
+          clone,
+          settingsData: data,
+        },
+      )
+      const bare = await postClone(card(data), data)
+      expect(
+        await store.answerItem(db, bare.id, { action: "approve" }, { actor, settingsData: data }),
+      ).toMatchObject({ code: "VALIDATION_ERROR", ok: false })
+      expect(calls).toEqual([])
+      expect(existsSync(scopeDir(data, ME))).toBe(false)
     })
   })
 })

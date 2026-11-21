@@ -1,15 +1,21 @@
-// playground uninstall: the LaunchAgents, the Dashboard's stack, the home skill set and the links go; the data folder and the database stay unless --purge, which asks first, then removes the database and moves the data folder aside.
+// playground uninstall: the LaunchAgents (on Linux the systemd user units), the Dashboard's stack, the home skill set and the links go; the data folder and the database stay unless --purge, which asks first, then removes the database and moves the data folder aside.
 import { lstatSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 
+import { userSystemctl } from "../user-systemctl"
 import { linksInto } from "./links"
 import type { Run } from "./update"
 
-// The LaunchAgents that run something from the checkout (a worktree of it included) or the data folder, A to Z.
-export const ourPlists = (agents: string, repo: string, data: string): string[] => {
+// The LaunchAgents, or with suffix .service the systemd user units, that run something from the checkout (a worktree of it included) or the data folder, A to Z.
+export const ourJobFiles = (
+  agents: string,
+  repo: string,
+  data: string,
+  suffix = ".plist",
+): string[] => {
   let names: string[] = []
   try {
-    names = readdirSync(agents).filter((name) => name.endsWith(".plist"))
+    names = readdirSync(agents).filter((name) => name.endsWith(suffix))
   } catch {}
   return names
     .map((name) => join(agents, name))
@@ -49,6 +55,7 @@ type Options = {
   database: string
   home: string
   log: (line: string) => void
+  platform?: NodeJS.Platform
   purge: boolean
   repo: string
   run: Run
@@ -60,11 +67,22 @@ export const uninstall = async (o: Options): Promise<number> => {
     o.log("playground uninstall: nothing removed")
     return 1
   }
-  for (const plist of ourPlists(join(o.home, "Library", "LaunchAgents"), o.repo, o.data)) {
-    await o.run(["launchctl", "bootout", `gui/${process.getuid!()}`, plist])
-    rmSync(plist, { force: true })
-    o.log(`removed ${plist}`)
+  const linux = (o.platform ?? process.platform) === "linux"
+  const agents = linux
+    ? join(o.home, ".config", "systemd", "user")
+    : join(o.home, "Library", "LaunchAgents")
+  const ours = ourJobFiles(agents, o.repo, o.data, linux ? ".service" : ".plist")
+  for (const file of ours) {
+    await o.run(
+      linux
+        ? userSystemctl(["disable", "--now", basename(file)])
+        : ["launchctl", "bootout", `gui/${process.getuid!()}`, file],
+    )
+    rmSync(file, { force: true })
+    o.log(`removed ${file}`)
   }
+  // systemd forgets the removed units at a reload
+  if (linux && ours.length) await o.run(userSystemctl(["daemon-reload"]))
   // a stack that would not stop is named with its last output line, and the run ends 1 once the rest is done
   let failed = false
   for (const checkout of o.stacks) {

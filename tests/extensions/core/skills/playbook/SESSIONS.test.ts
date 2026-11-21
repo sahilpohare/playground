@@ -18,6 +18,14 @@ describe("SESSIONS.md", () => {
     )
   })
 
+  test("a lead that holds a PR tells its reviewer, which stops its push waiter until the resume (#2343)", async () => {
+    const fixes =
+      (await Bun.file(SESSIONS).text()).split("## Fix pushes and nits")[1]?.split("\n## ")[0] ?? ""
+    expect(fixes).toContain("A lead that holds a PR")
+    expect(fixes).toContain("sends its reviewer the hold, then the resume")
+    expect(fixes).toContain("The reviewer stops its push waiter with `TaskStop` until the resume")
+  })
+
   test("holds the brief templates' fill rule (#1664)", async () => {
     const text = await Bun.file(SESSIONS).text()
     expect(text).toContain("a fill replaces those tokens alone")
@@ -67,5 +75,26 @@ describe("SESSIONS.md", () => {
     const loosening = lines.find((l) => l.includes("A loosening's plan and brief")) ?? ""
     expect(loosening).toContain("name the one class of forms it lets run")
     expect(loosening).toContain("every other form keeps canary's verdict")
+  })
+})
+
+// issue 2030: spawn.sh's account and brief arguments, in the words a start script needs
+describe("SPAWN.md and SESSIONS.md name the start's account and brief path", () => {
+  test("--account names the login by its full email, and a start script resolves it into $acct", async () => {
+    const spawn = await Bun.file(SPAWN).text()
+    const account = spawn.split("## --account")[1]?.split("\n## ")[0] ?? ""
+    expect(account).toContain("never its domain alone, since one domain can match two logins")
+    expect(account).toContain("`acct=$(bun packages/scripts/src/playground/cli.ts accounts list")
+    const sessions = await Bun.file(SESSIONS).text()
+    expect(sessions).toContain("`--account` takes the login's full email")
+    expect(sessions).toContain("resolves it into `$acct` in the start script")
+  })
+
+  test("the brief path is read relative to ~/.playground, and a bare file name is refused", async () => {
+    const spawn = await Bun.file(SPAWN).text()
+    expect(spawn).toContain(
+      "reads `<brief>` relative to `~/.playground` (`handoffs/brief-<name>.md`)",
+    )
+    expect(spawn).toContain("a bare file name fails with `is not a file`")
   })
 })

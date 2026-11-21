@@ -1,13 +1,40 @@
 import { readdir } from "node:fs/promises"
 import { join } from "node:path"
 
+import { configDirOf } from "@packages/env/data-dir"
+
 import { opsDir } from "../ops-job/job"
+import { PEER_QUEUE } from "../playground/send"
 import { writeAtomic } from "../write-atomic"
 
-export type Queued = { at: string; job: string; text: string; to: string }
+export type Queued = { at: string; from?: string; job: string; text: string; to: string }
 
-// The outbox lines notify.sh queued since the last drain, oldest first, for Ops' sweep to send (a script cannot SendMessage, ADR 0010); cursor.json holds each queue's byte offset, and is rewritten only when a line went out, the move relay-watch in ops-tick reads; a first run starts it at every queue's end.
-export async function drain(outbox: string): Promise<Queued[]> {
+// A queue file's job, from its name alone (ops-<job>.jsonl), never from a line it holds.
+export const jobOf = (file: string): string => file.slice("ops-".length, -".jsonl".length)
+
+// A line as a session reads it, led by its queue file's job, so the line's own words never name the job that sent it.
+export const tagged = (file: string, text: string): string => `[ops-${jobOf(file)}] ${text}`
+
+// A line's words, led by its sender's name when it has one, as a playground send's has.
+export const said = (entry: { from?: string; text?: string }): string =>
+  `${entry.from ? `${entry.from}: ` : ""}${entry.text ?? ""}`
+
+// The names of this machine's sessions, from Claude Code's registry ({name, sessionId} files, as scripts/hooks/role.ts reads it), an unreadable one naming none.
+export async function localNames(configDir = configDirOf(process.env)): Promise<Set<string>> {
+  const dir = join(configDir, "sessions")
+  const names = new Set<string>()
+  for (const file of await readdir(dir).catch(() => [])) {
+    if (!file.endsWith(".json")) continue
+    const entry = (await Bun.file(join(dir, file))
+      .json()
+      .catch(() => null)) as { name?: unknown } | null
+    if (typeof entry?.name === "string") names.add(entry.name)
+  }
+  return names
+}
+
+// The outbox lines notify.sh queued since the last drain, oldest first, for Ops' sweep to send whole (a script cannot SendMessage, ADR 0010), each its job and its text's lead tag read from its queue file (`tagged`); cursor.json holds each queue's byte offset, and is rewritten only when it moved, the move relay-watch in ops-tick reads; a first run starts it at every queue's end. An ops-peer line goes out only when its to is one of this machine's sessions, the backstop for one with no alerts-wait running; every other one stays in its file, read on the other machine, and the cursor moves past it.
+export async function drain(outbox: string, here?: Set<string>): Promise<Queued[]> {
   if (await Bun.file(join(outbox, "relay.py")).exists())
     throw new Error(`${outbox}/relay.py owns cursor.json here: its relay sends these lines`)
   const cursorPath = join(outbox, "cursor.json")
@@ -33,15 +60,19 @@ export async function drain(outbox: string): Promise<Queued[]> {
       .decode(bytes.subarray(from, end))
       .split("\n")
       .filter(Boolean)) {
+      let queued: Queued
       try {
-        out.push(JSON.parse(line) as Queued)
+        queued = JSON.parse(line) as Queued
       } catch {
         throw new Error(`${file}: unreadable line at byte ${from}: ${line.slice(0, 120)}`)
       }
+      if (file === PEER_QUEUE && !(here ??= await localNames()).has(queued.to)) continue
+      out.push({ ...queued, job: jobOf(file), text: tagged(file, said(queued)) })
     }
     next[file] = end
   }
-  if (raw === null || out.length) await writeAtomic(cursorPath, JSON.stringify(next))
+  if (raw === null || queues.some((file) => next[file] !== cursor[file]))
+    await writeAtomic(cursorPath, JSON.stringify(next))
   return out.sort((a, b) => a.at.localeCompare(b.at))
 }
 

@@ -1,5 +1,6 @@
-// Merge-on-ready: a PR ready before another merges straight away, so each gated PR, in queue order, merges at once through pr:merge when every gate passes, GitHub's checks at its head included. One merge a call.
+// Merge-on-ready: a PR ready before another merges straight away, so each gated PR, in queue order, merges at once through pr:merge when every gate passes, GitHub's checks at its head included. One merge a call. Each call first writes every read PR's failing gates to gates.json, which the Dashboard's Ready reads.
 import { gatesOf, marksReady } from "./gates"
+import { gatesFile, writeGates } from "./gates-file"
 import { gateOptions, prMerge, repoOf, runGh, type Outcome, type Run } from "./merge"
 import { gatedOf, resolve, type TrainLocal } from "./train"
 import { TYPES_BUDGET_MS } from "./types"
@@ -30,7 +31,7 @@ export async function mergeReady(
   run: Run = runGh,
   local: ReadyLocal = {},
 ): Promise<Readied> {
-  const { facts, queue } = resolve(local)
+  const { facts, gates, queue } = resolve(local)
   const name = await repoOf(run, repo)
   const options = await gateOptions(name)
   // every types gate in one call shares one budget, so a call that refuses several PRs still ends inside the merge train's 900s
@@ -38,7 +39,15 @@ export async function mergeReady(
   const merge =
     local.merge ??
     ((n: number, typesBudgetMs: number) => prMerge(n, { repo: name }, run, { typesBudgetMs }))
-  const { held, order } = await gatedOf(run, name, facts, queue)
+  const { held, order, reads } = await gatedOf(run, name, facts, queue)
+  // a file it cannot write costs the Dashboard's read, never this cycle's merge
+  if (gates)
+    await writeGates(gates, gatesFile(name, reads, new Date().toISOString())).catch(
+      (err: unknown) =>
+        console.error(
+          `pr:train ready: gates.json not written: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    )
   const unreadable = held.filter(({ why }) => why.startsWith("not gated: facts unreadable"))
   const readied: Readied = { refused: [], unreadable }
   for (const { facts: pr, n } of order) {

@@ -1,6 +1,7 @@
 "use client"
 
 import { measureNaturalWidth, prepare } from "@chenglou/pretext"
+import { PROGRESS_LANGUAGE, progressItems } from "@packages/config/inbox"
 import {
   RiAlertLine,
   RiErrorWarningLine,
@@ -28,6 +29,7 @@ import {
 
 import { SessionsContext } from "@/components/dashboard/dashboard"
 import { Hint } from "@/components/hint"
+import { ProgressBlock } from "@/components/progress-block"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   CodeBlock,
@@ -189,18 +191,18 @@ const transcriptHeading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6", size: s
   return Heading
 }
 
-// A fenced block draws as shadcn's CodeBlock, one border with nothing around it, its tokens from shadcn's own highlighter in the theme's light or dark colours, on the page's background so they read on any bubble, its long lines wrapping, and Copy over its top-right corner on hover and focus. Streamdown's pre marks a fenced block's code data-block, so inline code stays Streamdown's, and names its language in a language-<name> class.
+// The language a fenced block's language-<name> class names, or none.
+const languageOf = (className?: string) => /language-(\S+)/.exec(className ?? "")?.[1] ?? ""
+
+// A fenced block draws as shadcn's CodeBlock, one border with nothing around it, its tokens from shadcn's own highlighter in the theme's light or dark colours, on the page's background so they read on any bubble, its long lines wrapping, and Copy over its top-right corner on hover and focus; a progress block whose every line reads draws as its bars instead. Streamdown's pre marks a fenced block's code data-block, so inline code stays Streamdown's, and names its language in a language-<name> class.
 const transcriptCode = (card: boolean) => {
   function TranscriptCode(props: ComponentProps<typeof StreamdownCode>) {
     if (!("data-block" in props)) return <StreamdownCode {...props} />
     const { children, className } = props
-    return (
-      <FencedCode
-        card={card}
-        className={className}
-        text={typeof children === "string" ? children : ""}
-      />
-    )
+    const text = typeof children === "string" ? children : ""
+    const progress = languageOf(className) === PROGRESS_LANGUAGE ? progressItems(text) : null
+    if (progress?.ok) return <ProgressBlock items={progress.items} />
+    return <FencedCode card={card} className={className} text={text} />
   }
   return TranscriptCode
 }
@@ -250,7 +252,7 @@ function FencedCode({
   className?: string
   text: string
 }) {
-  const language = /language-(\S+)/.exec(className ?? "")?.[1] ?? ""
+  const language = languageOf(className)
   const code = text.replace(/\n$/, "")
   const lines = useHighlightedCode(code, language)
   const diffs = language === "diff" ? code.split("\n").map(diffLine) : []

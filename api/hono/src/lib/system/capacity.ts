@@ -11,7 +11,7 @@ export const RESERVE_SHARE = 0.15
 
 export type Limit = "cpu" | "memory" | "pressure"
 
-// Swap is shown but never judged: macOS adds swap files as it needs them, so the share in use rises and falls with no change in strain, and the pressure level is macOS's own word for when swapping hurts.
+// Swap is shown but never judged: macOS adds swap files as it needs them, so the share in use rises and falls with no change in strain, and the pressure level (macOS's own, on Linux PSI's) is the word for when swapping hurts.
 export type CapacityInput = {
   cores: number
   freePercent: number | null
@@ -26,7 +26,7 @@ export type Fit = { count: number; limitedBy: Limit | null; line: string }
 
 const gb = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`
 
-// Pure: how many more sessions of one cost fit, by whichever of memory and CPU runs out first, and none at all while macOS reports memory pressure. Memory room is what macOS counts as free (the share memory_pressure prints) less the reserve; CPU room is the cores less the 5-minute load. Unknown free memory counts as no room, since a guess here spawns sessions.
+// Pure: how many more sessions of one cost fit, by whichever of memory and CPU runs out first, and none at all while the machine reports memory pressure. Memory room is the free share (on macOS the share memory_pressure prints, on Linux MemAvailable's) less the reserve; CPU room is the cores less the 5-minute load. Unknown free memory counts as no room, since a guess here spawns sessions.
 export function fitOf(
   input: CapacityInput,
   cost: { bytes: number; cores: number },

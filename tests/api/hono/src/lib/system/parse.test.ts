@@ -8,6 +8,7 @@ import {
   parseCwds,
   parseDockerHost,
   parseHolders,
+  parsePeer,
   parsePs,
   parseSockets,
   parseSysctl,
@@ -170,5 +171,52 @@ describe("docker", () => {
     expect(bytesOf("512kB")).toBe(512_000)
     expect(bytesOf("0B")).toBe(0)
     expect(bytesOf("12 parsecs")).toBeNull()
+  })
+})
+
+describe("parsePeer", () => {
+  // what `df -kP ~; cat /proc/loadavg /proc/meminfo /proc/stat` prints on a 4-core Linux machine, shortened
+  const DF = [
+    "Filesystem     1024-blocks      Used Available Capacity Mounted on",
+    "/dev/nvme0n1p2  3936872448 299186688 3637685760       8% /",
+  ]
+  const OUT = [
+    ...DF,
+    "0.01 0.07 0.06 1/794 1112766",
+    "MemTotal:       127598704 kB",
+    "MemFree:        100000000 kB",
+    "MemAvailable:   123169288 kB",
+    "SwapTotal:      16777212 kB",
+    "SwapFree:       16777212 kB",
+    "cpu  7990 1 16886 31958492 3496 0 313 0 0 0",
+    "cpu0 1995 0 3498 7989093 269 0 295 0 0 0",
+    "cpu1 2146 0 4822 7991464 257 0 15 0 0 0",
+    "cpu2 2265 1 5068 7988971 2970 0 3 0 0 0",
+    "cpu3 1584 0 3498 7988964 0 0 0 0 0 0",
+    "intr 1 2 3",
+  ].join("\n")
+
+  test("reads the home's free and total size, the load, memory in use as free counts it, swap and one core per cpuN line", () => {
+    expect(parsePeer(OUT)).toEqual({
+      cores: 4,
+      disk: { freeBytes: 3637685760 * 1024, totalBytes: 3936872448 * 1024 },
+      load: [0.01, 0.07, 0.06],
+      memory: { totalBytes: 127598704 * 1024, usedBytes: (127598704 - 123169288) * 1024 },
+      swap: { totalBytes: 16777212 * 1024, usedBytes: 0 },
+    })
+  })
+
+  test("a reading missing its load, memory or cores is no reading, never zeros; swap alone may be missing", () => {
+    expect(parsePeer("")).toBeNull()
+    expect(parsePeer(OUT.replace(/^MemAvailable.*$/m, ""))).toBeNull()
+    expect(parsePeer(OUT.replace(/^cpu\d+ .*$/gm, ""))).toBeNull()
+    expect(parsePeer(OUT.replace("0.01 0.07 0.06", "Permission denied"))).toBeNull()
+    expect(parsePeer(OUT.replace(/^Swap.*$/gm, ""))?.swap).toBeNull()
+  })
+
+  test("a df that printed nothing leaves the disk out and keeps every other figure", () => {
+    const withoutDf = parsePeer(OUT.replace(DF.join("\n"), ""))
+    expect(withoutDf?.disk).toBeNull()
+    expect(withoutDf).toMatchObject({ cores: 4, load: [0.01, 0.07, 0.06] })
   })
 })

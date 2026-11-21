@@ -14,6 +14,8 @@ import {
   settingHistory,
   extGit,
   extensionsDir,
+  jobKey,
+  RETIRED,
   scopeDir,
   type Who,
   writeFiles,
@@ -294,6 +296,24 @@ describe("a job row an older install stored (PG-1439)", () => {
       status: 400,
     })
     expect(file(data, `${ME}/settings.json`)[key]).toEqual(stored)
+  })
+})
+
+describe("a retired job's stored row (#2339)", () => {
+  test.each(RETIRED.map(jobKey))("reset takes %s out and answers ok", (key) => {
+    const data = fresh()
+    set(data, "folderFixture.count", ME, 2, who("make the login"))
+    const stored = { ...file(data, `${ME}/settings.json`), [key]: { enabled: true } }
+    writeFiles(data, ME, new Map([["settings.json", JSON.stringify(stored)]]), {
+      author: "owner",
+      reason: "a row kept from before the job retired",
+    })
+    expect(resetSetting(data, { key, scope: ME }, who("clear the retired row"))).toEqual({
+      key,
+      ok: true,
+      scope: ME,
+    })
+    expect(file(data, `${ME}/settings.json`)).toEqual({ "folderFixture.count": 2 })
   })
 })
 

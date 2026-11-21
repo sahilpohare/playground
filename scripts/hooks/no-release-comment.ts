@@ -3,6 +3,7 @@ import { join } from "node:path"
 
 import { coreDir } from "../../packages/settings/src/rendered"
 import { implicitRepos, type Repo, repoOf } from "./github"
+import { input } from "./input"
 import { guardList, isStrings } from "./lists"
 import {
   type Command,
@@ -257,7 +258,7 @@ const INLINE_QUERY =
   "Write the query and each of its fields in the command itself, not in a variable: gh api graphql -f query='query { viewer { login } }'. For a long one, write it to a file with the Write tool first and pass it by its literal absolute path (-F query=@/abs/query.graphql, -F body=@/abs/body.md)."
 
 const REWORD =
-  'Write "ship" or "publish step" instead, or leave the comment out. For a file or rule whose name holds the word, name it by what it is, such as "the ship rule" or "the comment hook", with its line number; for a patch that holds it, write the patch to a file in your scratchpad, send its absolute path to the PR\'s worker by SendMessage, and say in the comment that a patch went to the author, since gh\'s `--attach` uploads only images and video.'
+  'Write "ship" or "publish step" instead, or leave the comment out. For a file or rule whose name holds the word, name it by what it is, such as "the ship rule" or "the comment hook", with its line number; for a patch that holds it, write the patch to a file in your scratchpad, send the PR\'s worker one SendMessage holding its absolute path and, under it, its whole text, since an auto-end moves your scratch folder to the trash, and say in the comment that a patch went to the author, since gh\'s `--attach` uploads only images and video.'
 
 async function judge(
   what: string,
@@ -381,7 +382,7 @@ async function inspect(
 }
 
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text())
+  const reason = await check(await input("no-release-comment", "guard"))
   if (reason) {
     console.error(reason)
     process.exit(2)

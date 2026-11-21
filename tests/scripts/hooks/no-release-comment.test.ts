@@ -153,7 +153,7 @@ describe("a gh comment on a guarded owner's repo that contains the word is refus
     expect(reason).toContain("name it by what it is")
     expect(reason).toContain("with its line number")
     expect(reason).toContain(
-      "write the patch to a file in your scratchpad, send its absolute path to the PR's worker by SendMessage, and say in the comment that a patch went to the author",
+      "write the patch to a file in your scratchpad, send the PR's worker one SendMessage holding its absolute path and, under it, its whole text, since an auto-end moves your scratch folder to the trash, and say in the comment that a patch went to the author",
     )
     expect(reason).toContain("gh's `--attach` uploads only images and video")
     expect(reason).not.toContain("--attach <file>")

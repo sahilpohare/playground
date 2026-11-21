@@ -1,21 +1,31 @@
-// PreToolUse hook, acting for a factory session (role.ts) that runs on GLM alone: refuses a git commit whose staged files, or a git push whose commits the remote does not hold, touch a path that is Opus work (GLM was handed UI work three times, against "truly tiny" mechanical work only), and while load5 is over glm.readOnlyLoad5 (15 by default) any install, node_modules clone, commit or push (a GLM worker pushed twice at load5 20 to 30), and, by the glm rule, a headless Claude run, every org tool, a read of a guarded org's checkout and a database client aimed off this machine. It fails closed on a commit or push whose file list it cannot read, on an org tool whose repository or policy it cannot read, on a database client whose host it cannot read, and on a call it cannot parse inside a guarded checkout, and passes every other call.
+// PreToolUse hook, acting for a factory session (role.ts) that runs on GLM alone: refuses a git commit whose staged files, or a git push whose commits the remote does not hold, touch a path that is Opus work (GLM was handed UI work three times, against "truly tiny" mechanical work only), and while load5 is over glm.readOnlyLoad5 (15 by default) any install, node_modules clone, commit or push (a GLM worker pushed twice at load5 20 to 30), and, by the glm rule, a headless Claude run, every org tool, a read of a guarded org's checkout and a database client aimed off this machine. It fails closed on a commit or push whose file list it cannot read, on an org tool whose repository or policy it cannot read, on a database client whose host or input it cannot read, on a read path it cannot read or a recursive read past its walk, and on a call it cannot parse inside a guarded checkout, and passes every other call.
 
-import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs"
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from "node:fs"
 import { loadavg } from "node:os"
-import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import { dataDir } from "../../packages/env/src/data-dir"
+import { heldBy, pushRemote, withLiveBudget } from "../../packages/safe-delete/src/live-refs"
 import { guardedOrgs } from "../../packages/settings/src/ext"
 import { readPin } from "../../packages/settings/src/harnesses"
 import { readPolicy } from "../../packages/settings/src/rendered"
 import { ruleSettings } from "../../packages/settings/src/rules"
 import { implicitRepos, type Repo, remotes, repoOf } from "./github"
+import { input } from "./input"
 import { headless } from "./no-headless-login"
 import { fromFactory, registryName, sessionOf } from "./role"
 import {
   type Command,
   type Env,
   examine,
+  fromXargs,
   GIT_TAKES,
   knownVariables,
   lex,
@@ -25,6 +35,8 @@ import {
   pathOf,
   program,
   pythonModule,
+  readPath,
+  resolveText,
   run,
   slotWords,
   UV_TAKES,
@@ -34,6 +46,7 @@ import {
   type Visit,
   type Word,
 } from "./shell"
+import { heldReadings, heldWord, namings, NONE, type Steady, steadyNames } from "./steady"
 
 type Environment = Record<string, string | undefined>
 
@@ -120,16 +133,19 @@ const ORG_CALL = /\b(?:claude|curl|dm|gh|git|https?|wget|xh)\b|linear[-:]|mcp__/
 export const heavy = (path: string): boolean =>
   OPUS_PATHS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p))
 
-// Whether the session runs on GLM: spawn.sh's GLM launch points ANTHROPIC_BASE_URL at api.z.ai, else the backend pin spawn.sh keeps under the session's registry name names glm (readPin, either shape).
+// Whether the session runs on GLM or the local model, which the glm rule fences alike: spawn.sh's GLM launch points ANTHROPIC_BASE_URL at api.z.ai and its local launch at this machine's model server on 127.0.0.1:8000, else the backend pin spawn.sh keeps under the session's registry name names glm or local (readPin, either shape).
 export async function onGlm(raw: string, environment: Environment = process.env): Promise<boolean> {
-  if (/(?:^|\/\/|\.)api\.z\.ai(?:[:/]|$)/.test(environment.ANTHROPIC_BASE_URL ?? "")) return true
+  const base = environment.ANTHROPIC_BASE_URL ?? ""
+  if (/(?:^|\/\/|\.)api\.z\.ai(?:[:/]|$)/.test(base)) return true
+  if (/^https?:\/\/(?:127\.0\.0\.1|localhost):8000(?:\/|$)/.test(base)) return true
   const id = sessionOf(raw)
   if (typeof id !== "string") return false
   try {
     const name = await registryName(id, environment)
     if (!name || name.includes("/")) return false
     const pin = join(dataDir(environment), "backends", name)
-    return readPin(await Bun.file(pin).text())?.backend === "glm"
+    const backend = readPin(await Bun.file(pin).text())?.backend
+    return backend === "glm" || backend === "local"
   } catch {
     return false
   }
@@ -330,20 +346,14 @@ function rebased(
   named: string | undefined,
   source: string,
   dest: string,
-  not: string,
+  held: string[],
 ): [string, string] | undefined {
   const branch =
     dest === "HEAD"
       ? names(dir, ["symbolic-ref", "-q", "--short", "HEAD"])?.[0]
       : dest.replace(/^refs\/heads\//, "")
   if (!branch) return
-  const config = (key: string) => names(dir, ["config", "--get", key])?.[0]
-  const remote =
-    named ??
-    config(`branch.${branch}.pushRemote`) ??
-    config("remote.pushDefault") ??
-    config(`branch.${branch}.remote`) ??
-    "origin"
+  const remote = named ?? pushRemote(dir, branch)
   const old = names(dir, ["rev-parse", "-q", "--verify", `refs/remotes/${remote}/${branch}`])?.[0]
   if (!old) return
   const ancestor = Bun.spawnSync(["git", "-C", dir, "merge-base", "--is-ancestor", old, source], {
@@ -351,7 +361,14 @@ function rebased(
     stderr: "ignore",
   })
   if (ancestor.exitCode !== 1) return
-  const oldest = names(dir, ["rev-list", "--reverse", "--topo-order", source, "--not", not])?.[0]
+  const oldest = names(dir, [
+    "rev-list",
+    "--reverse",
+    "--topo-order",
+    source,
+    "--not",
+    ...held,
+  ])?.[0]
   const base = oldest && names(dir, ["rev-parse", "-q", "--verify", `${oldest}^`])?.[0]
   return base ? [old, base] : undefined
 }
@@ -390,9 +407,8 @@ function push(rest: Word[], dir: string, branchReads: (string | undefined)[]): s
   }
   if (deleting && sources.length === 0) return
   const name = remote && !/[:/]/.test(remote.value) ? remote.value : undefined
-  // a remote not fetched yet has no tracking refs, so every remote stands in for it
-  const tracked = name && names(dir, ["for-each-ref", "--count=1", `refs/remotes/${name}`])?.length
-  const not = tracked ? `--remotes=${name}` : "--remotes"
+  // what the remote it pushes to holds now, read live, since a remote-tracking ref may name a branch it no longer holds; every commit when it cannot be read
+  const held = heldBy(dir, remote?.value ?? pushRemote(dir))
   const listed = pathsOf(dir, [
     "log",
     "--name-only",
@@ -401,9 +417,9 @@ function push(rest: Word[], dir: string, branchReads: (string | undefined)[]): s
     "--format=",
     ...sources,
     "--not",
-    not,
+    ...held,
   ])
-  const merges = names(dir, ["rev-list", "--merges", ...sources, "--not", not])
+  const merges = names(dir, ["rev-list", "--merges", ...sources, "--not", ...held])
   if (listed === null || merges === null)
     return unread("git push", "the files of the commits it pushes")
   const files = new Set(listed)
@@ -442,7 +458,7 @@ function push(rest: Word[], dir: string, branchReads: (string | undefined)[]): s
   // a rebase rewrites a branch the remote holds, so what it pushes is judged by its tip against git's own merge of the tip it replaces and the base it now sits on
   const bases =
     sources.length === 1 && dests.length === 1 && (!remote || name)
-      ? rebased(dir, name, sources[0], dests[0], not)
+      ? rebased(dir, name, sources[0], dests[0], held)
       : undefined
   if (bases)
     beyondMerge(
@@ -554,11 +570,16 @@ function packageScripts(dir: string): Map<string, { at: string; command: string 
   }
 }
 const FOLDER_FIX = "Name the folder literally, in a call of its own, or report to your lead."
+// A program word read with each ${NAME:?message} or ${NAME-word} of a name the hook knows as its value, so `"${PLAYGROUND_REPO:?}/scripts/spawn.sh"` reads as the literal path
+const programWord = (w: Word, env: Env): Word =>
+  (w.raw && marked(w.value)
+    ? heldWord({ ...w, raw: defaulted(w.raw, env.known, () => false) }, env, NONE)
+    : undefined) ?? w
 // Why a call runs an org script: its program word is the script (each has a shebang), or a path the hook cannot place, the playground CLI's dm command, or a runner's word that resolves into an org script's folder from the folder it runs in, or names a package script whose command does, whatever the runner; a runner in a folder the hook cannot read is refused, failing closed as git's is
 function orgScript(parsed: Parsed, env: Env): { fix?: string; why: string } | undefined {
   const { args, first, name } = parsed
   if (first?.value.includes("/")) {
-    const program = pathOf(first, env)
+    const program = pathOf(programWord(first, env), env)
     if (!program)
       return {
         fix: FOLDER_FIX,
@@ -831,10 +852,293 @@ const checkoutRefusal = (what: string, repo: Repo) =>
     what,
     `it reads the checkout of ${label(repo.owner, repo.repo)}, a guarded org's repository`,
   )
+// How far below a folder a recursive read is walked for a guarded checkout, and the most folders the walk reads before it fails closed
+const BELOW_DEPTH = 4
+const BELOW_FOLDERS = 5000
+const UNWALKED = new Set([".git", "node_modules"])
+// The guarded org's checkout a recursive read of a folder reaches: the nearest one at most BELOW_DEPTH folders below it, a link there read by its real path and never walked into, .git and node_modules passed over; "too many" past BELOW_FOLDERS folders
+function checkoutBelow(path: string, orgs: string[], roots: Roots): Repo | "too many" | undefined {
+  let level = [realOf(resolve(path))]
+  let walked = 0
+  for (let depth = 0; depth < BELOW_DEPTH && level.length > 0; depth++) {
+    const next: string[] = []
+    for (const at of level)
+      for (const entry of folderEntries(at)) {
+        if (UNWALKED.has(entry.name)) continue
+        const child = join(at, entry.name)
+        if (++walked > BELOW_FOLDERS) return "too many"
+        if (entry.isSymbolicLink() || existsSync(join(child, ".git"))) {
+          const repo = checkoutOf(child, orgs, roots)
+          if (repo) return repo
+        }
+        if (entry.isDirectory()) next.push(child)
+      }
+    level = next
+  }
+}
+// A folder's entries that are folders or links, none when it cannot be read
+function folderEntries(at: string) {
+  try {
+    return readdirSync(at, { withFileTypes: true }).filter(
+      (entry) => entry.isDirectory() || entry.isSymbolicLink(),
+    )
+  } catch {
+    return []
+  }
+}
+const belowRefusal = (what: string, path: string, found: Repo | "too many") =>
+  found === "too many"
+    ? orgRefusal(
+        what,
+        `it reads every folder below ${path}, more than the hook walks to find an org's checkout there`,
+        "Name a folder nearer what you read, in a call of its own, or report to your lead.",
+      )
+    : checkoutRefusal(what, found)
+// The shell's recursive searches, which read every folder below the ones they name: rg and find always, grep and its kin by -r, -R or their long forms
+const GREPS = new Set(["egrep", "fgrep", "ggrep", "grep"])
+const GREP_RECURSIVE =
+  /^(?:-[A-Za-z]*[rR]|--recursive$|--dereference-recursive$|--directories=recurse$)/
+const recursive = (name: string, args: Word[]) =>
+  name === "rg" ||
+  name === "find" ||
+  (GREPS.has(name) && args.some((a) => GREP_RECURSIVE.test(a.value)))
+// The folders a recursive search walks: find's starting points, else its own folder; for grep and rg, each operand that names a folder, the pattern's included, and its own folder when no operand follows the pattern (none at all when -e, -f, --regexp or --file gives it), read past each option's value; a long option it does not know walks its own folder too, failing closed
+const FIND_LEADS = /^-(?:[HLPEXdsx]+|O\d*)$/
+const SEARCH_VALUES: Record<string, { long: Set<string>; short: string }> = {
+  grep: {
+    long: new Set([
+      "--after-context",
+      "--before-context",
+      "--context",
+      "--exclude",
+      "--exclude-dir",
+      "--file",
+      "--include",
+      "--label",
+      "--max-count",
+      "--regexp",
+    ]),
+    short: "ABCDdefm",
+  },
+  rg: {
+    long: new Set([
+      "--after-context",
+      "--before-context",
+      "--context",
+      "--context-separator",
+      "--encoding",
+      "--engine",
+      "--file",
+      "--glob",
+      "--iglob",
+      "--ignore-file",
+      "--max-columns",
+      "--max-count",
+      "--max-depth",
+      "--max-filesize",
+      "--path-separator",
+      "--pre",
+      "--pre-glob",
+      "--regexp",
+      "--replace",
+      "--sort",
+      "--sortr",
+      "--threads",
+      "--type",
+      "--type-add",
+      "--type-clear",
+      "--type-not",
+    ]),
+    short: "ABCEMdefgjmrtT",
+  },
+}
+const PATTERN_LONG = new Set(["--file", "--regexp"])
+function searchRoots(name: string, args: Word[], env: Env): string[] {
+  const folder = (w: Word) => {
+    const path = pathOf(w, env)
+    return path && isFolder(path) ? [path] : []
+  }
+  const own = env.cwd ? [env.cwd] : []
+  if (name === "find") {
+    let i = 0
+    while (i < args.length && (FIND_LEADS.test(args[i].value) || args[i].value === "-D"))
+      i += args[i].value === "-D" ? 2 : 1
+    const starts: string[] = []
+    let named = false
+    for (; i < args.length; i++) {
+      const v = args[i].value
+      if (v === "-f" && args[i + 1]) {
+        named = true
+        starts.push(...folder(args[++i]))
+        continue
+      }
+      if (v.startsWith("-") || ["!", "(", ")", ","].includes(v)) break
+      named = true
+      starts.push(...folder(args[i]))
+    }
+    return named ? starts : own
+  }
+  const values = SEARCH_VALUES[name === "rg" ? "rg" : "grep"]
+  const operands: Word[] = []
+  let given = false
+  let unsure = false
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value
+    if (v === "--") {
+      operands.push(...args.slice(i + 1))
+      break
+    }
+    if (v.startsWith("--")) {
+      const key = v.split("=")[0]
+      if (PATTERN_LONG.has(key)) given = true
+      if (!v.includes("=") && values.long.has(key)) i++
+      else if (!v.includes("=")) unsure = true
+      continue
+    }
+    if (v.startsWith("-") && v.length > 1) {
+      for (let k = 1; k < v.length; k++) {
+        if (!values.short.includes(v[k])) continue
+        if (v[k] === "e" || v[k] === "f") given = true
+        if (k === v.length - 1) i++
+        break
+      }
+      continue
+    }
+    operands.push(args[i])
+  }
+  const folders = operands.flatMap(folder)
+  return operands.length <= (given ? 0 : 1) || unsure ? [...folders, ...own] : folders
+}
+const isFolder = (path: string) => {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+// A Glob pattern's literal start, the folder its segments name before the first glob, read from the pattern's own root when it is absolute, else from the call's folder; deep when what follows reaches below that folder's own entries
+function globRoot(
+  pattern: string,
+  base: string | undefined,
+): { deep: boolean; root: string } | undefined {
+  const full = isAbsolute(pattern) ? pattern : base && join(base, pattern)
+  if (!full) return
+  const segments = full.split("/")
+  const at = segments.findIndex((segment) => GLOB_CHARS.test(segment) || segment.includes("{"))
+  if (at < 0) return { deep: false, root: full }
+  const rest = segments.slice(at)
+  return {
+    deep: rest.length > 1 || rest[0].includes("**"),
+    root: segments.slice(0, at).join("/") || "/",
+  }
+}
+// The edit tools, each with the input that names the file it changes
+const EDIT_TOOLS: Record<string, string> = {
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  NotebookEdit: "notebook_path",
+  Write: "file_path",
+}
+// A file's path from the root of the checkout that holds it, the nearest folder above it with a .git, as a commit names it; undefined outside any checkout
+function fromCheckout(file: string): string | undefined {
+  for (let at = dirname(file); ; at = dirname(at)) {
+    if (existsSync(join(at, ".git"))) return relative(at, file)
+    if (dirname(at) === at) return
+  }
+}
 // The read tools, each with the input that names what it reads; a Grep or a Glob with no path reads the session's folder
 const READ_TOOLS: Record<string, string> = { Glob: "path", Grep: "path", Read: "file_path" }
 // the shell's commands that read no file, which run inside an org's checkout and open only an argument with a slash or a tilde, since their plain words are text
 const READS_NOTHING = new Set(["date", "echo", "printf", "pwd", "true"])
+// the shell's own headers and tests and the path-name programs, which take a word the hook cannot read as text and open no file by it, though they run in their folder: a for or select list, a case word, [ and test, exit's status, basename's and dirname's string
+const UNREAD_TEXT = new Set([
+  "[",
+  "[[",
+  "basename",
+  "case",
+  "dirname",
+  "exit",
+  "for",
+  "select",
+  "test",
+])
+// The words a program takes as code or an assignment and opens no file by: awk's program (with no -f) and each -v assignment, sed's script (each -e value, else its first operand when no -e or -f is given), and an interpreter's inline code (python's -c, node's and bun's -e, --eval, -p or --print, perl's and ruby's -e or -E); the indexes of args
+const AWKS = new Set(["awk", "gawk", "mawk", "nawk"])
+const INLINE_CODE: [RegExp, Set<string>][] = [
+  [/^python(?:\d+(?:\.\d+)?)?$/, new Set(["-c"])],
+  [/^(?:bun|node)$/, new Set(["--eval", "--print", "-e", "-p"])],
+  [/^(?:perl|ruby)$/, new Set(["-E", "-e"])],
+]
+function textWords(name: string, args: Word[]): Set<number> {
+  const out = new Set<number>()
+  const inline = INLINE_CODE.find(([program]) => program.test(name))?.[1]
+  if (inline) {
+    for (let i = 0; i < args.length - 1; i++) if (inline.has(args[i].value)) out.add(++i)
+    return out
+  }
+  if (SEDS.has(name)) return sedText(name, args)
+  if (!AWKS.has(name)) return out
+  const program = !args.some((w) => w.value === "-f" || /^-f./.test(w.value))
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value
+    if (v === "--") {
+      if (program && i + 1 < args.length) out.add(i + 1)
+      break
+    }
+    if (v === "-v" || v === "-F" || v === "-f") {
+      if (v === "-v" && i + 1 < args.length) out.add(i + 1)
+      i++
+    } else if (v.startsWith("--")) return out
+    else if (v.startsWith("-v")) out.add(i)
+    else if (!v.startsWith("-")) {
+      if (program) out.add(i)
+      break
+    }
+  }
+  return out
+}
+// sed's script words: an -e value (in a cluster, attached or the next word) and --expression's, else, when no -e or -f appears anywhere, the first operand; -l and --line-length take a number, --file and -f a file, and BSD sed's bare -i a suffix, read as one only when it is empty ('')
+const SEDS = new Set(["gsed", "sed"])
+function sedText(name: string, args: Word[]): Set<number> {
+  const out = new Set<number>()
+  const scripted = args.some((w) => /^(?:-[A-Za-z]*[ef]|--expression|--file)/.test(w.value))
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value
+    if (v === "--") {
+      if (!scripted && i + 1 < args.length) out.add(i + 1)
+      break
+    }
+    if (v.startsWith("--")) {
+      if (v === "--expression") out.add(++i)
+      else if (v.startsWith("--expression=")) out.add(i)
+      else if (v === "--file" || v === "--line-length") i++
+      continue
+    }
+    if (v.startsWith("-") && v.length > 1) {
+      for (let k = 1; k < v.length; k++) {
+        const letter = v[k]
+        const rest = v.slice(k + 1)
+        if (letter === "e" || letter === "f") {
+          if (rest === "") i++
+          if (letter === "e") out.add(i)
+          break
+        }
+        if (letter === "l") {
+          if (rest === "") i++
+          break
+        }
+        if (letter === "i") {
+          if (rest === "" && name === "sed" && args[i + 1]?.value === "") i++
+          break
+        }
+      }
+      continue
+    }
+    if (!scripted) out.add(i)
+    break
+  }
+  return out
+}
 const PATH_LIKE = /[/~]/
 const GLOB_CHARS = /[*?[]/
 // a redirect that names a file: an input, a read-write or an output, not a duplicated descriptor, a heredoc or a here-string
@@ -874,8 +1178,8 @@ function globRegex(segment: string): RegExp {
   }
   return new RegExp(`${re}$`)
 }
-// A glob's matches on disk, segment by segment from the call's folder: a literal segment is kept whether or not it exists, a glob segment takes each entry it matches (a hidden one only when the segment opens with the dot), a ** reads as a * here (the folders below it are the recursive read the residual-risk line names), at most 200 paths
-function globbed(value: string, cwd: string | undefined): string[] {
+// A glob's matches on disk, segment by segment from the call's folder: a literal segment is kept whether or not it exists, a glob segment takes each entry it matches (a hidden one only when the segment opens with the dot), a ** reads as a * here, each folder it starts from put in `deep`, which the caller walks all the way down, at most 200 paths
+function globbed(value: string, cwd: string | undefined, deep: string[] = []): string[] {
   const out: string[] = []
   for (const pattern of braces(value)) {
     const root = isAbsolute(pattern) ? "/" : cwd
@@ -886,6 +1190,7 @@ function globbed(value: string, cwd: string | undefined): string[] {
         candidates = candidates.map((at) => join(at, segment))
         continue
       }
+      if (segment.includes("**")) deep.push(...candidates)
       const re = globRegex(segment.replaceAll("**", "*"))
       const hidden = segment.startsWith(".")
       const next: string[] = []
@@ -907,21 +1212,110 @@ function globbed(value: string, cwd: string | undefined): string[] {
   }
   return out
 }
-// The paths a command opens: its folder, each argument, each file a redirect names, each file a substitution in a word reads ($(< f), $(cat f)) and each match of a glob or a brace, a word the hook cannot read giving none; a command that reads nothing gives no folder and only a path-like argument
-function opened(cmd: Command, parsed: Parsed, env: Env): (string | undefined)[] {
-  const { args, name } = parsed
-  const plain = READS_NOTHING.has(name)
-  const places: (string | undefined)[] = plain ? [] : [env.cwd]
-  const open = (w: Word, argument: boolean) => {
-    for (const read of w.reads ?? [])
-      if (!read.unknown && !marked(read.value)) places.push(pathOf(read, env))
-    if (unreadValue(w) || (plain && argument && !PATH_LIKE.test(w.value))) return
-    places.push(pathOf(w, env))
-    if (w.glob) places.push(...globbed(w.value, env.cwd))
+// A substitution of a pure command put as its output in a raw word, the innermost first: pwd as the folder the command runs in, echo as its literal words, git rev-parse's checkout and git folders as git gives them, and dirname or basename of a literal path; an output holding a character the shell would split or quote stays unread
+const QUIET_PATH = /^[\w./@+,~-]+$/
+const GIT_FOLDER =
+  /\$\(\s*git(?:\s+-C\s+("[^"$`\\]*"|'[^']*'|[^\s$`()'"\;&|<>]+))?\s+rev-parse((?:\s+--path-format=(?:absolute|relative))?\s+--(?:show-toplevel|git-common-dir|git-dir|absolute-git-dir))\s*\)/g
+const PATH_NAME = /\$\(\s*(dirname|basename)\s+("[^"$`\\]*"|'[^']*'|[^\s$`()'"\;&|<>]+)\s*\)/g
+function pureFilled(raw: string, cwd: string | undefined): string {
+  let out = raw
+    .replace(/\$\(\s*pwd(?:\s+-[LP])?\s*\)|`\s*pwd(?:\s+-[LP])?\s*`/g, (m) => cwd ?? m)
+    .replace(/\$\(\s*echo\s+([^$`()'"\\|;&<>]*?)\s*\)/g, (_, words: string) => words)
+  for (let round = 0; round < 4; round++) {
+    const before = out
+    out = out
+      .replace(GIT_FOLDER, (m, at: string | undefined, flags: string) => {
+        if (!cwd) return m
+        const dir = resolve(cwd, at ? at.replace(/^["']|["']$/g, "") : ".")
+        const answer = names(dir, ["rev-parse", ...flags.trim().split(/\s+/)])?.[0]
+        return answer && QUIET_PATH.test(answer) ? resolve(dir, answer) : m
+      })
+      .replace(PATH_NAME, (m, program: string, word: string) => {
+        const path = word.replace(/^["']|["']$/g, "")
+        if (!QUIET_PATH.test(path)) return m
+        return program === "dirname" ? dirname(path) : basename(path)
+      })
+    if (out === before) break
   }
-  for (const a of args) open(a, true)
-  for (const r of cmd.redirects) if (namesFile(r)) open(r.target as Word, false)
-  return places
+  return out
+}
+// A ${NAME:-word}, ${NAME-word} or ${NAME:?message} put as what the shell reads: ${NAME} for a name the session holds, its literal word for one the line never sets and the session lacks; any other stays as it is
+const DEFAULTED = /\$\{([A-Za-z_]\w*)(:?)([-?])([^}$`\\]*)\}/g
+const defaulted = (
+  raw: string,
+  known: Record<string, string | undefined>,
+  unset: (key: string) => boolean,
+) =>
+  raw.replace(DEFAULTED, (m, key: string, colon: string, op: string, word: string) => {
+    const value = known[key]
+    if (value !== undefined && (!colon || value !== "")) return `\${${key}}`
+    if (op === "-" && unset(key) && QUIET_PATH.test(word)) return word
+    return m
+  })
+// A word the lexer could not read, read with what the hook holds: its file reads filled in, else lexed again with a pure substitution's output, the line's steady variables and the session's own; undefined while it still holds a value the hook cannot read
+async function readable(
+  w: Word,
+  env: Env,
+  steady: Steady,
+  held: Held,
+): Promise<Word[] | undefined> {
+  if (w.reads?.length && !w.unknown) {
+    const text = await resolveText(w, env)
+    return text.unknown || marked(text.value)
+      ? undefined
+      : [{ ...w, reads: undefined, value: text.value }]
+  }
+  if (!w.raw) return undefined
+  const here = { ...env, known: { ...held.own, ...env.known } }
+  const filled = { ...w, raw: defaulted(pureFilled(w.raw, env.cwd), here.known, held.unset) }
+  const word = heldWord(filled, here, steady)
+  return word ? [word] : heldReadings(filled, here, steady)
+}
+// The paths a command opens (its folder, each argument, each file a redirect names, each file a substitution in a word reads ($(< f), $(cat f)) and each match of a glob or a brace), the folders it reads all the way down (a recursive search's, else its own folder, and each folder a ** starts from), and the first path it opens that the hook cannot read: a value it cannot expand, xargs's -I word, a file a substitution reads by such a value, or the folder a cd it cannot follow left it in; a command that reads nothing gives no folder and only a path-like argument, its other words text
+type Opened = { below: string[]; places: string[]; unread?: string }
+async function opened(
+  cmd: Command,
+  parsed: Parsed,
+  env: Env,
+  steady: Steady,
+  held: Held,
+): Promise<Opened> {
+  const { args, name, xargs } = parsed
+  const plain = READS_NOTHING.has(name)
+  const text = plain || UNREAD_TEXT.has(name)
+  const code = textWords(name, args)
+  const out: Opened = { below: [], places: [] }
+  const blind = (why: string) => {
+    out.unread ??= why
+  }
+  if (!plain && env.cwd) out.places.push(env.cwd)
+  else if (!plain && (env.cwdUnread || env.cwdAnywhere))
+    blind("the folder a cd on the line left it in")
+  const named: string[] = []
+  const open = async (w: Word, argument: boolean, asText = false) => {
+    for (const read of w.reads ?? []) {
+      const path = read.unknown || marked(read.value) ? undefined : pathOf(read, env)
+      if (path) out.places.push(path)
+      else blind(`a file a substitution reads by ${read.unknown ?? "a value it cannot expand"}`)
+    }
+    if (fromXargs(w, xargs))
+      return text ? undefined : blind(`the word xargs fills in place of ${xargs?.replace}`)
+    const words = unreadValue(w) ? await readable(w, env, steady, held) : [w]
+    if (!words) return text || asText ? undefined : blind(w.unknown ?? "a value it cannot expand")
+    for (const word of words) {
+      if (plain && argument && !PATH_LIKE.test(word.value)) continue
+      const path = pathOf(word, env)
+      if (!path) continue
+      out.places.push(path)
+      if (argument) named.push(path)
+      if (word.glob) out.places.push(...globbed(word.value, env.cwd, out.below))
+    }
+  }
+  for (const [at, a] of args.entries()) await open(a, true, code.has(at))
+  for (const r of cmd.redirects) if (namesFile(r)) await open(r.target as Word, false)
+  // a recursive search reads each folder it names all the way down, or its own folder when it names no path on disk
+  if (recursive(name, args)) out.below.push(...searchRoots(name, args, env))
+  return out
 }
 
 // The database clients the glm rule reads: psql, pgbench, pgcli and every pg_ program read PGHOST, PGHOSTADDR and PGSERVICE; mycli, mysql and mysqldump read MYSQL_HOST; mongo and mongosh take a positional host; redis-cli takes -h
@@ -1006,26 +1400,47 @@ function containedClient(parsed: Parsed): Parsed | undefined {
   }
   return { ...parsed, args: args.slice(at + 1), local: given, name: words[at] }
 }
+// The hosts a database value names, pushed onto hosts, undefined for one the hook cannot place: a host list read whole (each host a comma separates), a URL's host list and its query's host, hostaddr and service parameters
+type Hosts = (string | undefined)[]
+const namedHosts = (hosts: Hosts, value: string, service = false) => {
+  if (service) hosts.push(undefined)
+  else for (const host of value.split(",")) hosts.push(hostOf(host))
+}
+const urlHosts = (hosts: Hosts, value: string) => {
+  for (const m of value.matchAll(DB_URL)) {
+    namedHosts(hosts, m[1])
+    for (const pair of (m[2] ?? "").split("&")) {
+      const eq = pair.indexOf("=")
+      const key = eq < 0 ? pair : pair.slice(0, eq)
+      if (key === "host" || key === "hostaddr") namedHosts(hosts, pair.slice(eq + 1))
+      else if (key === "service") namedHosts(hosts, "", true)
+    }
+  }
+}
+// The refusal for the first host off this machine, or one the hook cannot place, a client's hosts name
+function hostRefusal(name: string, hosts: Hosts): string | undefined {
+  const at = hosts.findIndex((h) => h === undefined || !onThisMachine(h))
+  if (at < 0) return
+  const host = hosts[at]
+  return host === undefined
+    ? orgRefusal(
+        `this ${name} call`,
+        "the hook cannot tell which database it reaches, since a value it cannot read names it",
+        DB_FIX,
+      )
+    : orgRefusal(
+        `this ${name} call`,
+        `it reaches ${host}, a database off this machine, which may be an org's`,
+      )
+}
 // A database call the glm rule keeps a GLM session off: a client, or any command but a pure one, given a database URL, a conninfo, a host option, a positional host or a host variable naming a host off this machine, every host it names read; a client given a value the hook cannot read, a service name included, fails closed
 function dbCall(parsed: Parsed, env: Env): string | undefined {
   const inner = CONTAINER_RUNNERS.has(parsed.name) ? containedClient(parsed) : undefined
   if (inner) return dbCall(inner, env)
   const { args, local, name } = parsed
   const client = dbClient(name)
-  const hosts: (string | undefined)[] = []
-  // each host a value names, a comma-separated list read whole; a service name is one the hook cannot place
-  const named = (value: string, service = false) => {
-    if (service) hosts.push(undefined)
-    else for (const host of value.split(",")) hosts.push(hostOf(host))
-  }
-  const queried = (query: string) => {
-    for (const pair of query.split("&")) {
-      const eq = pair.indexOf("=")
-      const key = eq < 0 ? pair : pair.slice(0, eq)
-      if (key === "host" || key === "hostaddr") named(pair.slice(eq + 1))
-      else if (key === "service") named("", true)
-    }
-  }
+  const hosts: Hosts = []
+  const named = (value: string, service = false) => namedHosts(hosts, value, service)
   for (let i = 0; i < args.length; i++) {
     const a = args[i]
     if (unreadValue(a)) {
@@ -1033,10 +1448,7 @@ function dbCall(parsed: Parsed, env: Env): string | undefined {
       continue
     }
     const v = a.value
-    for (const m of v.matchAll(DB_URL)) {
-      named(m[1])
-      if (m[2]) queried(m[2])
-    }
+    urlHosts(hosts, v)
     if (!client) continue
     for (const m of v.matchAll(CONNINFO)) named(m[2], m[1] === "service")
     const mongo = mongoClient(name)
@@ -1071,19 +1483,76 @@ function dbCall(parsed: Parsed, env: Env): string | undefined {
     if (unreadValue(set as Word) || key === "PGSERVICE") hosts.push(undefined)
     else named(set.value)
   }
-  const at = hosts.findIndex((h) => h === undefined || !onThisMachine(h))
-  if (at < 0) return
-  const host = hosts[at]
-  return host === undefined
-    ? orgRefusal(
-        `this ${name} call`,
-        "the hook cannot tell which database it reaches, since a value it cannot read names it",
-        DB_FIX,
-      )
-    : orgRefusal(
-        `this ${name} call`,
-        `it reaches ${host}, a database off this machine, which may be an org's`,
-      )
+  return hostRefusal(name, hosts)
+}
+
+// A client's connect meta-command and its kin in the input it reads: psql's and pgcli's \c or \connect (a URL, a conninfo, or dbname user host port), mysql's connect or \r (db host), and mongosh's connect() (a URL, or host:port/db) or Mongo() (a URL or a host), given a literal
+const PG_CONNECT = /^[ \t]*\\(?:c|connect)(?:[ \t]+([^\n]*))?$/gm
+const MYSQL_CONNECT = /^[ \t]*(?:connect|\\r)(?:[ \t]+([^\n;]*))?;?[ \t]*$/gim
+const MONGO_CONNECT = /\b(connect|Mongo)\s*\(\s*([^),]*)/g
+const unquote = (word: string) => word.replace(/^['"`]|['"`]$/g, "")
+// The hosts the connect lines in a client's input name, pushed onto hosts, undefined for one holding a value the hook cannot read
+function inputHosts(name: string, text: string, hosts: Hosts) {
+  if (pgClient(name))
+    for (const m of text.matchAll(PG_CONNECT)) {
+      const rest = (m[1] ?? "").replace(/(?:^|\s)-reuse-previous=\S+/g, " ").trim()
+      const before = hosts.length
+      if (marked(rest)) hosts.push(undefined)
+      else urlHosts(hosts, rest)
+      if (hosts.length > before) continue
+      if (rest.includes("="))
+        for (const c of rest.matchAll(CONNINFO))
+          namedHosts(hosts, unquote(c[2]), c[1] === "service")
+      else {
+        const host = rest.split(/\s+/)[2]
+        if (host && host !== "-") namedHosts(hosts, unquote(host))
+      }
+    }
+  else if (mysqlClient(name))
+    for (const m of text.matchAll(MYSQL_CONNECT)) {
+      const rest = (m[1] ?? "").trim()
+      const host = rest.split(/\s+/)[1]
+      if (marked(rest)) hosts.push(undefined)
+      else if (host) namedHosts(hosts, unquote(host))
+    }
+  else if (mongoClient(name))
+    for (const [, call, arg] of text.matchAll(MONGO_CONNECT)) {
+      const value = /^(['"`])([^'"`]*)\1\s*$/.exec(arg.trim())?.[2]
+      if (arg.trim() === "") continue
+      if (value === undefined || marked(value)) hosts.push(undefined)
+      else if (value.includes("://")) urlHosts(hosts, value)
+      else if (call === "Mongo" || /[:/]/.test(value)) namedHosts(hosts, value.split(/[:/]/)[0])
+    }
+}
+// The input a database client reads: a heredoc's or here-string's body, a file a < redirect names, and a script its options or arguments name (psql's and pgcli's -f or --file, mongosh's --file or a .js argument), read for a connect line; a host off this machine, or input the hook cannot read, refuses, and a script inside a container is one it cannot read
+async function dbInput(cmd: Command, parsed: Parsed, env: Env): Promise<string | undefined> {
+  const contained = CONTAINER_RUNNERS.has(parsed.name) ? containedClient(parsed) : undefined
+  const { args, name } = contained ?? parsed
+  if (!dbClient(name)) return
+  const texts: Text[] = []
+  for (const r of cmd.redirects) {
+    if (r.body) texts.push(r.body)
+    else if (r.op === "<" && r.target) texts.push(await readPath(r.target, env))
+  }
+  const files = pgClient(name) || mongoClient(name)
+  const scripts: Word[] = []
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    const v = a.value
+    if (files && (v === "-f" || v === "--file")) {
+      const next = args[++i]
+      if (next) scripts.push(next)
+    } else if (files && v.startsWith("--file=")) scripts.push({ ...a, value: v.slice(7) })
+    else if (pgClient(name) && /^-f./.test(v)) scripts.push({ ...a, value: v.slice(2) })
+    else if (mongoClient(name) && !v.startsWith("-") && /\.[cm]?js$/.test(v)) scripts.push(a)
+  }
+  for (const script of scripts)
+    texts.push(contained ? unknown("a script inside the container") : await readPath(script, env))
+  const hosts: Hosts = []
+  for (const text of texts)
+    if (text.unknown) hosts.push(undefined)
+    else inputHosts(name, text.value, hosts)
+  return hostRefusal(name, hosts)
 }
 
 // The org tools the glm rule keeps a GLM session off: a headless Claude run, a fetch of an org service's host, a Linear script, and gh or git on a guarded org's repository.
@@ -1136,8 +1605,16 @@ function orgCall(
   }
 }
 
+// The line's reading the checkout rule takes past the words: each command's steady variables, and the session's own variables the line never names
+type Held = {
+  own: Record<string, string>
+  steadyAt: (cmd: Command) => Steady
+  unset: (key: string) => boolean
+}
+const UNHELD: Held = { own: {}, steadyAt: () => NONE, unset: () => false }
+const PATH_FIX = "Name the path literally, in a call of its own, or report to your lead."
 // A visitor for one call, tracking what ran before each command: cd, export and assignments are not visited, so they never chain.
-const visitor = (load5: number, limit: number, orgs: Orgs, roots: Roots): Visit => {
+const visitor = (load5: number, limit: number, orgs: Orgs, roots: Roots, held = UNHELD): Visit => {
   const busy = load5 > limit
   let earlier: "none" | "staging" | "other" = "none"
   const forced: string[] = []
@@ -1145,18 +1622,40 @@ const visitor = (load5: number, limit: number, orgs: Orgs, roots: Roots): Visit 
   const visit: Visit = async (cmd, parsed, env) => {
     const slot = slotWords(parsed)
     if (slot)
-      return slot.length === 0 ? undefined : examine({ ...cmd, words: slot }, env, visit, false)
+      return slot.length === 0
+        ? undefined
+        : examine(
+            { ...cmd, words: slot },
+            // run-slot.sh runs its words in a process of its own, so a cd among them moves no folder for the commands after it
+            { ...env, files: new Map(env.files), vars: new Map(env.vars) },
+            visit,
+            false,
+          )
     const { args, name } = parsed
-    if (Array.isArray(orgs) && orgs.length > 0)
-      for (const place of opened(cmd, parsed, env)) {
+    // a path the hook cannot read refuses after the org rules, whose own fix names the value to spell out
+    let blind: string | undefined
+    if (Array.isArray(orgs) && orgs.length > 0) {
+      const { below, places, unread } = await opened(cmd, parsed, env, held.steadyAt(cmd), held)
+      for (const place of places) {
         const repo = checkoutOf(place, orgs, roots)
         if (repo) return checkoutRefusal(`this ${name} call`, repo)
       }
+      for (const folder of below) {
+        const found = checkoutBelow(folder, orgs, roots)
+        if (found) return belowRefusal(`this ${name} call`, folder, found)
+      }
+      if (unread)
+        blind = orgRefusal(
+          `this ${name} call`,
+          `it opens ${unread}, a path the hook cannot read, which may be in an org's checkout`,
+          PATH_FIX,
+        )
+    }
     const reads = branchReads
     branchReads = []
     const busyRun = busy ? installOrClone(name, args) : undefined
     if (busyRun) return loaded(busyRun, load5, limit)
-    if (PURE.has(name) && !writes(cmd)) return
+    if (PURE.has(name) && !writes(cmd)) return blind
     const before = earlier
     const isGit = name === "git"
     let dir = env.cwd
@@ -1170,7 +1669,11 @@ const visitor = (load5: number, limit: number, orgs: Orgs, roots: Roots): Visit 
       else if (!v.startsWith("-")) break
     }
     const sub = isGit ? args[k]?.value : undefined
-    const org = orgCall(parsed, env, dir, sub, orgs) ?? dbCall(parsed, env)
+    const org =
+      orgCall(parsed, env, dir, sub, orgs) ??
+      dbCall(parsed, env) ??
+      (await dbInput(cmd, parsed, env)) ??
+      blind
     if (org) return org
     if (
       isGit &&
@@ -1221,6 +1724,18 @@ async function inspect(
       "an MCP tool reaches an org's or an outside service's data",
     )
   const directory = typeof cwd === "string" ? cwd : undefined
+  // an edit to an Opus path is refused at the first touch, as its commit would be, so a GLM worker stops before it writes the change
+  if (typeof tool === "string" && tool in EDIT_TOOLS) {
+    const given = toolInput?.[EDIT_TOOLS[tool]]
+    const file =
+      typeof given !== "string" || given === ""
+        ? undefined
+        : isAbsolute(given)
+          ? given
+          : directory && resolve(directory, given)
+    const path = file ? fromCheckout(file) : undefined
+    return path && heavy(path) ? refuse(`${tool} call`, [path]) : undefined
+  }
   if (typeof tool === "string" && tool in READ_TOOLS) {
     const orgs = await guardedOf(environment)
     if (!Array.isArray(orgs)) return
@@ -1233,8 +1748,24 @@ async function inspect(
           : isAbsolute(given)
             ? given
             : directory && resolve(directory, given)
-    const repo = orgs.length > 0 ? checkoutOf(path, orgs, new Map()) : undefined
-    return repo ? checkoutRefusal(`this ${tool} call`, repo) : undefined
+    if (orgs.length === 0) return
+    const roots: Roots = new Map()
+    const what = `this ${tool} call`
+    const repo = checkoutOf(path, orgs, roots)
+    if (repo) return checkoutRefusal(what, repo)
+    // a Grep reads its folder all the way down, and a Glob the folder its pattern's literal start names whenever a glob reaches past one level there
+    const pattern = toolInput?.pattern
+    const glob =
+      tool === "Glob" && typeof pattern === "string" ? globRoot(pattern, path) : undefined
+    const root = tool === "Grep" ? path : glob?.root
+    if (!root) return
+    if (root !== path) {
+      const at = checkoutOf(root, orgs, roots)
+      if (at) return checkoutRefusal(what, at)
+    }
+    if (tool === "Grep" ? !isFolder(root) : !glob?.deep) return
+    const found = checkoutBelow(root, orgs, roots)
+    return found ? belowRefusal(what, root, found) : undefined
   }
   if (tool !== "Bash" || typeof toolInput?.command !== "string") return
   const command = toolInput.command
@@ -1244,17 +1775,42 @@ async function inspect(
   const guarding = Array.isArray(orgs) && orgs.length > 0
   const text = command.replace(/["'\\]/g, "")
   if (!guarding && !mayRefuse(text, load5, limit) && !RUNNER_CALL.test(text)) return
+  // a variable the line sets once, at its top level, is read by its value, and so is one of the session's own the line never names
+  const named = namings(command)
+  // the session's PLAYGROUND_REPO, by which a brief names spawn.sh, reads in a path as HOME does while the line never sets it
+  const repo =
+    named.blind || named.counts.has("PLAYGROUND_REPO") ? undefined : environment.PLAYGROUND_REPO
+  const known = {
+    ...knownVariables(command, environment, directory),
+    ...(repo ? { PLAYGROUND_REPO: repo } : {}),
+  }
+  const lexed = lex(command, known)
+  const steadyAt = steadyNames(named, lexed.commands)
+  const own = named.blind
+    ? {}
+    : Object.fromEntries(
+        Object.entries(environment).filter(
+          (entry): entry is [string, string] =>
+            typeof entry[1] === "string" && !named.counts.has(entry[0]),
+        ),
+      )
   const env: Env = {
     cwd: directory,
+    // the line starts in the folder the tool names, which the payload itself proves
+    cwdSure: directory,
     files: new Map(),
-    known: knownVariables(command, environment, directory),
-    old: { dir: directory },
+    hold: (word, cmd, here) => heldWord(word, here, steadyAt(cmd)),
+    known,
+    // the folder the shell last left, which ~- names, is one no call records, so it reads as unknown until a cd on the line
+    old: {},
     process: environment,
     vars: new Map(),
   }
   const home = guarding ? checkoutOf(directory, orgs, roots) : undefined
   try {
-    return await run(lex(command, env.known), env, visitor(load5, limit, orgs, roots))
+    const unset = (key: string) =>
+      !named.blind && !named.counts.has(key) && environment[key] === undefined
+    return await run(lexed, env, visitor(load5, limit, orgs, roots, { own, steadyAt, unset }))
   } catch (error) {
     if (home) return checkoutRefusal("this call, which the hook could not read,", home)
     throw error
@@ -1273,7 +1829,7 @@ export async function check(
 ): Promise<string | undefined> {
   const limit = await loadLimit(environment)
   try {
-    return await inspect(raw, environment, load5, limit)
+    return await withLiveBudget(() => inspect(raw, environment, load5, limit))
   } catch (error) {
     if (!mayRefuse(raw, load5, limit)) return
     return `no-glm-heavy-path hook could not read this call (${error}), which reads as a git commit or push, an org tool, or an install or clone on a busy machine, from a GLM session, so it refuses it, as the glm rule (playground rules glm) asks of an org tool it cannot read. Run it as one plain command, or report to your lead.`
@@ -1290,7 +1846,7 @@ export async function refusal(
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-glm-heavy-path", "guard")
   const reason = (await fromFactory(raw)) ? await refusal(raw) : undefined
   if (reason) {
     console.error(reason)

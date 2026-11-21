@@ -3,13 +3,13 @@
 // Ported from ~/.playground/ops/optimizer/idle_sessions.py; a session's PRs are its roster pr and prs list, its worker's, every open one on its branch and every one its transcript links, so a checker serving a second PR is never listed while that one is open.
 // Flags, from Claude's session registry (live pid, status, statusUpdatedAt), roster.json and GitHub REST reads per PR (an open PR cached 5 minutes, a merged or closed one for good):
 // Every flag needs 10+ minutes not busy, so a session finishing a step is never listed. ops-tick's auto-end beat ends what auto_end.ts takes of it.
-//   checker-worker-gone  a reviewer or tester whose worker has no live session, with no open PR a live worker serves among its PRs
+//   checker-worker-gone  a reviewer or tester whose worker has no live session and is not coming back (comingBack), with no open PR a live worker serves among its PRs
 //   checker-pr-done      a reviewer or tester whose PRs are all merged or closed
 //   checker-nothing      a reviewer or tester not busy for 30+ minutes whose every PR head carries its verdict or is closed
 //   worker-prs-done      a worker whose roster holds a pr, whose PRs are all merged or closed, and whose /pull/ PR that closed last merged
 //   worker-pr-closed     a worker whose /pull/ PR that closed last closed unmerged; its lead is asked to reassign or end it
 //   roster-says-<status> any session whose roster entry reads paused or ended
-// A session whose status is `shell` (a background command still running) is not busy, and is marked `+bg`, since its watcher keeps waking it.
+// A session whose status is `shell` (a background command still running) is not busy, and is marked `+bg`, since its watcher keeps waking it; worker-prs-done alone skips a worker in `shell`, whose background task is a step of its chore.
 // Prints one line per flagged session and a total; reads only, signals nothing.
 
 import { mkdirSync } from "node:fs"
@@ -19,9 +19,13 @@ import { dirname, join } from "node:path"
 import { costOf } from "../../../api/hono/src/lib/usage/prices"
 import { kindOf } from "../../../packages/config/src/kinds"
 import { verdictsOf } from "../../../packages/config/src/verdicts"
-import { dataDirOf } from "../../../packages/env/src/data-dir"
+import { dataDirOf, herdrDir } from "../../../packages/env/src/data-dir"
+import { GH_TIMEOUT_MS, ghDown } from "../../../packages/scripts/src/gh-read"
+import STATUSES from "../../roster-statuses.json"
 
 const CACHE_TTL_S = 300
+// A PR still active under the last day keeps its checker, so a reaper beat between the lead's hand-off and the next review never ends the queue reviewer.
+const RECENT_S = 24 * 3600
 
 const PR_URL = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/
 // A checker's prs list names a PR not yet opened by its issue, which reads open until the PR that closes it merges.
@@ -56,6 +60,7 @@ export type PrState = {
   mergedAt?: string
   ref?: string
   state: string
+  updatedAt?: string
   verdicts: string[]
 }
 
@@ -64,6 +69,7 @@ export type Row = {
   kind: string | null
   lead?: string
   name: string
+  pr?: string
   quiet: number
   refs: string[]
   sessionId?: string
@@ -80,9 +86,20 @@ export type CollectInput = {
   now: number
   prState: (url: string) => Promise<PrState | null>
   projectsDir?: string
+  // the names each herdr server's latest spawn.sh restore printed as waiting, held by a gate or focus (restore_waits)
+  restoreWaiting?: Set<string>
+  // the names a resume record stands for in the data folder's resume/, which spawn.sh restore brings back
+  resumable?: Set<string>
   roster: Record<string, RosterEntry>
   sessions: Record<string, RegistryEntry>
   workerPrs: (worker: string) => Promise<string[]>
+}
+
+// A worker with no live session yet is coming back while its roster row reads live and a resume record stands for it or the latest restore printed it as waiting, so a reboot's held resume keeps its checkers; an ended, done or parked row is gone whatever the last restore log says.
+export function comingBack(input: CollectInput, worker: string): boolean {
+  const status = input.roster[worker]?.status
+  if (!status || !STATUSES.live.includes(status)) return false
+  return Boolean(input.resumable?.has(worker) || input.restoreWaiting?.has(worker))
 }
 
 // A session's PRs: its roster prs list, its roster pr and open branch PRs, its worker's, and every PR its own or its worker's transcript links.
@@ -197,7 +214,7 @@ export function workerOf(name: string, linked?: string): string | undefined {
 
 // The pure core: no network, no filesystem, no signals. Every input is injected.
 export async function collect(input: CollectInput): Promise<Row[]> {
-  const { hours, linkedPrs, now, prState, projectsDir, roster, sessions, workerPrs } = input
+  const { hours, now, prState, projectsDir, roster, sessions } = input
   const rows: Row[] = []
   for (const name of Object.keys(sessions).sort()) {
     const d = sessions[name]
@@ -219,11 +236,24 @@ export async function collect(input: CollectInput): Promise<Row[]> {
       const prs = await sessionPrs(input, name, worker, d.sessionId)
       const states = await Promise.all(prs.map((url) => prState(url)))
       const open = states.flatMap((s, i) => (s?.state === "open" ? [prs[i]] : []))
+      // A checker is kept while one of its own roster prs is open and was active under the last day, even with the row's worker paused and gone; a PR only a transcript links keeps none.
+      const own = new Set(roster[name]?.prs ?? [])
+      const active = prs.some((url, i) => {
+        const s = states[i]
+        return (
+          own.has(url) &&
+          s?.state === "open" &&
+          s.updatedAt !== undefined &&
+          now - Date.parse(s.updatedAt) / 1000 < RECENT_S
+        )
+      })
       if (
         worker &&
         !(worker in sessions) &&
         !Object.keys(sessions).some((s) => s.startsWith("worker-") && s.startsWith(worker)) &&
-        !(await servesLiveWorker(input, open))
+        !comingBack(input, worker) &&
+        !(await servesLiveWorker(input, open)) &&
+        !active
       )
         why.push(`checker-worker-gone (${worker})`)
       refs = states.flatMap((s) => (s?.ref ? [s.ref] : []))
@@ -255,8 +285,9 @@ export async function collect(input: CollectInput): Promise<Row[]> {
       // A worker only while its roster holds a pr: one with none sits between chores, since assign clears it.
       if (states.length > 0 && done && (checker || r.pr)) {
         if (checker) why.push(`checker-pr-done (${how})`)
-        else if (how === "merged") why.push("worker-prs-done (merged)")
-        else why.push(`worker-pr-closed (closed${donePr ? ` #${donePr}` : ""})`)
+        else if (how === "closed")
+          why.push(`worker-pr-closed (closed${donePr ? ` #${donePr}` : ""})`)
+        else if (status !== "shell") why.push("worker-prs-done (merged)")
       } else if (
         checker &&
         quiet >= 30 &&
@@ -274,6 +305,8 @@ export async function collect(input: CollectInput): Promise<Row[]> {
       kind,
       lead: r.lead ?? (worker ? roster[worker]?.lead : undefined),
       name,
+      // a checker's roster pr, which its cleanup finds its clones by; a worker's stays unset, so each of its worktrees is read against its own PR
+      pr: checker ? r.pr : undefined,
       quiet,
       refs,
       sessionId: d.sessionId,
@@ -317,6 +350,37 @@ export async function liveSessions(dir: string): Promise<Record<string, Registry
   return out
 }
 
+// The names a resume record stands for: each <name>.sh spawn.sh writes in the resume folder.
+export function resumeNames(dir: string): Set<string> {
+  try {
+    return new Set(
+      [...new Bun.Glob("*.sh").scanSync({ cwd: dir, onlyFiles: true })].map((f) => f.slice(0, -3)),
+    )
+  } catch {
+    return new Set()
+  }
+}
+
+// The names each herdr server's latest restore printed as waiting: ops-herdr writes each run's lines whole to <server>.restore.log in the herdr folder, a held session's as `waiting <name>: <why>` (spawn.sh restore).
+export async function restoreWaitingIn(dir: string): Promise<Set<string>> {
+  const names = new Set<string>()
+  let logs: string[] = []
+  try {
+    logs = [...new Bun.Glob("*.restore.log").scanSync({ cwd: dir, onlyFiles: true })]
+  } catch {
+    return names
+  }
+  for (const log of logs) {
+    try {
+      for (const line of (await Bun.file(join(dir, log)).text()).split("\n")) {
+        const name = /^waiting (\S+?):/.exec(line)?.[1]
+        if (name) names.add(name)
+      }
+    } catch {}
+  }
+  return names
+}
+
 export async function readRoster(path: string): Promise<Record<string, RosterEntry>> {
   try {
     const parsed = JSON.parse(await Bun.file(path).text()) as { agents?: RosterEntry[] }
@@ -328,8 +392,14 @@ export async function readRoster(path: string): Promise<Record<string, RosterEnt
   }
 }
 
+// One gh api read, null when it fails or while ghDown names why gh cannot read.
 async function ghApi(path: string): Promise<unknown> {
-  const proc = Bun.spawn(["gh", "api", path], { stderr: "ignore", stdout: "pipe", timeout: 30_000 })
+  if (ghDown()) return null
+  const proc = Bun.spawn(["gh", "api", path], {
+    stderr: "ignore",
+    stdout: "pipe",
+    timeout: GH_TIMEOUT_MS,
+  })
   const out = await new Response(proc.stdout).text()
   if ((await proc.exited) !== 0) return null
   try {
@@ -381,6 +451,7 @@ export async function prStateLive(
     merge_commit_sha?: string | null
     merged_at?: string | null
     state?: string
+    updated_at?: string | null
   } | null
   if (!pr?.state || !pr.head?.sha) return null
   const state = pr.merged_at ? "merged" : pr.state
@@ -402,6 +473,7 @@ export async function prStateLive(
     mergedAt: pr.merged_at || undefined,
     ref: pr.head.ref,
     state,
+    updatedAt: pr.updated_at || undefined,
     verdicts,
   })
 }
@@ -457,7 +529,7 @@ export async function linkedPrsLive(sessionId: string, projectsDir: string): Pro
   return [...new Set(urls)]
 }
 
-// The live machine's inputs: Claude's registry, the roster, GitHub through the PR cache and the transcripts.
+// The live machine's inputs: Claude's registry, the roster, the resume records, each herdr server's latest restore log, GitHub through the PR cache and the transcripts.
 export async function liveInput(hours: number, now: number): Promise<CollectInput> {
   const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")
   const lw = dataDirOf(process.env)
@@ -471,6 +543,8 @@ export async function liveInput(hours: number, now: number): Promise<CollectInpu
     now,
     prState: (url) => prStateLive(url, now, cachePath),
     projectsDir,
+    restoreWaiting: await restoreWaitingIn(herdrDir(process.env)),
+    resumable: resumeNames(join(lw, "resume")),
     roster,
     sessions,
     workerPrs: (worker) => workerPrsLive(worker, sessions, roster),

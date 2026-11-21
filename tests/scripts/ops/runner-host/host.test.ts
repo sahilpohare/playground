@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -15,11 +16,22 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
+import { peerRecordArgv } from "../../../../packages/scripts/src/machine-record/record"
+
 // The runner host is a small rented machine of about 4 GB.
 const DIR = join(import.meta.dir, "../../../../scripts/ops/runner-host")
 // each test spawns scripts and a scratch git repo, which runs past bun's 5s default under load (44 on 19 Oct)
 setDefaultTimeout(20_000)
 const TOKEN = "AAAREGTOKEN0123456789"
+// the box's user home a stub ssh answers ci.sh's first read with, the state folder under it, and free memory well past the floor
+const BOX_HOME = "/home/box"
+const BOX_CI_DIR =
+  readFileSync(join(DIR, "ci.sh"), "utf8").match(/^BOX_CI_DIR=(\S+)$/m)?.[1] ?? "BOX_CI_DIR unread"
+const BOX_CI = `${BOX_HOME}/${BOX_CI_DIR}`
+const BIG_KB = 64 * 1024 * 1024
+// the MemAvailable ci.sh passes suite.sh as a run's need: the model server's 15 GiB floor past a suite's 4.5 GiB peak, or an exec's 2 GiB
+const SUITE_NEED_KB = (15 * 1024 + 4608) * 1024
+const EXEC_NEED_KB = 17 * 1024 * 1024
 
 const dirs: string[] = []
 afterAll(() => {
@@ -201,13 +213,82 @@ describe("setup.sh", () => {
     expect(s).not.toMatch(/--token/)
     expect(s).toContain("ACTIONS_RUNNER_INPUT_TOKEN=\\$(cat ~/.runner-token)")
   })
+  // Only say, die and fetch run, cut out of setup.sh's text, with a curl on PATH that writes made-up bytes, so no install step runs and nothing reaches the network.
+  const fetchRun = (sum: string) => {
+    const root = mkdtempSync(join(tmpdir(), "runner-fetch-"))
+    dirs.push(root)
+    const b = join(root, "bin")
+    mkdirSync(b)
+    bin(
+      b,
+      "curl",
+      `echo "curl $*" >> "${root}/calls"\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && printf 'made-up bytes' > "$2"; shift; done`,
+    )
+    for (const tool of ["apt-get", "install", "su", "systemctl", "tar", "unzip"])
+      bin(b, tool, `echo "${tool} $*" >> "${root}/calls"`)
+    const text = readFileSync(join(DIR, "setup.sh"), "utf8")
+    const fns = ["say", "die", "fetch"].map((name) => {
+      const start = text.split("\n").findIndex((l) => l.startsWith(`${name}() {`))
+      if (start < 0) return ""
+      const lines = text.split("\n").slice(start)
+      const end = lines[0]!.endsWith("}") ? 0 : lines.findIndex((l) => l === "}")
+      return lines.slice(0, end + 1).join("\n")
+    })
+    const out = Bun.spawnSync(
+      [
+        "bash",
+        "-c",
+        `set -euo pipefail\n${fns.join("\n")}\nfetch https://example.invalid/tool.tar.gz ${sum} "${root}/tool.tar.gz"\necho fetched`,
+      ],
+      { env: { PATH: `${b}:/usr/bin:/bin:/usr/sbin:/sbin` }, stderr: "pipe", stdout: "pipe" },
+    )
+    const calls = existsSync(join(root, "calls")) ? readFileSync(join(root, "calls"), "utf8") : ""
+    return {
+      calls,
+      code: out.exitCode,
+      kept: existsSync(join(root, "tool.tar.gz")),
+      out: out.stdout.toString(),
+      err: out.stderr.toString(),
+    }
+  }
+  const MADE_UP_SUM = new Bun.CryptoHasher("sha256").update("made-up bytes").digest("hex")
+
+  test("fetch stops the script on a download whose sha256 is not the pinned one, and removes it", () => {
+    const r = fetchRun("0".repeat(64))
+    expect(r.code).toBe(1)
+    expect(r.out).toBe("")
+    expect(r.err).toContain(
+      `https://example.invalid/tool.tar.gz has sha256 ${MADE_UP_SUM}, not the pinned ${"0".repeat(64)}`,
+    )
+    expect(r.kept).toBe(false)
+    expect(r.calls).toMatch(/^curl -fsSL -o \S+ https:\/\/example\.invalid\/tool\.tar\.gz\n$/)
+  })
+
+  test("fetch keeps a download whose sha256 is the pinned one, and the script goes on", () => {
+    const r = fetchRun(MADE_UP_SUM)
+    expect([r.code, r.out, r.kept]).toEqual([0, "fetched\n", true])
+    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(1)
+  })
+
+  test("pins bun, uv and the runner by version and sha256, with no installer piped to a shell", () => {
+    const s = readFileSync(join(DIR, "setup.sh"), "utf8")
+    for (const name of ["BUN", "UV", "RUNNER"])
+      expect(s).toMatch(new RegExp(`^${name}_VERSION=\\d+\\.\\d+\\.\\d+$`, "m"))
+    expect(s.match(/_SHA256=[0-9a-f]{64}\b/g)).toHaveLength(6)
+    expect(s).not.toMatch(/curl[^\n]*\|\s*(ba)?sh/)
+    expect(s).not.toContain("releases/latest")
+  })
 })
 
 // ci.sh exec against a scratch box: ssh keeps the run's .cmd and answers its output and exit line from a file
 const boxExec = (
   out: string,
   {
+    cmd = (real: string): string[] => ["bun", "test", join(real, "web", "a.test.ts")],
     dirty = false,
+    freeKb = BIG_KB,
+    home = BOX_HOME,
+    key = "",
     more = (_: string): string[] => [],
     unit = "inactive",
     untracked = [] as string[],
@@ -222,21 +303,29 @@ const boxExec = (
     b,
     "ssh",
     `echo "ssh \${@: -1}" >> "${root}/argv"
+printf '%s\\n' "$*" >> "${root}/full"
 case "\${@: -1}" in
-  *"systemctl is-active"*) echo "unit ${unit}"; tail -n 1 "${root}/out"; echo ;;
-  "tail -n 1 /srv/ci/"*) tail -n 1 "${root}/out" ;;
-  "sed '\\$d' /srv/ci/"*) sed '$d' "${root}/out" ;;
-  "cat > /srv/ci/"*.cmd) cat > "${root}/cmd" ;;
+  *"/proc/meminfo"*) printf '%s\\n%s\\n' '${home}' '${freeKb}' ;;
+  *"systemctl --user is-active"*) echo "unit ${unit}"; tail -n 1 "${root}/out"; echo ;;
+  "tail -n 1 ${BOX_CI}/"*) tail -n 1 "${root}/out" ;;
+  "sed '\\$d' ${BOX_CI}/"*) sed '$d' "${root}/out" ;;
+  "cat > ${BOX_CI}/"*.cmd) cat > "${root}/cmd" ;;
   *".tar") cat > "${root}/tar" ;;
   *) cat > /dev/null ;;
 esac`,
   )
   const repo = join(root, "repo")
   mkdirSync(join(repo, "web"), { recursive: true })
+  if (key) {
+    mkdirSync(join(root, "data", "ops", "runner-host"), { recursive: true })
+    writeFileSync(join(root, "data", "ops", "runner-host", "key"), key)
+  }
   const env = {
     HOME: root,
     PATH: `${b}:/usr/bin:/bin`,
+    PLAYGROUND_DATA_DIR: join(root, "data"),
     RUNNER_HOST: "203.0.113.7",
+    RUNNER_HOST_CLONE: "~/code/playground",
     RUNNER_HOST_POLL: "0",
   }
   writeFileSync(join(repo, "web", "kept.ts"), "committed")
@@ -259,17 +348,7 @@ esac`,
   const before = status()
   const real = realpathSync(repo)
   const p = Bun.spawnSync(
-    [
-      "bash",
-      join(DIR, "ci.sh"),
-      "exec",
-      join(real, "web"),
-      "--",
-      "bun",
-      "test",
-      join(real, "web", "a.test.ts"),
-      ...more(real),
-    ],
+    ["bash", join(DIR, "ci.sh"), "exec", join(real, "web"), "--", ...cmd(real), ...more(real)],
     { cwd: repo, env },
   )
   const read = (name: string) =>
@@ -287,7 +366,7 @@ esac`,
   }
 }
 
-// suite.sh's run, the script it hands the runner user, run here with a docker that does not answer
+// suite.sh's run, the script it hands its steps, run here with a docker that does not answer
 const suiteRun = (mode: string) => {
   const root = mkdtempSync(join(tmpdir(), "runner-suite-"))
   dirs.push(root)
@@ -296,7 +375,7 @@ const suiteRun = (mode: string) => {
   mkdirSync(join(root, "tree"))
   bin(b, "docker", "exit 1")
   const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
-  const start = suite.indexOf(") << 'EOF'\n", suite.indexOf("exec runuser -u runner"))
+  const start = suite.indexOf(") << 'EOF'\n", suite.indexOf("exec env -i CI_RUN"))
   const script = suite.slice(suite.indexOf("\n", start) + 1, suite.indexOf("\nEOF\n", start))
   const p = Bun.spawnSync(["bash", "-s"], {
     env: {
@@ -312,7 +391,7 @@ const suiteRun = (mode: string) => {
   return { code: p.exitCode, out: p.stdout.toString() }
 }
 
-// suite.sh's web mode, the script it hands the runner user, run here with a docker that records its calls and answers `build` with
+// suite.sh's web mode, the script it hands its steps, run here with a docker that records its calls and answers `build` with
 // `build`'s code
 const suiteWeb = (build = 0) => {
   const root = mkdtempSync(join(tmpdir(), "runner-web-mode-"))
@@ -332,7 +411,7 @@ const suiteWeb = (build = 0) => {
   )
   bin(b, "timeout", `shift; exec "$@"`)
   const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
-  const start = suite.indexOf(") << 'EOF'\n", suite.indexOf("exec runuser -u runner"))
+  const start = suite.indexOf(") << 'EOF'\n", suite.indexOf("exec env -i CI_RUN"))
   const script = suite.slice(suite.indexOf("\n", start) + 1, suite.indexOf("\nEOF\n", start))
   const p = Bun.spawnSync(["bash", "-s"], {
     env: {
@@ -352,7 +431,7 @@ const suiteWeb = (build = 0) => {
 // the box's bash; the exec path reads its command with mapfile, which a Mac's bash 3.2 lacks
 const BASH4 = Bun.spawnSync(["bash", "-c", "[ ${BASH_VERSINFO[0]} -ge 4 ]"]).exitCode === 0
 
-// suite.sh's exec mode (or the given one), the script it hands the runner user, run here with a docker that answers, a bun that records its calls, and the base lockfile ci.sh sends when `base` is given
+// suite.sh's exec mode (or the given one), the script it hands its steps, run here with a docker that answers, a bun that records its calls, and the base lockfile ci.sh sends when `base` is given
 const suiteExec = (
   argv: string[],
   docker = `[ "$1" = port ] && echo 127.0.0.1:5432; exit 0`,
@@ -374,7 +453,7 @@ const suiteExec = (
   writeFileSync(join(root, "run.cmd"), `\n${argv.map((a) => `${a}\0`).join("")}`)
   if (base !== undefined) writeFileSync(join(root, "run.base"), base)
   const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
-  const start = suite.indexOf(") << 'EOF'\n", suite.indexOf("exec runuser -u runner"))
+  const start = suite.indexOf(") << 'EOF'\n", suite.indexOf("exec env -i CI_RUN"))
   const script = suite.slice(suite.indexOf("\n", start) + 1, suite.indexOf("\nEOF\n", start))
   const p = Bun.spawnSync(["bash", "-s"], {
     env: {
@@ -392,7 +471,7 @@ const suiteExec = (
   return { code: p.exitCode, calls: calls.trim().split("\n"), out: p.stdout.toString(), root }
 }
 
-// suite.sh's slot wait run here: /srv/ci under a scratch folder, tickets already queued, and the units in `live` reading active;
+// suite.sh's slot wait run here: its state folder a scratch one, its free memory past the floor, tickets already queued, and the units in `live` reading active;
 // flock records each try and takes the lock, and the run is cut off after `wait` ms when it never gets one
 const slotWait = (queued: string[], live: string[], wait: number) => {
   const root = mkdtempSync(join(tmpdir(), "runner-slots-"))
@@ -404,10 +483,19 @@ const slotWait = (queued: string[], live: string[], wait: number) => {
   bin(b, "systemctl", `case " ${live.join(" ")} " in *" \${@: -1} "*) exit 0 ;; esac; exit 3`)
   bin(b, "flock", `echo try >> "${root}/flock"`)
   bin(b, "sleep", "/bin/sleep 0.05")
+  writeFileSync(join(root, "meminfo"), `MemAvailable:   ${BIG_KB} kB\n`)
   const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
-  const block = suite.slice(suite.indexOf("SLOTS=$("), suite.indexOf('rm -f "$TICKET"\n') + 16)
-  const p = Bun.spawnSync(["bash", "-c", `${block.replaceAll("/srv/ci", root)}\necho got`], {
-    env: { MODE: "exec", PATH: `${b}:/usr/bin:/bin`, RUN: "0123456789ab-zzzzzz" },
+  const block = suite
+    .slice(suite.indexOf("SLOTS=$("), suite.indexOf('rm -f "$TICKET"\n') + 16)
+    .replaceAll("/proc/meminfo", join(root, "meminfo"))
+  const p = Bun.spawnSync(["bash", "-c", `${block}\necho got`], {
+    env: {
+      CI: root,
+      MODE: "exec",
+      NEED_KB: String(EXEC_NEED_KB),
+      PATH: `${b}:/usr/bin:/bin`,
+      RUN: "0123456789ab-zzzzzz",
+    },
     timeout: wait,
   })
   const read = (name: string) =>
@@ -432,17 +520,36 @@ const slotTake = (mode: string, busy: number[], argv?: string[]) => {
     `n=$(($(cat "${root}/n" 2> /dev/null || echo 0) + 1)); echo "$n" > "${root}/n"
 case " ${busy.join(" ")} " in *" $n "*) exit 1 ;; esac; exit 0`,
   )
+  writeFileSync(join(root, "meminfo"), `MemAvailable:   ${BIG_KB} kB\n`)
   const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
   const block = suite.slice(suite.indexOf("TAKE=$MODE"), suite.indexOf("\n}\nwhile :; do") + 3)
   const p = Bun.spawnSync(
-    ["bash", "-c", `${block.replaceAll("/srv/ci", root)}\ntake; echo "$? \${#LOCKS[@]}"`],
-    { env: { F: join(root, "run"), MODE: mode, PATH: `${b}:/usr/bin:/bin`, SLOTS: "3" } },
+    [
+      "bash",
+      "-c",
+      `${block.replaceAll("/proc/meminfo", join(root, "meminfo"))}\ntake; echo "$? \${#LOCKS[@]}"`,
+    ],
+    {
+      env: {
+        CI: root,
+        F: join(root, "run"),
+        MODE: mode,
+        NEED_KB: String(SUITE_NEED_KB),
+        PATH: `${b}:/usr/bin:/bin`,
+        SLOTS: "3",
+      },
+    },
   )
   return p.stdout.toString().trim()
 }
 
-// suite.sh's take() over 2 slots in a scratch folder, /proc/meminfo a file holding `availableKb`, and the suites in `lanes` holding every slot shared and their lane (the stub reads a descriptor's file from /proc, or lsof on a Mac)
-const suiteBeside = (mode: string, lanes: number[], availableKb: number) => {
+// suite.sh's take() over 2 slots in a scratch folder for a run whose need is `needKb`, /proc/meminfo a file holding `availableKb`, and the suites in `lanes` holding every slot shared and their lane (the stub reads a descriptor's file from /proc, or lsof on a Mac)
+const suiteBeside = (
+  mode: string,
+  lanes: number[],
+  availableKb: number,
+  needKb = mode === "exec" ? EXEC_NEED_KB : SUITE_NEED_KB,
+) => {
   const root = mkdtempSync(join(tmpdir(), "runner-beside-"))
   dirs.push(root)
   const b = join(root, "bin")
@@ -450,7 +557,7 @@ const suiteBeside = (mode: string, lanes: number[], availableKb: number) => {
   writeFileSync(join(root, "slots"), "2\n")
   writeFileSync(
     join(root, "meminfo"),
-    `MemTotal:       15728640 kB\nMemAvailable:   ${availableKb} kB\n`,
+    `MemTotal:       131072000 kB\nMemAvailable:   ${availableKb} kB\n`,
   )
   bin(
     b,
@@ -467,12 +574,13 @@ exit 0`,
   const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
   const block = suite
     .slice(suite.indexOf("SLOTS=$("), suite.indexOf("\n}\nwhile :; do") + 3)
-    .replaceAll("/srv/ci", root)
     .replaceAll("/proc/meminfo", join(root, "meminfo"))
   const p = Bun.spawnSync(["bash", "-c", `${block}\ntake; echo "$? \${#LOCKS[@]}"`], {
     env: {
+      CI: root,
       F: join(root, "run"),
       MODE: mode,
+      NEED_KB: String(needKb),
       PATH: `${b}:/usr/bin:/bin`,
       RUN: "0123456789ab-zzzzzz",
     },
@@ -526,6 +634,32 @@ exit 1`,
   return p.stdout.toString()
 }
 
+// suite.sh's test step when a file fails in the batch, passes alone, and the rerun is green: it names the file a BATCH-RED and still passes
+const testStepRedTurnsGreen = (
+  bun = `[ "$2" = test:file ] && exit 0
+n=$(($(cat "ROOT/n" 2> /dev/null || echo 0) + 1)); echo "$n" > "ROOT/n"
+if [ "$n" -lt 2 ]; then
+printf 'tests/a.test.ts:\n(fail) a > breaks [1.00ms]\n\n 9 pass\n 1 fail\n'
+exit 1
+fi
+printf ' 10 pass\n 0 fail\ntest-sandbox: parallel pass passed, serial pass passed\n'
+exit 0`,
+) => {
+  const root = mkdtempSync(join(tmpdir(), "runner-test-red-green-"))
+  dirs.push(root)
+  const b = join(root, "bin")
+  mkdirSync(b)
+  bin(b, "timeout", `shift; exec "$@"`)
+  bin(b, "bun", bun.replaceAll("ROOT", root))
+  const script = ["failing_files", "failing_names", "sandbox_ok", "summary", "test_step"]
+    .map(suiteFn)
+    .join("\n")
+  const p = Bun.spawnSync(["bash", "-c", `failed=0\n${script}\ntest_step`], {
+    env: { F: join(root, "run"), LOG: join(root, "log"), PATH: `${b}:/usr/bin:/bin` },
+  })
+  return p.stdout.toString()
+}
+
 describe("suite.sh", () => {
   test("a second full run that fails names its own files, so the Mac never re-runs the first run's", () => {
     const out = testStep()
@@ -533,6 +667,15 @@ describe("suite.sh", () => {
     expect(out).toContain("files test tests/b.test.ts\n")
     expect(out).not.toContain("files test tests/a.test.ts")
     expect(out).toContain("tally test 1 0\n")
+  })
+
+  test("a red its rerun turns green is named a BATCH-RED, and the step still passes", () => {
+    const out = testStepRedTurnsGreen()
+    expect(out).toContain(
+      "BATCH-RED: tests/a.test.ts (open one issue to root-cause it, by code-review-loop's step 2)\n",
+    )
+    expect(out).toContain("ok test ")
+    expect(out).not.toContain("fail test ")
   })
 
   test("only the oldest live waiter tries a slot, first come first served, and dead tickets drop", () => {
@@ -571,7 +714,7 @@ describe("suite.sh", () => {
 
   test("a run whose heartbeat goes stale stops its own unit, saying why in its output", () => {
     const r = watch("stale", 5000)
-    expect(r.stopped).toBe("stop --no-block ci-0123456789ab-abcdef\n")
+    expect(r.stopped).toBe("--user stop --no-block ci-0123456789ab-abcdef\n")
     expect(r.out).toContain("fail run: ")
   })
 
@@ -613,30 +756,59 @@ exit 0`)
     expect(slotTake("exec", [1, 2, 3])).toBe("1 0")
   })
 
-  // one suite at a time (dispatcher, 24 Oct: side by side took 632s each against 316s alone); the room test went with it
+  // one suite at a time (dispatcher, 24 Oct: side by side took 632s each against 316s alone)
   test("a second suite waits while one runs, even with MemAvailable to spare", () => {
-    expect(suiteBeside("suite", [1], 14 * 1024 * 1024)).toBe("1 0")
-    expect(suiteBeside("suite", [2], 14 * 1024 * 1024)).toBe("1 0")
-    expect(suiteBeside("suite", [1], 3 * 1024 * 1024)).toBe("1 0")
-    expect(suiteBeside("suite", [2], 3 * 1024 * 1024)).toBe("1 0")
+    expect(suiteBeside("suite", [1], BIG_KB)).toBe("1 0")
+    expect(suiteBeside("suite", [2], BIG_KB)).toBe("1 0")
   })
 
   test("a suite waits while both lanes are held, whatever the memory", () => {
-    expect(suiteBeside("suite", [1, 2], 14 * 1024 * 1024)).toBe("1 0")
+    expect(suiteBeside("suite", [1, 2], BIG_KB)).toBe("1 0")
   })
 
-  test("a lone suite takes its slots whatever the memory, and a web build or an exec run still waits for a running suite", () => {
-    expect(suiteBeside("suite", [], 1024 * 1024)).toBe("0 2")
-    expect(suiteBeside("web", [1], 14 * 1024 * 1024)).toBe("1 0")
-    expect(suiteBeside("exec", [1], 14 * 1024 * 1024)).toBe("1 0")
-    expect(suiteBeside("web", [], 14 * 1024 * 1024)).toBe("0 2")
+  test("a lone suite takes its slots, and a web build or an exec run still waits for a running suite", () => {
+    expect(suiteBeside("suite", [], BIG_KB)).toBe("0 2")
+    expect(suiteBeside("web", [1], BIG_KB)).toBe("1 0")
+    expect(suiteBeside("exec", [1], BIG_KB)).toBe("1 0")
+    expect(suiteBeside("web", [], BIG_KB)).toBe("0 2")
+  })
+
+  // #2529: the box is spark-9dfb, whose model server keeps 15 GiB; a suite or web build peaks at 4.5 GiB, an exec at 2 GiB
+  test("a run takes a slot only while the box's free memory covers the need ci.sh passed it, the floor past its own peak", () => {
+    const gib = (n: number) => Math.round(n * 1024 * 1024)
+    expect(suiteBeside("suite", [], gib(19.4))).toBe("1 0")
+    expect(suiteBeside("suite", [], gib(19.5))).toBe("0 2")
+    expect(suiteBeside("web", [], gib(19.4))).toBe("1 0")
+    expect(suiteBeside("exec", [], gib(16.9))).toBe("1 0")
+    expect(suiteBeside("exec", [], gib(17))).toBe("0 1")
+    expect(suiteBeside("exec", [], gib(17), gib(18))).toBe("1 0")
+    expect(suiteBeside("suite", [], gib(18), gib(18))).toBe("0 2")
+  })
+
+  // a box can hold a suite.sh beside an older ci.sh that passes no need, so the run refuses before it queues rather than take a slot past the floor
+  test("suite.sh refuses a run with no need, or one that is not a number, before it queues", () => {
+    const root = mkdtempSync(join(tmpdir(), "runner-need-"))
+    dirs.push(root)
+    cpSync(join(DIR, "suite.sh"), join(root, "suite.sh"))
+    const run = (...args: string[]) =>
+      Bun.spawnSync(["bash", join(root, "suite.sh"), "0123456789ab-aaaaaa", ...args], {
+        env: { HOME: root, PATH: "/usr/bin:/bin" },
+      })
+    for (const args of [["suite"], ["exec"], ["web"], ["exec", "17G"]]) {
+      const p = run(...args)
+      expect(p.exitCode).toBe(2)
+      expect(p.stderr.toString()).toContain(
+        "the MemAvailable in KiB the run needs, which ci.sh passes",
+      )
+    }
+    expect(existsSync(join(root, "queue"))).toBe(false)
   })
 
   test.skipIf(!BASH4)(
     "an exec run of the whole suite takes every slot, and one of a file takes one",
     () => {
-      expect(slotTake("exec", [], ["bun", "--cwd=/srv/ci/x", "run", "test"])).toBe("0 3")
-      expect(slotTake("exec", [], ["bun", "run", "--cwd", "/srv/ci/x", "test"])).toBe("0 3")
+      expect(slotTake("exec", [], ["bun", `--cwd=${BOX_CI}/x`, "run", "test"])).toBe("0 3")
+      expect(slotTake("exec", [], ["bun", "run", "--cwd", `${BOX_CI}/x`, "test"])).toBe("0 3")
       expect(slotTake("exec", [3], ["bun", "run", "test"])).toBe("1 0")
       expect(slotTake("exec", [], ["bun", "run", "test", "tests/a.test.ts"])).toBe("0 1")
       expect(slotTake("exec", [], ["bun", "test", "a.test.ts"])).toBe("0 1")
@@ -648,8 +820,8 @@ exit 0`)
   // as a suite, 10 queued test:skills runs of about 200s each held the box one at a time; one 37-minute wait was 5 suites in a row
   test.skipIf(!BASH4)("an exec run of dispatcher's checks takes one slot, as any exec does", () => {
     expect(slotTake("exec", [], ["bun", "run", "test:skills"])).toBe("0 1")
-    expect(slotTake("exec", [], ["bun", "--cwd=/srv/ci/x", "run", "test:skills"])).toBe("0 1")
-    expect(slotTake("exec", [1], ["bun", "run", "--cwd", "/srv/ci/x", "test:skills"])).toBe("0 1")
+    expect(slotTake("exec", [], ["bun", `--cwd=${BOX_CI}/x`, "run", "test:skills"])).toBe("0 1")
+    expect(slotTake("exec", [1], ["bun", "run", "--cwd", `${BOX_CI}/x`, "test:skills"])).toBe("0 1")
     expect(slotTake("exec", [1, 2, 3], ["bun", "run", "test:skills"])).toBe("1 0")
   })
 
@@ -682,7 +854,7 @@ exit 0`)
       const audit = (calls: string[]) =>
         calls.find((c) => c.startsWith("bun packages/scripts/src/audit.ts"))
       const strict =
-        "bun packages/scripts/src/audit.ts --audit-level high --ignore GHSA-vfj7-8cjw-p6xm"
+        "bun packages/scripts/src/audit.ts --audit-level moderate --ignore GHSA-67mh-4wv8-2f99 --ignore GHSA-g3hv-75wg-m249"
       const over = suiteExec([], undefined, "suite", "{}")
       expect(audit(over.calls)).toBe(`${strict} --new-over ${join(over.root, "run.base")}`)
       expect(audit(suiteExec([], undefined, "suite").calls)).toBe(strict)
@@ -717,7 +889,7 @@ case "$f" in *socket) [ $n -eq 1 ] ;; *) [ $n -ge 3 ] ;; esac`
   test("a run whose Docker does not answer never reads green: red in suite mode, 255 in exec", () => {
     const suite = suiteRun("suite")
     expect(suite.code).toBe(1)
-    expect(suite.out).toContain("fail docker: Docker does not answer for the runner user")
+    expect(suite.out).toContain("fail docker: Docker does not answer for this user")
     const exec = suiteRun("exec")
     expect(exec.code).toBe(255)
     expect(exec.out).toContain("fail docker")
@@ -781,12 +953,14 @@ esac`,
       "c0 playground.ci.run=0123456789ab-aaaaaa\nc1 playground.ci.run=0123456789ab-bbbbbb\n",
     )
     expect(readFileSync(join(root, "calls"), "utf8")).toContain("\ninfo\n")
-    bin(stubs, "id", "echo 0")
     bin(stubs, "timeout", `shift; exec "$@"`)
-    const p = Bun.spawnSync(["bash", "-s", "0123456789ab-aaaaaa", "stop"], {
-      env: { PATH: `${stubs}:${real}:/usr/bin:/bin` },
-      stdin: Buffer.from(suite.replaceAll("/srv/ci", join(root, "srv"))),
-    })
+    writeFileSync(join(root, "srv", "suite.sh"), suite)
+    const p = Bun.spawnSync(
+      ["bash", join(root, "srv", "suite.sh"), "0123456789ab-aaaaaa", "stop"],
+      {
+        env: { PATH: `${stubs}:${real}:/usr/bin:/bin` },
+      },
+    )
     expect(p.exitCode).toBe(0)
     expect(readFileSync(join(root, "containers"), "utf8")).toBe(
       "c1 playground.ci.run=0123456789ab-bbbbbb\n",
@@ -794,40 +968,55 @@ esac`,
     expect(readFileSync(join(root, "calls"), "utf8")).toContain("rm -fv c0\n")
     expect(existsSync(tree)).toBe(false)
     expect(readFileSync(join(DIR, "ci.sh"), "utf8")).toContain(
-      "--property='ExecStopPost=/bin/bash /root/playground-suite.sh $RUN stop'",
+      "--property='ExecStopPost=/bin/bash $CI/suite.sh $RUN stop'",
     )
   })
 
   test("the box's run tree sits under .claude/worktrees/, as a Mac worktree does", () => {
     expect(readFileSync(join(DIR, "suite.sh"), "utf8")).toContain(
-      "DIR=/srv/ci/.claude/worktrees/$RUN\n",
+      "DIR=$CI/.claude/worktrees/$RUN\n",
     )
     expect(readFileSync(join(DIR, "ci.sh"), "utf8")).toContain(
-      "BOXDIR=/srv/ci/.claude/worktrees/$RUN\n",
+      "BOXDIR=$CI/.claude/worktrees/$RUN\n",
     )
   })
 })
 
-// ci.sh exec (or the given mode) against a box faked on this machine: ssh runs each command here with /srv/ci and /root moved under a
-// scratch folder, systemd-run runs the unit in place, and the unit runs a stand-in suite that records its mode and prints the given output
+// ci.sh exec (or the given mode) against a box faked on this machine: ssh runs each command here, the box's home this scratch folder and its
+// free memory past the floor, systemd-run runs the unit in place, and the unit runs a stand-in suite that records its mode and need and prints the given output
 const fakeBox = (
   output: string,
-  { argv = (repo: string) => ["exec", repo, "--", "true"], code = 0 } = {},
+  { argv = (repo: string) => ["exec", repo, "--", "true"], code = 0, clone = true } = {},
 ) => {
   const root = mkdtempSync(join(tmpdir(), "runner-fake-"))
   dirs.push(root)
   const b = join(root, "bin")
   mkdirSync(b)
-  mkdirSync(join(root, "srv"))
+  // the box's clone, whose record CLI a stand-in bun on the box's ~/.bun/bin answers, keeping where it ran, its words and its stdin
+  if (clone) {
+    mkdirSync(join(root, "clone"))
+    mkdirSync(join(root, ".bun", "bin"), { recursive: true })
+    bin(
+      join(root, ".bun", "bin"),
+      "bun",
+      `{ printf '%s\\n' "$PWD" "$*"; cat; } > "${root}/recorded"`,
+    )
+  }
   writeFileSync(
     join(root, "fake-suite.sh"),
-    `echo "$2" > "${root}/mode"; printf '%s' '${output}'; exit ${code}\n`,
+    `echo "$2" > "${root}/mode"; echo "$3" > "${root}/need"; printf '%s' '${output}'; exit ${code}\n`,
   )
   bin(
     b,
     "ssh",
-    String.raw`c=$(printf '%s' "${"$"}{@: -1}" | sed -e 's#/srv/ci#ROOT/srv#g' -e 's#/root/playground-suite.sh #ROOT/fake-suite.sh #g' -e 's#/root/#ROOT/#g')
-exec bash -c "$c"`.replaceAll("ROOT", root),
+    String.raw`case "${"$"}{@: -1}" in *"/proc/meminfo"*) printf 'ROOT
+BIG
+'; exit 0 ;; esac
+printf '%s\n' "${"$"}{@: -1}" >> ROOT/argv
+c=$(printf '%s' "${"$"}{@: -1}" | sed -e 's#ROOT/${BOX_CI_DIR}/suite.sh #ROOT/fake-suite.sh #g')
+exec bash -c "$c"`
+      .replaceAll("ROOT", root)
+      .replace("BIG", String(BIG_KB)),
   )
   bin(b, "systemd-run", `while [[ "$1" == --* ]]; do shift; done; "$@"`)
   bin(b, "systemctl", "echo inactive; exit 3")
@@ -837,6 +1026,7 @@ exec bash -c "$c"`.replaceAll("ROOT", root),
     HOME: root,
     PATH: `${b}:/usr/bin:/bin`,
     RUNNER_HOST: "203.0.113.7",
+    RUNNER_HOST_CLONE: join(root, "clone"),
     RUNNER_HOST_POLL: "0",
   }
   for (const args of [
@@ -848,9 +1038,60 @@ exec bash -c "$c"`.replaceAll("ROOT", root),
     cwd: repo,
     env,
   })
-  const mode = existsSync(join(root, "mode")) ? readFileSync(join(root, "mode"), "utf8").trim() : ""
-  return { code: p.exitCode, err: p.stderr.toString(), mode, out: p.stdout.toString() }
+  const read = (name: string) =>
+    existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : ""
+  return {
+    argv: read("argv"),
+    code: p.exitCode,
+    err: p.stderr.toString(),
+    mode: read("mode").trim(),
+    need: read("need").trim(),
+    out: p.stdout.toString(),
+    recorded: read("recorded"),
+    root,
+  }
 }
+
+describe("what a run puts on the box goes into the box's machine record (PG-2538)", () => {
+  test("each upload hands the box clone's record CLI the run folder and the Postgres image, by peerRecordArgv's own remote words", () => {
+    const r = fakeBox("done")
+    expect(r.code).toBe(0)
+    const clone = join(r.root, "clone")
+    expect(r.argv.split("\n")).toContain(peerRecordArgv(undefined, "box", clone, "add").at(-1)!)
+    const [where, words, stdin] = r.recorded.split("\n")
+    expect([where, words]).toEqual([
+      clone,
+      "--no-env-file packages/scripts/src/machine-record/cli.ts add --stdin",
+    ])
+    const ci = join(r.root, BOX_CI_DIR)
+    expect(JSON.parse(stdin!)).toEqual([
+      {
+        by: "ci.sh",
+        kind: "folder",
+        path: ci,
+        undo: `remove ${ci} and what it holds`,
+        why: "ci.sh runs heavy runs here",
+      },
+      {
+        by: "ci.sh",
+        kind: "image",
+        path: "docker image postgres:alpine",
+        undo: "docker image rm postgres:alpine",
+        why: "suite.sh starts each run's Postgres from it",
+      },
+    ])
+  })
+
+  test("a box whose clone cannot take the record still runs, with one line saying what is not in it", () => {
+    const r = fakeBox("done", { clone: false })
+    expect(r.code).toBe(0)
+    expect(r.out).toBe("done\n")
+    expect(r.err.split("\n")[0]).toBe(
+      `ci.sh: ${r.root}/${BOX_CI_DIR} and docker image postgres:alpine are not in the box's machine record (its clone ${r.root}/clone); its next check names them`,
+    )
+    expect(r.err.split("\n")[1]).toMatch(/^ci\.sh: ci-\S+ started on the box; /)
+  })
+})
 
 describe("ci.sh exec", () => {
   test("a command whose output has no final newline still ends green, its output whole", () => {
@@ -887,8 +1128,9 @@ describe("ci.sh exec", () => {
     expect(rel).toBe("/web")
     const argv = args.split("\0").filter(Boolean)
     expect(argv.slice(0, 2)).toEqual(["bun", "test"])
-    expect(argv[2]).toMatch(
-      /^\/srv\/ci\/\.claude\/worktrees\/[0-9a-f]{12}-[0-9a-z]{6}\/web\/a\.test\.ts$/,
+    expect(argv[2]).toStartWith(`${BOX_CI}/.claude/worktrees/`)
+    expect(argv[2].slice(BOX_CI.length)).toMatch(
+      /^\/\.claude\/worktrees\/[0-9a-f]{12}-[0-9a-z]{6}\/web\/a\.test\.ts$/,
     )
   })
 
@@ -930,6 +1172,122 @@ describe("ci.sh exec", () => {
     expect(r.code).toBe(1)
     expect(r.out).toBe(" 3 pass\n 1 fail\n")
     expect(boxExec("ok\nexit 0\n").code).toBe(0)
+  })
+
+  // #2529: the box is a peer of this user's own, reached with no root, under user units; #2554: its state sits outside that user's data folder, which a test sandbox may hide
+  test(`it logs in as this user, never root, and keeps every remote path under the box user's ~/${BOX_CI_DIR} in user units`, () => {
+    const r = boxExec("exit 0\n")
+    expect(r.code).toBe(0)
+    const me = Bun.spawnSync(["id", "-un"]).stdout.toString().trim()
+    const full = r.read("full").trim().split("\n")
+    expect(full.length).toBeGreaterThan(3)
+    for (const line of full) expect(line).toContain(` ${me}@203.0.113.7 `)
+    const sent = r.read("argv")
+    expect(sent).not.toMatch(/\/srv\/ci|\/root|root@|runuser/)
+    expect(sent).toContain(`cat > ${BOX_CI}/`)
+    expect(sent).not.toContain(`${BOX_HOME}/.playground`)
+    expect(sent).toContain("systemd-run --user ")
+    expect(sent).toContain("systemctl --user is-active ")
+  })
+
+  test("the key comes from RUNNER_HOST_KEY, else the data folder's runner-host/key", () => {
+    const r = boxExec("exit 0\n", { key: "/keys/peer" })
+    expect(r.read("full").split("\n")[0]).toStartWith("-i /keys/peer -o IdentitiesOnly=yes ")
+  })
+
+  test("a box whose free memory would go under the model server's 15 GiB floor exits 255 before any upload, so the run stays here", () => {
+    const low = boxExec("exit 0\n", { freeKb: 17 * 1024 * 1024 - 1 })
+    expect(low.code).toBe(255)
+    expect(low.err).toContain("under the model server's 15 GiB floor")
+    expect(low.read("tar")).toBe("")
+    expect(low.read("argv").trim().split("\n")).toHaveLength(1)
+    expect(boxExec("exit 0\n", { freeKb: 17 * 1024 * 1024 }).code).toBe(0)
+    for (const home of ["", "/home/two words", "relative/home"]) {
+      const lost = boxExec("exit 0\n", { home })
+      expect(lost.code).toBe(255)
+      expect(lost.err).toContain("the box's home or free memory did not read")
+      expect(lost.read("tar")).toBe("")
+    }
+  })
+
+  test.each([
+    [["bun", "run", "test"]],
+    [["bun", "run", "test:file"]],
+    [["bun", "run", "--cwd", "web", "test"]],
+  ])(
+    "an exec of the whole suite (%p) keeps the suite's 4.5 GiB peak, so at 18 GiB free it exits 255 before any upload, as suite.sh's take() would wait",
+    (argv) => {
+      const low = boxExec("exit 0\n", { cmd: () => argv, freeKb: 18 * 1024 * 1024 })
+      expect(low.code).toBe(255)
+      expect(low.err).toContain("under the model server's 15 GiB floor")
+      expect(low.read("tar")).toBe("")
+      expect(low.read("argv").trim().split("\n")).toHaveLength(1)
+      expect(boxExec("exit 0\n", { cmd: () => argv, freeKb: 19.5 * 1024 * 1024 }).code).toBe(0)
+    },
+  )
+
+  test("an exec of named test files keeps the exec's 2 GiB peak, so 18 GiB free takes it", () => {
+    const argv = ["bun", "run", "test:file", "tests/a.test.ts"]
+    expect(boxExec("exit 0\n", { cmd: () => argv, freeKb: 18 * 1024 * 1024 }).code).toBe(0)
+  })
+
+  // ci.sh holds the floor and the peaks alone, and suite.sh's slot wait reads the need it passes
+  test.each([
+    ["an exec", (repo: string) => ["exec", repo, "--", "true"], EXEC_NEED_KB],
+    [
+      "a whole-suite exec",
+      (repo: string) => ["exec", repo, "--", "bun", "run", "test"],
+      SUITE_NEED_KB,
+    ],
+    ["a web build", () => ["web", "HEAD"], SUITE_NEED_KB],
+    ["a suite", () => ["HEAD"], SUITE_NEED_KB],
+  ])("%s passes suite.sh the floor past its own peak as its need", (_, argv, need) => {
+    expect(fakeBox("ok\n", { argv }).need).toBe(String(need))
+  })
+
+  // dispatcher, 17 Nov: on spark-a566, linger kept a locked keyring daemon alive, and the factory's calls jammed on it
+  test("nothing ci.sh sends or suite.sh runs reaches the keyring: no gh, credential helper or docker login, and the steps' env drops the bus", () => {
+    const keyring = /\bgh\b|credential|docker login|secret-tool|keyring|DBUS/i
+    const sent = boxExec("exit 0\n").read("argv")
+    expect(sent).not.toMatch(keyring)
+    // the two settings that shut the bus and gh's own config are the one place either word may stand
+    const shut = ["DBUS_SESSION_BUS_ADDRESS=disabled: ", 'GH_CONFIG_DIR="$CI/gh" ']
+    const code = (name: string) =>
+      readFileSync(join(DIR, name), "utf8")
+        .split("\n")
+        .filter((line) => !/^\s*#/.test(line))
+        .join("\n")
+    expect(code("ci.sh")).not.toMatch(keyring)
+    const steps = code("suite.sh").match(/exec env -i [^\n]*/)?.[0] ?? ""
+    for (const s of shut) expect(steps).toContain(s)
+    expect(steps).toContain('DOCKER_CONFIG="$CI/docker"')
+    expect(steps).toContain("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1")
+    expect(shut.reduce((s, cut) => s.replace(cut, ""), code("suite.sh"))).not.toMatch(keyring)
+  })
+
+  test("a box with no node on the steps' own PATH gives them bun as node, and one with its own node drops that link", () => {
+    const root = mkdtempSync(join(tmpdir(), "runner-node-"))
+    dirs.push(root)
+    mkdirSync(join(root, "ci", "bin"), { recursive: true })
+    const suite = readFileSync(join(DIR, "suite.sh"), "utf8")
+    const line = suite.split("\n").find((l) => l.includes('"$CI/bin/node"')) ?? ""
+    const run = () =>
+      Bun.spawnSync(["bash", "-c", line.replace(":/usr/bin:/bin", "")], {
+        env: {
+          CI: join(root, "ci"),
+          HOME: root,
+          PATH: "/usr/bin:/bin",
+          RUN: "0123456789ab-abcdef",
+        },
+      }).exitCode
+    expect(run()).toBe(0)
+    expect(readlinkSync(join(root, "ci", "bin", "node"))).toBe(join(root, ".bun", "bin", "bun"))
+    expect(readdirSync(join(root, "ci", "bin"))).toEqual(["node"])
+    mkdirSync(join(root, ".local", "bin"), { recursive: true })
+    writeFileSync(join(root, ".local", "bin", "node"), "")
+    chmodSync(join(root, ".local", "bin", "node"), 0o755)
+    expect(run()).toBe(0)
+    expect(readdirSync(join(root, "ci", "bin"))).toEqual([])
   })
 })
 
@@ -1037,7 +1395,7 @@ const box = (
     b,
     "ssh",
     reachable
-      ? `case "\${@: -1}" in *"systemctl is-active"*) n=$(cat "${root}/polls" 2> /dev/null || echo 0); echo $((n + 1)) > "${root}/polls"; if [ "$n" -lt ${active} ]; then echo "unit active ${place}"; [ -n "${place}" ] || echo "ok install 3s"; else echo "unit ${unit}"; tail -n 1 "${root}/out"; fi; echo ;; "tail -n 1 /srv/ci/"*) tail -n 1 "${root}/out" ;; "cat /srv/ci/"*) cat "${root}/out" ;; *) cat > /dev/null ;; esac`
+      ? `case "\${@: -1}" in *"/proc/meminfo"*) printf '%s\\n%s\\n' '${BOX_HOME}' '${BIG_KB}' ;; *"systemctl --user is-active"*) n=$(cat "${root}/polls" 2> /dev/null || echo 0); echo $((n + 1)) > "${root}/polls"; if [ "$n" -lt ${active} ]; then echo "unit active ${place}"; [ -n "${place}" ] || echo "ok install 3s"; else echo "unit ${unit}"; tail -n 1 "${root}/out"; fi; echo ;; "tail -n 1 ${BOX_CI}/"*) tail -n 1 "${root}/out" ;; "cat ${BOX_CI}/"*) cat "${root}/out" ;; *) cat > /dev/null ;; esac`
       : "exit 255",
   )
   bin(
@@ -1051,6 +1409,7 @@ const box = (
     HOME: root,
     PATH: `${b}:/usr/bin:/bin`,
     RUNNER_HOST: "203.0.113.7",
+    RUNNER_HOST_CLONE: "~/code/playground",
     ...(linuxOnly === null ? {} : { RUNNER_HOST_LINUX_ONLY: linuxOnly }),
     RUNNER_HOST_POLL: active ? "1" : "0",
     ...(progress === undefined ? {} : { RUNNER_HOST_PROGRESS: progress }),
@@ -1190,7 +1549,7 @@ describe("ci.sh against the box", () => {
     bin(
       b,
       "ssh",
-      `printf '%s\\n' "$*" >> "${root}/argv"; printf '%s\\n' "\${@: -1}" >> "${root}/ssh"; case "\${@: -1}" in *"systemctl is-active"*) printf 'unit active\\nok install 3s\\n\\n' ;; *.base) cat > "${root}/base" ;; *) cat > /dev/null ;; esac`,
+      `printf '%s\\n' "$*" >> "${root}/argv"; printf '%s\\n' "\${@: -1}" >> "${root}/ssh"; case "\${@: -1}" in *"/proc/meminfo"*) printf '%s\\n%s\\n' '${BOX_HOME}' '${BIG_KB}' ;; *"systemctl --user is-active"*) printf 'unit active\\nok install 3s\\n\\n' ;; *.base) cat > "${root}/base" ;; *) cat > /dev/null ;; esac`,
     )
     const repo = join(root, "repo")
     mkdirSync(repo)
@@ -1216,7 +1575,8 @@ describe("ci.sh against the box", () => {
     })
     const calls = () =>
       existsSync(join(root, "ssh")) ? readFileSync(join(root, "ssh"), "utf8") : ""
-    for (let i = 0; i < 200 && !calls().includes("systemctl is-active"); i++) await Bun.sleep(25)
+    for (let i = 0; i < 200 && !calls().includes("systemctl --user is-active"); i++)
+      await Bun.sleep(25)
     const argv = () =>
       existsSync(join(root, "argv")) ? readFileSync(join(root, "argv"), "utf8") : ""
     return { argv, calls, root, run }
@@ -1233,12 +1593,12 @@ describe("ci.sh against the box", () => {
       git("commit", "-q", "-m", "a")
     })
     try {
-      expect(calls()).toContain("systemctl is-active")
+      expect(calls()).toContain("systemctl --user is-active")
       process.kill(-run.pid, "SIGTERM")
       expect(await run.exited).toBe(143)
       const unit = calls().match(/systemd-run .*--unit=(ci-\S+)/)?.[1]
       expect(unit).toBeTruthy()
-      expect(calls()).toContain(`systemctl stop ${unit}`)
+      expect(calls()).toContain(`systemctl --user stop ${unit}`)
     } finally {
       stop(run)
     }
@@ -1258,7 +1618,7 @@ describe("ci.sh against the box", () => {
       expect(await run.exited).toBe(143)
       const unit = calls().match(/systemd-run .*--unit=(ci-\S+)/)?.[1]
       expect(unit).toBeTruthy()
-      expect(calls()).toContain(`systemctl stop ${unit}`)
+      expect(calls()).toContain(`systemctl --user stop ${unit}`)
     } finally {
       stop(run)
     }
@@ -1272,11 +1632,11 @@ describe("ci.sh against the box", () => {
       expect(id).toBeTruthy()
       const lines = calls().split("\n")
       expect(lines.find((l) => l.includes("systemd-run"))).toStartWith(
-        `touch /srv/ci/${id}.beat && `,
+        `touch ${BOX_CI}/${id}.beat && `,
       )
-      const polls = lines.filter((l) => l.includes("systemctl is-active"))
+      const polls = lines.filter((l) => l.includes("systemctl --user is-active"))
       expect(polls.length).toBeGreaterThan(0)
-      for (const poll of polls) expect(poll).toStartWith(`touch -c /srv/ci/${id}.beat; `)
+      for (const poll of polls) expect(poll).toStartWith(`touch -c ${BOX_CI}/${id}.beat; `)
     } finally {
       stop(run)
     }
@@ -1310,7 +1670,7 @@ describe("ci.sh against the box", () => {
     const ok = cancel("0123456789ab-abcdef")
     expect(ok.exitCode).toBe(0)
     expect(readFileSync(join(root, "ssh"), "utf8")).toContain(
-      "systemctl stop ci-0123456789ab-abcdef",
+      "systemctl --user stop ci-0123456789ab-abcdef",
     )
     expect(ok.stdout.toString()).toBe("ci.sh: ci-0123456789ab-abcdef inactive\n")
     for (const bad of ["ci-0123456789ab-abcdef", "0123456789ab-abcdef; reboot", "*"]) {
@@ -1338,7 +1698,7 @@ describe("ci.sh against the box", () => {
     try {
       const id = calls().match(/systemd-run .*--unit=ci-(\S+)/)?.[1]
       expect(id).toBeTruthy()
-      expect(calls()).toContain(`cat > /srv/ci/${id}.base`)
+      expect(calls()).toContain(`cat > ${BOX_CI}/${id}.base`)
       expect(readFileSync(join(root, "base"), "utf8")).toBe("at the merge base")
     } finally {
       stop(run)

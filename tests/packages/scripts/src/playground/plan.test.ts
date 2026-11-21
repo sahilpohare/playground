@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test"
 
 import {
   addCommand,
+  aliasFailure,
   extraWordRefusal,
   HELP,
   planStart,
   rollOutcome,
+  rollTimedOut,
   runStart,
   runStatus,
   statusLines,
@@ -13,6 +15,8 @@ import {
   VIEW_HINT,
   dashboardBeatOf,
   startFailure,
+  stepQueued,
+  waitingLine,
   waitOutcome,
   wantsHelp,
   type DashboardBeat,
@@ -215,6 +219,22 @@ describe("addCommand", () => {
     })
   })
 
+  // spawn.sh refuses a worker with no --account while usage.accounts lists a Claude row, so add passes the one it is given.
+  test("passes --account to spawn.sh as given", () => {
+    expect(
+      addCommand(["--account", "blue@example.com", "worker-brave-otter"], all, pick, MODELS),
+    ).toEqual({
+      argv: [
+        "worker",
+        "worker-brave-otter",
+        "handoffs/new-worker.md",
+        "--account",
+        "blue@example.com",
+      ],
+      started: "Started worker-brave-otter",
+    })
+  })
+
   test("--kind runner starts a runner, its name picked for that kind", () => {
     expect(addCommand(["--kind", "runner", "--brief", "b-x.md"], all, pick, MODELS)).toEqual({
       argv: ["runner", "runner-brave-otter", "b-x.md"],
@@ -291,7 +311,7 @@ describe("addCommand", () => {
       ["otter", "--model", "claude-opus-4"],
       "--model takes claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5 or claude-haiku-5-5, not claude-opus-4",
     ],
-    [["otter", "--backend", "gpt"], "--backend takes claude or glm, not gpt"],
+    [["otter", "--backend", "gpt"], "--backend takes claude, glm or local, not gpt"],
     [
       ["k3m9px-runner"],
       "k3m9px-runner reads as a runner, not a worker: bun run name worker gives one",
@@ -309,6 +329,7 @@ describe("addCommand", () => {
     [["--kind", "researcher"], "--kind takes worker or runner, not researcher"],
     [["--dispatcher", "--kind", "runner"], "--dispatcher takes --backend alone"],
     [["--dispatcher", "--title", "Plain work"], "--dispatcher takes --backend alone"],
+    [["--dispatcher", "--account", "zai"], "--dispatcher takes --backend alone"],
     [
       ["--dispatcher"],
       "a second dispatcher runs on --backend glm, since on Claude it needs a second account",
@@ -388,6 +409,65 @@ describe("rollOutcome", () => {
         ],
       ),
     ).toEqual({ done: "Updated to abc1234", ok: true })
+  })
+
+  // #2787: a roll that moved the database onto loopback names the move and the old container's remove command on its PASS line
+  test("reads a passing roll that moved the database as updated, naming the move and its remove command", () => {
+    const moved =
+      "Moved the database playground-db-Ab12 onto 127.0.0.1:55432 alone, keeping its data; playground-db-Ab12-old is stopped and kept; once the Dashboard reads its data, remove it with: docker rm -v playground-db-Ab12-old"
+    expect(
+      rollOutcome(
+        [],
+        [
+          `2026-10-18T02:03:00Z ROLL canary abc1234 (roll-now) abc1234 PASS version=abc1234 verify=PASS follower=running database: ${moved}`,
+        ],
+      ),
+    ).toEqual({ done: `Updated to abc1234; ${moved}`, ok: true })
+  })
+
+  test("keeps a move's note when the roll fails after it, so the old container and its remove command still reach the report", () => {
+    const moved =
+      "Moved the database playground-db-Ab12 onto 127.0.0.1:55432 alone, keeping its data; playground-db-Ab12-old is stopped and kept; once the Dashboard reads its data, remove it with: docker rm -v playground-db-Ab12-old"
+    expect(
+      rollOutcome(
+        [],
+        [
+          `2026-10-18T02:03:00Z ROLL canary def5678 (roll-now) def5678 FAIL dev=DOWN (dev: refusing to start: x) follower=running database: ${moved}`,
+          "2026-10-18T02:03:01Z ROLL canary def5678 (roll-now) def5678 FAIL dev refusing: x (not the head's, no bad build)",
+          "2026-10-18T02:05:00Z FALLBACK abc1234 PASS version=abc1234 verify=PASS",
+        ],
+      ),
+    ).toEqual({
+      done: `Failed: dev refusing: x (not the head's, no bad build); back on abc1234; ${moved}`,
+      ok: false,
+    })
+    expect(
+      rollOutcome(
+        [],
+        [
+          `2026-10-18T02:03:00Z ROLL canary def5678 (roll-now) def5678 FAIL dev=DOWN (dev: y) database: ${moved}`,
+          "2026-10-18T02:05:00Z FALLBACK abc1234 PASS version=abc1234 verify=PASS",
+        ],
+      ),
+    ).toEqual({ done: `Failed: dev=DOWN (dev: y); back on abc1234; ${moved}`, ok: false })
+  })
+
+  test("reads a failed move's reason first, from the refusing line playground update prints", () => {
+    const why =
+      "database move: dashboard-db: the move failed (docker run failed: no); playground-db is started again as it was"
+    expect(
+      rollOutcome(
+        [],
+        [
+          `2026-10-18T02:03:00Z ROLL canary def5678 (roll-now) def5678 FAIL dev=up follower=FAIL x ${why}`,
+          `2026-10-18T02:03:01Z ROLL canary def5678 (roll-now) def5678 FAIL dev refusing: ${why}; refusing to write: playground-db publishes port 55432 beyond loopback (not the head's, no bad build)`,
+          "2026-10-18T02:05:00Z FALLBACK abc1234 PASS version=abc1234 verify=PASS",
+        ],
+      ),
+    ).toEqual({
+      done: `Failed: dev refusing: ${why}; refusing to write: playground-db publishes port 55432 beyond loopback (not the head's, no bad build); back on abc1234`,
+      ok: false,
+    })
   })
 
   const FAILED =
@@ -488,6 +568,140 @@ describe("rollOutcome", () => {
   test("ignores an unrelated result line", () => {
     expect(rollOutcome([], ["2026-10-18T02:01:00Z RESTART follower follower=running"])).toEqual({
       phase: "building",
+    })
+  })
+
+  // #2644: v0.0.151's roll queued about 30 minutes for load5 to drop under its clone's line, and update printed a false "Failed"
+  describe("a roll whose prebuild queues in run-slot", () => {
+    const rolling = "2026-11-17T12:00:00Z roll-now: rolling to abc1234 at once"
+    const held =
+      "run-slot.sh: this clone waits for load5 under 16, the brake's 20 less 4 and never under half of it"
+
+    test("reads as waiting with run-slot's reason, the supervisor's own queued line included, until run-slot lets it start", () => {
+      const waiting = {
+        phase: "waiting" as const,
+        why: "this clone waits for load5 under 16, the brake's 20 less 4 and never under half of it",
+      }
+      expect(rollOutcome([rolling, held], [])).toEqual(waiting)
+      expect(
+        rollOutcome(
+          [
+            rolling,
+            held,
+            "2026-11-17T12:20:00Z prebuild clone still queued after 1200s; it keeps waiting",
+            held,
+          ],
+          [],
+        ),
+      ).toEqual(waiting)
+      expect(
+        rollOutcome([rolling, held, "run-slot.sh: ops-dashboard holds run-slot-clone"], []),
+      ).toEqual({ phase: "building" })
+      expect(
+        rollOutcome(
+          [
+            rolling,
+            "run-slot.sh: waiting for a run slot (worker-a 4242 2026-11-17T12:00:01Z 2 medium)",
+          ],
+          [],
+        ),
+      ).toEqual({
+        phase: "waiting",
+        why: "waiting for a run slot (worker-a 4242 2026-11-17T12:00:01Z 2 medium)",
+      })
+      expect(rollOutcome([held], [])).toEqual({ phase: "building" })
+    })
+
+    test("prints the load it waits on, or run-slot's own reason", () => {
+      expect(waitingLine("this clone waits for load5 under 16, the brake's 20 less 4", 18.24)).toBe(
+        "Waiting for load: load5 is 18.2, and the roll goes on under 16",
+      )
+      expect(waitingLine("waiting for a run slot (worker-a 4242)", 3)).toBe(
+        "Waiting for a run slot (worker-a 4242)",
+      )
+      expect(waitingLine("queued behind 2 waiter(s) ahead of it in the queue's order", 3)).toBe(
+        "Waiting for a run slot: queued behind 2 waiter(s) ahead of it in the queue's order",
+      )
+    })
+
+    // round 1 of #2648: the install's general-queue wait and the build's captured wait still read as Building, then a false Failed at 30 minutes
+    test("an install queued behind other waiters reads as waiting until run-slot gives it a lane", () => {
+      const log = [
+        rolling,
+        "run-slot.sh: ops-dashboard holds run-slot-clone",
+        "run-slot.sh: queued behind 2 waiter(s) ahead of it in the queue's order",
+      ]
+      expect(rollOutcome(log, [])).toEqual({
+        phase: "waiting",
+        why: "queued behind 2 waiter(s) ahead of it in the queue's order",
+      })
+      expect(rollOutcome([...log, "run-slot.sh: ops-dashboard holds run-slot-2"], [])).toEqual({
+        phase: "building",
+      })
+    })
+
+    test("a build whose run-slot lines the supervisor captures reads as waiting once its own still-queued line lands", () => {
+      const log = [
+        rolling,
+        "run-slot.sh: ops-dashboard holds run-slot-clone",
+        "run-slot.sh: ops-dashboard holds run-slot",
+        "2026-11-17T12:02:00Z building abc1234 before the stop, from /ops/dashboard/staging",
+        "2026-11-17T12:22:00Z prebuild build still queued after 1200s; it keeps waiting",
+      ]
+      expect(rollOutcome(log, [])).toEqual({
+        phase: "waiting",
+        why: "prebuild build still queued after 1200s; it keeps waiting",
+      })
+      expect(rollTimedOut(rollOutcome(log, []), 18).ok).toBe(true)
+    })
+
+    test("still waiting at 30 minutes reads as waiting and passes, never Failed, since the roll goes on by itself", () => {
+      const end = rollTimedOut({ phase: "waiting", why: held.replace("run-slot.sh: ", "") }, 18)
+      expect(end).toEqual({
+        done: "Waiting for load: load5 is 18.0, and the roll goes on under 16: still waiting after 30 minutes, and the roll goes on by itself; see ops/dashboard/supervisor.log",
+        ok: true,
+      })
+      expect(end.done).not.toContain("Failed")
+    })
+
+    // round 2 of #2648: a build queued under 20 minutes logs no wait at all, since build_head captures its run-slot lines and slot_step says it still queues only at 1200 s
+    test("at 30 minutes, a prebuild step whose run-slot has not started yet reads as waiting and passes", () => {
+      expect(rollTimedOut({ phase: "building" }, 18, true)).toEqual({
+        done: "Waiting for a run slot: the roll's next step is still queued in run-slot: still waiting after 30 minutes, and the roll goes on by itself; see ops/dashboard/supervisor.log",
+        ok: true,
+      })
+    })
+
+    test("a prebuild step queues while its run-slot pid lives and run-slot.runs.log holds no start line for it, as slot_step reads it", () => {
+      const live = (pid: number) => pid === 4242
+      const runs = [
+        "2026-11-17T12:00:00Z ask ops-dashboard 4242 bun run build",
+        "2026-11-17T12:00:01Z start worker-a 4243 run-slot waited=0s",
+      ]
+      expect(stepQueued("4242\n", live, runs)).toBe(true)
+      expect(
+        stepQueued("4242\n", live, [
+          ...runs,
+          "2026-11-17T12:16:00Z start ops-dashboard 4242 run-slot waited=959s",
+        ]),
+      ).toBe(false)
+      expect(stepQueued("4243\n", live, runs)).toBe(false)
+      expect(stepQueued(undefined, live, runs)).toBe(false)
+      expect(stepQueued("", live, runs)).toBe(false)
+    })
+
+    test("a roll that gave no result and waits on nothing still reads Failed with its reason", () => {
+      for (const phase of ["building", "switching", "going back"] as const)
+        expect(rollTimedOut({ phase }, 18)).toEqual({
+          done: "Failed: no roll result within 30 minutes; see ops/dashboard/supervisor.log",
+          ok: false,
+        })
+      expect(
+        rollOutcome(
+          [rolling, held, "run-slot.sh: ops-dashboard holds run-slot-clone"],
+          ["2026-11-17T12:40:00Z ROLL roll-now abc1234 FAIL build before the stop: tsc failed"],
+        ),
+      ).toEqual({ done: "Failed: build before the stop: tsc failed", ok: false })
     })
   })
 })
@@ -627,7 +841,8 @@ describe("waitOutcome", () => {
     beat: DashboardBeat | null = RUNNING,
     api = false,
     failure: string | null = null,
-  ) => waitOutcome({ api, beat, failure, now }, { shownAt: 0, startedAt: 0 })
+    upHolds = false,
+  ) => waitOutcome({ api, beat, failure, now, upHolds }, { shownAt: 0, startedAt: 0 })
 
   test("ends at once when the API answers", () => {
     expect(at(42_000, RUNNING, true)).toEqual({
@@ -643,6 +858,16 @@ describe("waitOutcome", () => {
       ok: false,
     })
     expect(at(80_000, null)).toMatchObject({ ok: false })
+  })
+
+  test("keeps the wait going past a missing beat while up.py holds the job, and names the supervisor down only after the grace", () => {
+    // up.py has not had time to refresh the beat, so a hold keeps the wait going, not a "supervisor is not running"
+    expect(at(80_000, { ...RUNNING, running: false }, false, null)).toEqual({
+      done: "ops-dashboard's supervisor is not running, so the Dashboard will not come up (waited 1m 20s); see ops/dashboard/supervisor.log, then run playground again",
+      ok: false,
+    })
+    expect(at(80_000, { ...RUNNING, running: false }, false, null, true)).not.toHaveProperty("done")
+    expect(at(80_000, null, false, null, true)).not.toHaveProperty("done")
   })
 
   test("ends when ops-dashboard's heartbeat is older than three of its cycles, naming its age", () => {
@@ -697,6 +922,48 @@ describe("waitOutcome", () => {
     expect(read([stale, `${T} DOWN dev: x`, stale])).toMatchObject({ ok: false })
     expect(read([stale, `${T} DOWN dev: x`, `${T} RESTART abc1234 PASS v`], true)).toMatchObject({
       ok: true,
+    })
+  })
+
+  // the supervisor's ALIAS FAIL from a first start's first minute once cost the full 15 minutes with no reason given (#2301)
+  test("ends at the next poll past the grace on an ALIAS FAIL no PASS has followed, naming the missing route", () => {
+    const T = "2026-11-16T06:42:16Z"
+    const fail = `${T} ALIAS FAIL no route for dashboard.playground.localhost in /home/me/.portless/fallback/routes.json`
+    const read = (results: string[], now = 62_000) =>
+      waitOutcome(
+        { alias: aliasFailure(results), api: false, beat: RUNNING, failure: null, now },
+        { shownAt: now, startedAt: 0 },
+      )
+    expect(read([fail])).toEqual({
+      done: "portless does not route the Dashboard's addresses to its stack: no route for dashboard.playground.localhost in /home/me/.portless/fallback/routes.json (waited 1m 2s); see ops/dashboard/supervisor.log, then run playground again",
+      ok: false,
+    })
+    expect(read([fail], 29_000)).not.toHaveProperty("done")
+    expect(
+      read([
+        fail,
+        `${T} ALIAS PASS playground.localhost and api.playground.localhost hold the live stack's ports 1 and 2`,
+      ]),
+    ).toEqual({ progress: null })
+    expect(read([`${T} START abc1234 PASS version=1`])).toEqual({ progress: null })
+  })
+
+  // on the 1355 proxy with TLS an http address answers 302 to https, which read as down for 15 minutes (#2301)
+  test("ends past the grace on a health read that answers a redirect, naming the URL asked and where it was sent", () => {
+    const redirect = {
+      from: "http://dashboard.api.playground.localhost:1355/api/health",
+      status: 302,
+      to: "https://dashboard.api.playground.localhost:1355/api/health",
+    }
+    const read = (now: number) =>
+      waitOutcome(
+        { api: false, beat: RUNNING, failure: null, now, redirect },
+        { shownAt: now, startedAt: 0 },
+      )
+    expect(read(29_000)).not.toHaveProperty("done")
+    expect(read(30_000)).toEqual({
+      done: "the Dashboard's API answered 302 at http://dashboard.api.playground.localhost:1355/api/health, a redirect to https://dashboard.api.playground.localhost:1355/api/health, so playground asks it at an address portless does not serve (waited 30s); see ops/dashboard/supervisor.log, then run playground again",
+      ok: false,
     })
   })
 

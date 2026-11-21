@@ -271,25 +271,42 @@ export const waiterPidPath = (outbox: string, name: string): string =>
 // A waiter that handed its manager an alert this recently counts as live, since the manager starts it again as it reads the alert; a waiter skips an alert queued this long before it began, since a prompt times out in 120s.
 export const WAITER_GRACE_MS = 5 * 60_000
 
-// Whether a manager's alerts-wait is waiting now (its pid runs), or handed it an alert in the last 5 minutes.
-export async function waiterLive(outbox: string, name: string, now = new Date()): Promise<boolean> {
+// Whether a manager's alerts-wait is waiting now: a process runs under the pid its file holds.
+export async function waiterRunning(outbox: string, name: string): Promise<boolean> {
   const pid = Number(
     await Bun.file(waiterPidPath(outbox, name))
       .text()
       .catch(() => ""),
   )
-  if (Number.isInteger(pid) && pid > 0)
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch {}
-  const cursor = Bun.file(join(outbox, "alerts-wait", name))
-  return (await cursor.exists()) && now.getTime() - cursor.lastModified < WAITER_GRACE_MS
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
+
+// Whether a manager's alerts-wait is waiting now, or handed it an alert at or after since (ms), when it wrote its cursor and exited.
+export async function waiterSince(outbox: string, name: string, since: number): Promise<boolean> {
+  if (await waiterRunning(outbox, name)) return true
+  const cursor = Bun.file(join(outbox, "alerts-wait", name))
+  return (await cursor.exists()) && cursor.lastModified >= since
+}
+
+// Whether a manager's alerts-wait is waiting now, or handed it an alert in the last 5 minutes.
+export const waiterLive = (outbox: string, name: string, now = new Date()): Promise<boolean> =>
+  waiterSince(outbox, name, now.getTime() - WAITER_GRACE_MS)
 
 // Pure: the restart hint a manager whose waiter is not live reads under its alert.
 const restartHint = (name: string): string =>
   `\nYour playground alerts-wait is not running, so this alert reached you late: start it again with playground alerts-wait ${name}.`
+
+// Pure: the line that sends a message on to a manager whose waiter is down: Ops sends it by SendMessage, and Ops' own goes by the dispatcher.
+export const forwardLine = (to: string, text: string): { text: string; to: string } => ({
+  text: `${to} has no playground alerts-wait running, so it hears this only from the relay: send it to ${to} by SendMessage now.\n${text}`,
+  to: to === "ops" ? "dispatcher" : "ops",
+})
 
 // Pure: the lines one alert queues. A manager with no live waiter hears it only from the relay, minutes past a built-in prompt's 120s timeout, so Ops is told at once to send it on; that copy is fast only while Ops' own waiter runs, so Ops reads the same hint while its waiter is not live.
 export function alertLines(
@@ -302,10 +319,7 @@ export function alertLines(
   if (to === "ops") return [{ text: `${text}${restartHint(to)}`, to }]
   return [
     { text: `${text}${restartHint(to)}`, to },
-    {
-      text: `${to} has no playground alerts-wait running, so it hears this only from the relay: send it to ${to} by SendMessage now.\n${text}${opsLive ? "" : restartHint("ops")}`,
-      to: "ops",
-    },
+    { text: `${forwardLine(to, text).text}${opsLive ? "" : restartHint("ops")}`, to: "ops" },
   ]
 }
 

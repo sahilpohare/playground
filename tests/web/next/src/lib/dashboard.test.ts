@@ -564,9 +564,9 @@ describe("agentGroup", () => {
 })
 
 describe("sessionGroups", () => {
-  // The sidebar groups as ZeroSDK's does, Orchestrators and Subagents, then the factory's AI Runners, Scripts and Other
+  // The sidebar groups as ZeroSDK's does, with the factory's AI Runners right under Orchestrators so a long Subagents list never pushes them down (#2429), then Scripts and Other
   // the dispatchers have a group of their own
-  test("the dispatchers under Dispatchers, then the managers under Orchestrators, then Subagents, then AI Runners, then Scripts, which holds no session, each in the board's order", () => {
+  test("the dispatchers under Dispatchers, then the managers under Orchestrators, then AI Runners, then Subagents, then Scripts, which holds no session, each in the board's order", () => {
     const board = [
       session(OLD.dispatcher, "dispatcher"),
       session(OLD.builder, "manager"),
@@ -579,18 +579,18 @@ describe("sessionGroups", () => {
     expect(sessionGroups(board).map((g) => [g.label, g.sessions.map((w) => w.name)])).toEqual([
       ["Dispatchers", [OLD.dispatcher]],
       ["Orchestrators", [OLD.builder, OLD.ops]],
-      ["Subagents", ["worker-pride", "worker-greed"]],
       ["AI Runners", ["runner-pride", "runner-sloth"]],
+      ["Subagents", ["worker-pride", "worker-greed"]],
       ["Scripts", []],
     ])
   })
 
-  test("Dispatchers, Orchestrators, Subagents, AI Runners and Scripts are there even when nobody is in them; Other only holds strays", () => {
+  test("Dispatchers, Orchestrators, AI Runners, Subagents and Scripts are there even when nobody is in them; Other only holds strays", () => {
     expect(sessionGroups([]).map((g) => [g.label, g.sessions.length])).toEqual([
       ["Dispatchers", 0],
       ["Orchestrators", 0],
-      ["Subagents", 0],
       ["AI Runners", 0],
+      ["Subagents", 0],
       ["Scripts", 0],
     ])
   })
@@ -600,8 +600,8 @@ describe("sessionGroups", () => {
     expect(sessionGroups(board).map((g) => [g.label, g.sessions.map((w) => w.name)])).toEqual([
       ["Dispatchers", []],
       ["Orchestrators", []],
-      ["Subagents", ["worker-greed"]],
       ["AI Runners", []],
+      ["Subagents", ["worker-greed"]],
       ["Scripts", []],
       ["Other", ["session e73f9d9c"]],
     ])

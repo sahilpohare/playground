@@ -4,7 +4,7 @@ import { z } from "zod"
 import { CORE } from "./rendered"
 import { defineSettings } from "./settings"
 
-// The ops job registry: one setting per job, `jobs.<camelName>`, whose row holds the fields it changes (its enabled field alone, for a job turned on) and reads over the job's registry entry, so turning a job on, pausing it or moving its schedule is a settings write with a reason, never a PR, and the rest still follows the registry. The runner renders <data>/ops/jobs.json and each launchd job's plist from it at the top of every pass. A fresh install has every job off but the Dashboard's (ops-dashboard) and ops-usage, so the Dashboard shows the account's week with no setting. In a command, cwd or program, {bun}, {checkout} (the install's checkout), {dashboard} (the Dashboard's checkout, on live.branch) and {data} (the data folder) are filled in by the render.
+// The ops job registry: one setting per job, `jobs.<camelName>`, whose row holds the fields it changes (its enabled field alone, for a job turned on) and reads over the job's registry entry, so turning a job on, pausing it or moving its schedule is a settings write with a reason, never a PR, and the rest still follows the registry. The runner renders <data>/ops/jobs.json and each launchd job's plist, and on Linux its systemd user unit, from it at the top of every pass. A fresh install has every job off but the Dashboard's (ops-dashboard) and ops-usage, so the Dashboard shows the account's week with no setting, and on a Mac a third, ops-keep-awake, so an idle Mac stays awake with no setting. In a command, cwd or program, {bun}, {checkout} (the install's checkout), {dashboard} (the Dashboard's checkout, on live.branch) and {data} (the data folder) are filled in by the render.
 // A job row as a write takes it, every field named and none it does not have; a stored row reads through fromStored first.
 export const jobSchema = z.strictObject({
   callsModel: z.boolean(),
@@ -17,7 +17,7 @@ export const jobSchema = z.strictObject({
   disabledWhy: z.string().optional(),
   enabled: z.boolean(),
   heartbeat: z.string().min(1),
-  // A job launchd holds: its label, and the program its plist runs from cwd.
+  // A job launchd holds, or on Linux systemd as the user unit <label>.service: its label, and the program its plist or unit runs from cwd.
   launchd: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   neverPause: z.boolean().optional(),
@@ -77,13 +77,8 @@ const launchd = (name: string, job: Pick<Job, "description" | "schedule">): Job 
 const bunJob = (name: string, root = "{checkout}") =>
   `{bun} --no-env-file ${root}/packages/scripts/src/${name}/cli.ts`
 
-// The jobs Playground ships, each off until the owner turns it on but the Dashboard's own; A to Z.
+// The jobs Playground ships, each off until the owner turns it on but the Dashboard's own, ops-usage and, on a Mac, ops-keep-awake; A to Z.
 export const JOBS: Record<string, Job> = {
-  "ops-awake": terminal("ops-awake", `${bunJob("ops-awake")} --data {data}`, {
-    description:
-      "Keeps the Mac awake on AC power and on battery with caffeinate, display and lock unchanged.",
-    schedule: { always: true },
-  }),
   // Its sync runs in its script's checkout, so it runs from the Dashboard's, which holds the database's .env.
   "ops-changelog": terminal("ops-changelog", bunJob("ops-changelog", "{dashboard}"), {
     cwd: "{dashboard}",
@@ -118,6 +113,13 @@ export const JOBS: Record<string, Job> = {
       "Starts each herdr server that is down, on the pinned binary and the repo's config.",
     schedule: { every: 60 },
   }),
+  // caffeinate -i holds off idle sleep and -s system sleep on AC power, so an idle Mac keeps its ops jobs running while the display still sleeps and locks; it needs no sudo and sets no pmset value.
+  "ops-keep-awake": terminal("ops-keep-awake", `${bunJob("ops-keep-awake")} --data {data}`, {
+    description:
+      "Keeps an idle Mac from sleeping, so the ops jobs and the WhatsApp link run on, with caffeinate as its one child; macOS alone.",
+    enabled: true,
+    schedule: { always: true },
+  }),
   "ops-machine": terminal("ops-machine", `${bunJob("ops-machine")} --data {data}`, {
     description:
       "Writes one line a minute of the machine's load, memory and live sessions to machine.jsonl.",
@@ -130,6 +132,22 @@ export const JOBS: Record<string, Job> = {
       description: "Runs the merge train: builds a train of ready PRs and checks each step.",
       neverPause: true,
       schedule: { every: 60 },
+    },
+  ),
+  "ops-model-tunnel": terminal("ops-model-tunnel", `${bunJob("ops-model-tunnel")} --data {data}`, {
+    description:
+      "Holds an ssh tunnel from this machine's loopback ports 18000 and 18001 to the model servers on the peer's 8000 and 8001, loopback at both ends.",
+    schedule: { always: true },
+  }),
+  // It runs from the Dashboard's checkout, whose .env names the peers (PLAYGROUND_PEERS) the System page reads.
+  "ops-peer-relay": terminal(
+    "ops-peer-relay",
+    `${bunJob("ops-peer-relay", "{dashboard}")} --data {data}`,
+    {
+      cwd: "{dashboard}",
+      description:
+        "Copies playground send's lines between this machine and each peer PLAYGROUND_PEERS names, over ssh, so a session on one machine reads a message from the other.",
+      schedule: { always: true },
     },
   ),
   // launchd holds it and it runs from the Dashboard's checkout, so a main checkout wiped with its herdr config and scripts still has its restore.
@@ -161,6 +179,13 @@ export const JOBS: Record<string, Job> = {
       "The factory's timed beats: the roll gate, the tick, the usage-limit watch and the sweeps.",
     schedule: { every: 60 },
   }),
+  // On the Mac that reaches a Dashboard on another machine: config.host names it, set through an Inbox guard decision's Approve.
+  "ops-tunnel": terminal("ops-tunnel", `${bunJob("ops-tunnel")} --data {data}`, {
+    config: { host: "", port: 1355 },
+    description:
+      "Holds an ssh tunnel from this Mac's loopback to the Dashboard on the machine config.host names, and posts its link to the Inbox.",
+    schedule: { always: true },
+  }),
   "ops-unstick": terminal("ops-unstick", "python3 -I {checkout}/scripts/ops/unstick/run.py", {
     description:
       "Reads every live session's screen and clears a factory session stuck on a prompt.",
@@ -183,6 +208,16 @@ export const JOBS: Record<string, Job> = {
     schedule: { every: 300 },
   }),
 }
+
+// The jobs Playground shipped and no longer does, A to Z: renderJobs turns an existing row of one off, so its teardown stops it on every install, its stored jobs.<camelName> row reads as no org's job and settings reset clears it, and the board and the sweep leave it out.
+export const RETIRED: readonly string[] = ["ops-awake"]
+
+// The jobs that run on macOS alone: renderJobs leaves each out on any other platform, so there it is no job and nothing restarts it.
+export const MAC_ONLY: readonly string[] = ["ops-keep-awake"]
+
+// Whether a job runs on this platform: a MAC_ONLY one on darwin alone; renderJobs and listSettings both read it.
+export const runsOn = (name: string, platform: string) =>
+  platform === "darwin" || !MAC_ONLY.includes(name)
 
 // A job's old setting keys: the switch imports jobs.json under its old names before the migration renames them.
 const OLD_KEYS: Record<string, string[]> = { "ops-dashboard": ["jobs.opsDesk"] }
@@ -215,9 +250,13 @@ const filled = (text: string, fill: Fill) =>
 const xml = (text: string) =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
 
+// A launchd job's log, which its plist and its systemd unit both write to.
+export const logOf = (name: string, fill: Fill) =>
+  `${fill.data}/ops/${name.replace(/^ops-/, "")}/launchd.log`
+
 // A launchd job's plist: its label, its program from its cwd, kept alive, logging into its own folder under ops.
 const plistOf = (name: string, job: Job, fill: Fill): string => {
-  const log = `${fill.data}/ops/${name.replace(/^ops-/, "")}/launchd.log`
+  const log = logOf(name, fill)
   const string = (text: string) => `<string>${xml(text)}</string>`
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -238,20 +277,49 @@ const plistOf = (name: string, job: Job, fill: Fill): string => {
   ].join("\n")
 }
 
-// Pure: the registry's values (policy.json's, over each job's default) and each org's own jobs (orgJobs, each row marked with its org) as jobs.json in the shape every reader parses, and an enabled launchd job's plist by label. Each value reads as a stored row (fromStored). A job jobs.json lists that neither knows (a company script kept by hand) is kept as it stands; one an org's row rendered before, whose row is now refused or gone, is kept paused, so the runner stops it, and kept as it stands when the orgs could not be read (org null).
+// The same job as a systemd user unit, for Linux, which has no launchd: its plist's program, folder and log, its PATH with ~/.bun/bin (%h, the home folder) first, restarted always 10 s apart as launchd throttles, so systemd's start limit never parks it, and started at login; a stop ends its own process alone, so a server it started detached (ops-herdr's herdr servers) outlives it, as under launchd. % is systemd's specifier and $ its variable sign, so each is doubled where systemd reads it.
+const unitOf = (name: string, job: Job, fill: Fill): string => {
+  const spec = (text: string) => text.replaceAll("%", "%%")
+  const quoted = (text: string) => `"${text.replace(/["\\]/g, "\\$&")}"`
+  const log = spec(logOf(name, fill))
+  return [
+    "[Unit]",
+    `Description=Playground's ${name} ops job`,
+    "",
+    "[Service]",
+    `Environment=${quoted(`PATH=%h/.bun/bin:${spec(fill.path)}`)}`,
+    `ExecStart=${job.program!.map((arg) => quoted(spec(filled(arg, fill)).replaceAll("$", () => "$$"))).join(" ")}`,
+    "KillMode=process",
+    "Restart=always",
+    "RestartSec=10",
+    `StandardError=append:${log}`,
+    `StandardOutput=append:${log}`,
+    `WorkingDirectory=${spec(filled(job.cwd ?? fill.checkout, fill))}`,
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n")
+}
+
+// Pure: the registry's values (policy.json's, over each job's default) and each org's own jobs (orgJobs, each row marked with its org) as jobs.json in the shape every reader parses, a MAC_ONLY job on darwin alone, and an enabled launchd job's plist and systemd user unit by label. Each value reads as a stored row (fromStored). A job jobs.json lists that neither knows (a company script kept by hand) is kept as it stands, and a RETIRED one kept paused, so the runner stops it; one an org's row rendered before, whose row is now refused or gone, is kept paused, so the runner stops it, and kept as it stands when the orgs could not be read (org null).
 export const renderJobs = (
   values: Record<string, unknown>,
   existing: { name?: unknown }[],
   fill: Fill,
   org: Record<string, OrgJob> | null = {},
-): { jobs: Record<string, unknown>[]; plists: Map<string, string> } => {
+  platform: string = process.platform,
+): { jobs: Record<string, unknown>[]; plists: Map<string, string>; units: Map<string, string> } => {
   const plists = new Map<string, string>()
+  const units = new Map<string, string>()
   const row = (
     name: string,
     { command, cwd, enabled, program, ...job }: Job & { org?: string },
   ) => {
-    if (enabled && job.launchd && program)
+    if (enabled && job.launchd && program) {
       plists.set(job.launchd, plistOf(name, { ...job, cwd, enabled, program }, fill))
+      units.set(job.launchd, unitOf(name, { ...job, cwd, enabled, program }, fill))
+    }
     return {
       name,
       ...job,
@@ -262,19 +330,25 @@ export const renderJobs = (
     }
   }
   const jobs: Record<string, unknown>[] = [
-    ...Object.entries(JOBS).map(([name, fallback]) => {
-      const set = jobSchema.safeParse(fromStored(values[jobKey(name)]))
-      return row(name, set.success ? set.data : fallback)
-    }),
+    ...Object.entries(JOBS)
+      .filter(([name]) => runsOn(name, platform))
+      .map(([name, fallback]) => {
+        const set = jobSchema.safeParse(fromStored(values[jobKey(name)]))
+        return row(name, set.success ? set.data : fallback)
+      }),
     ...Object.entries(org ?? {}).map(([name, job]) => row(name, job)),
   ]
   const known = new Set([...Object.keys(JOBS), ...Object.keys(org ?? {})])
   jobs.push(
     ...(existing as Record<string, unknown>[])
       .filter((job) => typeof job.name === "string" && !known.has(job.name))
-      .map((job) => (org && typeof job.org === "string" ? { ...job, disabled: true } : job)),
+      .map((job) =>
+        RETIRED.includes(String(job.name)) || (org && typeof job.org === "string")
+          ? { ...job, disabled: true }
+          : job,
+      ),
   )
-  return { jobs: jobs.sort((a, b) => String(a.name).localeCompare(String(b.name))), plists }
+  return { jobs: jobs.sort((a, b) => String(a.name).localeCompare(String(b.name))), plists, units }
 }
 
 // A word an org job's command passes its script, and each segment of its paths: plain text, never a shell operator, a quote or a placeholder.
@@ -327,11 +401,20 @@ const runsFrom = (
 // An org's own job, marked with the org that adds it, which its jobs.json row keeps so a later pass can tell it from a row kept by hand.
 export type OrgJob = Job & { org: string }
 
-const REGISTRY_KEYS = new Set([...Object.keys(JOBS).map(jobKey), ...Object.values(OLD_KEYS).flat()])
+const RETIRED_KEYS = new Set(RETIRED.map(jobKey))
+
+const REGISTRY_KEYS = new Set([
+  ...Object.keys(JOBS).map(jobKey),
+  ...Object.values(OLD_KEYS).flat(),
+  ...RETIRED_KEYS,
+])
 
 // Whether a key names an org's own job: a jobs.<camelName> key the registry lacks, under any spelling, which only orgJob can say is the job's name.
 export const orgJobKey = (key: string): boolean =>
   key.startsWith("jobs.") && !REGISTRY_KEYS.has(key)
+
+// Whether a key is the stored jobs.<camelName> row of a job RETIRED names.
+export const retiredJobKey = (key: string): boolean => RETIRED_KEYS.has(key)
 
 // One scope's row for a job the registry lacks as that org's job, by its name, or why it is refused; a write of the row checks it the same way, as it stands, against the scope's own script folders, while a read hands it a stored row through fromStored.
 export const orgJob = (

@@ -3,7 +3,7 @@ export const HELD_KINDS = ["bug", "fix", "log", "steps"] as const
 
 // What decides whether a post is held: who sent it and how, what it is, and where it goes.
 export type Post = {
-  // the post opens its DM, the first message there
+  // the post opens its DM, the first message there, outside the DM bot add made between the poster and its own bot
   firstInDm: boolean
   kind: string
   postRule: string

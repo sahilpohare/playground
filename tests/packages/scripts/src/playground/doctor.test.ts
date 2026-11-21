@@ -1,20 +1,34 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { proxyDown } from "../../../../../api/hono/src/lib/dev/proxy"
 import {
+  agentBrowserConfig,
+  browserCheck,
+  certificateCheck,
   dataCheck,
   herdrCheck,
   jobChecks,
   launchdChecks,
   line,
+  lingerCheck,
   linkChecks,
+  linuxChromium,
   missing,
   proxyCheck,
   registryJobsText,
   toolChecks,
+  tunnelChecks,
   versionCheck,
 } from "../../../../../packages/scripts/src/playground/doctor"
 import { writeRoot } from "../../../../../packages/settings/src/folder"
@@ -94,6 +108,26 @@ describe("toolChecks", () => {
     expect(at("v18.20.0").status).toBe("MISSING")
     expect(at("v20.9.0").status).toBe("ok")
     expect(at("v24.21.0").status).toBe("ok")
+  })
+
+  test("on Linux no fix names brew, and uv's names uv's own installer; a Mac's keep brew's", () => {
+    const fixes = (platform: NodeJS.Platform) =>
+      toolChecks(
+        () => false,
+        () => true,
+        () => null,
+        platform,
+      ).map((c) => `${c.name}: ${c.detail}`)
+    expect(fixes("linux").filter((fix) => /brew/.test(fix))).toEqual([])
+    expect(fixes("linux")).toContain(
+      "uv: missing; fix: curl -LsSf https://astral.sh/uv/install.sh | sh (the skills' tests)",
+    )
+    expect(fixes("linux").find((fix) => fix.startsWith("whisper-cli: "))).toContain("whisper.cpp")
+    expect(fixes("linux").find((fix) => fix.startsWith("node: "))).toContain("20.9 or newer")
+    expect(fixes("darwin")).toContain("uv: missing; fix: brew install uv (the skills' tests)")
+    expect(fixes("darwin").find((fix) => fix.startsWith("whisper-cli: "))).toContain(
+      "brew install whisper-cpp ffmpeg",
+    )
   })
 
   test("with no gh the login is not asked", () => {
@@ -197,13 +231,23 @@ describe("jobChecks", () => {
   })
 
   test("each launchd job turned on is checked loaded, and one not loaded is MISSING", () => {
-    expect(jobChecks(jobs, (label) => label === "com.x.ops-awake")).toEqual([
+    expect(jobChecks(jobs, (label) => label === "com.x.ops-awake", "darwin")).toEqual([
       { detail: "com.x.ops-awake loaded", name: "job ops-awake", status: "ok" },
     ])
-    const [check] = jobChecks(jobs, () => false)
+    const [check] = jobChecks(jobs, () => false, "darwin")
     expect(check!.status).toBe("MISSING")
     expect(check!.detail).toContain("launchctl bootstrap")
     expect(check!.detail).toContain("com.x.ops-awake.plist")
+  })
+
+  // #2203: on Linux each launchd job runs as a systemd user unit of the same label
+  test("on Linux each job turned on is checked active as its systemd user unit, with systemctl's fix", () => {
+    expect(jobChecks(jobs, () => true, "linux")).toEqual([
+      { detail: "com.x.ops-awake.service active", name: "job ops-awake", status: "ok" },
+    ])
+    const [check] = jobChecks(jobs, () => false, "linux")
+    expect(check!.status).toBe("MISSING")
+    expect(check!.detail).toContain("systemctl --user enable --now com.x.ops-awake.service")
   })
 
   test("a turned-off job and one with no launchd label are left alone", () => {
@@ -220,6 +264,60 @@ describe("jobChecks", () => {
   })
 })
 
+// #2203: a fake systemctl first on PATH answers is-active, exit 0 for the one unit it runs, so no real systemctl is called
+describe("jobLoaded", () => {
+  test("on Linux reads systemctl --user is-active --quiet for the label's unit", () => {
+    const bin = mkdtempSync(join(scratch, "systemctl-"))
+    const said = join(bin, "said")
+    writeFileSync(
+      join(bin, "systemctl"),
+      `#!/bin/sh\necho "$*" >> "${said}"\n[ "$4" = com.x.ops-tick.service ]\n`,
+    )
+    chmodSync(join(bin, "systemctl"), 0o755)
+    // a child of its own, since bun finds a program on the PATH it started with
+    const child = Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        "-e",
+        `const { jobLoaded } = await import(${JSON.stringify(DOCTOR)}); console.log(JSON.stringify(["com.x.ops-tick", "com.x.ops-off"].map(jobLoaded("linux"))))`,
+      ],
+      { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
+    )
+    expect(child.stderr.toString()).toBe("")
+    expect(JSON.parse(child.stdout.toString())).toEqual([true, false])
+    expect(readFileSync(said, "utf8")).toBe(
+      "--user is-active --quiet com.x.ops-tick.service\n--user is-active --quiet com.x.ops-off.service\n",
+    )
+  })
+})
+
+// #2314: the linger row names the command that turns it on for this uid, and stays optional, so doctor still passes while it is off
+test("lingerCheck is ok on yes, and otherwise optional, naming loginctl enable-linger for the uid", () => {
+  expect(lingerCheck("yes", 1000).status).toBe("ok")
+  for (const linger of ["no", null]) {
+    const row = lingerCheck(linger, 1000)
+    expect(row.status).toBe("optional")
+    expect(row.detail).toContain("loginctl enable-linger 1000")
+  }
+})
+
+// A Linux with no systemd: the probe reads the job as down, so doctor prints its MISSING line rather than crashing.
+test("jobLoaded on Linux with no systemctl on PATH reads the job as not running", () => {
+  const empty = mkdtempSync(join(scratch, "no-systemctl-"))
+  const child = Bun.spawnSync(
+    [
+      process.execPath,
+      "--no-env-file",
+      "-e",
+      `const { jobLoaded } = await import(${JSON.stringify(DOCTOR)}); console.log(JSON.stringify(jobLoaded("linux")("com.x.ops-tick")))`,
+    ],
+    { env: { ...process.env, PATH: empty } },
+  )
+  expect(child.stderr.toString()).toBe("")
+  expect(JSON.parse(child.stdout.toString())).toBe(false)
+})
+
 describe("the jobs check on a machine with a store", () => {
   const policy = JSON.stringify({
     values: {
@@ -231,7 +329,7 @@ describe("the jobs check on a machine with a store", () => {
   })
 
   test("reads the registry's values: each launchd job turned on, by its job name", () => {
-    expect(jobChecks(registryJobsText(policy), () => true)).toEqual([
+    expect(jobChecks(registryJobsText(policy), () => true, "darwin")).toEqual([
       { detail: "com.x.ops-tick loaded", name: "job ops-tick", status: "ok" },
       { detail: "com.x.ops-zai-usage loaded", name: "job ops-zai-usage", status: "ok" },
     ])
@@ -242,9 +340,9 @@ describe("the jobs check on a machine with a store", () => {
 
   test("a launchd job its row turns on by enabled alone reads its label from the registry (PG-1196)", () => {
     const rows = [{ key: "jobs.opsTick", scope: "made-up-me", value: { enabled: true } }]
-    expect(jobChecks(registryJobsText(policyJson(rows, "made-up-me")), () => true)).toEqual([
-      { detail: "com.playground.ops-tick loaded", name: "job ops-tick", status: "ok" },
-    ])
+    expect(
+      jobChecks(registryJobsText(policyJson(rows, "made-up-me")), () => true, "darwin"),
+    ).toEqual([{ detail: "com.playground.ops-tick loaded", name: "job ops-tick", status: "ok" }])
   })
 
   test("takes the store's policy.json over jobs.json, and a store that lacks it reads jobs.json", async () => {
@@ -359,6 +457,112 @@ describe("herdrCheck", () => {
   })
 })
 
+describe("browserCheck", () => {
+  const home = join(scratch, "browser-home")
+  const chrome = linuxChromium(home)
+  const config = agentBrowserConfig(home)
+  const why = `agent-browser 0.43.0 on Playwright 1.65.1's Chromium, from ${config}`
+  const installChromium = "npx -y playwright@1.65.1 install chromium"
+  const writeConfig = `write ${config} as {"executablePath": "${chrome}", "args": "--no-sandbox"}`
+  const runs = (argv: string[]) => Bun.spawnSync(argv, { stdout: "ignore" }).exitCode === 0
+
+  test("a scratch cache with nothing in it is MISSING, naming every step", () => {
+    const empty = join(scratch, "empty-home")
+    const its = agentBrowserConfig(empty)
+    expect(browserCheck(empty, () => false, runs)).toEqual({
+      detail: `fix: bun add -g agent-browser@0.43.0, then ${installChromium}, then write ${its} as {"executablePath": "${linuxChromium(empty)}", "args": "--no-sandbox"} (agent-browser 0.43.0 on Playwright 1.65.1's Chromium, from ${its})`,
+      name: "test browser",
+      status: "MISSING",
+    })
+  })
+
+  test("a Chromium whose install did not finish, or that does not run, is MISSING with its install", () => {
+    mkdirSync(join(chrome, ".."), { recursive: true })
+    writeFileSync(chrome, "#!/bin/sh\necho 'Google Chrome for Testing 159.0.8154.6'\n")
+    chmodSync(chrome, 0o755)
+    mkdirSync(join(config, ".."), { recursive: true })
+    writeFileSync(config, JSON.stringify({ args: "--no-sandbox", executablePath: chrome }))
+    expect(browserCheck(home, () => true, runs).detail).toBe(`fix: ${installChromium} (${why})`)
+    writeFileSync(join(chrome, "..", "..", "INSTALLATION_COMPLETE"), "")
+    writeFileSync(chrome, "#!/bin/sh\nexit 1\n")
+    expect(browserCheck(home, () => true, runs).detail).toBe(`fix: ${installChromium} (${why})`)
+  })
+
+  test("a config that keeps the sandbox, or names another browser, is MISSING with the config to write", () => {
+    writeFileSync(chrome, "#!/bin/sh\necho 'Google Chrome for Testing 159.0.8154.6'\n")
+    writeFileSync(config, JSON.stringify({ executablePath: chrome }))
+    expect(browserCheck(home, () => true, runs).detail).toBe(`fix: ${writeConfig} (${why})`)
+    writeFileSync(config, JSON.stringify({ args: "--no-sandbox", executablePath: "/usr/bin/x" }))
+    expect(browserCheck(home, () => true, runs).detail).toBe(`fix: ${writeConfig} (${why})`)
+  })
+
+  test("the pinned Chromium, run from agent-browser's config without the sandbox, reads ok", () => {
+    writeFileSync(
+      config,
+      JSON.stringify({ args: "--mute-audio,--no-sandbox", executablePath: chrome }),
+    )
+    expect(browserCheck(home, () => true, runs)).toEqual({
+      detail: why,
+      name: "test browser",
+      status: "ok",
+    })
+  })
+})
+
+describe("certificateCheck", () => {
+  const CA = "/home/x/.portless/fallback/ca.pem"
+  const PROFILE = "/home/x/snap/firefox/common/.mozilla/firefox/abc.default"
+  const read = (over: Partial<Parameters<typeof certificateCheck>[0]>) => ({
+    certutil: true,
+    chromium: [],
+    firefox: [PROFILE],
+    policy: [],
+    untrusted: [],
+    ...over,
+  })
+
+  test("a Firefox profile that does not trust the CA is MISSING, naming the script, the button and the restart", () => {
+    const check = certificateCheck(read({ untrusted: [PROFILE] }), CA, "/repo")
+    expect(check.status).toBe("MISSING")
+    expect(check.detail).toContain("run bun /repo/packages/scripts/src/playground/ca-trust.ts")
+    expect(check.detail).toContain("Trust it in Firefox")
+    expect(check.detail).toContain("restart Firefox")
+    expect(check.detail).toContain(PROFILE)
+    expect(check.detail).not.toContain("libnss3-tools")
+  })
+
+  test("with no certutil the step installs the distro's NSS tools first, and a Chromium browser's import follows", () => {
+    const check = certificateCheck(
+      read({ certutil: false, chromium: ["helium"], untrusted: [PROFILE] }),
+      CA,
+      "/repo",
+    )
+    expect(check.status).toBe("MISSING")
+    expect(check.detail).toContain("libnss3-tools")
+    expect(check.detail).toContain("In helium, open chrome://certificate-manager")
+  })
+
+  test("optional with a Chromium-family browser's own import once Firefox trusts it, else ok", () => {
+    const chromium = certificateCheck(read({ chromium: ["google-chrome"] }), CA, "/repo")
+    expect(chromium.status).toBe("optional")
+    expect(chromium.detail).toContain(`Import ${CA}`)
+    expect(certificateCheck(read({}), CA, "/repo")).toEqual({
+      detail: `Firefox trusts ${CA}`,
+      name: "browser certificate",
+      status: "ok",
+    })
+    expect(certificateCheck(read({ firefox: [] }), CA, "/repo").detail).toBe("no browser found")
+  })
+
+  test("ok naming the browsers the chromium-ca policy covers (PG-2458)", () => {
+    expect(certificateCheck(read({ firefox: [], policy: ["helium"] }), CA, "/repo")).toEqual({
+      detail: `helium trusts ${CA} through the browser policy`,
+      name: "browser certificate",
+      status: "ok",
+    })
+  })
+})
+
 describe("versionCheck", () => {
   test("at main's head it names the release; behind it after update --to it reads held at its tag", () => {
     expect(versionCheck("v0.0.1", "v0.0.1", 0).detail).toBe("at v0.0.1")
@@ -370,5 +574,39 @@ describe("versionCheck", () => {
     expect(versionCheck("v0.0.1-1-gabc1234", null, 1).detail).toBe(
       "at v0.0.1-1-gabc1234, 1 commit behind origin/main: playground update moves it on",
     )
+  })
+})
+
+describe("tunnelChecks (PG-2207)", () => {
+  const NOW = new Date("2026-11-15T00:00:00Z")
+  const on = JSON.stringify({ jobs: [{ config: { host: "spark-a" }, name: "ops-tunnel" }] })
+  const beat = (lastResult: string, at = "2026-11-14T23:59:30.000Z") =>
+    JSON.stringify({ cycleSeconds: 60, job: "ops-tunnel", lastBeatAt: at, lastResult, pid: 1 })
+
+  test("a tunnel job turned off, or no jobs.json, adds no line", () => {
+    const off = JSON.stringify({ jobs: [{ disabled: true, name: "ops-tunnel" }] })
+    for (const jobs of [null, "{", off]) expect(tunnelChecks(jobs, null, NOW)).toEqual([])
+  })
+
+  test("a tunnel that is up reads ok with its link", () => {
+    const up = "up: https://dashboard.playground.localhost:1355/dashboard through spark-a"
+    expect(tunnelChecks(on, beat(up), NOW)).toEqual([{ detail: up, name: "tunnel", status: "ok" }])
+  })
+
+  test("a tunnel that cannot connect is MISSING and names why", () => {
+    const [check] = tunnelChecks(
+      on,
+      beat("down: the Spark refused the key /h/.ssh/playground_spark"),
+      NOW,
+    )
+    expect(check!.status).toBe("MISSING")
+    expect(check!.detail).toContain("refused the key /h/.ssh/playground_spark")
+  })
+
+  test("a job turned on with no heartbeat, or one gone stale, is MISSING and says so", () => {
+    expect(tunnelChecks(on, null, NOW)[0]!.detail).toContain("has not started")
+    const stale = tunnelChecks(on, beat("up: x", "2026-11-14T23:40:00.000Z"), NOW)[0]!
+    expect(stale.status).toBe("MISSING")
+    expect(stale.detail).toContain("20m old")
   })
 })

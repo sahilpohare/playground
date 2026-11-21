@@ -132,6 +132,26 @@
         ]
       },
       {
+        "matcher": "^Monitor$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-outside-pr-code.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-outside-pr-code.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-outside-pr-code: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-outside-pr-code: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "^(Edit|MultiEdit|NotebookEdit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "R=\"${PLAYGROUND_REPO}\"; [ -n \"$R\" ] || { g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\" && R=\"$(dirname \"$g\")\"; }; [ -n \"$R\" ] && [ \"$R\" != . ] && { s=scripts/hooks/bundled/no-outside-pr-code.js; [ -f \"$R/$s\" ] || s=scripts/hooks/no-outside-pr-code.ts; [ -f \"$R/$s\" ]; } || { [ -z \"$PLAYGROUND_ROLE\" ] && exit 0; echo \"no-outside-pr-code: no guard script in the main checkout (${R:-not found}); refusing. ops-restore puts it back, else Ops by playbook LIFECYCLE.md, Restoring the main checkout\" >&2; exit 2; }; cd -P \"$R\" && bun --no-env-file \"$s\"; c=$?; [ $c = 0 ] || [ $c = 2 ] || { echo \"no-outside-pr-code: crashed (exit $c); refusing. Fix: bun install in $R\" >&2; exit 2; }; exit $c",
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "^(Edit|MultiEdit|NotebookEdit|Write)$",
         "hooks": [
           {
@@ -152,7 +172,7 @@
         ]
       },
       {
-        "matcher": "^(ListMcpResourcesTool|ReadMcpResourceDirTool|ReadMcpResourceTool|mcp__.+)$",
+        "matcher": "^(Edit|ListMcpResourcesTool|MultiEdit|NotebookEdit|ReadMcpResourceDirTool|ReadMcpResourceTool|Write|mcp__.+)$",
         "hooks": [
           {
             "type": "command",

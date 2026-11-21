@@ -7,7 +7,9 @@ install stored, reads as herdr, the one runtime.
 
   up.py                      check every job once; start each unhealthy terminal job as a pane of herdr's Ops workspace
   up.py --restarted <a,b>    a plain pass, once any running pass ends, with those jobs' starts dropped first, so GRACE holds
-                             back no job ops-restart stopped (packages/scripts/src/ops-restart)
+                             back no job ops-restart stopped (packages/scripts/src/ops-restart); a start made from START_WINDOW
+                             before the call on, one made while it waits on up.lock included, is kept and logged, since
+                             another pass started the job after it stopped
   up.py --sessions           list, never run, the commands that bring the factory's Claude sessions back
 
 Any other argument is refused with the usage line, exit 1, and runs no pass.
@@ -15,12 +17,16 @@ Any other argument is refused with the usage line, exit 1, and runs no pass.
 Healthy means the job's heartbeat (ops/<name>.json) is fresh (within three cycles), its pid is alive, its last result
 is not an exit. An unhealthy job's old herdr pane, which ops opened, is closed first (ops-dashboard then waits until its
 recorded process groups are gone, stopping them through procs.sh);
-nothing is ever selected by name or pattern. A launchd job is only reported, once after DOWN_PASSES unhealthy passes in a row: launchd keeps it alive. A job whose holder runs an
+nothing is ever selected by name or pattern. A launchd job is only reported, once after DOWN_PASSES unhealthy passes in a row: launchd, or on Linux its systemd user unit, keeps it alive. A job whose holder runs an
 executable an update deleted, or whose heartbeat pid does while a holder or launchd holds it, (lsof, once a pass) is unhealthy: a
 terminal job is stopped by its recorded pid and started again, a launchd job is reported once. A job that fails to start is logged
 with herdr's whole answer and tried again on the next pass; only one that started waits out GRACE. Every pass exits 0.
+herdr closes a job's pane the moment its job exits, so a restart reads why the job stopped from ops/<job>.last, the last
+stderr line once.py's reader kept, when it was written after the job's last start, and a private notify.sh line tells
+ops once per job until the line changes (ops/up-last-lines.json, 0600) or the job is healthy again; the printed started
+line leaves it out, since ops-tick sends every printed line to ops in public.
 """
-import fcntl, glob, hashlib, json, os, re, shutil, subprocess, sys, time
+import calendar, fcntl, glob, hashlib, json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
@@ -38,6 +44,7 @@ REGISTRY = (
 # spawn.sh's data folder, as dataDir() reads it: PLAYGROUND_DATA_DIR when set, else .playground in the home folder; it keeps the backend pins and the roster there
 DATA = (os.path.abspath(os.environ.get("PLAYGROUND_DATA_DIR") or os.path.expanduser("~/.playground")) if os.path.isabs(os.environ.get("PLAYGROUND_DATA_DIR") or "/") else sys.exit(f"PLAYGROUND_DATA_DIR is relative ({os.environ['PLAYGROUND_DATA_DIR']}), so each process would read it from its own folder: set it to an absolute path"))
 GRACE = 600  # a job started this recently has not had time to write its first heartbeat, so it is left alone
+START_WINDOW = 10  # a start this close before a --restarted call, or after it, came from another pass after the job stopped, so that call keeps it
 DOWN_PASSES = 3  # a launchd job unhealthy this many passes in a row is told to ops once, since launchd is not bringing it back
 SPAWN = os.path.join(os.path.dirname(HERE), "spawn.sh")  # the one way a session comes back, through the factory's capacity gate
 ONCE = os.path.join(HERE, "once.py")  # every job starts through it: one copy per job, held by its recorded pid
@@ -50,6 +57,7 @@ import ptable
 OPS = once.OPS
 LOG = os.path.join(OPS, "up.log")
 STARTS = os.path.join(OPS, "up-state.json")
+LAST_TOLD = os.path.join(OPS, "up-last-lines.json")  # each job's last line already told to ops
 
 HERDR_DIR = os.environ.get("PLAYGROUND_HERDR_DIR") or os.environ.get("DESK_HERDR_DIR") or os.path.expanduser("~/.playground/herdr")
 HERDR_SESSION = os.environ.get("PLAYGROUND_HERDR_SESSION") or os.environ.get("DESK_HERDR_SESSION") or "playground"
@@ -60,12 +68,18 @@ def log(msg):
         f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
 
 
-def run(argv, timeout=60):
+def run_streams(argv, timeout=60, env=None):
+    """(exit code, stdout, stderr) of the command, its streams apart, as a caller that reads one alone needs."""
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        return r.returncode, r.stdout or "", r.stderr or ""
     except Exception as e:
-        return 1, str(e)
+        return 1, "", str(e)
+
+
+def run(argv, timeout=60, env=None):
+    code, out, err = run_streams(argv, timeout, env)
+    return code, out + err
 
 
 def alive(pid):
@@ -81,7 +95,7 @@ def healthy(job):
         b = json.load(open(os.path.join(OPS, f"{job['heartbeat']}.json")))
     except Exception:
         return False, "no heartbeat"
-    age = time.time() - (time.mktime(time.strptime(b["lastBeatAt"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone)
+    age = time.time() - calendar.timegm(time.strptime(b["lastBeatAt"][:19], "%Y-%m-%dT%H:%M:%S"))
     if age > 3 * int(b.get("cycleSeconds", 60)):
         return False, f"heartbeat {int(age // 60)}m old"
     if not alive(b.get("pid", 0)):
@@ -132,6 +146,41 @@ def beat_pid(job):
         return 0
 
 
+def boot_time():
+    """The machine's boot time as epoch seconds, from sysctl on macOS and /proc/stat on Linux, else 0, so a just-started job is left alone only while the machine that ran it is still up."""
+    try:
+        r = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            m = re.search(r"\bsec = (\d+)", r.stdout)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    try:
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+
+def beat_started(job):
+    """The heartbeat's startedAt as epoch seconds, else 0: the moment the job recorded, so a start at or after the recorded one ends the grace and the job is restarted."""
+    try:
+        b = json.load(open(os.path.join(OPS, f"{job['heartbeat']}.json")))
+        return calendar.timegm(time.strptime(b["startedAt"][:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return 0
+
+
+def grace_ended(job, start_at):
+    """Whether the start grace is over, so a job recorded within GRACE is restarted: its heartbeat recorded a start at or after the recorded one, or the machine booted at or after it, since the just-started loop went down with that boot."""
+    beat = beat_started(job)
+    return bool(beat and beat >= start_at) or bool(start_at and start_at <= boot_time())
+
+
 def deleted(pids):
     """Each of the pids whose executable no longer exists, with that path, read in one lsof call (the first txt file after each pid); a failed or empty read finds none."""
     if not pids:
@@ -152,6 +201,33 @@ def stale_of(holder, beat, gone):
     if beat in gone:
         return f"holds pid {beat}, which runs a deleted executable ({gone[beat]})"
     return ""
+
+
+def last_line(name, since):
+    """The job's last stderr line, as once.py's reader kept it, when written after the job's last start (since), else ""."""
+    path = os.path.join(OPS, f"{name}.last")
+    try:
+        if os.path.getmtime(path) < since:
+            return ""
+        return open(path).read().strip()[: once.LAST_MAX]
+    except OSError:
+        return ""
+
+
+def told_last(name, line):
+    """Record line as the job's last line told to ops, line None forgetting it; True when it differs from the one told before."""
+    try:
+        told = json.load(open(LAST_TOLD))
+    except Exception:
+        told = {}
+    if told.get(name) == line:
+        return False
+    if line is None:
+        told.pop(name)
+    else:
+        told[name] = line
+    once.private(LAST_TOLD, json.dumps(told))
+    return line is not None
 
 
 def herdr():
@@ -242,11 +318,30 @@ def stop_dashboard():
 
 
 GRID = "Ops"  # every terminal job runs as a pane of this one herdr workspace
+EXT = "ext:"  # a command word ext:<scope>/<path> names an extension file, which rendered.ts resolves at each start
+RENDERED = os.path.join(os.path.dirname(os.path.dirname(HERE)), "packages", "scripts", "src", "playground", "rendered.ts")
+
+
+def resolved(command):
+    """The command with each ext:<scope>/<path> word made the path rendered.ts prints on stdout, the extension's latest accepted revision, and the refusal when one does not resolve."""
+    bun = shutil.which("bun") or os.path.expanduser("~/.bun/bin/bun")
+    words = []
+    for word in command.split(" "):
+        if word.startswith(EXT):
+            code, out, err = run_streams([bun, "--no-env-file", RENDERED, word[len(EXT):]], 30)
+            if code != 0:
+                return None, one_line_answer(out + err) or f"rendered.ts exited {code} on {word}"
+            word = out.strip()
+        words.append(word)
+    return " ".join(words), None
 
 
 def marker(job):
     """The job's folder (ops/<name>/), which its loop's command line holds even after a wrapper execs."""
     argv = [os.path.expanduser(a) for a in job["command"].split()]
+    ext = next((a[len(EXT):] for a in argv if a.startswith(EXT)), None)
+    if ext:
+        return once.marker_of(ext)
     script = next((a for a in argv if "/" in a and os.path.isfile(a) and not a.endswith(("/python3", "/bash", "/env"))), argv[0])
     return once.marker_of(script)
 
@@ -258,7 +353,11 @@ def in_grid(job, binary):
 
 def start(job):
     """Start the job as a pane of herdr's Ops workspace, closing its old pane there first (best effort); True once it started."""
-    command = job["command"].replace("~/", os.path.expanduser("~") + "/")
+    command, refused = resolved(job["command"])
+    if refused:
+        log(f"started {job['name']}: not started, since {refused}")
+        return False
+    command = command.replace("~/", os.path.expanduser("~") + "/")
     binary = herdr()[0]
     for pane, label in ops_panes(binary)[0] if binary else []:
         if label == job["name"]:
@@ -271,21 +370,28 @@ def start(job):
 JOBS_RENDER = os.path.join(os.path.dirname(os.path.dirname(HERE)), "packages", "scripts", "src", "playground", "jobs.ts")
 
 
+def kept_by(job):
+    """What keeps a launchd job alive, as a report names it: launchd's label on macOS, and on Linux the systemd user unit of the same name."""
+    if sys.platform.startswith("linux"):
+        return f"systemd unit {job.get('launchd')}.service"
+    return f"launchd job {job.get('launchd')}"
+
+
 def render_jobs():
-    """jobs.json from the store's job settings and each org's own job rows, each org's script folders under ops, and each enabled launchd job's plist into ops/launch-agents, a turned-off job's plist going to the trash; a launchd job of Playground's own turned on and not loaded is installed in ~/Library/LaunchAgents when its plist is missing there and bootstrapped, and one turned off has its plist there trashed and is booted out while loaded (exit 1 logs the one the trash kept, each refused bootstrap or bootout and each org job row refused); a machine with no store keeps its own jobs.json, and one whose store read is refused keeps the last and logs why."""
+    """jobs.json from the store's job settings and each org's own job rows, each org's script folders under ops, and each enabled launchd job's plist into ops/launch-agents, a turned-off job's plist going to the trash; a launchd job of Playground's own turned on and not loaded is installed in ~/Library/LaunchAgents when its plist is missing there and bootstrapped, and one turned off has its plist there trashed and is booted out while loaded, or on Linux the same as a systemd user unit in ~/.config/systemd/user, enabled, or disabled, trashed and stopped, linger turned on before its first start (exit 1 logs the one the trash kept, each refused bootstrap, bootout, enable, disable or stop and each org job row refused, and exit 0 or 1 logs linger turned on or refused); a machine with no store keeps its own jobs.json, and one whose store read is refused keeps the last and logs why."""
     bun = shutil.which("bun") or os.path.expanduser("~/.bun/bin/bun")
     if not (os.path.exists(bun) and os.path.exists(JOBS_RENDER)):
         return
     try:
-        r = subprocess.run([bun, "--no-env-file", JOBS_RENDER, "render", "--data", os.path.dirname(OPS), "--jobs", os.path.join(OPS, "jobs.json"), "--launch-agents", os.path.join(OPS, "launch-agents"), "--install", os.path.expanduser("~/Library/LaunchAgents")],
+        r = subprocess.run([bun, "--no-env-file", JOBS_RENDER, "render", "--data", os.path.dirname(OPS), "--jobs", os.path.join(OPS, "jobs.json"), "--launch-agents", os.path.join(OPS, "launch-agents"), "--install", os.path.expanduser("~/.config/systemd/user" if sys.platform.startswith("linux") else "~/Library/LaunchAgents")],
                            capture_output=True, text=True, timeout=60)
     except Exception as e:
         log(f"jobs.json kept: {e}")
         return
     if r.returncode in (0, 1) and r.stdout.strip() and "unchanged" not in r.stdout:
         log(r.stdout.strip())
-    named = [line for line in (r.stderr or "").splitlines() if line.startswith(("jobs: kept ", "jobs: refused "))]
-    if r.returncode == 1 and named:
+    named = [line for line in (r.stderr or "").splitlines() if line.startswith(("jobs: kept ", "jobs: refused ", "jobs: turned on "))]
+    if r.returncode in (0, 1) and named:
         log(" ".join(named))
     elif r.returncode not in (0, 3):
         log(f"jobs.json kept: {one_line_answer(r.stderr or r.stdout)}")
@@ -312,7 +418,9 @@ def up(quiet):
                 os.kill(holder, 15)
                 log(f"{job['name']} is paused; stopped its loop, pid {holder}")
             continue
-        if job["name"] == skip or time.time() - (starts.get(job["name"]) or 0) < GRACE:
+        start_at = starts.get(job["name"]) or 0
+        # a job started this recently is left alone, but its grace ends when it recorded a later start or the machine booted after it, so a dead job restarts on the first pass after a reboot
+        if job["name"] == skip or (time.time() - start_at < GRACE and not grace_ended(job, start_at)):
             continue
         ok, why = healthy(job)
         # a heartbeat pid counts only with a holder to stop, or for a job ops-up never starts; with neither, a start would run a second copy beside it
@@ -321,6 +429,9 @@ def up(quiet):
             ok, why = False, stale
         if ok:
             starts.get("_down", {}).pop(job["name"], None)
+            # a healthy job's told line is forgotten, so a later stop on the same line is told again
+            if os.path.exists(LAST_TOLD):
+                told_last(job["name"], None)
             continue
         binary = None
         if is_herdr(job):
@@ -354,25 +465,31 @@ def up(quiet):
             continue
         if not is_herdr(job):
             if stale:
-                # launchd keeps it alive and ops-up never started it, so it is reported, never signalled
+                # launchd (systemd on Linux) keeps it alive and ops-up never started it, so it is reported, never signalled
                 key = f"{job['name']}:{beats.get(job['name'])}:deleted"
                 if key not in starts.get("_reported", []):
                     starts.setdefault("_reported", []).append(key)
-                    run([os.path.join(HERE, "notify.sh"), "up", f"{job['name']} pid {beats.get(job['name'])} runs a deleted executable ({gone[beats.get(job['name'])]}); launchd job {job.get('launchd')} keeps it alive, so restart it there"], 60)
-            log(f"{job['name']} unhealthy ({why}); launchd job {job.get('launchd')} keeps it alive")
+                    run([os.path.join(HERE, "notify.sh"), "up", f"{job['name']} pid {beats.get(job['name'])} runs a deleted executable ({gone[beats.get(job['name'])]}); {kept_by(job)} keeps it alive, so restart it there"], 60)
+            log(f"{job['name']} unhealthy ({why}); {kept_by(job)} keeps it alive")
             # told once at DOWN_PASSES in a row; a healthy pass drops the count, so a later outage is told again
             down = starts.setdefault("_down", {})
             down[job["name"]] = down.get(job["name"], 0) + 1
             if down[job["name"]] == DOWN_PASSES:
                 told = re.sub(r"\d+m old", "stale", why)
-                run([os.path.join(HERE, "notify.sh"), "up", f"{job['name']} has been unhealthy ({told}) for {DOWN_PASSES} passes in a row; launchd job {job.get('launchd')} is not bringing it back, so check it is installed and loaded (playground doctor)"], 60)
+                run([os.path.join(HERE, "notify.sh"), "up", f"{job['name']} has been unhealthy ({told}) for {DOWN_PASSES} passes in a row; {kept_by(job)} is not bringing it back, so check it is installed and loaded (playground doctor)"], 60)
             continue
         log(f"{job['name']} unhealthy ({why}); starting")
         # the printed line is told to ops once until it changes, so a heartbeat's age stays out of it
         told = re.sub(r"\d+m old", "stale", why)
-        # only a job that started waits out GRACE; a failed start is tried again on the next pass
+        # read before the start, whose once.py drops the line: herdr closed the dead job's pane, so this file holds why it stopped
+        last = last_line(job["name"], start_at)
+        # a job's error can carry a key's name or a token's piece, so the line goes to ops in private alone: ops-tick sends every printed line in public
+        if last and told_last(job["name"], last):
+            run([os.path.join(HERE, "notify.sh"), "up", f"{job['name']} stopped, and ops-up started it again; its last line: {last}"], 60, {**os.environ, "NOTIFY_PRIVATE": "1"})
+        # only a job that started waits out GRACE; a failed start is tried again on the next pass; stamped before the start, so a line the new copy writes at once is never read as older than it
+        at = time.time()
         if start(job):
-            starts[job["name"]] = time.time()
+            starts[job["name"]] = at
             with open(STARTS, "w") as f:
                 json.dump(starts, f)
             if not quiet:
@@ -472,7 +589,7 @@ def sessions():
                 ids[names[-1]] = (os.path.basename(f)[:-6], os.path.getmtime(f), cwds[-1], glm)
     for a in roster.get("agents", []):
         n = a.get("name")
-        if a.get("status") in ("ended", "paused") or n in running or n not in ids:
+        if a.get("status") in ("done", "ended", "paused") or n in running or n not in ids:
             continue
         sid, _, cwd, glm = ids[n]
         # a resume takes --backend only while no pin stands: with one, the pin decides and a flag is refused
@@ -496,6 +613,8 @@ def main():
     if args == ["--sessions"]:
         sessions()
         return
+    # read before the lock's wait: a start after this, or just before it, came from another pass after the job stopped
+    asked = time.time()
     restarted = args[1].split(",") if len(args) == 2 and args[0] == "--restarted" else []
     if args and not restarted:
         print("usage: up.py [--restarted <a,b> | --sessions]", file=sys.stderr)
@@ -513,6 +632,10 @@ def main():
         except Exception:
             starts = {}
         for name in restarted:
+            # an accept restarts each of its jobs by its own --restarted call, and the first call's pass starts them all
+            if starts.get(name, 0) >= asked - START_WINDOW:
+                log(f"another pass started {name} within {START_WINDOW}s of this restart's call; not starting it again")
+                continue
             starts.pop(name, None)
         with open(STARTS, "w") as f:
             json.dump(starts, f)

@@ -114,7 +114,7 @@ describe("every script a session can run reaches the data folder through PLAYGRO
   const BY_HOME =
     /"?\$\{?HOME\}?\/\.playground|expanduser\("~\/\.playground|(homedir\(\)|home), "\.playground"/
   const COMMENT = /^\s*(#|\/\/|\*)/
-  // herdr's binary and sockets follow HOME alone, as ops-herdr puts them (herdrDir in packages/scripts/src/ops-herdr/herdr.ts), so every login and stack reaches the same servers
+  // herdr's binary and sockets follow HOME alone, as ops-herdr puts them (herdrDir in packages/env/src/data-dir.ts), so every login and stack reaches the same servers
   const HERDR = /herdr/i
   const byHome = (file: string) =>
     readFileSync(join(REPO, file), "utf8")

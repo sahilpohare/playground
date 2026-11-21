@@ -62,7 +62,7 @@ const CARVE_OUTS: Record<string, { lines: number; reason: string }> = {
   "scripts/ops/runner-host/suite.sh": {
     lines: 5,
     reason:
-      "runs on the CI runner host under /srv/ci, which has no trash: it removes a run's own unpacked tree and files, the trees of runs whose unit has stopped, and logs and outputs older than 7 days",
+      "runs on the runner host under its user's ~/.cache/playground-ci, which has no trash: it removes a run's own unpacked tree and files, the trees of runs whose unit has stopped, and logs and outputs older than 7 days",
   },
   "web/next/package.json": {
     lines: 2,

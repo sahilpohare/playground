@@ -12,6 +12,8 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { scratchEnv } from "../../../scratch-env"
+
 const script = join(
   import.meta.dir,
   "..",
@@ -86,33 +88,22 @@ const history = (home: string, accounts: [string, number, number][]) => {
 
 const iso = (t: number) => new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, "Z")
 
-const status = (home: string) => {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: home,
+// one run of the script under the scratch HOME, its output's lines
+const run = (home: string) => {
+  const env = scratchEnv(home, {
     PATH: `${join(home, "bin")}:${process.env.PATH}`,
-  }
-  delete env.CLAUDE_CONFIG_DIR
+  })
   const child = Bun.spawnSync(["python3", "-I", script], { env })
   expect(child.exitCode).toBe(0)
-  return child.stdout.toString().split("\n")[0]
+  return child.stdout.toString().split("\n")
 }
 
-const alerts = (home: string) => {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: home,
-    PATH: `${join(home, "bin")}:${process.env.PATH}`,
-  }
-  delete env.CLAUDE_CONFIG_DIR
-  const child = Bun.spawnSync(["python3", "-I", script], { env })
-  expect(child.exitCode).toBe(0)
-  return child.stdout
-    .toString()
-    .split("\n")
+const status = (home: string) => run(home)[0]
+
+const alerts = (home: string) =>
+  run(home)
     .filter((line) => line.startsWith("ALERT"))
     .map((line) => line.split(" ").slice(0, 2).join(" "))
-}
 
 test("a week past 90% and a 5-hour window past 85% each alert once", () => {
   const home = setup("high", 91, 86)
@@ -123,12 +114,9 @@ test("a week past 90% and a 5-hour window past 85% each alert once", () => {
 // the owner's drain order: every account is used to 100%, where a seated second dispatcher switches, so no mark parks or stops work
 test("the 97% and 98% alerts say nothing parks and a seated second dispatcher switches at 100%", () => {
   const home = setup("drain", 99, 20)
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: home,
+  const env = scratchEnv(home, {
     PATH: `${join(home, "bin")}:${process.env.PATH}`,
-  }
-  delete env.CLAUDE_CONFIG_DIR
+  })
   const out = Bun.spawnSync(["python3", "-I", script], { env }).stdout.toString()
   const lines = out.split("\n").filter((line) => /^ALERT 9[78] /.test(line))
   expect(lines).toHaveLength(2)
@@ -204,7 +192,7 @@ test("the factory's accounts at 1%/h each read 2%/h combined", () => {
     ["spare@example.test", 30, now + 172800],
   ])
   const line = status(home)
-  expect(line).toContain("rate 1.0%/h")
+  expect(line).toContain("rate 1.0%/h over 1h")
   expect(line).toContain("; combined 2.0%/h across 2 accounts")
   const accounts = (file: string) =>
     [...readFileSync(samples(home, file), "utf8").matchAll(/"account": "([^"]+)"/g)].map(
@@ -212,6 +200,48 @@ test("the factory's accounts at 1%/h each read 2%/h combined", () => {
     )
   expect(new Set(accounts("week-samples.jsonl"))).toEqual(new Set(["login@example.test"]))
   expect(new Set(accounts("account-samples.jsonl"))).toEqual(new Set(["spare@example.test"]))
+})
+
+// #2735: a whole-point step in the 1-hour window inflated the combined line; reading the 6-hour rate keeps it 1.0 plus 0.7, not 1.0 plus 2.0
+test("a whole-point step in the 1-hour window reads the 6-hour rate, so the combined line does not inflate (#2735)", () => {
+  const now = Date.now() / 1000
+  const home = setup("step-2735", 50, 20, {
+    "spare@example.test": { readAt: iso(now - 900), week: 70, weekReset: now + 172800 },
+  })
+  history(home, [["login@example.test", 50, now + 86400]])
+  const second = [
+    [10800, 68],
+    [9900, 68],
+    [9000, 68],
+    [8100, 68],
+    [7200, 68],
+    [6300, 68],
+    [5400, 68],
+    [4500, 68],
+    [3600, 69],
+    [2700, 69],
+    [1800, 70],
+    [900, 70],
+  ]
+  for (const [back, week] of second)
+    appendFileSync(
+      samples(home, "account-samples.jsonl"),
+      `${JSON.stringify({ account: "spare@example.test", reset: now + 172800, t: now - back, week })}\n`,
+    )
+  const line = status(home)
+  expect(line).toContain("rate 1.0%/h over 1h")
+  expect(line).toContain("; combined 1.7%/h across 2 accounts")
+})
+
+// #2735: under an hour of readings the 6-hour window holds no older reading, so a single step reads over the hour and its words name 1h, as before
+test("a step under an hour of readings reads over 1h, not over 6h (#2735)", () => {
+  const home = setup("sub-hour-step", 11, 20)
+  readings(home, [
+    [2700, 10],
+    [1800, 10],
+    [900, 11],
+  ])
+  expect(status(home)).toContain("rate 1.3%/h over 1h")
 })
 
 // #1587: a full week's reading parks in the map until its reset with a readAt that stops moving, so it counts 0%/h and the combined figure stays a number
@@ -254,8 +284,57 @@ test("one account alone reads as before, with no combined pace", () => {
   const home = setup("one", 50, 20)
   history(home, [["login@example.test", 50, now + 86400]])
   const line = status(home)
-  expect(line).toContain("rate 1.0%/h")
+  expect(line).toContain("rate 1.0%/h over 1h")
   expect(line).not.toContain("combined")
+})
+
+// the logged-in account's readings, each `[seconds back, week %]`, in this week
+const readings = (home: string, rows: [number, number][]) => {
+  const now = Date.now() / 1000
+  for (const [back, week] of rows)
+    appendFileSync(
+      samples(home, "week-samples.jsonl"),
+      `${JSON.stringify({ account: "login@example.test", reset: now + 86400, t: now - back, week })}\n`,
+    )
+}
+
+// #2100: the whole-percent reading holds at 91% through the last hour while the week rose 5 points in 5 hours, so the line reads 1%/h over 6 hours and keeps the 98% time
+test("a flat hour inside a rising week reads the 6-hour rate and names its window (#2100)", () => {
+  const home = setup("flat-hour", 91, 20)
+  readings(home, [
+    [5 * 3600, 86],
+    [50 * 60, 91],
+  ])
+  const lines = run(home)
+  expect(lines[0]).toContain("rate 1.0%/h over 6h, 98% in ~7.0h;")
+  expect(lines.find((line) => line.startsWith("ALERT 90"))).toContain(
+    "burning 1.0%/h over 6h, 98% in ~7.0h",
+  )
+})
+
+// #2100: a reading that held through every window with data reads as under one point over the span it covers, rounded up, never 0.0%/h
+test("a reading flat through every window reads under one point over its span (#2100)", () => {
+  const home = setup("flat-all", 50, 20)
+  readings(home, [[45 * 60, 50]])
+  const line = status(home)
+  expect(line).toContain("rate under 1.4%/h over 45m;")
+  expect(line).not.toContain("0.0%/h")
+})
+
+// #2100: two accounts flat for 45 minutes each read under 1.4%/h, so their combined pace is a bound too
+test("a combined pace holding a flat account reads as under the sum of the bounds (#2100)", () => {
+  const now = Date.now() / 1000
+  const home = setup("flat-combined", 50, 20, {
+    "spare@example.test": { readAt: iso(now), week: 30, weekReset: now + 172800 },
+  })
+  readings(home, [[45 * 60, 50]])
+  appendFileSync(
+    samples(home, "account-samples.jsonl"),
+    `${JSON.stringify({ account: "spare@example.test", reset: now + 172800, t: now - 45 * 60, week: 30 })}\n`,
+  )
+  const line = status(home)
+  expect(line).toContain("; combined under 2.8%/h across 2 accounts")
+  expect(line).not.toContain("0.0%/h")
 })
 
 test("an account usage.accounts does not list counts nothing", () => {
@@ -276,12 +355,9 @@ test("a spare account at 97% alerts once per its week reset, with the logged-in 
   })
   const home = setup("spare-97", 50, 20, spare(now + 172800))
   const marks = () => {
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      HOME: home,
+    const env = scratchEnv(home, {
       PATH: `${join(home, "bin")}:${process.env.PATH}`,
-    }
-    delete env.CLAUDE_CONFIG_DIR
+    })
     const child = Bun.spawnSync(["python3", "-I", script], { env })
     expect(child.exitCode).toBe(0)
     return child.stdout
@@ -316,12 +392,9 @@ test("a listed spare's marks fire while the logged-in account is outside usage.a
       '"account":"other@example.test"',
     ),
   )
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: home,
+  const env = scratchEnv(home, {
     PATH: `${join(home, "bin")}:${process.env.PATH}`,
-  }
-  delete env.CLAUDE_CONFIG_DIR
+  })
   const run = () => Bun.spawnSync(["python3", "-I", script], { env }).stdout.toString().split("\n")
   const lines = run()
   expect(lines[0]).toStartWith("other@example.test: not a factory account")

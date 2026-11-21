@@ -20,6 +20,7 @@ import {
   extLog,
   filesIn,
   mustGit,
+  mustGitRaw,
   scopesIn,
   withLock,
   writeAtomically,
@@ -168,6 +169,7 @@ export const putItem = (
         }
         if (state === "accepted") lists(data, ref, root)
       },
+      state === "accepted" && ref.kind === "list",
     )
   } catch (error) {
     return refused(error)
@@ -244,6 +246,7 @@ export const judgeItem = (
         renameSync(join(at, proposed), join(at, path!))
         lists(data, ref, root)
       },
+      state === "accepted" && ref.kind === "list",
     )
   } catch (error) {
     return refused(error)
@@ -308,7 +311,7 @@ export const showItem = (data: string, ref: Ref, rev?: string) => {
   }
   const [path] = candidates(ref.kind, ref.key)
   const proposed = join(PROPOSED, path!)
-  // a revision that wrote or judged this item reads in the state its trailers say it was written in: a proposal from proposed/, a reject from proposed/ just before it removed it
+  // a revision that wrote or judged this item reads from the paths its trailers name: a proposal from proposed/, a reject from proposed/ just before it removed it
   const trailers = extGit(dir, [
     "log",
     "-1",
@@ -322,22 +325,46 @@ export const showItem = (data: string, ref: Ref, rev?: string) => {
     proposed: ["proposed", proposed, rev],
     rejected: ["rejected", proposed, `${rev}^`],
   } as const
-  const reads =
+  const ownState =
     item === `${ref.kind} ${ref.key}`
-      ? [ownRead[written === "accepted" || written === "rejected" ? written : "proposed"]]
-      : [ownRead.accepted, ownRead.proposed]
+      ? written === "accepted" || written === "rejected"
+        ? written
+        : "proposed"
+      : null
+  const reads = ownState ? [ownRead[ownState]] : [ownRead.accepted, ownRead.proposed]
+  // a proposal that has since landed reads accepted: the commit that next changed proposed/ is its accept, its reject, or the proposal that replaced it, since judgeItem accepts only that path's last writer
+  const next =
+    ownState === "proposed"
+      ? extGit(dir, [
+          "log",
+          "--reverse",
+          "--ancestry-path",
+          "--format=%(trailers:key=State,valueonly)%x00",
+          "--end-of-options",
+          `${rev}..HEAD`,
+          "--",
+          proposed,
+        ])
+          .out.split("\0")[0]
+          ?.trim()
+      : undefined
   for (const [state, at, tree] of reads) {
     const listed = extGit(dir, ["ls-tree", "-r", "--name-only", tree, "--", at])
     if (listed.code !== 0) return null
     const names = listed.out.split("\n").filter(Boolean)
     if (!names.length) continue
-    const show = (name: string) => mustGit(dir, ["show", `${tree}:${name}`])
+    const show = (name: string) => mustGitRaw(dir, ["show", `${tree}:${name}`])
     const content: Content = { attachments: [], body: null, files: null, value: null }
     if (names.length > 1 || names[0] !== at)
       content.files = Object.fromEntries(names.map((name) => [relative(at, name), show(name)]))
     else if (ref.kind === "list") content.value = JSON.parse(show(at))
     else content.body = show(at)
-    return { ...ref, content, rev, state }
+    return {
+      ...ref,
+      content,
+      rev,
+      state: next === "accepted" ? "accepted" : state,
+    }
   }
   return null
 }
@@ -483,7 +510,10 @@ export const importFrom = (
       continue
     }
     const fetched =
-      existsSync(join(from, ".git")) && extGit(into, ["fetch", "-q", from, "HEAD"]).code === 0
+      existsSync(join(from, ".git")) &&
+      withLock(data, () => extGit(into, ["fetch", "-q", from, "HEAD"]).code === 0, {
+        scopes: [scope],
+      })
     const forward =
       fetched && extGit(into, ["merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"]).code === 0
     const stat = fetched
@@ -494,7 +524,10 @@ export const importFrom = (
       ...stat.split("\n").filter(Boolean),
     )
     if (dryRun) continue
-    if (forward) withLock(data, () => mustGit(into, ["merge", "-q", "--ff-only", "FETCH_HEAD"]))
+    if (forward)
+      withLock(data, () => mustGit(into, ["merge", "-q", "--ff-only", "FETCH_HEAD"]), {
+        scopes: [scope],
+      })
     else copyTree(data, scope, from, who)
   }
   const login = dryRun ? undefined : loginOr(data)
@@ -515,14 +548,17 @@ const copyTree = (data: string, scope: string, from: string, who: Who) =>
         ["Import", from],
       ],
     },
+    undefined,
+    (file) => (statSync(join(from, file)).mode & 0o111) !== 0,
   )
 
-// The guards' list files of a folder (scripts/hooks in a checkout) into the login's lists, one commit, then the root's lists derived: what a fresh machine seeds its guards with.
+// The guards' list files of a folder (extensions/core/lists in a checkout) into the login's lists, one commit, then the root's lists derived: what a fresh machine seeds its guards with. With keep, a list the login already holds stays as it is, so a second seed changes nothing.
 export const importLists = (
   data: string,
   dir: string,
   dryRun: boolean,
   who: Who,
+  keep = false,
 ): Outcome<{ lines: string[] }> => {
   let login: string
   try {
@@ -534,6 +570,10 @@ export const importLists = (
   const files = new Map<string, string>()
   for (const name of GUARD_LISTS) {
     const file = join(dir, `${name}.json`)
+    if (keep && existsSync(join(scopeDir(data, login), "lists", `${name}.json`))) {
+      lines.push(`= list ${login} ${name} kept`)
+      continue
+    }
     if (!existsSync(file)) {
       lines.push(
         `- ${name}: no ${file}; add it with playground ext put ${login} list ${name} <file> --reason <why>`,

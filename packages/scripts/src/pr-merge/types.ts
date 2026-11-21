@@ -68,10 +68,14 @@ const BUNDLES: TypeStep = {
 const touchesHooks = (paths: string[]): boolean =>
   paths.some((path) => /^(scripts\/hooks|packages)\//.test(path))
 
+// Pure: cp's flags for a copy-on-write clone of a folder, by scripts/README.md's "A worktree's node_modules": -c on macOS (APFS), --reflink=auto elsewhere, since GNU cp has no -c and reflink clones where the file system can and copies where it cannot.
+export const cloneArgs = (platform: NodeJS.Platform = process.platform): string[] =>
+  platform === "darwin" ? ["-cR"] : ["-R", "--reflink=auto"]
+
 // CI's own type steps (.github/workflows/auto-check-build.yml), after what node_modules needs: a clone by scripts/README.md's "A worktree's node_modules" then its forced install, or a plain install into the kept node_modules, since a forced one rewrites every package; each through the run slot.
 export const ciSteps: TypeSteps = ({ canary, checkout, hooks, prepare, worktree }) => {
   const clone = {
-    argv: ["cp", "-cR", join(checkout, "node_modules"), `${worktree}/`],
+    argv: ["cp", ...cloneArgs(), join(checkout, "node_modules"), `${worktree}/`],
     name: "clone",
   }
   const install = {
@@ -161,9 +165,9 @@ export async function typesExplained(
 const skipped = (facts: { canary: string; head: string }) =>
   `skipped: ${facts.head.slice(0, 7)} holds ${BASE} ${facts.canary.slice(0, 7)}, so its own checks typed this tree`
 
-const FIX = `Merge ${BASE} into the PR and fix the error; the new head then needs its checks and a 5/5`
+const FIX = `Merge ${BASE} into the PR and fix the error; the new head then needs its checks, a 5/5 and each PASS its diff calls for`
 
-const REBUILD = `Merge ${BASE} into the PR plainly, run \`bun run hooks:bundle\`, and commit the rebuild on its own; the new head then needs its checks and a 5/5`
+const REBUILD = `Merge ${BASE} into the PR plainly, run \`bun run hooks:bundle\`, and commit the rebuild on its own; the new head then needs its checks, a 5/5 and each PASS its diff calls for`
 
 // Removes the worktree and its folder, whatever state a run left them in, for a worktree that cannot be reused.
 async function clear(git: Run, worktree: string): Promise<void> {

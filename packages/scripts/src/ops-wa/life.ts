@@ -27,6 +27,8 @@ export type LinkSock = {
 }
 export type LifeIo<S extends LinkSock> = {
   alert: (text: string) => Promise<unknown>
+  // wa.alert, the second number in E.164, a guest, if set
+  alertNumber?: string
   // posts the pairing card with its code, answering the card's id
   card: (code: string) => Promise<string | undefined>
   connect: () => Promise<S>
@@ -50,6 +52,14 @@ export const RELINK = "playground wa relink"
 export const PAIRING =
   "On the spare phone, open WhatsApp Business. On Android tap ⋮ then Linked devices; on iPhone tap Settings then Linked devices. Tap Link a device, then Link with phone number instead, and type this code.\n\nKeep the Business profile unverified, with no Meta Verified: a verified business account has been banned when it linked a device."
 
+// The pairing card as the Inbox takes it, its outcome an alert, since a code times out unheard while focus holds the Inbox quiet. Pure and whole, so the schema check runs against the card the code sends.
+export const pairingCard = (code: string, from: string) => ({
+  from,
+  kind: "update" as const,
+  preview: { outcome: "alert" as const, text: PAIRING },
+  title: `Link WhatsApp: code ${code.slice(0, 4)}-${code.slice(4)}`,
+})
+
 // Pairing waits for no-raw-wa's registration in the factory's settings, so no auth state exists while a session could still reach it.
 export async function unguarded(settings: string): Promise<string | undefined> {
   const text = await Bun.file(settings)
@@ -64,6 +74,8 @@ export async function life<S extends LinkSock>(io: LifeIo<S>): Promise<string> {
   const digits = (n: string) => n.replace(/\D/g, "")
   if (digits(io.device) === digits(io.owner))
     return "wa.device is the owner's own number, and a self-chat number is banned fast: set wa.device to the spare number"
+  if (io.alertNumber && digits(io.alertNumber) === digits(io.device))
+    return "wa.alert is the spare number, and an alert to it is a self-chat, which is banned fast: set wa.alert to another number or leave it empty"
   await ownFolder(io.dir)
   const marker = join(io.dir, "logged-out")
   if (await Bun.file(marker).exists())

@@ -37,8 +37,8 @@ Only a choice that cannot be taken back reaches you, as an Inbox decision, and t
 ## Starting and ending sessions
 
 ```bash
-playground add --title "<title>"              # a worker, under a name Playground picks
-playground add --kind runner <name>           # a runner, titled by its name
+playground add --title "<title>" --account <email>   # a worker on that Claude login, under a name Playground picks
+playground add --kind runner <name>                  # a runner, titled by its name
 ```
 
 Every start passes a capacity check first: the Mac's load, its free memory, and the Claude account's week, and a name a live session already holds is refused.
@@ -75,14 +75,15 @@ While a leak guard's list is missing or broken, a Bash call that only reads stil
 A machine has extensions once its data folder holds the `extensions/` folder ([Settings and extensions](/docs/extensions)).
 A broken list refuses only the calls its guard checks, so the rest of your work runs on.
 
-One guard keeps the public repositories clean, the factory's and that of Yard, the hosted app where Playgrounds talk to each other: a pull request, issue, review or comment there is refused when it holds a person's name, a handle, a company term, a Slack id, a ticket key, an email address or a link into the old private repository.
-Its refusal names the kind of text, never the text, and says how to put it in plain words.
+One guard keeps the public repositories clean, the factory's and that of Yard, the hosted app where Playgrounds talk to each other: a pull request, issue, review or comment there is refused when it holds a person's name, a handle, a company term, a Slack id, a ticket key, an email address (but one on example.com, example.org or example.net, kept for examples) or a link into the old private repository.
+Its refusal names the kind of text and where it sat (a commit, the title, the body), never the text itself, and says how to put it in plain words.
 
 ## Traces
 
-`bun run trace-count` counts each of those kinds over the files git holds, plus issue numbers, the old session names and the old skill names, and fails when any count rises.
+`bun run trace-count` counts each of those kinds over the files git holds, plus issue numbers, the old session names, the old skill names and each call in code to a program macOS alone has (such as `osascript` or `vm_stat`) with no Linux branch in front of it, and fails when any count rises.
 It needs that guard's list: when the list is missing or one of its keys is empty, it stops and says how to add it, since those kinds would count nothing.
 Every commit runs `bun run trace-count --lists`, which counts the list's kinds alone, so a file holding a value on your machine's list fails the commit, and a machine with no list counts none.
+Every push checks each new commit's message and the branch's name against the same list, and the CI of each pull request into `canary` checks what it adds (its changed files, their paths, its commit messages and its branch's name) against the list kept as the `TRACE_TERMS` secret; each refusal names a place and a kind, never the value.
 A made-up address counts as none: one on a domain kept for examples (`example.com`, `.test`, `.invalid`, `.localhost`) or the fixtures' `local.host`.
 So do a made-up issue number in a test or a fixture and a hex colour such as `#000`.
 So new comments, docs and tests are written in plain words, and the counts only fall.
@@ -94,4 +95,5 @@ So new comments, docs and tests are written in plain words, and the counts only 
 
 Each change is made in a worktree of its own, branched from the latest `canary`, and opened as a draft pull request.
 A reviewer session other than its author scores it out of 5, round by round, and the author fixes what it finds until it scores 5 on the latest commit with the checks green.
+A change to the web app also waits for its tester, a session that drives the change in a browser and posts its pass on that commit.
 Then it merges with `bun run pr:merge <n>`, or merge-on-ready lands it, the only two ways a change reaches `canary`.

@@ -6,6 +6,7 @@ import { dataDirOf } from "../../packages/env/src/data-dir"
 import { liveSettings } from "../../packages/settings/src/live"
 import { readPolicySync } from "../../packages/settings/src/rendered"
 import { eachInput } from "./codex"
+import { input } from "./input"
 import { fromFactory, registryName, rosterKind, sessionOf, sessionRole } from "./role"
 import {
   codeFed,
@@ -27,6 +28,7 @@ import {
   stdinOf,
   stdinShell,
   type Text,
+  unknown,
   unreadWord,
   type Visit,
   type Word,
@@ -319,7 +321,7 @@ const STEP_FIVE = /^(?:-q |--quiet )?--ff-only (?:-q |--quiet )?origin\/main$/
 const GIT_FIX = `it moves the HEAD, index or files of the main checkout, which every installed skill, hook and ops job runs from. Name your own tree on every git call, git -C <your worktree> ..., after git -C <your worktree> rev-parse --show-toplevel names it; the main checkout moves only by the release skill's step 5, git -C <main checkout> fetch -q origin main && git -C <main checkout> merge --ff-only -q origin/main, a stray local commit on its main goes by git -C <main checkout> reset --keep origin/main while its tree is clean, and a worktree is made by absolute path under the main checkout's .claude/worktrees/, so it nests in no other worktree, by git worktree add --no-track "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/worktrees/<name>" -b <branch> origin/canary.`
 
 const LIVE_FIX =
-  "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each canary head, and a change it needs goes through a PR into canary."
+  "it moves the live Dashboard's checkout, which serves the owner's Dashboard, and only the runner that holds it and the ops lead change it. Ask Ops: its supervisor rolls the checkout onto each head of the branch the main checkout sits on, and a change it needs goes through a PR into canary."
 
 // A git call that writes the live Dashboard's checkout: a commit, or any move gitMoves reads, every merge and reset included, since step 5 and the keep reset are the main checkout's own.
 function liveWrite(
@@ -377,21 +379,34 @@ function gitMoves(sub: string, rest: string[]): boolean {
 }
 
 // turbo's own words, however it is called: by name or path, through npx, bunx or bun x (runs reads bunx as bun x), as their tool or the package their -p names.
-export function turboWords(name: string, args: Word[], env: Env): Word[] | undefined {
-  if (name === "turbo") return args
-  if (RUNNERS.has(name) || name === "bunx") return runnerTurbo(args)
+export const turboWords = (name: string, args: Word[], env: Env): Word[] | undefined =>
+  toolWords(["turbo"], name, args, env)
+
+// A tool's own words, under any of its names, called as turboWords reads turbo.
+export function toolWords(
+  tools: readonly string[],
+  name: string,
+  args: Word[],
+  env: Env,
+): Word[] | undefined {
+  const named = (word: string | undefined) => tools.includes(toolName(word))
+  if (tools.includes(name)) return args
+  if (RUNNERS.has(name) || name === "bunx") return runnerTool(named, args)
   if (name !== "bun") return
   const { at, sub, words } = bunCall(args, env)
-  if (words[0] === "x") return runnerTurbo(args.slice(sub + 1))
+  if (words[0] === "x") return runnerTool(named, args.slice(sub + 1))
   const target = words[0] === "run" ? words[1] : words[0]
-  return isTurbo(target) ? args.slice(at + 1) : undefined
+  return named(target) ? args.slice(at + 1) : undefined
 }
 
-// A package runner's turbo words: after turbo as its tool, or from its tool on when its -p names turbo, since the runner then runs whatever it names with turbo on PATH.
-function runnerTurbo(args: Word[]): Word[] | undefined {
+// A package runner's tool words: after the tool, or from its tool on when its -p names it, since the runner then runs whatever it names with the tool on PATH.
+function runnerTool(
+  named: (word: string | undefined) => boolean,
+  args: Word[],
+): Word[] | undefined {
   const at = runnerTarget(args)
-  if (isTurbo(args[at]?.value)) return args.slice(at + 1)
-  return packagedTools(args).includes("turbo") ? args.slice(at) : undefined
+  if (named(args[at]?.value)) return args.slice(at + 1)
+  return packagedTools(args).some(named) ? args.slice(at) : undefined
 }
 
 // npx's and bunx's options whose next word is their value (bun x --help, npx's -p)
@@ -434,8 +449,53 @@ export function runnerFolders(
   return xCwd ? [...folders, xCwd.dir] : folders
 }
 
+// bun's options whose value bunCall reads itself, and the most readings runnerReadings makes of one call, past which the call as typed and a --cwd the hook cannot read (UNREAD_CWD) join them, so the call's folder reads as unread too
+const BUN_SPLITS = new Set(["--cwd", "--filter", "-F"])
+export const STARTED_RUNNERS = new Set(["bun", "bunx", "npx"])
+const OPTION_READINGS = 16
+export const UNREAD_CWD: Word = {
+  quoted: false,
+  ...unknown("a runner's option past the readings the hook makes"),
+}
+
+// The readings of a bun, bunx or npx call's words: as typed, and for each option before the word it runs but bun's own --cwd, --filter and -F (BUN_SPLITS), written without = and followed by a word (`--env-file /tmp/e`, `-w pkg`), one more that takes that word as its value, as `--env-file=/tmp/e`, so a value the reader would take for the program is judged as the option's too, and a runner it starts read by its own readings; any other program's words read as typed alone
+export function runnerReadings(name: string, args: Word[]): Word[][] {
+  if (!STARTED_RUNNERS.has(name)) return [args]
+  const out: Word[][] = []
+  const walk = (from: number, head: Word[]): void => {
+    let k = from
+    for (; k < args.length && out.length <= OPTION_READINGS; k++) {
+      const word = args[k]
+      const next = args[k + 1]
+      const v = word.value
+      if (!v.startsWith("-") || v === "-") {
+        if (v !== "run" && v !== "x") break
+      } else if (BUN_SPLITS.has(v) && next) {
+        head = [...head, word, next]
+        k++
+        continue
+      } else if (!v.includes("=") && next && !next.value.startsWith("-"))
+        walk(k + 2, [...head, { ...word, value: `${v}=${next.value}` }])
+      head = [...head, word]
+    }
+    const started = toolName(args[k]?.value)
+    if (!STARTED_RUNNERS.has(started)) out.push([...head, ...args.slice(k)])
+    else
+      for (const sub of runnerReadings(started, args.slice(k + 1)))
+        out.push([...head, args[k], ...sub])
+  }
+  walk(0, [])
+  return out.length > OPTION_READINGS
+    ? [
+        args,
+        ...out.slice(0, OPTION_READINGS - 1),
+        [{ quoted: false, value: "--cwd" }, UNREAD_CWD, ...args],
+      ]
+    : out
+}
+
 // The word a package runner runs, past its options and their values (-y, --yes, -p turbo).
-function runnerTarget(args: Word[]): number {
+export function runnerTarget(args: Word[]): number {
   let k = 0
   while (k < args.length && args[k].value.startsWith("-"))
     k += RUNNER_TAKES.has(args[k].value) ? 2 : 1
@@ -445,7 +505,6 @@ function runnerTarget(args: Word[]): number {
 // A tool by name or path, or as a package at a version (turbo@latest)
 export const toolName = (word: string | undefined) =>
   program((word ?? "").replace(/(?<=.)@[^/]*$/, ""))
-const isTurbo = (word: string | undefined) => toolName(word) === "turbo"
 
 // Whether the build's settings reach turbo: from its own assignments or env wrapper, an export before it, or the session's environment.
 function validationOff(local: Map<string, Text>, env: Env): boolean {
@@ -478,6 +537,9 @@ function runs(
 ):
   | { also?: (string | undefined)[]; cwd: string | undefined; fix?: string; what: string }
   | undefined {
+  // a call past the readings runnerReadings makes may run any program in any folder, so it fails closed at any depth
+  if (args[1] === UNREAD_CWD)
+    return { also: [undefined], cwd: undefined, what: `${name} past the readings the hook makes` }
   if (name === "bunx") return runs("bun", [X, ...args], local, env)
   const turbo = turboWords(name, args, env)
   if (turbo && packagesBuild(turbo)) {
@@ -495,6 +557,11 @@ function runs(
       TOOLS.has(t),
     )
     if (tool) return { cwd: cwdFlag(args, env), what: `${name} ${tool}` }
+    // a runner npx starts is read as the shell would read it, as bun x's program is below
+    const at = runnerTarget(args)
+    const started = toolName(args[at]?.value)
+    const ran = STARTED_RUNNERS.has(started) && runs(started, args.slice(at + 1), local, env)
+    if (ran) return { ...ran, what: `${name} ${ran.what}` }
   }
   if (name === "git") {
     const { also, cwd, rest, sub } = gitCall(args, env, local)
@@ -562,7 +629,7 @@ const SED_VALUES = new Set(["--expression", "--file", "--line-length"])
 const BSD_SUFFIX = /^(\.[\w.-]*)?$/
 
 // The files sed -i or perl -i edits in place (none without -i): every positional, but the first when no script flag gave the script.
-function inPlace(name: string, args: Word[]): Word[] {
+export function inPlace(name: string, args: Word[]): Word[] {
   const letters = LETTERS[name]
   if (!letters) return []
   let edits = false
@@ -757,15 +824,26 @@ async function inspect(raw: string, environment: Record<string, string | undefin
     }
     const slot = slotWords(parsed)
     if (slot)
-      return slot.length === 0 ? undefined : examine({ ...cmd, words: slot }, env, visit, false)
+      return slot.length === 0
+        ? undefined
+        : examine(
+            { ...cmd, words: slot },
+            // run-slot.sh runs its words in a process of its own, so a cd among them moves no folder for the commands after it
+            { ...env, files: new Map(env.files), vars: new Map(env.vars) },
+            visit,
+            false,
+          )
     const { args, local, name } = parsed
     // a line that names more folders than the reader carries may run anywhere, the main checkout included, so what it guards is refused with no folder to name
     if (env.cwdAnywhere) {
       const blind: Env = { ...env, cwd: undefined }
-      const ran = runs(name, args, local, blind)
       // a folder the command names itself is judged by that path, as everywhere else; one the shell gives it could be the main checkout
-      if (ran && ranIn(ran.cwd, ran.also).some((dir) => dir === undefined || inMain(dir)))
-        return refuse(ran.what, ANYWHERE_FIX)
+      const ran = runnerReadings(name, args)
+        .map((reading) => runs(name, reading, local, blind))
+        .find(
+          (ran) => ran && ranIn(ran.cwd, ran.also).some((dir) => dir === undefined || inMain(dir)),
+        )
+      if (ran) return refuse(ran.what, ANYWHERE_FIX)
       const blindWrite = writeTargets(cmd, name, args).find((t) => {
         const path = pathOf(t, blind)
         return path === undefined || inMain(path)
@@ -800,9 +878,13 @@ async function inspect(raw: string, environment: Record<string, string | undefin
       }
       const script = await fedScript(cmd, here, sure, inMain, visit)
       if (script) return script
-      const ran = runs(name, args, local, here)
-      if (ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)))
-        return refuse(ran.what, fixFor(sure, ran.fix))
+      const ran = runnerReadings(name, args)
+        .map((reading) => runs(name, reading, local, here))
+        .find(
+          (ran) =>
+            ran && (ranIn(ran.cwd, ran.also).some((dir) => inMain(dir)) || unreadFolder(ran.also)),
+        )
+      if (ran) return refuse(ran.what, fixFor(sure, ran.fix))
       const moved =
         name === "git"
           ? await liveRefusal(args, local, here, inLive, fixFor(sure, LIVE_FIX))
@@ -843,7 +925,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-main-checkout", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

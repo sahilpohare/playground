@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs"
+import { isAbsolute, join, relative } from "node:path"
+
 import { z } from "zod"
 
 import { defineSettings, extLinksSchema, extOrderSchema, extScopeSchema } from "./settings"
@@ -43,3 +46,23 @@ export const guardedOrgs = (values: Record<string, unknown>): string[] => {
   const links = extLinksSchema.parse(values["ext.links"] ?? {})
   return [...new Set(Object.values(links).flat())].filter((link) => link !== "*").sort()
 }
+
+// A path as written and as resolved, so a checkout reached through a symlinked folder (/tmp, /private/tmp) still matches.
+export const pathsOf = (path: string): string[] => {
+  try {
+    return [path, realpathSync(path)]
+  } catch {
+    return [path]
+  }
+}
+
+export const within = (path: string, root: string): boolean => {
+  const rel = relative(root, path)
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
+
+// The org whose own folder ~/<org> holds dir, among the orgs ext.links guards, for a folder with no GitHub origin; a value ext.links refuses reads as none.
+export const orgFolderOf = (home: string, dir: string, values: Record<string, unknown>) =>
+  guardedOrgs({ "ext.links": extLinksSchema.safeParse(values["ext.links"]).data }).find((org) =>
+    pathsOf(dir).some((path) => pathsOf(join(home, org)).some((root) => within(path, root))),
+  )

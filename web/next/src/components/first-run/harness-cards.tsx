@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import type { HarnessCard, HarnessId } from "@/lib/harness"
 
-// One card for each harness Alpha can start on, picked by its radio: its Installed, Signed in and Plan rows, each failed one with its fix's button (the first run's own CheckRow), and the refusal in plain words while its start would be refused. First run's step and Settings' Harness section both show it.
+// One card for each harness Alpha can start on, picked by its radio: its Installed, Signed in and Plan rows (Claude Code's with Trusted before Plan), each failed one with its fix's button (the first run's own CheckRow), and the refusal in plain words while its start would be refused. First run's step and Settings' Harness section both show it.
 export function HarnessCards({
   cards,
   onPick,

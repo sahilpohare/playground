@@ -10,6 +10,7 @@ Playground's background work runs as ops jobs: the Dashboard's supervisor, the s
 Each job is a setting, `jobs.<name>` (`ops-merge-train` is `jobs.opsMergeTrain`), whose value is the job: whether it is on, its schedule, its command or launchd program, and why it is paused.
 A stored value holds only the fields it changes, and reads over the job's entry in Playground's registry, so a job turned on still runs the command and schedule Playground ships, including after an update changes them.
 A fresh install has every job off but two: `jobs.opsDashboard`, the Dashboard's own, which serves first run's checks and every settings write, and `jobs.opsUsage`, which reads your Claude login's 5-hour and week usage every 5 minutes, so the Dashboard shows them with no setting.
+On a Mac a third is on too, `jobs.opsKeepAwake`, which keeps an idle Mac awake ([below](#keep-an-idle-mac-awake)).
 
 ## Turn a job on
 
@@ -34,6 +35,49 @@ Moving a schedule or pausing a job with `pausedFor` is the same kind of write, n
 A job with a `config`, the settings of its own it reads on each pass, shows a card under its row in Settings > Jobs: the config as JSON in a box you edit, and Save, which writes the new object at the job's scope at once, over the rest of the value there.
 Playground checks only that it is a JSON object; the job checks each field itself, and when it refuses one it writes why as `configRefused` in its heartbeat, which the card shows in red under the box until a beat holds none.
 
+## Reach a Dashboard on another machine
+
+When the Dashboard runs on another machine, such as a DGX Spark, it listens on that machine's loopback alone, and the `ops-tunnel` job on your Mac brings it to you.
+The job holds an ssh tunnel with the key `~/.ssh/playground_spark` from a port on your Mac's loopback to the same port on the other machine's loopback, 1355 by default, so the link is the address of that machine's live Dashboard, `https://dashboard.playground.localhost:1355/dashboard`, and nothing listens off loopback at either end.
+The link's host comes from the `live.branch` setting (`live/dashboard` by default), and the Dashboard's API, `dashboard.api.playground.localhost`, goes through the same port.
+Its config names the machine: `{"host": "<name or address>", "port": 1355}`, with optional `key` and `user` (your Mac's user by default).
+That machine serves its names under the certificate authority your Mac already trusts, since its setup copies your Mac's portless folder there, so there is no trust step.
+Two Approves set the job up, in this order: a session posts the host as an Inbox guard decision, `{"config": {"host": ...}}`, then the switch, `{"enabled": true}`, and you click Approve on each.
+If your Mac does not trust the certificate that machine serves, `playground doctor` says so and the job posts no link.
+
+Once the tunnel is up and your Mac trusts the certificate the other machine serves, the job posts the link to your Inbox once: click the card's title and the Dashboard opens in a new tab.
+That Dashboard keeps a sign-in of its own, apart from your Mac's, since a stack on a port other than 443 names its sign-in cookie by its port.
+After a drop, the job starts ssh again within 2 seconds, waiting up to a minute between tries while it keeps failing.
+`playground doctor` shows a `tunnel` line while the job is on: ok with the link, or why it cannot connect, such as a key the other machine refused, a host key this Mac does not know yet, the port already taken on your Mac, or a certificate your Mac does not trust yet.
+
+## Carry messages to another machine
+
+Sessions on one machine message each other directly, and a session on another machine, such as a probe started there over ssh, sends with `playground send <name> <text>` ([CLI](/docs/cli#message-a-session-on-another-machine-playground-send)).
+The `ops-peer-relay` job carries those lines across: it runs on one machine, holds one ssh connection to each machine `PLAYGROUND_PEERS` names in the Dashboard's `.env`, the same setting the System page reads, with the key `PLAYGROUND_PEER_KEY` names (`~/.ssh/playground_spark` by default), and copies each new line both ways, once each.
+On the other machine it runs a small script from that machine's own Playground checkout, at the same path, so nothing is installed there, and that checkout must be at a release that has the script, or the job says so; it also says when the other machine stays silent or ends before the script answers.
+Lines carry from the job's first connection on, so a line written before it stays where it was written.
+After a drop it starts ssh again within 2 seconds, waiting up to a minute between tries, tells Ops once, and a line written meanwhile still arrives once, keeping the time it was sent.
+
+## Reach the model servers on another machine
+
+The `ops-model-tunnel` job brings the peer's local model servers, which [`playground model use`](/docs/cli#start-a-local-model-playground-model-use) starts on its loopback, to this machine's loopback: one ssh connection forwards `127.0.0.1:18000` here to the peer's `127.0.0.1:8000`, and `18001` to `8001`, with nothing listening off loopback at either end.
+The peer is the one `localModels.machine` names in `PLAYGROUND_PEERS`, or the only one it names, reached with the key `PLAYGROUND_PEER_KEY` names (`~/.ssh/playground_spark` by default).
+After a drop it starts ssh again within 2 seconds, waiting up to a minute between tries while it keeps failing.
+
+## Keep an idle Mac awake
+
+The `ops-keep-awake` job keeps an idle Mac from sleeping, so the ops jobs and the WhatsApp link run on while you are away and the display is off.
+It holds `caffeinate -i -s` as its one child: the display still sleeps and the screen still locks, it needs no `sudo`, and it sets no `pmset` value.
+It runs on macOS alone: on any other platform the runner leaves it out of `jobs.json`, so there it is no job.
+It is on by default on a Mac, and `pmset -g assertions` lists its hold; turn it off as any job, with `jobs.opsKeepAwake` set to `{"enabled": false}` ([above](#turn-a-job-on)).
+
+## Restore now
+
+The ops-restore row in Settings > Jobs holds Restore now, your way back when the main checkout's guards are gone and no session can repair it, with the job on or off.
+It runs ops-restore's own steps once, from the Dashboard's server: it puts the checkout's files back, installs, runs `link-skills.sh`, and checks the guards again.
+The Dashboard runs from its own checkout, so the page still works while the main checkout is broken.
+Under the button it says what it restored, that every guard is in place so nothing was, or the step it stopped at; ops and the dispatcher get the same words.
+
 ## How a change reaches the runner
 
 At the top of every pass, the ops runner (`scripts/ops/up.py`) renders the jobs from your extensions into `<data>/ops/jobs.json` and writes a plist for each launchd job that is on into `<data>/ops/launch-agents`.
@@ -41,12 +85,39 @@ A machine with no extensions keeps its own `jobs.json`.
 A plist whose job is now off moves to the trash under the `jobs` carve-out ([CLI](/docs/cli)), and its installed copy under `jobs-installed`, as below; one the trash refuses stays, and the runner writes why to `<data>/ops/up.log`.
 When that render cannot be trusted, the runner keeps the last `jobs.json` and writes why to `<data>/ops/up.log`.
 A job the registry does not know, such as one of your own scripts, stays in `jobs.json` as it is, unless an org's own job of its name ([below](#an-orgs-own-job)) replaces it.
+A job Playground no longer ships, such as `ops-awake`, stays in `jobs.json` turned off, so the runner stops it, and the Scripts list shows no row for it; a setting of it you still hold clears with `playground settings reset jobs.<camelName>`, `jobs.opsAwake` for `ops-awake`.
 Each `script` item an org holds as a folder is installed into `<data>/ops/<key>/` in the same pass, beside the state its job keeps there, which the render never touches.
+The folder's `.revision` names the accepted revision that last wrote it, and a job running from the folder restarts onto a new one at its next idle moment, never in the middle of a pass, logging the revision it picked up; a job that runs a skill's script from the extensions folder restarts the same way on accepted revisions of that skill or of any other its scripts import.
+A job's command names such a script by its place in your extensions, `ext:<scope>/<path>` (`python3 -I ext:<org>/skills/vault/scripts/vault.py run`), in place of a folder path: the runner turns each `ext:` word into the path `bun packages/scripts/src/playground/rendered.ts <scope>/<path>` prints, at each start, so the job runs the latest accepted revision with no row to repoint.
+A start whose `ext:` word your extensions lack opens no pane, and the runner writes the reader's refusal to `<data>/ops/up.log`.
 
 launchd reads `~/Library/LaunchAgents`, not `<data>/ops/launch-agents`, so the same pass installs each launchd job you turn on: while launchd has not loaded it, its rendered plist is copied into `~/Library/LaunchAgents` when none is there and loaded with `launchctl bootstrap`, tried again on the next pass when launchd refuses, and a plist already there stays as it is.
 Only Playground's own labels (`com.playground.*`) are installed or removed, so no other app's agent is touched.
 A launchd job you turn off has its plist in `~/Library/LaunchAgents` moved to the trash under the `jobs-installed` carve-out, beside the `jobs` one above, and is unloaded with `launchctl bootout` while launchd still holds it, tried again on the next pass when launchd refuses.
 A launchd job still down after 3 passes in a row is told to Ops once, and again only after it has run healthy in between.
+
+### On Linux
+
+Linux has no launchd, so on Linux the same pass runs each launchd job as a systemd user unit of the same name, `<label>.service`:
+
+| Job                  | launchd label                       | systemd user unit                           |
+| -------------------- | ----------------------------------- | ------------------------------------------- |
+| `ops-flow`           | `com.playground.ops-flow`           | `com.playground.ops-flow.service`           |
+| `ops-herdr`          | `com.playground.ops-herdr`          | `com.playground.ops-herdr.service`          |
+| `ops-restore`        | `com.playground.ops-restore`        | `com.playground.ops-restore.service`        |
+| `ops-session-resume` | `com.playground.ops-session-resume` | `com.playground.ops-session-resume.service` |
+| `ops-tick`           | `com.playground.ops-tick`           | `com.playground.ops-tick.service`           |
+| `ops-zai-usage`      | `com.playground.ops-zai-usage`      | `com.playground.ops-zai-usage.service`      |
+
+A unit runs its plist's program from the same folder and logs to the same `launchd.log`, with `~/.bun/bin` first on its `PATH`, and systemd restarts it always, 10 seconds apart, as launchd keeps a job alive.
+A stop ends the job's own process alone (`KillMode=process`), so the herdr servers ops-herdr starts outlive it, as they outlive its launchd job.
+While systemd does not run it, its unit is written into `~/.config/systemd/user` when none is there, its log's folder is made, and it is started with `systemctl --user enable --now`, tried again on the next pass when systemd refuses, and a unit already there stays as it is.
+A job you turn off is disabled with `systemctl --user disable`, its unit moved to the trash under the `jobs-units` carve-out ([CLI](/docs/cli)) and systemd reloaded so it forgets the unit, and then stopped while it runs, the unit going first since ops-tick's own pass runs the render.
+Only Playground's own units (`com.playground.*.service`) are installed or removed, so no other user unit is touched.
+`playground doctor` checks each one with `systemctl --user is-active`, and `playground uninstall` disables and removes it.
+
+A user's units stop when that user logs out unless lingering is on, so a pass that starts a unit turns it on once with `loginctl enable-linger <uid>`, which asks for no password, and says so in `<data>/ops/up.log`; when the machine refuses it, that log names the refusal, the units still run while you are logged in, and `playground doctor`'s `linger` line names the command.
+Each `systemctl --user` call finds your session's bus in `/run/user/<uid>` when `XDG_RUNTIME_DIR` is unset, as in a terminal pane, a cron job or ssh.
 
 ## Bring an existing jobs.json in
 

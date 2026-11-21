@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { stackIn } from "../../../../api/hono/src/lib/dev/stop"
 import { withoutShebang } from "../shebang"
 
-// verify, pr:merge, the dev launcher, ask, thread, test:file and check-types:tests reach each workspace package through its built dist, which a fresh worktree lacks, and which a pulled change can outgrow; it builds them only then, since a rebuild cleans the dist a running stack in this worktree imports (`bun run dev` refuses before this runs while one does). A dist that exists counts as unbuilt when a file under its package's `src` is newer than it while no stack runs in this worktree (since `bun run verify` runs beside this worktree's stack, and a rebuild under it hangs it), or when it lacks a name the target's sources import from it, those it reaches through relative, `@/` and absolute imports into this checkout included.
+// verify, pr:merge, the dev launcher, ask, thread, test:file and check-types:tests reach each workspace package through its built dist (its `types` always, its code where the entry has no `bun` condition), which a fresh worktree lacks, and which a pulled change can outgrow; it builds them only then, since a rebuild cleans the dist a running stack in this worktree imports (`bun run dev` refuses before this runs while one does). A dist that exists counts as unbuilt when a file under its package's `src` is newer than it while no stack runs in this worktree (since `bun run verify` runs beside this worktree's stack, and a rebuild under it hangs it), or when it lacks a name the target's sources import from it, those it reaches through relative, `@/` and absolute imports into this checkout included.
 const VERIFY = import.meta.dir
 const SRC = join(VERIFY, "..")
 const ROOT = join(VERIFY, "../../../..")
@@ -236,6 +236,24 @@ export const builtPaths = (sources: string[]): string[] => [
   ...new Set(sources.flatMap((source) => source.match(BUILT_PATH) ?? [])),
 ]
 
+// A source that spawns a child process may start Bun on code the import scan cannot follow (a `bun -e` text, a path read at run time, a helper's binary in a variable), so test:file builds every shared package's dist for it, whatever the program.
+const SPAWNS = /\b(?:spawn|spawnSync|execFile|execFileSync|execSync|fork)\s*\(|(?:^|[^\w$])\$`/m
+
+// What test:file, or with `types` check-types:tests, builds for the given sources: their built imports and paths, and for a source that spawns a child process each built shared package's dist.
+export const testSpecifiers = (
+  sources: string[],
+  built: Set<string | undefined>,
+  types: boolean,
+): string[] => [
+  ...workspaceImports(sources, types),
+  ...builtPaths(sources),
+  ...(!types && sources.some((source) => SPAWNS.test(source))
+    ? [...built]
+        .filter((name): name is string => Boolean(name?.startsWith("@packages/")))
+        .map((name) => `packages/${name.slice("@packages/".length)}/dist`)
+    : []),
+]
+
 // Where a built import's file lives, by its workspace's exports and the conditions the reader takes (Bun's runtime, or tsc's types), so a test file outside any workspace resolves as the code it imports does; it throws when the file is not there yet.
 export const builtFile = (specifier: string, root: string, conditions: string[]): string => {
   if (
@@ -373,13 +391,29 @@ export const prebuildTests = async (paths: string[], types = false): Promise<num
       .map(({ pkg }) => pkg.name),
   )
   const missing = unbuilt(
-    [...workspaceImports(sources, types), ...builtPaths(sources)].filter(
+    testSpecifiers(sources, built, types).filter(
       (specifier) => specifier.startsWith("generated/") || built.has(packageOf(specifier)),
     ),
     ROOT,
     types ? {} : importedNames(sources),
     (specifier) => builtFile(specifier, ROOT, conditions),
   )
+  // a test's child process may load code no source names (a path read at run time, an aliased spawn), so test:file also builds every shared package whose dist is missing, whatever its files import; a dist that is present stays as it is
+  if (!types) {
+    const named = new Set(missing.map(packageOf))
+    missing.push(
+      ...workspaces(ROOT)
+        .filter(
+          ({ dir, path, pkg }) =>
+            pkg.scripts?.build &&
+            /^(?:api|packages)\//.test(dir) &&
+            !existsSync(join(path, "dist")) &&
+            !named.has(packageOf(dir)),
+        )
+        .map(({ dir }) => `${dir}/dist`)
+        .sort(),
+    )
+  }
   return prebuild(types ? "check-types:tests" : "test:file", missing)
 }
 

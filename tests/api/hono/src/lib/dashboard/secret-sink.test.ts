@@ -5,11 +5,13 @@ import { join } from "node:path"
 
 import {
   FIXTURE_REVEAL,
+  keychainWriter,
   readFromKeychain,
   runSink,
   sinkEnv,
   spawnSink,
 } from "../../../../../../api/hono/src/lib/dashboard/secret-sink"
+import type { Run } from "../../../../../../api/hono/src/lib/keychain"
 
 const scratch = mkdtempSync(join(tmpdir(), "secret-sink-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
@@ -70,5 +72,35 @@ describe("a reveal card's reader (PG-1023)", () => {
     })
     expect(await read("playground-glm")).toBe(FIXTURE_REVEAL)
     expect(calls).toEqual([])
+  })
+})
+
+describe("a keychain sink's writer", () => {
+  // a fake `security`, so no test reaches the real Keychain
+  const fake = () => {
+    const calls: string[][] = []
+    const run: Run = async (argv, input) => {
+      calls.push(input ? [...argv, input.split(" -a ")[0] ?? ""] : argv.slice(0, 4))
+      return { code: 0, stderr: "", stdout: "" }
+    }
+    return { calls, run }
+  }
+
+  test("writes the Mac's one Yard item through the Yard keychain, so the old relay item and a swap's pending one go after it", async () => {
+    for (const item of ["yard", "playground-yard"]) {
+      const { calls, run } = fake()
+      await keychainWriter(item, run).write("yard_made-up-token")
+      expect(calls).toEqual([
+        ["security", "-i", 'add-generic-password -U -s "playground-yard"'],
+        ["security", "delete-generic-password", "-s", "playground-yard-relay"],
+        ["security", "delete-generic-password", "-s", "playground-yard-pending"],
+      ])
+    }
+  })
+
+  test("writes any other item as itself", async () => {
+    const { calls, run } = fake()
+    await keychainWriter("slack", run).write("xoxp-made-up-0000")
+    expect(calls).toEqual([["security", "-i", 'add-generic-password -U -s "playground-slack"']])
   })
 })

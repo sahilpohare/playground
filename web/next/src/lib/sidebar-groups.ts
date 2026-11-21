@@ -82,3 +82,97 @@ export function useGroupOpen(
   )
   return [groupOpen(parseGroups(raw), group, initial), setOpen]
 }
+
+// Every group you can drag into another place, in the order the sidebar draws them until you do; Threads stays first.
+export const ORDERED_GROUPS = [
+  "Channels",
+  "Direct messages",
+  "Orchestrators",
+  "AI Runners",
+  "Subagents",
+  "Scripts",
+  "Other",
+] as const satisfies readonly NavGroup[]
+
+export type OrderedGroup = (typeof ORDERED_GROUPS)[number]
+
+const isOrdered = (group: unknown): group is OrderedGroup =>
+  (ORDERED_GROUPS as readonly unknown[]).includes(group)
+
+// Pure: the saved order, each group it names that the sidebar still has, once and as saved, then every group it leaves out, such as a new one, at the end in the default order; a missing or malformed value is the default order.
+export const groupOrder = (raw: string | null): OrderedGroup[] => {
+  let saved: unknown
+  try {
+    saved = JSON.parse(raw ?? "[]")
+  } catch {
+    saved = []
+  }
+  const kept = [...new Set(Array.isArray(saved) ? saved.filter(isOrdered) : [])]
+  return [...kept, ...ORDERED_GROUPS.filter((group) => !kept.includes(group))]
+}
+
+// Pure: the whole order after a shown group moves from one place among the shown groups to another; a hidden group, such as Channels with no rows, keeps its own place.
+export const moveGroup = (
+  order: OrderedGroup[],
+  shown: OrderedGroup[],
+  from: number,
+  to: number,
+): OrderedGroup[] => {
+  const moved = [...shown]
+  moved.splice(to, 0, ...moved.splice(from, 1))
+  let next = 0
+  return order.map((group) => (shown.includes(group) ? moved[next++] : group))
+}
+
+// A tab's group order for one signed-in account, read and written as groupsState reads and writes the open states.
+export function orderState(store: () => Pick<Storage, "getItem" | "setItem">, account: string) {
+  const key = `dashboard.sidebar.order.v1:${account}`
+  let raw: string | null | undefined
+  const read = (): string | null => {
+    if (raw === undefined) {
+      try {
+        raw = store().getItem(key)
+      } catch {
+        raw = null
+      }
+    }
+    return raw
+  }
+  const set = (order: OrderedGroup[]) => {
+    raw = JSON.stringify(order)
+    try {
+      store().setItem(key, raw)
+    } catch {
+      // the tab keeps the order alone
+    }
+  }
+  return { read, set }
+}
+
+const orders = new Map<string, ReturnType<typeof orderState>>()
+
+// Fired on a move, so the sidebar reads the tab's new order.
+const ORDER_CHANGED = "dashboard-sidebar-order"
+
+const subscribeOrder = (notify: () => void) => {
+  window.addEventListener(ORDER_CHANGED, notify)
+  return () => window.removeEventListener(ORDER_CHANGED, notify)
+}
+
+// The signed-in account's group order and its setter, kept in this browser across reloads; the server renders the default order.
+export function useGroupOrder(account: string): [OrderedGroup[], (order: OrderedGroup[]) => void] {
+  let tab = orders.get(account)
+  if (!tab) {
+    tab = orderState(() => localStorage, account)
+    orders.set(account, tab)
+  }
+  const raw = useSyncExternalStore(subscribeOrder, tab.read, () => null)
+  const setOrder = useCallback(
+    (order: OrderedGroup[]) => {
+      orders.get(account)?.set(order)
+      window.dispatchEvent(new Event(ORDER_CHANGED))
+    },
+    [account],
+  )
+  return [groupOrder(raw), setOrder]
+}

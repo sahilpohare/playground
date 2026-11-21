@@ -12,20 +12,24 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { LockStore } from "../../../../../packages/redis/src/index"
-import { FREEZE_LAPSE_MS, heldPath } from "../../../../../packages/scripts/src/pr-merge/held"
+import { codeGate } from "../../../../../packages/scripts/src/pr-merge/gates"
+import { FREEZE_LAPSE_MS } from "../../../../../packages/scripts/src/pr-merge/held"
 import {
+  gateCodeOf,
   gateOptions,
   isServerError,
   lockRootOf,
-  queuePath,
   realLockRoot,
   prMerge,
+  runGh,
+  shipNowLine,
   takeLock,
   unfoundTokens,
   type Run,
   type RunResult,
 } from "../../../../../packages/scripts/src/pr-merge/merge"
 import "./scratch-config"
+import { withGhDown } from "../../../../gh-down"
 import { storeWith } from "../../../../scripts/hooks/render-set"
 import { PR_TEMPLATE, SKILL_BODY } from "./bodies"
 import { greenChecks } from "./suite"
@@ -58,11 +62,12 @@ const CONFLICTED: RunResult = {
     "",
   ].join("\n"),
 }
-// git in a scratch world: canary is CANARY, the head merges into it as TREE (null: a conflict), and the lock lives in a fresh folder. parents: each commit's parents on the walk back from the head; clean: the merges among them that git re-runs to their own tree.
+// git in a scratch world: canary is CANARY, the head merges into it as TREE (null: a conflict), and the lock lives in a fresh folder. parents: each commit's parents on the walk back from the head; clean: the merges among them that git re-runs to their own tree; differs: the gate code files this checkout holds apart from canary's.
 const local = ({
   answer,
   canary = CANARY,
   clean = [] as string[],
+  differs = [] as string[],
   parents = { [HEAD]: ["p0"] } as Record<string, string[]>,
   template = PR_TEMPLATE as string | null,
   tree = TREE as string | null,
@@ -70,6 +75,7 @@ const local = ({
   answer?: RunResult
   canary?: string
   clean?: string[]
+  differs?: string[]
   parents?: Record<string, string[]>
   template?: string | null
   tree?: string | null
@@ -77,6 +83,7 @@ const local = ({
   const lockRoot = mkdtempSync(join(scratch, "lock-"))
   const git: Run = async (args) => {
     if (args[0] === "fetch") return ok("")
+    if (args[0] === "diff") return ok(differs.map((file) => `${file}\n`).join(""))
     if (args[0] === "show") {
       return template === null
         ? { code: 128, stderr: "fatal: path not in tree", stdout: "" }
@@ -128,10 +135,12 @@ function stub({
   draft = false,
   ready = ok(""),
   comments = PASSING,
-  files = ["AGENTS.md", "packages/scripts/src/pr-merge/cli.ts"],
+  files = ["AGENTS.md", "packages/scripts/src/ship/cli.ts"],
+  labels = [] as string[],
   merges = [ok("")],
   parents = {},
   stateAfter = ["MERGED"],
+  title = "feat(PG-112): x",
   viewBody,
 }: {
   aheadBy?: string
@@ -142,9 +151,11 @@ function stub({
   draft?: boolean
   ready?: RunResult
   files?: string[]
+  labels?: string[]
   merges?: RunResult[]
   parents?: Record<number, RunResult>
   stateAfter?: string[]
+  title?: string
   viewBody?: string
 } = {}) {
   const calls: string[][] = []
@@ -162,10 +173,13 @@ function stub({
           author: { login: author },
           baseRefName: "canary",
           body: viewBody,
+          headRefName: "PG-112-x",
           headRefOid: HEAD,
           isDraft: draft,
+          labels: labels.map((name) => ({ name })),
           state: "OPEN",
           statusCheckRollup: checks,
+          title,
         }),
       )
     }
@@ -282,6 +296,53 @@ describe("prMerge", () => {
     expect(outcome).toMatchObject({ kind: "merged" })
   })
 
+  // a fix for a bug live on the factory's own machine, or a feat for an ask the owner waits to see live, waited for the usual ship beat, so a ship-now label tells Ops to ship once it merges.
+  test("a ship-now fix's merge and a ship-now feat's naming the owner's ask each send Ops one ship line; an unlabelled merge, a feat naming no owner ask and a refusal send none", async () => {
+    const sent: string[] = []
+    const shipNow = async (line: string) => void sent.push(line)
+    const labelled = stub({ labels: ["bug", "ship-now"], title: "fix(PG-112): x" })
+    expect(await prMerge(112, { repo: REPO }, labelled.run, { ...local(), shipNow })).toMatchObject(
+      { kind: "merged" },
+    )
+    expect(sent).toEqual([
+      "#112 carries ship-now and merged at abc1234def: ship canary now by the release skill, unless a ship you are already running pinned a canary that holds abc1234def.",
+    ])
+    const plain = stub({ labels: ["bug"], title: "fix(PG-112): x" })
+    expect(await prMerge(112, { repo: REPO }, plain.run, { ...local(), shipNow })).toMatchObject({
+      kind: "merged",
+    })
+    const unasked = stub({ labels: ["ship-now"], title: "feat(PG-112): x" })
+    expect(await prMerge(112, { repo: REPO }, unasked.run, { ...local(), shipNow })).toMatchObject({
+      kind: "merged",
+    })
+    expect(sent).toHaveLength(1)
+    const asked = stub({
+      labels: ["ship-now"],
+      title: "feat(PG-112): x",
+      viewBody: `${SKILL_BODY.replace("**After:** one.", "**After:** one. `AGENTS.md` checked.")}\n- Owner ask: #i1`,
+    })
+    expect(await prMerge(112, { repo: REPO }, asked.run, { ...local(), shipNow })).toMatchObject({
+      kind: "merged",
+    })
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toStartWith("#112 carries ship-now and merged at abc1234def: ship canary now")
+    const refused = stub({ aheadBy: "1", labels: ["ship-now"], title: "fix(PG-112): x" })
+    const refusal = await prMerge(112, { repo: REPO }, refused.run, {
+      ...local({ tree: null }),
+      shipNow,
+    })
+    expect(refusal.kind).toBe("refused")
+    expect(sent).toHaveLength(2)
+    const failing = stub({ labels: ["ship-now"], title: "fix(PG-112): x" })
+    const outcome = await prMerge(112, { repo: REPO }, failing.run, {
+      ...local(),
+      shipNow: async () => {
+        throw new Error("notify.sh failed")
+      },
+    })
+    expect(outcome).toMatchObject({ kind: "merged" })
+  })
+
   test("a compare answer that is not a count refuses, never reading as up to date", async () => {
     for (const aheadBy of ["", "null", " "]) {
       const { calls, run } = stub({ aheadBy })
@@ -290,6 +351,92 @@ describe("prMerge", () => {
       expect(outcome.gates.find((gate) => gate.name === "up to date")?.ok).toBe(false)
       expect(merges(calls)).toEqual([])
     }
+  })
+
+  // #2478's shape: a web/next diff at 5/5 with every check green and no tester verdict merged on ready (PG-2485).
+  test("refuses a web/next diff at 5/5 with green checks and no tester verdict, and never calls gh pr merge", async () => {
+    const { calls, run } = stub({ files: ["web/next/src/components/dashboard/row.tsx"] })
+    const outcome = await prMerge(112, { repo: REPO }, run, local())
+    expect(outcome.kind).toBe("refused")
+    expect(outcome.gates.filter((gate) => !gate.ok).map((gate) => gate.name)).toEqual(["tester"])
+    expect(merges(calls)).toEqual([])
+    const tested = stub({
+      comments: `${PASSING}\n${comment("## TesterBot · PASS at 69a6a4c · both shots attached", "2026-10-06T19:05:00Z")}`,
+      files: ["web/next/src/components/dashboard/row.tsx"],
+    })
+    expect(await prMerge(112, { repo: REPO }, tested.run, local())).toMatchObject({
+      kind: "merged",
+    })
+  })
+
+  // #2500's shape: a hand merge from a checkout without #2497's tester gate passed every gate it had, while the train held the PR on that gate (PG-2525).
+  test("a checkout whose gate code differs from canary's refuses on the code gate, naming each file, and never calls gh pr merge", async () => {
+    const differs = ["packages/config/src/verdicts.ts", "packages/scripts/src/pr-merge/gates.ts"]
+    const { calls, run } = stub()
+    const outcome = await prMerge(112, { repo: REPO }, run, local({ differs }))
+    expect(outcome.kind).toBe("refused")
+    expect(outcome.gates.filter((gate) => !gate.ok)).toEqual([
+      {
+        detail: `this checkout's gate code differs from origin/canary's (${differs.join(", ")}); run pr:merge from a checkout on origin/canary, or let merge-on-ready land it`,
+        name: "code",
+        ok: false,
+      },
+    ])
+    expect(merges(calls)).toEqual([])
+    const explained = await prMerge(112, { explain: true, repo: REPO }, run, local({ differs }))
+    expect(explained.gates.find((gate) => gate.name === "code")?.ok).toBe(false)
+    expect(merges(calls)).toEqual([])
+  })
+
+  test("a checkout holding canary's gate code passes the code gate", async () => {
+    const { run } = stub()
+    const outcome = await prMerge(112, { explain: true, repo: REPO }, run, local())
+    expect(outcome.gates.find((gate) => gate.name === "code")).toEqual({
+      detail: "this checkout's gate code is canary's",
+      name: "code",
+      ok: true,
+    })
+  })
+
+  // a PR could change a check that judges it, and the same review passed it like any other diff (PG-2576).
+  test("a PR deleting a refused-forms row, read from the files call's deletion count, refuses on the checks gate until its 5/5 names the file", async () => {
+    const row = "tests/scripts/hooks/fixtures/refused-forms/2522.ts"
+    const { calls, run } = stub({ files: ["AGENTS.md", `${row}\t\t2`] })
+    const outcome = await prMerge(112, { repo: REPO }, run, local())
+    expect(outcome.kind).toBe("refused")
+    expect(outcome.gates.filter((gate) => !gate.ok)).toEqual([
+      {
+        detail: `the PR changes a check that judges it (${row}): its 5/5 at 69a6a4c does not name ${row} in a \`Reviewed check change: <path>\` line`,
+        name: "checks",
+        ok: false,
+      },
+    ])
+    expect(merges(calls)).toEqual([])
+    const explained = await prMerge(112, { explain: true, repo: REPO }, run, local())
+    expect(explained.gates.find((gate) => gate.name === "checks")?.ok).toBe(false)
+    const named = comment(
+      `## ReviewBot · round 1: 5/5 at 69a6a4c · 0 blocking\n\nReviewed check change: \`${row}\``,
+      "2026-10-06T19:00:00Z",
+    )
+    const passed = stub({ comments: named, files: ["AGENTS.md", `${row}\t\t2`] })
+    expect((await prMerge(112, { repo: REPO }, passed.run, local())).kind).toBe("merged")
+  })
+
+  test("a refused-forms file the PR only adds to, and a renamed file's old path, read as the files call gives them", async () => {
+    const added = stub({ files: ["tests/scripts/hooks/fixtures/refused-forms/2522.ts\t\t0"] })
+    const outcome = await prMerge(112, { explain: true, repo: REPO }, added.run, local())
+    expect(outcome.gates.find((gate) => gate.name === "checks")).toEqual({
+      detail: "the PR changes no check that judges it",
+      name: "checks",
+      ok: true,
+    })
+    const moved = stub({
+      files: ["tests/scripts/hooks/rows.ts\ttests/scripts/hooks/fixtures/refused-forms/2522.ts\t0"],
+    })
+    const read = await prMerge(112, { explain: true, repo: REPO }, moved.run, local())
+    expect(read.gates.find((gate) => gate.name === "checks")?.detail).toContain(
+      "(tests/scripts/hooks/fixtures/refused-forms/2522.ts)",
+    )
   })
 
   test("refuses a PR the held list names, saying why, and never calls gh pr merge", async () => {
@@ -640,6 +787,38 @@ describe("the merge lock", () => {
     ).rejects.toThrow("its first markdown fence holds none")
   })
 
+  // origin as GitHub left #2367 at 15:00Z: no refs/pull/<n>/head yet, and the PR's branch at tip
+  const noPullRef = (tip: string) => {
+    const at = local()
+    const fetches: string[][] = []
+    const git: Run = async (args) => {
+      if (args[0] === "fetch") fetches.push(args)
+      if (args[0] === "fetch" && args.includes("refs/pull/112/head"))
+        return {
+          code: 128,
+          stderr: "fatal: couldn't find remote ref refs/pull/112/head\n",
+          stdout: "",
+        }
+      if (args[0] === "rev-parse" && args[1] === "FETCH_HEAD") return ok(`${tip}\n`)
+      return at.git(args)
+    }
+    return { fetches, local: { ...at, git } }
+  }
+
+  test("fetches the PR's branch when GitHub has not made its pull ref yet, and merges at that head (#2389)", async () => {
+    const world = noPullRef(HEAD)
+    const outcome = await prMerge(112, { repo: REPO }, stub().run, world.local)
+    expect(outcome).toMatchObject({ kind: "merged", sha: "abc1234def" })
+    expect(world.fetches).toContainEqual(["fetch", "--quiet", "origin", "refs/heads/PG-112-x"])
+  })
+
+  test("refuses a branch whose tip is not the PR's head, so the gates never judge another commit (#2389)", async () => {
+    const world = noPullRef("b".repeat(40))
+    await expect(prMerge(112, { repo: REPO }, stub().run, world.local)).rejects.toThrow(
+      "refs/pull/112/head is missing, and its branch PG-112-x is at bbbbbbb, not the head 69a6a4c",
+    )
+  })
+
   test("outside the CLI, a run without a git stub throws before it fetches or locks, whatever NODE_ENV says", async () => {
     const { calls, run } = stub()
     await expect(prMerge(112, { repo: REPO }, run, { lockRoot: local().lockRoot })).rejects.toThrow(
@@ -736,7 +915,7 @@ describe("the merge lock in Redis", () => {
   }
   const root = () => mkdtempSync(join(scratch, "redis-lock-"))
   const held = (lock: Awaited<ReturnType<typeof takeLock>>) => "release" in lock
-  const deadPid = () => Bun.spawnSync(["true"]).pid
+  const deadPid = () => 4_194_305
 
   test("a holder that crashed lets its key lapse, and the next taker gets the lock", async () => {
     const at = root()
@@ -826,6 +1005,41 @@ describe("the merge lock in Redis", () => {
     if ("release" in lock) await lock.release()
     expect(redis.keys.size).toBe(0)
     expect(existsSync(join(at, "merge.lock"))).toBe(false)
+  })
+})
+
+// a feat for an ask the owner waits to see live rightly carried ship-now, so a ship takes a fix( title or a Links line naming the owner's ask (PG-2469).
+describe("shipNowLine", () => {
+  const links = (...lines: string[]) =>
+    `## TL;DR\n\nIt ships.\n\n## Links\n\n- Closes #2469\n${lines.join("\n")}`
+  const SHIP =
+    "#7 carries ship-now and merged at abc1234: ship canary now by the release skill, unless a ship you are already running pinned a canary that holds abc1234."
+
+  test.each([
+    ["a fix( title", "fix(PG-7): x", links()],
+    ["a feat naming an Inbox id", "feat(PG-7): x", links("- Owner ask: #i162")],
+    ["a feat naming a PG issue", "feat(PG-7): x", links("- **Owner ask:** PG-2437")],
+    ["a feat quoting the owner", "feat(PG-7): x", links('- Owner ask: "show it live tonight"')],
+    [
+      "a feat quoting the owner in curly quotes",
+      "feat(PG-7): x",
+      links("Owner ask: “show it live”"),
+    ],
+  ])("%s ships", (_, title, body) => {
+    expect(shipNowLine(7, "abc1234", { body, title })).toEqual({ line: SHIP, ship: true })
+  })
+
+  test.each([
+    ["a feat whose Links names none", "feat(PG-7): x", links()],
+    ["a feat with no body", "feat(PG-7): x", undefined],
+    ["an Owner ask: line outside Links", "feat(PG-7): x", `Owner ask: #i162\n\n${links()}`],
+    ["an Owner ask: line naming nothing", "feat(PG-7): x", links("- Owner ask: soon")],
+    ["a title that only opens with fix", "fixture(PG-7): x", links()],
+  ])("%s answers with the rule's line and no ship", (_, title, body) => {
+    const answer = shipNowLine(7, "abc1234", { body, title })
+    expect(answer.ship).toBe(false)
+    expect(answer.line).toContain("extensions/core/rules/release.md")
+    expect(answer.line).toContain("Owner ask:")
   })
 })
 
@@ -945,6 +1159,84 @@ describe("the body gate's token grep at the head", () => {
     }
     expect(await unfoundTokens(git, "HEAD", ["CLOCK_EXEMPT", "SKILLS_LINE", "SUITE_LINE"])).toEqual(
       ["SKILLS_LINE", "SUITE_LINE"],
+    )
+  })
+})
+
+// the train's every gh call goes through runGh, so a broken gh is never flooded
+test("runGh skips gh while the gh-auth beat's fresh result reads failed", async () => {
+  expect(await withGhDown(() => runGh(["pr", "list"]))).toEqual({
+    code: 1,
+    stderr: "gh unreachable: gh token invalid",
+    stdout: "",
+  })
+})
+
+describe("the code gate's diff, in a real scratch checkout", () => {
+  const repo = mkdtempSync(join(tmpdir(), "pr-merge-code-"))
+  afterAll(() => rmSync(repo, { force: true, recursive: true }))
+  const git: Run = async (args) => {
+    const proc = Bun.spawnSync(["git", "-C", repo, ...args])
+    return { code: proc.exitCode, stderr: proc.stderr.toString(), stdout: proc.stdout.toString() }
+  }
+  const at = (...args: string[]) =>
+    Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args])
+  const write = (path: string, text: string) => {
+    mkdirSync(join(repo, path, ".."), { recursive: true })
+    writeFileSync(join(repo, path), text)
+  }
+  const GATES = "packages/scripts/src/pr-merge/gates.ts"
+  const PATHS = "packages/scripts/src/new-user-gate/paths.ts"
+  write(GATES, "export const gates = ['review']\n")
+  write(PATHS, "export const NEW_USER_PATHS = ['install.sh']\n")
+  write("README.md", "a\n")
+  at("init", "-q", "-b", "canary")
+  at("add", ".")
+  at("commit", "-q", "-m", "behind")
+  const behind = at("rev-parse", "HEAD").stdout.toString().trim()
+  write(GATES, "export const gates = ['review', 'tester']\n")
+  at("commit", "-q", "-am", "the tester gate")
+  const canary = at("rev-parse", "HEAD").stdout.toString().trim()
+
+  test("a checkout behind canary's added gate names its gate file, so pr:merge refuses there (PG-2525)", async () => {
+    at("checkout", "-q", behind)
+    expect(await gateCodeOf(git, canary)).toEqual([GATES])
+    at("checkout", "-q", canary)
+  })
+
+  test("a checkout at canary names none, and a change outside the gate code names none", async () => {
+    expect(await gateCodeOf(git, canary)).toEqual([])
+    write("README.md", "b\n")
+    expect(await gateCodeOf(git, canary)).toEqual([])
+    at("checkout", "-q", "--", "README.md")
+  })
+
+  test("an edit to the new-user gate's path list counts, since the gate reads which diffs it holds from it (PG-2496)", async () => {
+    write(PATHS, "export const NEW_USER_PATHS = []\n")
+    expect(await gateCodeOf(git, canary)).toEqual([PATHS])
+    at("checkout", "-q", "--", PATHS)
+  })
+
+  test("an uncommitted edit to the gate code counts, as a commit does", async () => {
+    write(GATES, "export const gates = []\n")
+    expect(await gateCodeOf(git, canary)).toEqual([GATES])
+    at("checkout", "-q", "--", GATES)
+  })
+
+  test("a PR branch that changes pr-merge itself shows the code gate's ✗ from its own worktree, so its verdict is read from a checkout on origin/canary", async () => {
+    at("checkout", "-q", "-b", "PG-1-gate")
+    write("packages/scripts/src/pr-merge/new-gate.ts", "export {}\n")
+    at("add", ".")
+    at("commit", "-q", "-m", "a new gate")
+    const differs = await gateCodeOf(git, canary)
+    expect(differs).toEqual(["packages/scripts/src/pr-merge/new-gate.ts"])
+    expect(codeGate(differs).ok).toBe(false)
+    at("checkout", "-q", "canary")
+  })
+
+  test("a diff that cannot run throws, so the gate fails closed", async () => {
+    await expect(gateCodeOf(git, "0".repeat(40))).rejects.toThrow(
+      /git diff of the gate code exited/,
     )
   })
 })

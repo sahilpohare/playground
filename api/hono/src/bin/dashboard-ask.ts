@@ -1,4 +1,5 @@
 import "@/bin/ask-from-clone"
+import "@/bin/needs-database"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -9,7 +10,13 @@ import { env } from "@packages/env/db"
 import { factorySettings, readPolicyOrDefaults, ruleSettings } from "@packages/settings"
 
 import { fillNow, futureNowTimes, NOW, ownerTime } from "@/lib/dashboard/ask-clock"
-import { ASK_EXAMPLES, isAskExampleKind, shapeHints } from "@/lib/dashboard/ask-shape"
+import {
+  ASK_EXAMPLES,
+  isAskExampleKind,
+  progressCardRefusal,
+  progressRefusal,
+  shapeHints,
+} from "@/lib/dashboard/ask-shape"
 import { deleteRefusal } from "@/lib/dashboard/delete-targets"
 import { branchOf, checkoutRoot, readsLive } from "@/lib/dashboard/fixture"
 import {
@@ -17,9 +24,10 @@ import {
   editItem,
   getItem,
   getPickLine,
+  inflightCard,
   itemTag,
   openItems,
-  postItem,
+  postOrEdit,
   readAnswer,
   resolveItem,
   settleItem,
@@ -30,10 +38,11 @@ import { publicDraftRefusal } from "@/lib/dashboard/public-draft"
 import { linkShipPrs, repoOfRemote } from "@/lib/dashboard/ship-links"
 import { whatsappAnswer } from "@/lib/dashboard/whatsapp-answer"
 import { livePair, mainCheckoutOf, othersLiveDashboard } from "@/lib/dev/launch"
+import { org } from "@/lib/org"
 import { checkoutMismatch, locate, prove } from "@/lib/sessions/guard"
 import { dataDir } from "@/lib/sessions/paths"
 
-// The one way into Playground's Inbox: `bun run ask new < item.json` posts a decision, a draft or an update and prints its id (its #iN tag on stderr); `edit <id|#iN> < item.json` replaces the poster's own item's title and preview in place until it closes, checked as new checks it; both fill `{now}` with the time they post at and refuse a measured or now time ahead of the clock, and a draft with no link, a public post's, whose text holds a work figure or an internal name (the public rule); `open [--from <session>] [--since <iso time>] [--until <iso time>] [--json]` lists the open items, oldest first, those posted in that window alone when given, each whole as one JSON line with --json, so a poster names one on the same thing rather than posting it twice; `get <id|#iN>` prints the item, the owner's answer included once given, and the option the owner picked on stderr, and `--ack` marks that answer read, so the Dashboard shows it reached the poster, closing a deny, a clear, a discard or a provided secret; `ack <id>` closes it once carried out, a go with `--link` (where it landed) or `--no-link "<why>"`; `settle <id>` closes the poster's own open item once it is decided another way; `resolve <id> --by <you>` closes the poster's own update once it has settled; `stale` lists the answers no poster has closed, for ops-sweep; `whatsapp <file>` records the owner's answer from WhatsApp, a file ops-wa wrote in its own folder (whatsapp-answer.ts); `example <kind>` prints an ask to start from, and `new` hints at that shape when an ask is one block of prose, labels no options, names a PR, a tracker ID or a commit with no link on its line, or holds a code line too wide for the card. See `.agents/dashboard/asks.md` for the fields.
+// The one way into Playground's Inbox: `bun run ask new < item.json` posts a decision, a draft or an update and prints its id (its #iN tag on stderr), an update titled as one of its poster's an edit still takes editing that card in place (postOrEdit); `edit <id|#iN> < item.json` replaces the poster's own item's title and preview in place until it closes, checked as new checks it; both fill `{now}` with the time they post at and refuse a measured or now time ahead of the clock, and a draft with no link, a public post's, whose text holds a work figure or an internal name (the public rule); `open [--from <session>] [--since <iso time>] [--until <iso time>] [--json]` lists the open items, oldest first, those posted in that window alone when given, each whole as one JSON line with --json, so a poster names one on the same thing rather than posting it twice; `get <id|#iN>` prints the item, the owner's answer included once given, and the option the owner picked on stderr, and `--ack` marks that answer read, so the Dashboard shows it reached the poster, closing a deny, a clear, a discard or a provided secret; `ack <id>` closes it once carried out, a go with `--link` (where it landed) or `--no-link "<why>"`; `settle <id>` closes the poster's own open item once it is decided another way; `resolve <id> --by <you>` closes the poster's own update once it has settled; `stale` lists the answers no poster has closed, for ops-sweep; `whatsapp <file>` records the owner's answer from WhatsApp, a file ops-wa wrote in its own folder (whatsapp-answer.ts); `example <kind>` prints an ask to start from, and `new` hints at that shape when an ask is one block of prose, labels no options, names a PR, a tracker ID or a commit with no link on its line, or holds a code line too wide for the card, and both refuse a progress block whose line does not read (progressRefusal). See `.agents/dashboard/asks.md` for the fields.
 const USAGE = `usage: bun run ask new [--thread <id>] < item.json
                                                 posts an inbox item from JSON on stdin, prints its id
                                                 options and approve/deny labels go in plain words (the plain-words skill)
@@ -42,6 +51,9 @@ const USAGE = `usage: bun run ask new [--thread <id>] < item.json
                                                 its Slack link's thread on Send or Approve, before its words
                                                 an update with text and attachments is a read-only card: it shows
                                                 them as an ask does, with no Approve or Deny
+                                                an update titled as one of yours an edit still takes edits that
+                                                card in place and prints its id, edited or unchanged, never a
+                                                second card
                                                 a secret ask names a key and a sink (a Vercel project, or a Keychain
                                                 item such as yard); the owner's value goes to the sink, and get shows
                                                 only when and each exit status, or saved
@@ -51,6 +63,10 @@ const USAGE = `usage: bun run ask new [--thread <id>] < item.json
                                                 an accept decision names one proposal (scope, kind, key, rev), and
                                                 more lists up to 20 further ones, accepted after it in that order;
                                                 Approve stops at the first that fails
+                                                a clone decision lists up to 20 repos, the login's first, each
+                                                with its scope and that scope's full folder in this machine's
+                                                extensions; one whose folder is already there is refused;
+                                                Approve then seeds the guards' lists, keeping each one there
                                                 a guard decision names a key a guard reads, or an ops job's
                                                 jobs.<name>, or an org's own job's jobs.<camelName>, whose value is
                                                 {"enabled": true|false} alone or {"config": {...}} alone, any
@@ -62,11 +78,22 @@ const USAGE = `usage: bun run ask new [--thread <id>] < item.json
                                                 they post at; a "measured" or "now" time ahead of the clock is refused
                                                 a draft with no link is a public post's: one whose text holds a work
                                                 figure or an internal name is refused (playground rules public)
+                                                a \`\`\`progress block draws bars at the card's width, one
+                                                name | percent | what's going on | ETA | state a line, the state
+                                                optional: active, done, held or waiting (active draws in colour,
+                                                the rest muted, a row at 100 with none done); a line with other
+                                                than 4 or 5 fields, a percent outside 0 to 100 or another state
+                                                is refused; a progress block is the dispatcher's one in-flight
+                                                card, so new refuses it as a second card, a different title,
+                                                or a card another poster may start: the dispatcher edits it
+                                                in place (edit), any other poster sends it up the chain, not
+                                                its own card, so every job stays one row
+
        bun run ask edit <id|#iN> < item.json
                                                 replaces your own item's title, preview and attachments
                                                 in place, checked as new checks it, so one card carries a
-                                                progress to its end: an update until it is Done or dismissed,
-                                                an ask, answered or not, until it closes; one put away with Later stays put away
+                                                progress to its end: an update until it is dismissed (an edit
+                                                after Done brings it back unread), an ask, answered or not, until it closes; one put away with Later stays put away
        bun run ask example <code|decision|delete|questions|slack|ui>
                                                 prints an item to start from: an ask's picture and its note, bullets,
                                                 then what Approve does (.agents/dashboard/asks.md, The ask's shape),
@@ -233,7 +260,7 @@ if (command === "new" || command === "edit") {
         }).stdout.toString(),
       ),
   )
-  // a delete names its targets by full path, the one playground rm --decision matches, so the owner approves it once
+  // a delete names its targets by full path, so the owner approves the very path that goes
   const main = mainCheckoutOf(process.cwd())
   const shortDelete = deleteRefusal(input, {
     cwd: process.cwd(),
@@ -242,6 +269,15 @@ if (command === "new" || command === "edit") {
     worktrees: main === null ? null : join(main, ".claude", "worktrees"),
   })
   if (shortDelete) fail(shortDelete)
+  // a progress block draws as bars only when every line reads, so one that does not is refused before it posts
+  const badProgress = progressRefusal(input)
+  if (badProgress) fail(badProgress)
+  // the progress block is the dispatcher's one card, and a second, a different title, or another poster's is refused before it posts (PG-2720); the daily ledger card posts beside it
+  if (command === "new") {
+    const ledger = org.ledger.title
+    const refusal = progressCardRefusal(input, await inflightCard(db, ledger), ledger)
+    if (refusal) fail(refusal)
+  }
   // a draft with no link is a public post's, which goes out in the owner's own words alone (the public rule): scripts/hooks/public-draft.ts reads it with the leak guards' own finders, as a child
   const publicLeak = await publicDraftRefusal(input)
   if (publicLeak) fail(publicLeak)
@@ -253,7 +289,7 @@ if (command === "new" || command === "edit") {
           ? 'ask: this ask labels no options, so its card shows a bare Approve and Deny; for a yes or no, label one option, "options": [{"label": "..."}], with "deny"; for real alternatives, label 2 to 5 (.agents/dashboard/asks.md, The ask\'s shape)'
           : hint.kind === "unlinked"
             ? `ask: ${hint.refs.join(", ")} named with no link on its line; link each so the owner can open it: a PR as [#N](https://github.com/<owner>/<repo>/pull/N), a commit as [sha](https://github.com/<owner>/<repo>/commit/<sha>), a ticket at its tracker's URL (to-inbox, Links; .agents/dashboard/asks.md, The ask's shape)`
-            : `ask: a code or ASCII line runs ${hint.longest} characters, past the ${ASK_CODE_COLUMNS} the narrowest Inbox card shows on one line; break or shorten it (.agents/dashboard/asks.md, The ask's shape)`,
+            : `ask: a code or ASCII line runs ${hint.longest} characters, past the ${ASK_CODE_COLUMNS} columns the owner chose for an Inbox drawing; break or shorten it, or make it a compact table (.agents/dashboard/asks.md, The ask's shape)`,
     )
   }
   // the files an ask names are copied in first, so the item keeps their ids, never a path on this Mac
@@ -262,7 +298,7 @@ if (command === "new" || command === "edit") {
   const result =
     command === "edit"
       ? await editItem(db, key as string, kept.ok ? kept.input : input, undefined, dataDir())
-      : await postItem(db, kept.ok ? kept.input : input, flags?.thread, undefined, dataDir())
+      : await postOrEdit(db, kept.ok ? kept.input : input, flags?.thread, undefined, dataDir())
   if (!result.ok)
     fail(
       command === "edit" && result.code === "NOT_FOUND" ? `no inbox item ${key}` : result.message,
@@ -270,7 +306,18 @@ if (command === "new" || command === "edit") {
   else {
     // the id alone on stdout, as a poster's `id=$(bun run ask new < f)` takes it; the tag the owner sees beside it on stderr
     if (command === "new") console.log(result.item.id)
-    console.error(`ask: ${command === "edit" ? "edited" : "posted"} ${itemTag(result.item.ref)}`)
+    const tag = itemTag(result.item.ref)
+    console.error(
+      "unchanged" in result && result.unchanged
+        ? `ask: unchanged ${tag}: your update with this title already says this`
+        : "edited" in result && result.edited
+          ? `ask: edited ${tag}, your update with this title, in place of a second card`
+          : `ask: ${command === "edit" ? "edited" : "posted"} ${tag}`,
+    )
+    if ("reopened" in result && result.reopened)
+      console.error(
+        "ask: reopened it: the owner had marked it Done, and it is back in the list as unread",
+      )
     // a draft whose link is a Slack message replies to it, so the poster checks it is still unanswered
     const link = (result.item.preview as { link?: string }).link ?? ""
     if (result.item.kind === "draft" && link.includes("/thread/")) {

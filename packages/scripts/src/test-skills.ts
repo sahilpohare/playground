@@ -5,7 +5,8 @@ import { removeScratch } from "@packages/safe-delete"
 
 import { sandbox } from "./sandbox"
 
-const py = (file: string, ...withs: string[]) => [
+// Runs one Python test: uv with --python 3.13, a pinned 3.13 so a future uv default can't move the target, tests/<file> as the file the test imports
+export const py = (file: string, ...withs: string[]) => [
   "uv",
   "run",
   "--quiet",
@@ -16,8 +17,8 @@ const py = (file: string, ...withs: string[]) => [
   `tests/${file}`,
 ]
 
-const steps: [string, string[]][] = [
-  ["skill frontmatter", py("test_skill_frontmatter.py")],
+export const steps: [string, string[]][] = [
+  ["skill frontmatter", ["bun", "run", "test:file", "tests/skill-frontmatter.test.ts"]],
   ["skills-ref validate", ["bun", "packages/scripts/src/skills-ref/cli.ts"]],
   ["links", py("test_links.py")],
   ["setup check", py("test_setup_check.py")],
@@ -44,14 +45,14 @@ type Result = [name: string, ok: boolean, fail?: string]
 
 // Every step runs in sandbox.ts's sandbox, which keeps uv's Pythons and cache the real home's; Docker's config stays the real home's too, read before the swap, so a run downloads nothing twice
 export const runSteps = async (list: [string, string[]][]) => {
-  const { env: box, scratch } = sandbox()
+  const { env: box, scratch, wrap } = sandbox()
   const env = { ...box, DOCKER_CONFIG: process.env.DOCKER_CONFIG ?? join(homedir(), ".docker") }
   const results: Result[] = []
   try {
     for (const [name, cmd] of list) {
       console.log(`\n== ${name}`)
       // stdout is piped, so a Python step streams only unbuffered
-      const step = Bun.spawn(cmd, {
+      const step = Bun.spawn(wrap(cmd), {
         env: { ...env, PYTHONUNBUFFERED: "1" },
         stdout: "pipe",
         stderr: "inherit",

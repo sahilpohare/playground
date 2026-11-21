@@ -1,16 +1,21 @@
+import { peerSchema } from "@packages/config/org"
+
 import { readFixtureMachine, readsLive } from "@/lib/dashboard/fixture"
+import { org } from "@/lib/org"
 import { settledWithin } from "@/lib/settle"
+import { peerArgv } from "@/lib/system/peer"
 
 // A kill at a timeout is bounded: SIGTERM first, then this grace, then SIGKILL, and the pipes stop being waited on a moment later.
 const KILL_GRACE_MS = 3000
 
-// The System panel reads the machine through these commands alone, each a fixed argv run without a shell, and so does the dashboard when it reads when a session's process started. Every one only reports (memory_pressure is left out, since its -l simulates pressure; sysctl is never handed a name=value), so nothing the panel runs can change the machine. Nothing else under lib/system starts a process.
+// The System panel reads the machine through these commands alone, each a fixed argv run without a local shell (a peer's ssh hands the peer's login shell its fixed reads), and so does the dashboard when it reads when a session's process started. Every one only reports (memory_pressure is left out, since its -l simulates pressure; sysctl is never handed a name=value; a peer's ssh runs one fixed df of its home and cat of /proc, never prompting), so nothing the panel runs can change a machine. Nothing else under lib/system starts a process.
 export const COMMANDS = {
   containerStats: () => ["docker", "stats", "--no-stream", "--format", "{{json .}}"],
   containers: () => ["docker", "ps", "--format", "{{json .}}"],
   cwds: (uid: number) => ["lsof", "-nPw", "-a", "-u", String(uid), "-d", "cwd", "-Fpn"],
   dockerHost: () => ["docker", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
   memory: () => ["vm_stat"],
+  peer: (target: string) => peerArgv(target, org.cluster.key),
   processes: () => ["ps", "-axo", "pid=,ppid=,rss=,time="],
   socketHolder: (path: string) => ["lsof", "-nPw", "-Fp", path],
   starts: (pids: readonly number[]) => ["ps", "-o", "pid=,lstart=", "-p", pids.join(",")],
@@ -43,15 +48,17 @@ const ENV: Partial<Record<Probe, Record<string, string>>> = { starts: { LC_ALL: 
 const whole = (value: unknown): boolean =>
   typeof value === "number" && Number.isInteger(value) && value >= 0
 
-// Pure: the argv for one probe. A uid is a whole number, pids a list of them, and a socket an absolute path, so none can become a flag.
+// Pure: the argv for one probe. A uid is a whole number, pids a list of them, a socket an absolute path and a peer user@host, so none can become a flag.
 export function commandOf<K extends Probe>(name: K, ...args: Parameters<(typeof COMMANDS)[K]>) {
   const [arg] = args as unknown[]
   if (arg !== undefined) {
     const ok = Array.isArray(arg)
       ? arg.length > 0 && arg.every(whole)
-      : typeof arg === "number"
-        ? whole(arg)
-        : typeof arg === "string" && arg.startsWith("/") && !/[\0\n]/.test(arg)
+      : name === "peer"
+        ? peerSchema.shape.target.safeParse(arg).success
+        : typeof arg === "number"
+          ? whole(arg)
+          : typeof arg === "string" && arg.startsWith("/") && !/[\0\n]/.test(arg)
     if (!ok) throw new Error(`${name} cannot take ${JSON.stringify(arg)}`)
   }
   return (COMMANDS[name] as (...a: unknown[]) => string[])(...args)
@@ -79,16 +86,16 @@ export async function probe<K extends Probe>(
         })
         .join("\n")
     }
-    const out = machine.system.probes[name]
+    const out = machine.system.probes[name === "peer" ? `peer ${String(args[0])}` : name]
     if (out === undefined) throw new Error(`${command[0]} has no answer in the fixture`)
     return out
   }
   const timeoutMs = TIMEOUT_MS[name] ?? 5000
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">
   try {
-    const env = ENV[name]
+    // the env is passed whole, so the PATH a command is found on is the current one, not the one the process booted with
     proc = Bun.spawn(command, {
-      env: env ? { ...process.env, ...env } : undefined,
+      env: { ...process.env, ...ENV[name] },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -109,7 +116,7 @@ export async function probe<K extends Probe>(
   )
   clearTimeout(timer)
   clearTimeout(grace)
-  const label = command.slice(0, 2).join(" ")
+  const label = name === "peer" ? `ssh ${String(args[0])}` : command.slice(0, 2).join(" ")
   if (!settled || timedOut) throw new Error(`${label} ran past ${timeoutMs / 1000}s`)
   const [out, err, code] = settled
   if (!answered(command, code, err)) {

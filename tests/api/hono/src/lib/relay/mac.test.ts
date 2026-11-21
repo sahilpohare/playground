@@ -9,7 +9,7 @@ const { answerRelay, CONNECT_MS, RECYCLE_MS, requireRelay, requireSignedWrite, s
   await import("../../../../../../api/hono/src/lib/relay/mac")
 const { keyIdOf, pairKeySchema, RELAY_ANSWER_KINDS, signedBytes } =
   await import("../../../../../../packages/message/src/index")
-const { RELAY_MAX_AGE_MS, RELAY_REPLACED_CLOSE } =
+const { BOT_GETS, RELAY_GETS, RELAY_MAX_AGE_MS, RELAY_REPLACED_CLOSE, RELAY_WRITES } =
   await import("../../../../../../api/hono/src/lib/relay/protocol")
 const { dashboardRouter } = await import("../../../../../../api/hono/src/routers/dashboard")
 const { errorHandler } = await import("../../../../../../api/hono/src/lib/error")
@@ -893,6 +893,42 @@ describe("startRelay, this Mac's socket to the hub", () => {
     expect([made[1]!.readyState, made[1]!.closedWith]).toEqual([3, undefined])
   })
 
+  // a swapped token leaves the socket opened on the old one holding the relay until the recycle, so renew opens the next one on the new token now, as a recycle does
+  test("renew opens the next socket on the token the Keychain holds now, and the old one answers a read in flight before it goes", async () => {
+    const { connect, made } = sockets()
+    let token = "yard_old"
+    const held: (() => void)[] = []
+    const stop = relay(connect, {
+      dispatch: async () => {
+        await new Promise<void>((resolve) => held.push(resolve))
+        return new Response('{"data":[]}', { headers: { "content-type": "application/json" } })
+      },
+      token: async () => token,
+    })
+    try {
+      await until("the socket", () => made.length === 1)
+      made[0]!.open()
+      made[0]!.feed(frame({ at: new Date().toISOString(), id: crypto.randomUUID() }))
+      await until("the read", () => held.length === 1)
+      token = "yard_new"
+      stop.renew()
+      await until("the next socket", () => made.length === 2)
+      expect(made[1]!.token).toBe("yard_new")
+      expect(made[0]!.readyState).toBe(1)
+      made[1]!.open()
+      expect(made[0]!.readyState).toBe(1)
+      held[0]!()
+      await until("the answer", () =>
+        [...made[0]!.sent, ...made[1]!.sent].some((one) => one.includes('"response"')),
+      )
+      await until("the old socket going", () => made[0]!.readyState === 3)
+      expect(made[0]!.closedWith).toBe(RELAY_REPLACED_CLOSE)
+      expect(made).toHaveLength(2)
+    } finally {
+      stop()
+    }
+  })
+
   test("a next socket that never opens leaves the old one holding the relay", async () => {
     const { connect, made } = sockets()
     const stop = relay(connect, { recycleMs: 30 })
@@ -1114,5 +1150,114 @@ describe("startRelay, this Mac's socket to the hub", () => {
     expect([made[0]!.readyState, made[1]!.readyState]).toEqual([3, 3])
     await Bun.sleep(1200)
     expect(made).toHaveLength(2)
+  })
+})
+
+describe("a bot's read of the dispatcher's log, on this Mac (#1888)", () => {
+  const LOG = "/api/v1/dashboard/dispatcher/log"
+  // a made-up key and a made-up .env value, which no answer to a bot may hold
+  const MADE_UP_KEY = ["sk-ant-", "madeUpKeyForTheRelayTestOnly0123"].join("")
+  const ENV_VALUE = "madeUpEnvValue42"
+  // the made-up DM scout was made with, which yard.logReaders binds its login to
+  const DM = crypto.randomUUID()
+  const botFrame = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      at: NOW.toISOString(),
+      bot: "scout[bot]",
+      dm: DM,
+      id: crypto.randomUUID(),
+      login: "owner",
+      method: "GET",
+      path: `${LOG}?after=4`,
+      type: "bot",
+      ...over,
+    })
+  const botDeps = (
+    dispatch: (request: Request) => Promise<Response>,
+    over: Record<string, unknown> = {},
+  ) => ({
+    ...deps(dispatch),
+    secretValues: () => [],
+    readers: () => ({ "Scout[bot]": DM }),
+    ...over,
+  })
+
+  test("a bot on yard.logReaders reads the log route as this Mac's owner, its answer redacted before it leaves", async () => {
+    const reached: string[][] = []
+    const dispatch = async (request: Request) => {
+      const url = new URL(request.url)
+      reached.push([`${url.pathname}${url.search}`, request.headers.get("cookie") ?? ""])
+      return Response.json({
+        data: { entries: [{ text: `ran ${MADE_UP_KEY} with ${ENV_VALUE}` }] },
+      })
+    }
+    const answer = await answerRelay(
+      botFrame(),
+      botDeps(dispatch, { secretValues: () => [ENV_VALUE] }),
+    )
+    expect(answer?.status).toBe(200)
+    expect(reached).toEqual([[`${LOG}?after=4`, "session=fake"]])
+    expect(words(answer!.body)).toEqual({
+      data: { entries: [{ text: "ran [hidden] with [hidden]" }] },
+    })
+  })
+
+  test("BOT_GETS holds the log route alone", () => {
+    expect(BOT_GETS).toEqual([LOG])
+  })
+
+  test("refuses a bot's request on every RELAY_GETS and RELAY_WRITES route, before any route runs", async () => {
+    for (const route of [...RELAY_GETS, ...RELAY_WRITES]) {
+      const { dispatch, reached } = spy()
+      const path = route.replace(/:[a-zA-Z]+/g, "x1")
+      const answer = await answerRelay(botFrame({ path }), botDeps(dispatch))
+      expect([route, answer?.status, reached]).toEqual([route, 403, []])
+    }
+  })
+
+  test("refuses a bot off yard.logReaders, and every bot while the list is empty", async () => {
+    for (const readers of [{ "other[bot]": DM }, {}]) {
+      const { dispatch, reached } = spy()
+      const answer = await answerRelay(botFrame(), botDeps(dispatch, { readers: () => readers }))
+      expect([answer?.status, reached]).toEqual([403, []])
+    }
+    const { dispatch, reached } = spy()
+    const { readers: _, ...unwired } = botDeps(dispatch)
+    expect([(await answerRelay(botFrame(), unwired))?.status, reached]).toEqual([403, []])
+  })
+
+  test("refuses a bot made again under a listed bot's name, since its DM is a new one", async () => {
+    const { dispatch, reached } = spy()
+    const answer = await answerRelay(botFrame({ dm: crypto.randomUUID() }), botDeps(dispatch))
+    expect([answer?.status, reached]).toEqual([403, []])
+  })
+
+  test("refuses a bot's frame for another owner's Mac, a stale one and a replay", async () => {
+    const { dispatch, reached } = spy()
+    const seen = new Map<string, number>()
+    const stale = new Date(NOW.getTime() - RELAY_MAX_AGE_MS).toISOString()
+    const once = botFrame()
+    expect((await answerRelay(botFrame({ login: "someone" }), botDeps(dispatch)))?.status).toBe(403)
+    expect((await answerRelay(botFrame({ at: stale }), botDeps(dispatch)))?.status).toBe(403)
+    expect((await answerRelay(once, botDeps(dispatch, { seen })))?.status).toBe(200)
+    expect((await answerRelay(once, botDeps(dispatch, { seen })))?.status).toBe(409)
+    expect(reached).toEqual([LOG])
+  })
+
+  test("gives no answer to a bot frame that names a person, or writes", async () => {
+    const { dispatch, reached } = spy()
+    for (const raw of [
+      botFrame({ bot: "scout" }),
+      botFrame({ dm: undefined }),
+      botFrame({ method: "POST" }),
+    ])
+      expect(await answerRelay(raw, botDeps(dispatch))).toBeNull()
+    expect(reached).toEqual([])
+  })
+
+  test("the owner's own relayed read never reaches the bot's route", async () => {
+    const { dispatch, reached } = spy()
+    const answer = await answerRelay(frame({ path: LOG }), botDeps(dispatch))
+    expect([answer?.status, reached]).toEqual([403, []])
   })
 })

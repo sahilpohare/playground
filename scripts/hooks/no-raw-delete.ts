@@ -3,11 +3,14 @@
 import { realpathSync } from "node:fs"
 import { basename, dirname, resolve, sep } from "node:path"
 
+import { input } from "./input"
 import { gitCommand } from "./no-stash"
 import {
   type Command,
   type Env,
   examine,
+  decodedText,
+  globSpells,
   known,
   knownVariables,
   lex,
@@ -22,10 +25,11 @@ import {
   run,
   scriptStdin,
   slotWords,
+  spelledText,
   stdinFed,
   stdinOf,
-  UNKNOWN,
   unreadable,
+  unreadRun,
   visible,
   type Visit,
   withDeadline,
@@ -36,7 +40,7 @@ const INSTEAD =
   "Move it to the 7-day trash with playground rm <path> (a worktree: playground rm --worktree <path>), which takes up to 5,000 files or 2 GB; leave a bigger tree or a scratch folder in place for your lead's cleanup, and let bun install rebuild a node_modules in place. A plain rm of a file inside your own worktree or scratchpad, with no -r, still runs."
 
 const WORKTREE =
-  "Remove a worktree with playground rm --worktree <path>, which moves it to the 7-day trash once no live session holds it, it holds no uncommitted change and its work has landed on canary."
+  "Remove a worktree with playground rm --worktree <path>, which moves it to the 7-day trash once no live session holds it (a clean worktree, detached at a commit canary already has, counts as held by none), it holds no uncommitted change and its work has landed on canary or on a branch origin still holds."
 
 const refuse = (
   what: string,
@@ -67,9 +71,21 @@ const DATA = new Set([
   "sed",
 ])
 const isData = (name: string) => DATA.has(name) || /^python[\d.]*$/.test(name)
-// agent-browser's eval runs its script as JavaScript in the page, so its words stay text, as one of the call's own commands on a call made of bare agent-browser commands alone
+// agent-browser's eval runs its script as JavaScript in the page, so its words stay text, as one of the call's own commands on a call made of bare agent-browser commands alone, with only these of its options before eval: --session's name, --args' launch flags holding no blank, which the spaced-word rule never reads, and the flags --ignore-https-errors and --json
 const scriptStaysText = (cmd: Command, args: Word[], browserOnly: Set<Command>) =>
-  browserOnly.has(cmd) && args[0]?.value === "eval"
+  browserOnly.has(cmd) && browserEval(args)
+const BROWSER_FLAGS = new Set(["--ignore-https-errors", "--json"])
+const BROWSER_VALUES = new Set(["--args", "--session"])
+const browserEval = (args: Word[]) => {
+  for (let k = 0; k < args.length; k++) {
+    const { value } = args[k]
+    if (value === "eval") return true
+    const [name, attached] = value.split(/=(.*)/s)
+    const own = BROWSER_VALUES.has(name) ? (attached ?? args[++k]?.value) : undefined
+    if (!BROWSER_FLAGS.has(value) && (own === undefined || /\s/.test(own))) return false
+  }
+  return false
+}
 // Programs that run the command their arguments name, read here at each word that does not start with a dash.
 const STARTERS = new Set(["screen", "tmux"])
 // rm under its own name and GNU rm's Homebrew name.
@@ -133,9 +149,11 @@ const unversioned = (name: string) => name.replace(/(?<=.)@[^@/]*$/, "")
 // fd's exec option, alone or last in a cluster of short flags that take no value (`-HX`), with any value attached (`--exec=rm`, `-x=rm`, `-Hxrm`).
 const ATTACHED = /^(?:--exec(?:-batch)?=|-[01FHILVaghilpqsu]*[xX]=?)(.*)$/s
 
-// rm's recursive option: -r or -R in a cluster, or --recursive by any prefix GNU rm takes (`--rec`).
+// rm's recursive option: -r or -R in a cluster of rm's own letters, GNU's and macOS's together, or --recursive by any prefix GNU rm takes (`--rec`); rm refuses a cluster holding any other letter and deletes nothing, so `-fingerprint` and `-servername` are no -r.
 const recursive = (v: string): boolean =>
-  v.startsWith("--") ? v.length >= 3 && "--recursive".startsWith(v) : /^-[A-Za-z]*[rR]/.test(v)
+  v.startsWith("--")
+    ? v.length >= 3 && "--recursive".startsWith(v)
+    : /^-[dfiIPRrvWx]*[rR][dfiIPRrvWx]*$/.test(v)
 
 // A recursive option anywhere in a text, as a brace's members spell one (`{rm,-rf,x}`).
 const spellsRecursive = (v: string): boolean =>
@@ -246,9 +264,12 @@ async function inspect(raw: string, environment: Record<string, string | undefin
   const { cwd, session_id: session, tool_input: input, tool_name: tool } = payload
   if (tool !== "Bash") return
   const command = (input as { command?: unknown } | null)?.command
-  if (typeof command !== "string" || !CANDIDATE.test(bare(command))) return
+  if (typeof command !== "string" || !CANDIDATE.test(bare(spelledText(command)))) return
   const directory = typeof cwd === "string" ? cwd : undefined
   const roots = rootsOf(directory, session)
+  // an array run whole or a glob program word the reader cannot read (unreadRun) may be any delete, in a call that reads as one, in its text, an ANSI-C string or a brace list or zsh group spelled out (spelledText), or holds a glob that may match a delete program
+  const text = bare(spelledText(decodedText(command)))
+  const named = DELETES.test(text) || globSpells(text, SPELLED)
   const env: Env = {
     cwd: directory,
     files: new Map(),
@@ -266,6 +287,8 @@ async function inspect(raw: string, environment: Record<string, string | undefin
   const visitAs =
     (reach: Reach): Visit =>
     async (cmd, parsed, at) => {
+      // a case pattern is matched, never run, so its words are no program; a substitution in it is its own command
+      if (cmd.casePattern) return
       const { args, name } = parsed
       const verdict = await judge(cmd, parsed, at, reach)
       if (verdict) return verdict
@@ -317,6 +340,12 @@ async function inspect(raw: string, environment: Record<string, string | undefin
   ): Promise<string | undefined> => {
     const { args, first, xargs } = parsed
     const name = unversioned(parsed.name)
+    if (named && unreadRun(parsed))
+      return refuse(
+        "a command built from a value it cannot read, in a call that names a delete",
+        "it may be any delete",
+        `Write the program and its words out in the call, or write the script to a file and run it. ${INSTEAD}`,
+      )
     // a program word the hook cannot read (a variable, a brace, a glob) given -r, or led by a word it cannot read either (`$RM $FLAGS`), may be a recursive rm; a readable word ends the lead (`$T git clone $S/x`)
     const end = args.findIndex((a) => !a.value.startsWith("-") && !hidden(a))
     const lead = end < 0 ? args : args.slice(0, end)
@@ -328,19 +357,6 @@ async function inspect(raw: string, environment: Record<string, string | undefin
         lead.some((a) => hidden(a) && !a.quoted))
     )
       return refuse(`a program the hook cannot read (${shown(first)}) given -r`, "it may be rm")
-    // an unquoted variable in a program's place splits at its spaces under bash (`c="rm -rf x"; $c`), with no quote or pipe read again, so its words lead the command's own
-    const held =
-      first && !first.quoted && first.value === UNKNOWN && first.variable
-        ? at.vars.get(first.variable)
-        : undefined
-    if (held && !held.unknown && /\s/.test(held.value.trim())) {
-      const split = held.value
-        .trim()
-        .split(/\s+/)
-        .map((value) => ({ quoted: false, value }))
-      const found = await examine({ ...cmd, words: [...split, ...args] }, at, visitAs(reach), false)
-      if (found) return found
-    }
     const slot = slotWords(parsed)
     if (slot) return examine({ ...cmd, words: slot }, at, visitAs(reach), false)
     if (RM.has(name)) return judgeRm(args, xargs !== undefined || reach.appends, at, roots, reach)
@@ -431,7 +447,10 @@ async function inspect(raw: string, environment: Record<string, string | undefin
 
 const bare = (command: string) => command.replace(/[\\'"]/g, "")
 
-// The cheap first look: a name the hook judges, in any case as macOS runs it, or a $, a backtick, a brace or a glob that can spell one.
+// The delete programs a glob in a call may spell (`/bin/r?`), which counts the call as naming a delete
+const SPELLED = [...RM, ...DELETER_PROGRAMS, ...SHRED, "chflags", "chmod"]
+
+// The cheap first look, read on the call with its brace lists and zsh groups spelled out (spelledText): a name the hook judges, in any case as macOS runs it, or a $, a backtick, a brace or a glob that can spell one.
 const CANDIDATE =
   /rm|del|chflags|chmod|clean|worktree|rimraf|rsync|shred|\bg?tar\b|screen|tmux|\bat\b|batch|\$|`|[{*?[]/i
 
@@ -465,7 +484,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text())
+  const reason = await check(await input("no-raw-delete", "guard"))
   if (reason) {
     console.error(reason)
     process.exit(2)

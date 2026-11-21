@@ -1,9 +1,10 @@
 import { appendFile, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 
-import { kindOf, placedKindOf } from "@packages/config/kinds"
+import { kindOf, placedKindOf, SDK_PROBE } from "@packages/config/kinds"
+import { type SshLaunch, sshLaunchOf, sshProcessOf } from "@packages/config/ssh-probe"
 import { verdictOf } from "@packages/config/verdicts"
-import { accountKey, accountSettings, accountsOf, readPolicy } from "@packages/settings"
+import { accountKey, accountSettings, accountsOf, readPolicy, RETIRED } from "@packages/settings"
 
 import STATUSES from "../../../../scripts/roster-statuses.json"
 import { leadName } from "../ops-session-resume/resume"
@@ -15,12 +16,13 @@ export type Run = (
   options?: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs?: number },
 ) => Promise<{ code: number; err: string; out: string }>
 
-// cfg is Claude Code's config folder, data the factory's folder in it, ops the ops jobs' state, dashboard the live dashboard's checkout, main the main checkout, repo the checkout this job runs from, and factory the factory's GitHub repository (factory.repo by default).
+// cfg is Claude Code's config folder, data the factory's folder in it, ops the ops jobs' state, dashboard the live dashboard's checkout, main the main checkout, repo the checkout this job runs from, factory the factory's GitHub repository (factory.repo by default), and herdr a read of herdr's CLI on one server.
 export type Context = {
   cfg: string
   data: string
   dashboard: string
   factory?: () => Promise<string>
+  herdr?: (server: string, args: string[]) => Promise<string>
   load: () => number
   main: string
   now: () => number
@@ -31,6 +33,8 @@ export type Context = {
 
 type Json = Record<string, unknown>
 
+// Under one 300-second sweep, so the pass after a conflict's first sighting tells it.
+export const CONFLICT_AFTER = 240
 export const HEADROOM = 85
 export const IDLE_DB_AFTER = 7200
 export const IDLE_DB_GAP = 900
@@ -108,6 +112,48 @@ export async function registry(ctx: Context): Promise<Map<string, string>> {
       live.set(d.name, typeof d.status === "string" ? d.status : "")
   }
   return live
+}
+
+// An --ssh probe's claude runs on the far box, out of this machine's registry, so it counts live while any pane labelled with its name still runs ssh, by the rule the Dashboard's live list shares (sshLaunchOf, sshProcessOf); one pane list a server, read only when such a probe is unended.
+export async function sshLive(ctx: Context, names: string[]): Promise<string[]> {
+  const byServer = new Map<string, SshLaunch[]>()
+  for (const name of names) {
+    const launch = sshLaunchOf(
+      await Bun.file(join(ctx.data, "resume", `${name}.sh`))
+        .text()
+        .catch(() => ""),
+    )
+    if (launch?.name === name)
+      byServer.set(launch.server, [...(byServer.get(launch.server) ?? []), launch])
+  }
+  if (!ctx.herdr || !byServer.size) return []
+  const herdr = ctx.herdr
+  const read = async (server: string, args: string[]): Promise<Json> => {
+    try {
+      return JSON.parse(await herdr(server, args)) as Json
+    } catch {
+      return {}
+    }
+  }
+  const out: string[] = []
+  for (const [server, launches] of byServer) {
+    const result = (await read(server, ["pane", "list"])).result as Json | undefined
+    const panes = (Array.isArray(result?.panes) ? result.panes : []) as Json[]
+    for (const launch of launches) {
+      for (const { label, pane_id: pane } of panes) {
+        if (label !== launch.name || typeof pane !== "string") continue
+        const info = (await read(server, ["pane", "process-info", "--pane", pane])).result as
+          | { process_info?: { foreground_processes?: { argv?: string[] }[] } }
+          | undefined
+        const processes = info?.process_info?.foreground_processes ?? []
+        if (sshProcessOf(launch, server, { label: launch.name, processes })) {
+          out.push(launch.name)
+          break
+        }
+      }
+    }
+  }
+  return out
 }
 
 // Records a usage sample, then projects each window to its reset from the recent rate (5h: the last hour, 7d: the last 3 hours).
@@ -249,7 +295,14 @@ export async function paceOff(ctx: Context): Promise<void> {
   await writeAtomic(recordPath, JSON.stringify({ at, forecast: projected, until: iso }))
 }
 
-// The ops jobs by reading ps alone: each job's script must be running, and each heartbeat ok and fresh.
+// A steady beat that is not `ok` but is not a failure: up: for the tunnel, idle: for the relay, while waiting: (nothing to read yet) stays healthy for every job. The Dashboard reads this same list, its copy kept in step by a test.
+export const HEALTHY_PREFIXES: Record<string, string[]> = {
+  "ops-model-tunnel": ["up: "],
+  "ops-peer-relay": ["idle: "],
+  "ops-tunnel": ["up: "],
+}
+
+// The ops jobs by reading ps alone: each job's script must be running, and each heartbeat ok and fresh, but a paused job's; a RETIRED job's heartbeat file, which outlives it, goes unread.
 export async function opsDown(ctx: Context): Promise<string[]> {
   const cmds = (await ctx.run(["ps", "-ax", "-o", "command="])).out
   let disabled = new Set<string>()
@@ -261,7 +314,7 @@ export async function opsDown(ctx: Context): Promise<string[]> {
     .filter(([job, mark]) => !cmds.includes(mark) && !disabled.has(`ops-${job}`))
     .map(([job]) => `ops-down:${job}`)
   const files = (await readdir(ctx.ops).catch(() => [])).filter(
-    (f) => f.startsWith("ops-") && f.endsWith(".json"),
+    (f) => f.startsWith("ops-") && f.endsWith(".json") && !RETIRED.includes(f.slice(0, -5)),
   )
   for (const file of files) {
     try {
@@ -269,8 +322,12 @@ export async function opsDown(ctx: Context): Promise<string[]> {
       if (disabled.has(String(b.job))) continue
       const at = Date.parse(String(b.lastBeatAt))
       if (Number.isNaN(at)) throw new Error("lastBeatAt")
-      // a waiting: beat has nothing to read yet, as opsRowOf reads it, so it is no failure
-      if (b.lastResult !== "ok" && !String(b.lastResult).startsWith("waiting: "))
+      if (
+        b.lastResult !== "ok" &&
+        !["waiting: ", ...(HEALTHY_PREFIXES[String(b.job)] ?? [])].some((p) =>
+          String(b.lastResult).startsWith(p),
+        )
+      )
         out.push(`ops-failing:${b.job}`)
       if (ctx.now() - at > 3 * Number(b.cycleSeconds ?? 60) * 1000) out.push(`ops-stale:${b.job}`)
     } catch {
@@ -319,6 +376,7 @@ const pullOf = (pr: unknown, repo: string): number | undefined => {
 }
 
 // A worker's PR whose head has been ready (its checks green) REVIEWER_LATE seconds with no review round (a ReviewBot verdict at any head) and no live session for the reviewer the roster names on it, by its pr or any entry of its prs: one line to the worker's lead, once per head, since a reviewer started late or by hand left heads ready for over an hour. A draft PR and a parked row wait by design, so neither raises a line; the runner check below reads the parked one.
+// The same read finds a worker's PR, a draft's too, that conflicts with its base (mergeable CONFLICTING or mergeStateStatus DIRTY) with no GitHub Actions run at its head, which GitHub never starts on it: CONFLICT_AFTER seconds after a sweep first sees it, one line to the worker and one to its lead, once per head; conflict-told.json keeps only the PRs conflicting now, a read of UNKNOWN at the same head keeping its entry, so a fixed conflict that comes back alerts again. A conflicting PR raises no late-reviewer line, since its head is not ready.
 export async function lateReviewers(
   ctx: Context,
   agents: Json[],
@@ -340,7 +398,7 @@ export async function lateReviewers(
   }
   if (!workers.size) return []
   const fields =
-    "state headRefOid isDraft comments(last: 100) { nodes { body } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { completedAt } ... on StatusContext { createdAt } } } } } } }"
+    "state headRefOid isDraft mergeable mergeStateStatus comments(last: 100) { nodes { body } } commits(last: 1) { nodes { commit { checkSuites(first: 1, filterBy: { appId: 15368 }) { totalCount } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { completedAt } ... on StatusContext { createdAt } } } } } } }"
   const [owner, name] = repo.split("/")
   const query = `{ repository(owner: "${owner}", name: "${name}") { ${[...workers.keys()].map((n) => `p${n}: pullRequest(number: ${n}) { ${fields} }`).join(" ")} } }`
   const r = await ctx.run(["gh", "api", "graphql", "-f", `query=${query}`], { timeoutMs: 60_000 })
@@ -353,6 +411,10 @@ export async function lateReviewers(
   const path = join(here(ctx), "reviewer-told.json")
   const told = (await readJson<Record<string, string>>(path, {})) ?? {}
   const keep: Record<string, string> = {}
+  type Conflict = { at: number; sha: string; told: boolean }
+  const conflictPath = join(here(ctx), "conflict-told.json")
+  const conflicts = (await readJson<Record<string, Conflict>>(conflictPath, {})) ?? {}
+  const conflicting: Record<string, Conflict> = {}
   const now = seconds(ctx)
   for (const [n, worker] of workers) {
     const pr = pulls?.[`p${n}`] as {
@@ -360,6 +422,8 @@ export async function lateReviewers(
       commits?: {
         nodes?: {
           commit?: {
+            // GitHub Actions' suites alone (app 15368): one is a workflow run at the head
+            checkSuites?: { totalCount?: number }
             statusCheckRollup?: {
               contexts?: { nodes?: { completedAt?: string; createdAt?: string }[] }
               state?: string
@@ -369,11 +433,32 @@ export async function lateReviewers(
       }
       headRefOid?: string
       isDraft?: boolean
+      mergeStateStatus?: string
+      mergeable?: string
       state?: string
     } | null
-    if (!pr || pr.state !== "OPEN" || !pr.headRefOid || pr.isDraft) continue
+    if (!pr || pr.state !== "OPEN" || !pr.headRefOid) continue
+    const commit = pr.commits?.nodes?.[0]?.commit
+    const seen = conflicts[n]?.sha === pr.headRefOid ? conflicts[n]! : null
+    // GitHub reads UNKNOWN while it works the answer out again, after the base moves: a conflict already seen at this head stands, telling nothing
+    const real = pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY"
+    const conflicted = real || (pr.mergeable === "UNKNOWN" && seen !== null)
+    if (conflicted && !commit?.checkSuites?.totalCount) {
+      const conflict = (conflicting[n] = seen ?? { at: now, sha: pr.headRefOid, told: false })
+      if (real && !conflict.told && now - conflict.at >= CONFLICT_AFTER) {
+        conflict.told = true
+        const text = `PR #${n} (${worker}): it conflicts with its base at head ${pr.headRefOid.slice(0, 7)}, so GitHub runs no CI on it. Merge canary into it and push.`
+        for (const to of new Set([worker, await leadName(ctx.ops, worker)]))
+          await ctx.run(notifyArgv(ctx, text), {
+            env: { ...process.env, NOTIFY_TO: to },
+            timeoutMs: 60_000,
+          })
+      }
+    }
+    // a conflicting head is not ready, even while other apps' checks read SUCCESS with no Actions run
+    if (pr.isDraft || conflicted) continue
     if (told[n] === pr.headRefOid) keep[n] = pr.headRefOid
-    const rollup = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup
+    const rollup = commit?.statusCheckRollup
     if (rollup?.state !== "SUCCESS") continue
     const readyAt = Math.max(
       0,
@@ -401,6 +486,7 @@ export async function lateReviewers(
     })
   }
   await writeAtomic(path, JSON.stringify(keep))
+  await writeAtomic(conflictPath, JSON.stringify(conflicting))
   return []
 }
 
@@ -572,7 +658,7 @@ export async function stalledPrs(ctx: Context, agents: Json[]): Promise<string[]
   return []
 }
 
-// run-slot's runner-box route, which falls back to this Mac without a word: one finding naming each precondition run-slot.sh box-off reports failing (no-ci-sh, no-ssh-key, runner-host-off, slot-off).
+// run-slot's runner-box route, which falls back to this Mac without a word: one finding naming each precondition run-slot.sh box-off reports failing (no-ci-sh, no-host, no-ssh-key, runner-host-off, slot-off).
 export async function boxRoute(ctx: Context): Promise<string[]> {
   const r = await ctx.run([join(ctx.ops, "run-slot.sh"), "box-off"], { timeoutMs: 60_000 })
   if (r.code) return ["box-route-unreadable"]
@@ -640,7 +726,7 @@ export const runsForDelete = (pid: number): boolean => {
   }
 }
 
-// A test container named playground-test-<suite>-<pid> whose runner pid no longer runs is a killed test run's leftover (the kill never reaches the suite's cleanup): removed with its volumes, so a killed run leaks nothing. Every other container stays: the live dashboard's database, pglaunch's, a Vibeground copy, a worktree's, any running stack's, and any test container whose pid still runs; a name whose last field is not a pid, such as a worktree named test-x's playground-test-x-db, is never one. runs says whether a pid has a process, a test's table in its place.
+// A test container named playground-test-<suite>-<pid> whose runner pid no longer runs is a killed test run's leftover (the kill never reaches the suite's cleanup): removed with its volumes, so a killed run leaks nothing. Every other container stays: the live dashboard's database, first run's, a Vibeground copy, a worktree's, any running stack's, and any test container whose pid still runs; a name whose last field is not a pid, such as a worktree named test-x's playground-test-x-db, is never one. runs says whether a pid has a process, a test's table in its place.
 export async function leakedTests(
   ctx: Context,
   runs: (pid: number) => boolean = runsForDelete,
@@ -662,7 +748,7 @@ export async function leakedTests(
   return removed
 }
 
-// One read of runners, probes, the managers' asks, unclosed answers, the ops jobs, idle databases, the runner-box route, late reviewers, branches with no PR, stalled PRs and the usage forecast.
+// One read of runners, probes, the managers' asks, unclosed answers, the ops jobs, idle databases, the runner-box route, late reviewers and conflicting PRs, branches with no PR, stalled PRs and the usage forecast.
 export async function check(ctx: Context): Promise<string[]> {
   let roster: Json
   try {
@@ -672,12 +758,17 @@ export async function check(ctx: Context): Promise<string[]> {
     return [`roster-unreadable:${e.code ?? e.name ?? "Error"}`]
   }
   const agents = (Array.isArray(roster.agents) ? roster.agents : []) as Json[]
+  const kinds = new Map(agents.map((a) => [a.name, a.kind]))
   const live = await registry(ctx)
+  const unended = agents
+    .filter((a) => a.status !== "ended" && a.status !== "parked" && typeof a.name === "string")
+    .map((a) => a.name as string)
+    .filter((name) => !live.has(name) && kindOf(name, kinds.get(name)) === "probe")
+  for (const name of await sshLive(ctx, unended)) live.set(name, "")
   const now = Math.floor(seconds(ctx))
   const seenPath = join(here(ctx), "probe-first-seen.json")
   const seen = numbers(await readJson(seenPath, {}))
   const recorded = new Set(agents.filter((a) => a.status !== "ended").map((a) => a.name))
-  const kinds = new Map(agents.map((a) => [a.name, a.kind]))
   const found: string[] = []
   for (const a of agents) {
     const name = typeof a.name === "string" ? a.name : ""
@@ -708,7 +799,7 @@ export async function check(ctx: Context): Promise<string[]> {
   }
   for (const name of Object.keys(seen)) if (!live.has(name)) delete seen[name]
   for (const name of live.keys()) {
-    if (kindOf(name, kinds.get(name)) !== "probe") continue
+    if (name === SDK_PROBE || kindOf(name, kinds.get(name)) !== "probe") continue
     seen[name] ??= now
     const age = Math.floor((now - seen[name]!) / 60)
     if (age >= 15) found.push(`probe-over-15m:${name}`)

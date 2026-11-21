@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs"
-import { extname, join } from "node:path"
+import { existsSync, readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { dirname, extname, join } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 
 import { withOwn } from "@packages/config/accounts"
@@ -9,18 +10,24 @@ import {
   answerPayloadSchema,
   choicesOf,
   CLOCKS_STOPPED_AT,
+  HEX64,
   MAX_OPTIONS,
   picksOf,
+  ROOT_NAMES,
   rowOfAnswer,
 } from "@packages/config/inbox"
+import { cloneOf, type Peer, peerSchema } from "@packages/config/org"
 import type { ActivityActor, Database } from "@packages/db"
 import { inboxItem, thread } from "@packages/db"
 import { dataDir } from "@packages/env/data-dir"
+import { addEntries, peerRecordArgv, rootEntries } from "@packages/scripts/machine-record/record"
+import { seedAlert } from "@packages/scripts/ops-wa/seed"
 import {
   checkSetting,
   extensionsDir,
   extScopeSchema,
   GUARD_SETTING_KEYS,
+  importLists,
   itemKeySchema,
   JOBS,
   jobKey,
@@ -32,6 +39,7 @@ import {
   readSetting,
   resetSetting,
   SCOPE_NAME,
+  scopeDir,
   setSetting,
   settingRows,
   slackSettings,
@@ -40,12 +48,33 @@ import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, or, sql } from 
 import { z } from "zod"
 
 import { fileNameOf } from "../download"
+import { keychainItem } from "../keychain"
 import { KEYCHAIN_ITEM_NAMES, keychainSpec, PLAYGROUND_SERVICE } from "../keychain-items"
+import { org } from "../org"
+import {
+  peerCopyArgv,
+  peerInstallArgv,
+  peerInstalledRefusal,
+  peerOf,
+  peerReadArgv,
+  peerSecret,
+  peerStepArgv,
+} from "../system/peer-root"
+import {
+  caFile,
+  caPin,
+  installArgv,
+  installedRefusal,
+  repoScripts,
+  ROOT_TIMEOUT_MS,
+  stepArgv,
+} from "../system/root"
+import { holdsProgressBlock, type InflightCard, isDispatcher, isLedgerTitle } from "./ask-shape"
 import { ID_PATTERN } from "./attachments"
 import { checkoutRoot, currentSource, type DashboardSource } from "./fixture"
 import { OWNER_APPS } from "./owner-apps"
 
-// Playground's Inbox: what the factory posts for the owner, one row of inbox_item each, through the bun run ask CLI alone. A decision previews exactly what Approve does, a draft is a Slack message or Linear comment to send, and an update is an outcome to read. The dashboard records his answer and types it into the posting session through deliver(); the dashboard itself never sends a message, merges or files anything, sharing only a Slack send's files (filesToUpload) and running only the step an accept's, an apps change's, a grant's, a guard setting's or an own account change's Approve names (stepOf). Nothing here imports the API's env or an @/ path, so the CLI runs from any shell and the web reads its types.
+// Playground's Inbox: what the factory posts for the owner, one row of inbox_item each, through the bun run ask CLI alone. A decision previews exactly what Approve does, a draft is a Slack message or Linear comment to send, and an update is an outcome to read. The dashboard records his answer and types it into the posting session through deliver(); the dashboard itself never sends a message, merges or files anything, sharing only a Slack send's files (filesToUpload) and running only the step an accept's, a clone's, an apps change's, a grant's, a guard setting's, an own account change's or a root step's Approve names (stepOf). Nothing here imports the API's env or an @/ path, so the CLI runs from any shell and the web reads its types.
 
 const LIMITS = { line: 200, name: 120, prs: 50, text: 4000 }
 
@@ -184,7 +213,7 @@ const vercelSinkSchema = z.strictObject({
 const playgroundService = z.string().regex(PLAYGROUND_SERVICE, "Must be a playground- service")
 const keychainItemField = z.union([z.enum(KEYCHAIN_ITEM_NAMES), playgroundService])
 
-// Where a secret ask's value goes, the allowlist in code: Vercel, `vercel env add` once an environment for one project, or keychain, one of this Mac's Keychain items keychainItemField allows.
+// Where a secret ask's value goes, the allowlist in code: Vercel, `vercel env add` once an environment for one project, or keychain, one of this computer's secret store items keychainItemField allows.
 export const secretSinkSchema = z.discriminatedUnion("type", [
   vercelSinkSchema,
   z.strictObject({ item: keychainItemField, type: z.literal("keychain") }),
@@ -308,8 +337,34 @@ export const grantArgv = (preview: InboxGrant): string[] => [
   `x-apple.systempreferences:com.apple.preference.security?${GRANT_PANES[preview.permission]}`,
 ]
 
+// A step that needs root on this machine, which the owner approves from the Inbox in place of a terminal: `install` puts the listed scripts in place, and the Dashboard's CA when it has one, their hashes frozen on the card as it is posted (rootScripts), and any other step is one listed script (system/root.ts's ROOT_STEPS), run through the desktop's password window with no argument.
+const rootSchema = z.strictObject({
+  ca: z
+    .strictObject({ sha256: z.string().regex(HEX64, "Must be a sha256 in 64 lowercase hex") })
+    .optional(),
+  // a machine org.cluster names, whose steps run over ssh (system/peer-root.ts); none for this one
+  machine: peerSchema.shape.name.optional(),
+  scripts: z
+    .array(
+      z.strictObject({
+        name: z.enum(ROOT_NAMES),
+        sha256: z.string().regex(HEX64, "Must be a sha256 in 64 lowercase hex"),
+      }),
+    )
+    .max(ROOT_NAMES.length)
+    .optional(),
+  step: z.enum(["install", ...ROOT_NAMES]),
+  type: z.literal("root"),
+  why: words,
+})
+
+export type InboxRoot = z.infer<typeof rootSchema>
+
 // Runs an argv with no shell and returns its exit code and output; run-argv.ts holds the real one, and a test passes its own.
-export type ArgvRun = (argv: string[]) => Promise<{ code: number; err: string; out: string }>
+export type ArgvRun = (
+  argv: string[],
+  input?: string,
+) => Promise<{ code: number; err: string; out: string }>
 
 // An app's name as the owner's list holds it: a letter or digit of any script first, then letters, digits, spaces and . _ & ' ( ) + -, so none starts as a flag or names a path.
 const APP_NAME = /^[\p{L}\p{N}][\p{L}\p{N} ._&'()+-]*$/u
@@ -421,6 +476,110 @@ const ownSchema = z.strictObject({
 
 export type InboxOwn = z.infer<typeof ownSchema>
 
+// One private repo a clone card clones: its owner/name, the scope it becomes and that scope's folder in this machine's extensions, which the post and Approve check against the data folder, so the card shows the very folder Approve fills.
+const cloneRepoSchema = z.strictObject({
+  folder: z.string().max(LIMITS.line).startsWith("/", "Must be a full path"),
+  repo: z
+    .string()
+    .max(LIMITS.name)
+    .regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/, "Must be a repo as owner/name"),
+  scope: extScopeSchema,
+})
+
+// The extensions' first clone on a new machine, which only the owner may write: the login's repo first, through ext init, then each further one through ext add, in order. Each scope once.
+const cloneSchema = z.strictObject({
+  repos: z
+    .array(cloneRepoSchema)
+    .min(1)
+    .max(20)
+    .refine((repos) => new Set(repos.map((repo) => repo.scope)).size === repos.length, {
+      error: "A clone card names each scope once",
+    }),
+  type: z.literal("clone"),
+  why: words,
+})
+
+export type InboxClone = z.infer<typeof cloneSchema>
+
+// Pure: why a clone card cannot run on the machine whose data folder this is, or undefined: a folder that is not its scope's in this machine's extensions, or one already there, since the clone is a new machine's first alone.
+const cloneHeld = (data: string, preview: InboxClone): string | undefined => {
+  const elsewhere = preview.repos.filter((repo) => repo.folder !== scopeDir(data, repo.scope))
+  if (elsewhere.length)
+    return elsewhere
+      .map(
+        (repo) => `${repo.folder} is not where ${repo.scope} goes: ${scopeDir(data, repo.scope)}`,
+      )
+      .join("; ")
+  const held = preview.repos.filter((repo) => existsSync(repo.folder))
+  if (held.length)
+    return `This machine's extensions already hold ${held.map((repo) => repo.folder).join(", ")}, so nothing is cloned`
+}
+
+// What a clone's Approve runs with: `playground ext` for the clone, and the folder the guards' lists are seeded from after it (the checkout's extensions/core/lists).
+export type CloneRun = { lists: string; run: ExtRun }
+
+// Seeds the guards' lists into the login's scope as the owner's act, the item named in its commit, after a clone: each list from the folder the login does not hold yet, a list it holds kept as it is, so a second seed changes nothing.
+function seedLists(data: string, lists: string, ref: number, actor: string): RunResult {
+  const done = importLists(
+    data,
+    lists,
+    false,
+    {
+      actor,
+      author: "owner",
+      inboxRef: ref,
+      reason: `the owner approved it in the Inbox (${itemTag(ref)})`,
+    },
+    true,
+  )
+  if (!done.ok) return { exitCode: 1, line: done.message }
+  const added = done.lines.filter((line) => line.startsWith("+ ")).length
+  const kept = done.lines.filter((line) => line.startsWith("= ")).length
+  const missing = done.lines
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).split(":")[0])
+  return {
+    exitCode: 0,
+    line: `seeded ${added} of the guards' lists, kept ${kept} already there${missing.length ? `; still missing: ${missing.join(", ")}` : ""}`,
+  }
+}
+
+// Clones each repo in order through `playground ext`, stopping at the first that fails: ext init --dry-run first, so the login's repo it clones is the card's first, then ext init, then ext add for each further one. Neither runs with --yes, so off a terminal neither makes a repo.
+async function cloneAll(clone: ExtRun, preview: InboxClone): Promise<RunResult> {
+  const first = preview.repos[0]!
+  const name = (repo: InboxClone["repos"][number]) => `${repo.repo} into ${repo.folder}`
+  const checked = await clone(["init", "--dry-run"])
+  if (checked.code !== 0) return runResult(checked)
+  const found = JSON.parse(checked.out) as { exists: boolean; login: string; repo: string }
+  if (found.repo !== first.repo || found.login !== first.scope)
+    return {
+      exitCode: 1,
+      line: `ext init clones ${found.repo} for ${found.login}, not ${first.repo}, so nothing was cloned`,
+    }
+  if (!found.exists)
+    return { exitCode: 1, line: `${first.repo} is not on GitHub, so nothing was cloned` }
+  const cloned: string[] = []
+  for (const [at, repo] of preview.repos.entries()) {
+    const ran = runResult(
+      await clone(at === 0 ? ["init"] : ["add", repo.scope, repo.repo]).catch((error: unknown) => ({
+        code: 1,
+        err: error instanceof Error ? error.message : String(error),
+        out: "",
+      })),
+    )
+    if (ran.exitCode !== 0) {
+      const done = cloned.length ? `cloned ${cloned.join(", ")}; ` : ""
+      const untried = preview.repos.slice(at + 1).map((next) => next.repo)
+      return {
+        exitCode: ran.exitCode,
+        line: `${done}${repo.repo} failed: ${ran.line}${untried.length ? `; not tried: ${untried.join(", ")}` : ""}`,
+      }
+    }
+    cloned.push(name(repo))
+  }
+  return { exitCode: 0, line: cloned.join(", ") }
+}
+
 const ACCOUNTS = "usage.accounts"
 
 // usage.accounts as it is stored at one scope: undefined when that scope sets none.
@@ -477,7 +636,7 @@ const askQuestion = z
     path: ["recommended"],
   })
 
-// What Approve does, one shape per kind of approval the owner keeps (playbook's ask rule): an extension accept, an apps change, a grant's System Settings pane, a guard setting or an own account change, which the dashboard carries out itself, a Slack message, a ship of canary, a new Linear ticket, a delete, a schema, a budget, or a plain ask, whose words say what its poster does on Approve, for a decision no other shape fits (a production port, a work request from outside the chain, or a step only he can take, such as plugging in the Mac, where Approve means done and Deny means he can't). An ask labels its options in plain words (the plain-words skill), one line each: one option and deny for a yes or no, or 2 to 5 for lettered choices, A to E, then None of these (choicesOf); the card shows its text as the quoted block above them. A secret asks for a value instead of a yes, which goes straight to its sink and is kept nowhere. A reveal shows the owner a Keychain item's value on the owner's click instead, kept nowhere either.
+// What Approve does, one shape per kind of approval the owner keeps (playbook's ask rule): an extension accept, an extensions clone, an apps change, a grant's System Settings pane, a guard setting, an own account change or a root step, which the dashboard carries out itself, a Slack message, a ship of canary, a new Linear ticket, a delete, a schema, a budget, or a plain ask, whose words say what its poster does on Approve, for a decision no other shape fits (a production port, a work request from outside the chain, or a step only he can take, such as plugging in the Mac, where Approve means done and Deny means he can't). An ask labels its options in plain words (the plain-words skill), one line each: one option and deny for a yes or no, or 2 to 5 for lettered choices, A to E, then None of these (choicesOf); the card shows its text as the quoted block above them. A secret asks for a value instead of a yes, which goes straight to its sink and is kept nowhere. A reveal shows the owner a Keychain item's value on the owner's click instead, kept nowhere either.
 export const previewSchema = z.discriminatedUnion("type", [
   z.strictObject({
     approve: oneLine(LIMITS.line).optional(),
@@ -546,9 +705,11 @@ export const previewSchema = z.discriminatedUnion("type", [
   z.strictObject({ service: playgroundService, type: z.literal("reveal"), why: words }),
   acceptSchema,
   appsSchema,
+  cloneSchema,
   grantSchema,
   guardSchema,
   ownSchema,
+  rootSchema,
 ])
 
 const link = z
@@ -670,12 +831,13 @@ export type InboxAction = (typeof ACTIONS)[number]
 // What an answer holds: every action but Archive and Move back, which answer nothing, and Dismiss, which a waiting item records as clear.
 export type InboxChoice = Exclude<InboxAction, "archive" | "dismiss" | "unarchive">
 
-// ackedAt: when its poster closed it through bun run ask, so the sweep stops chasing it; accepted, listed, opened, owned and set: what the dashboard ran on an accept's, an apps change's, a grant's, an own card's and a guard setting's Approve gave; dismissedAt: when he dismissed the answered item or its poster closed it, which moves it to Done at once; noLink: why a go closed with no link; uploaded: how many files a Slack send shared into its channel and thread, so a retry shares none twice.
+// ackedAt: when its poster closed it through bun run ask, so the sweep stops chasing it; accepted, cloned, listed, opened, owned, rooted and set: what the dashboard ran on an accept's, a clone's, an apps change's, a grant's, an own card's, a root step's and a guard setting's Approve gave; dismissedAt: when he dismissed the answered item or its poster closed it, which moves it to Done at once; noLink: why a go closed with no link; uploaded: how many files a Slack send shared into its channel and thread, a draft's words going with them, so a retry shares none twice and its poster posts no words again.
 export type InboxAnswer = {
   accepted?: RunResult
   ackedAt?: string
   at: string
   choice: InboxChoice
+  cloned?: RunResult
   dismissed?: true
   dismissedAt?: string
   editedText?: string
@@ -688,6 +850,7 @@ export type InboxAnswer = {
   option?: number
   options?: number[]
   owned?: RunResult
+  rooted?: RunResult
   set?: RunResult
   uploaded?: number
   // where the owner answered when not on the card: whatsapp, his reply naming the card's id there (whatsapp-answer.ts)
@@ -987,10 +1150,12 @@ function answerOf(
     }
     if (
       (item.preview.type === "apps" ||
+        item.preview.type === "clone" ||
         item.preview.type === "grant" ||
         item.preview.type === "guard" ||
         item.preview.type === "own" ||
-        item.preview.type === "reveal") &&
+        item.preview.type === "reveal" ||
+        item.preview.type === "root") &&
       action === "edit"
     ) {
       return { message: "This decision is approved or denied as it reads" }
@@ -1103,16 +1268,28 @@ export function answerPayload(
     case "approve":
     case "edit":
       // a step the dashboard ran on Approve leaves only its close, and a grant's recheck once its pane opened (asks.md)
-      if (answer.accepted || answer.listed || answer.opened || answer.owned || answer.set) {
+      if (
+        answer.accepted ||
+        answer.cloned ||
+        answer.listed ||
+        answer.opened ||
+        answer.owned ||
+        answer.rooted ||
+        answer.set
+      ) {
         const ran = answer.accepted
           ? { accepted: answer.accepted }
-          : answer.listed
-            ? { listed: answer.listed }
-            : answer.owned
-              ? { owned: answer.owned }
-              : answer.set
-                ? { set: answer.set }
-                : { opened: answer.opened! }
+          : answer.cloned
+            ? { cloned: answer.cloned }
+            : answer.listed
+              ? { listed: answer.listed }
+              : answer.owned
+                ? { owned: answer.owned }
+                : answer.rooted
+                  ? { rooted: answer.rooted }
+                  : answer.set
+                    ? { set: answer.set }
+                    : { opened: answer.opened! }
         return {
           ...head,
           ...comment,
@@ -1151,6 +1328,11 @@ export function answerPayload(
     case "discard":
       return { ...head, ...comment, close: read, go: false, next: "close", verb: "discard" }
     case "send":
+      // a Slack draft's words already went with its files, so the poster only closes it
+      if (answer.uploaded && wordsWithFiles(item, answer) && "link" in item.preview) {
+        const close = `${ask} ack ${tag} --link "${item.preview.link}"`
+        return { ...head, ...comment, close, go: true, next: "close", verb: "send" }
+      }
       return { ...head, ...comment, ...text, close: ack, go: true, next: "carry-out", verb: "send" }
     case "draft": {
       const converter = slack("slack.linkConverter")
@@ -1168,7 +1350,7 @@ export function answerPayload(
   }
 }
 
-// Pure: what the owner's Dismiss on an answered card, or Done or Dismiss on an update, tells its poster: drop it. A card its poster has not closed names how to close it (a go with why it has no link, a reply by its ack, anything else by reading it), and an update, which the owner closed, takes no more edits.
+// Pure: what the owner's Dismiss on an answered card, or Done or Dismiss on an update, tells its poster: drop it. A card its poster has not closed names how to close it (a go with why it has no link, a reply by its ack, anything else by reading it), and an update he sent to Done comes back with its poster's next edit that changes its words, while one he dismissed takes no more.
 export function closedPayload(
   item: InboxItem,
   verb: "dismiss" | "done",
@@ -1228,10 +1410,10 @@ async function tellClosed(
   return send(
     db,
     item,
-    {
+    () => ({
       relay: answerLine({ ...payload, relay: { for: item.from, why: "poster-ended" } }),
       text: answerLine(payload),
-    },
+    }),
     { ...telling, dispatcher: item.kind === "update" ? undefined : telling.dispatcher },
   )
 }
@@ -1242,17 +1424,20 @@ type Telling = Omit<Sending, "upload">
 export const answerLine = (payload: AnswerPayload): string =>
   `${ANSWER_LEAD} ${JSON.stringify(answerPayloadSchema.parse(payload))}`
 
-// Pure: the line for the poster and, once it has ended, the same line for the dispatcher with relay set, which reads the item's preview with playground ask get.
-const textsOf = (
-  item: InboxItem,
-  answer: InboxAnswer | InboxProvided,
-): { relay: string; text: string } => {
-  const payload = answerPayload(item, answer, askCli())
-  return {
-    relay: answerLine({ ...payload, relay: { for: item.from, why: "poster-ended" } }),
-    text: answerLine(payload),
+// Pure: the line for the poster and, once it has ended, the same line for the dispatcher with relay set, which reads the item's preview with playground ask get; built once send has shared any files, whose count a Slack draft's line reads (answerPayload).
+const textsOf =
+  (item: InboxItem, answer: InboxAnswer | InboxProvided) =>
+  (uploaded?: number): { relay: string; text: string } => {
+    const payload = answerPayload(
+      item,
+      uploaded === undefined || answer.choice === "provided" ? answer : { ...answer, uploaded },
+      askCli(),
+    )
+    return {
+      relay: answerLine({ ...payload, relay: { for: item.from, why: "poster-ended" } }),
+      text: answerLine(payload),
+    }
   }
-}
 
 // Pure: an answer that did not reach its poster, which asks him to retry it or dismiss it.
 export const deliveryFailed = (item: InboxItem): boolean =>
@@ -1306,10 +1491,19 @@ export function slackPlace(link: string | undefined): UploadPlace | null {
   return word === "thread" && thread && more.length === 0 ? { channel, thread } : null
 }
 
-// Pure: the files a go shares into Slack before its words reach the poster: a Slack draft's on Send, or a slack decision's on Approve or Edit, when its link names a Slack place and it has shared none yet; null for anything else, whose files stay on the card.
+// Pure: the words a Slack draft's Send posts with its files as their message, a mention or a URL in them resolved by dm upload: the owner's changed ones, else the draft's; none for any other answer.
+export function wordsWithFiles(
+  item: InboxItem,
+  answer: { choice?: string; editedText?: string },
+): string | undefined {
+  if (item.kind !== "draft" || answer.choice !== "send") return undefined
+  return answer.editedText ?? ("text" in item.preview ? item.preview.text : undefined)
+}
+
+// Pure: the files a go shares into Slack before its answer reaches the poster: a Slack draft's on Send, with its words as their message (wordsWithFiles), or a slack decision's on Approve or Edit, when its link names a Slack place and it has shared none yet; null for anything else, whose files stay on the card.
 export function filesToUpload(
   item: InboxItem,
-): { files: InboxAttachment[]; place: UploadPlace } | null {
+): { files: InboxAttachment[]; place: UploadPlace; text?: string } | null {
   const answer = item.answer
   if (!answer || !("choice" in answer) || ("uploaded" in answer && answer.uploaded !== undefined))
     return null
@@ -1323,7 +1517,9 @@ export function filesToUpload(
         (answer.choice === "approve" || answer.choice === "edit")
   if (!go || !("attachments" in preview) || !preview.attachments?.length) return null
   const place = slackPlace("link" in preview ? preview.link : undefined)
-  return place && { files: preview.attachments, place }
+  if (!place) return null
+  const text = wordsWithFiles(item, answer)
+  return { files: preview.attachments, place, ...(text && { text }) }
 }
 
 // Pure: when an open item or an update is scheduled to ask again, while that time is still ahead; null once it is awake, and on anything not scheduled.
@@ -1358,7 +1554,7 @@ const UNREAD = (item: InboxItem, now: Date): boolean =>
 export const inboxCount = (items: InboxItem[], now = new Date()): number =>
   items.filter((item) => NEEDS_YOU(item, now) || UNREAD(item, now)).length
 
-// Pure: the ids of the items that came in since focus began, while it stands, which the Inbox holds quiet; an alert update stays loud, since the 5% battery alert or a failed ship cannot wait for focus to end.
+// Pure: the ids of the items that came in since focus began, while it stands, which the Inbox holds quiet; an alert update stays loud, since an alert such as a failed ship cannot wait for focus to end.
 export const quietIds = (items: InboxItem[], focus: { since: string } | null): string[] =>
   focus === null
     ? []
@@ -1418,8 +1614,13 @@ export async function postItem(
   if (!parsed.success) {
     return { code: "VALIDATION_ERROR", message: zodMessage(parsed.error), ok: false }
   }
-  const refused = ownRefused(parsed.data, settingsData) ?? voiceRefused(parsed.data, settingsData)
+  const refused =
+    ownRefused(parsed.data, settingsData) ??
+    cloneRefused(parsed.data, settingsData) ??
+    voiceRefused(parsed.data, settingsData)
   if (refused) return refused
+  const data = await rootScripts(parsed.data)
+  if ("ok" in data) return data
   if (threadId !== undefined) {
     const [found] = await db.select({ id: thread.id }).from(thread).where(eq(thread.id, threadId))
     if (!found) return { code: "NOT_FOUND", message: `no thread ${threadId}`, ok: false }
@@ -1427,14 +1628,48 @@ export async function postItem(
   const [row] = await db
     .insert(inboxItem)
     .values({
-      ...parsed.data,
+      ...data,
       createdAt: now,
-      status: parsed.data.kind === "update" ? "done" : "open",
+      status: data.kind === "update" ? "done" : "open",
       threadId,
       updatedAt: now,
     })
     .returning()
   return { item: toItem(row as Row), ok: true }
+}
+
+// An install card's scripts as this checkout holds them, and the Dashboard's CA as this machine holds it, when it is posted or edited, so the card shows the very bytes its Approve installs: a poster's own list or CA must match them, and a step card lists neither.
+const rootScripts = async (
+  input: z.infer<typeof inboxInputSchema>,
+): Promise<z.infer<typeof inboxInputSchema> | Refused> => {
+  if (input.kind !== "decision" || input.preview.type !== "root") return input
+  const { preview } = input
+  const refuse = (message: string): Refused => ({ code: "VALIDATION_ERROR", message, ok: false })
+  if (preview.machine) {
+    if (!org.cluster.peers.some((peer) => peer.name === preview.machine))
+      return refuse(`${preview.machine} is not a machine this Dashboard reaches`)
+    // its install reads the password from this item, so a name no item can take is refused here, not at Approve
+    try {
+      peerSecret(preview.machine)
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error))
+    }
+  }
+  if (preview.step !== "install")
+    return preview.scripts || preview.ca
+      ? refuse("A root step's card lists no scripts and no CA")
+      : input
+  const scripts = await repoScripts()
+  if (preview.scripts && !isDeepStrictEqual(preview.scripts, scripts))
+    return refuse("An install card's scripts are this checkout's; post it with none to fill them")
+  if (preview.machine)
+    return preview.ca
+      ? refuse("An install card for another machine keeps no CA")
+      : { ...input, preview: { ...preview, scripts } }
+  const pin = await caPin()
+  if (preview.ca && preview.ca.sha256 !== pin)
+    return refuse("An install card's CA is this machine's; post it with none to fill it")
+  return { ...input, preview: { ...preview, ...(pin && { ca: { sha256: pin } }), scripts } }
 }
 
 // Pure: under owner.voice's singular, the refusal for a draft's or a slack decision's first we, us, our, ours or ourselves outside someone else's words; none under any other voice.
@@ -1484,7 +1719,19 @@ const ownRefused = (
   return message ? { code: "VALIDATION_ERROR", message, ok: false } : undefined
 }
 
-// Pure: an item its poster can no longer edit: done or dismissed by the owner, settled, resolved, or closed by its poster's ack.
+// A clone card refused as it is posted or edited, so the card never offers an Approve that cannot run: no data folder to read, a folder that is not its scope's there, or one this machine's extensions already hold.
+const cloneRefused = (
+  input: z.infer<typeof inboxInputSchema>,
+  data?: string,
+): Refused | undefined => {
+  if (input.kind !== "decision" || input.preview.type !== "clone") return
+  const message = data
+    ? cloneHeld(data, input.preview)
+    : "This dashboard cannot read its extensions, so a clone card is refused"
+  return message ? { code: "VALIDATION_ERROR", message, ok: false } : undefined
+}
+
+// Pure: an item its poster can no longer edit: done or dismissed by the owner, settled, resolved, or closed by its poster's ack; editItem still takes an update the owner sent to Done (ownerDone).
 const closed = (item: InboxItem): boolean => {
   const answer = item.answer
   if (answer === null) return false
@@ -1493,20 +1740,48 @@ const closed = (item: InboxItem): boolean => {
   return "choice" in answer && (answer.choice === "resolved" || answer.choice === "settled")
 }
 
-// The poster replaces its own item's title and preview in place (`bun run ask edit`), checked as postItem checks a new one, so one card carries a progress to its end: an update until the owner presses Done or Dismiss or its poster resolves it, and an ask until it closes, answered, archived, put away with Later or replied to alike, an edit to one he replied to taking the reply off so it waits on him again. Another session's item, a change of kind and a closed item are refused.
+// Pure: an update the owner sent to Done with his Done, not his Dismiss, its poster's resolve or ack, which an edit that changes its words brings back to the list unread, so a thread keeps one card (PG-1926).
+const ownerDone = (item: InboxItem): boolean => {
+  const answer = item.answer
+  if (item.kind !== "update" || answer === null) return false
+  if (!("dismissedAt" in answer && answer.dismissedAt)) return false
+  if ("dismissed" in answer && answer.dismissed) return false
+  if ("ackedAt" in answer && answer.ackedAt) return false
+  return !("choice" in answer)
+}
+
+// Pure: an update a poster may still edit, its twin postOrEdit takes, a closed one except the owner's Done (PG-2720).
+const stillEditable = (item: InboxItem): boolean => !closed(item) || ownerDone(item)
+
+// Pure: what a card says, its files by name alone, since bun run ask copies a file under a new id on every edit.
+const wordsOf = ({ preview, title }: { preview: unknown; title: string }): unknown =>
+  JSON.parse(
+    JSON.stringify({ preview, title }, (key, value) =>
+      key === "attachments" && Array.isArray(value)
+        ? value.map(({ id: _, ...rest }: InboxAttachment) => rest)
+        : value,
+    ),
+  )
+
+// The poster replaces its own item's title and preview in place (`bun run ask edit`), checked as postItem checks a new one, so one card carries a progress to its end: an update until the owner presses Dismiss or its poster resolves it, an edit that changes its words after his Done bringing it back to the list unread (reopened), and an ask until it closes, answered, archived, put away with Later or replied to alike, an edit to one he replied to taking the reply off so it waits on him again. Another session's item, a change of kind and a closed item are refused.
 export async function editItem(
   db: Database,
   key: string,
   input: unknown,
   now = new Date(),
   settingsData?: string,
-): Promise<{ item: InboxItem; ok: true } | Refused> {
+): Promise<{ item: InboxItem; ok: true; reopened?: true } | Refused> {
   const parsed = inboxInputSchema.safeParse(input)
   if (!parsed.success) {
     return { code: "VALIDATION_ERROR", message: zodMessage(parsed.error), ok: false }
   }
-  const refused = ownRefused(parsed.data, settingsData) ?? voiceRefused(parsed.data, settingsData)
+  const refused =
+    ownRefused(parsed.data, settingsData) ??
+    cloneRefused(parsed.data, settingsData) ??
+    voiceRefused(parsed.data, settingsData)
   if (refused) return refused
+  const data = await rootScripts(parsed.data)
+  if ("ok" in data) return data
   const item = await getItem(db, key)
   if (!item) return NOT_FOUND
   if (parsed.data.from !== item.from) {
@@ -1515,7 +1790,8 @@ export async function editItem(
   if (parsed.data.kind !== item.kind) {
     return { code: "VALIDATION_ERROR", message: `This item is a ${item.kind}`, ok: false }
   }
-  if (closed(item)) {
+  const reopens = ownerDone(item) && !isDeepStrictEqual(wordsOf(data), wordsOf(item))
+  if (closed(item) && !reopens) {
     return {
       code: "CONFLICT",
       message: "This item is closed: done, dismissed, settled, resolved or closed by its poster",
@@ -1527,8 +1803,12 @@ export async function editItem(
     .set({
       // an edit answers his reply, so the card waits on him again
       ...(choiceOf(item) === "replied" && { answer: null }),
-      preview: parsed.data.preview,
-      title: parsed.data.title,
+      ...(reopens && {
+        answer: sql`nullif(${inboxItem.answer} - 'dismissedAt', '{}'::jsonb)`,
+        readAt: null,
+      }),
+      preview: data.preview,
+      title: data.title,
       // past the stamp he read, even inside its millisecond, so an answer whose seen names the old words is refused (answerItem)
       updatedAt: sql`greatest(${now.toISOString()}::timestamptz, ${inboxItem.updatedAt} + interval '1 millisecond')`,
       version: sql`${inboxItem.version} + 1`,
@@ -1538,7 +1818,57 @@ export async function editItem(
   if (!row) {
     return { code: "CONFLICT", message: "This item changed while editing it; try again", ok: false }
   }
-  return { item: toItem(row), ok: true }
+  return { item: toItem(row), ok: true, ...(reopens && { reopened: true as const }) }
+}
+
+// bun run ask new: an update whose poster already has one by that title in the same thread, or none, that it can still edit (its twin) edits that card on editItem's path, or leaves it as it is when the words match, so a repeat never makes a second card; anything else posts. postItem stays one card a call, since Yard's pendingCard gives two pending posts in one channel one title (api/hono/src/lib/yard/inbound.ts:127).
+export async function postOrEdit(
+  db: Database,
+  input: unknown,
+  threadId?: string,
+  now = new Date(),
+  settingsData?: string,
+): Promise<
+  { edited?: true; item: InboxItem; ok: true; reopened?: true; unchanged?: true } | Refused
+> {
+  const parsed = inboxInputSchema.safeParse(input)
+  if (!parsed.success || parsed.data.kind !== "update")
+    return postItem(db, input, threadId, now, settingsData)
+  const rows = await db
+    .select()
+    .from(inboxItem)
+    .where(
+      and(
+        eq(inboxItem.kind, "update"),
+        eq(inboxItem.from, parsed.data.from),
+        eq(inboxItem.title, parsed.data.title),
+        threadId === undefined ? isNull(inboxItem.threadId) : eq(inboxItem.threadId, threadId),
+      ),
+    )
+    .orderBy(desc(inboxItem.createdAt))
+  const twin = rows.map(toItem).find((item) => !closed(item) || ownerDone(item))
+  if (!twin) return postItem(db, input, threadId, now, settingsData)
+  if (isDeepStrictEqual(wordsOf(parsed.data), wordsOf(twin)))
+    return { item: twin, ok: true, unchanged: true }
+  const edited = await editItem(db, twin.id, input, now, settingsData)
+  return edited.ok ? { ...edited, edited: true } : edited
+}
+
+// Pure: the dispatcher's one open in-flight card among items newest first: its newest item it may still edit that holds a progress block, or null on none. Another poster's card, one posted before the rule, is never it, so it neither blocks the dispatcher's card nor is named in a refusal (PG-2720); nor is the daily ledger card, which posts beside it.
+export function inflightOf(items: InboxItem[], ledger: string): InflightCard {
+  const card = items.find(
+    (item) =>
+      isDispatcher(item.from) &&
+      stillEditable(item) &&
+      holdsProgressBlock(item.preview) &&
+      !isLedgerTitle(item.title, ledger),
+  )
+  return card ? { ref: card.ref, title: card.title } : null
+}
+
+export async function inflightCard(db: Database, ledger: string): Promise<InflightCard> {
+  const rows = await db.select().from(inboxItem).orderBy(desc(inboxItem.createdAt))
+  return inflightOf(rows.map(toItem), ledger)
 }
 
 // By its id, or by its tag (#i41, i41), as a person or an agent would name it.
@@ -1597,6 +1927,7 @@ export async function listItems(
         sql`${inboxItem.answer} ->> 'choice' <> 'settled'`,
         sql`${inboxItem.answer} ->> 'ackedAt' is null`,
         sql`${inboxItem.answer} ->> 'dismissedAt' is null`,
+        awakeSql,
       ),
       and(
         eq(inboxItem.kind, "update"),
@@ -1629,6 +1960,8 @@ export async function listItems(
       .where(
         or(
           and(or(eq(inboxItem.status, "open"), eq(inboxItem.kind, "update")), sql`not ${awakeSql}`),
+          // an answered card he archived from Done (PG-1909)
+          sql`(${inboxItem.answer} ->> 'archivedAt' is not null and ${inboxItem.answer} ->> 'dismissedAt' is null)`,
           // a set-aside item he dismissed has gone to Done, which keeps a week as every settled item does
           and(eq(inboxItem.status, "cleared"), sql`${inboxItem.answer} ->> 'dismissedAt' is null`),
         ),
@@ -1660,11 +1993,13 @@ export async function answerItem(
     accept,
     actor,
     apps,
+    clone,
     deliver,
     dispatcher,
     grant,
     now = new Date(),
     reveal,
+    root,
     settingsData,
     upload,
     via,
@@ -1673,11 +2008,13 @@ export async function answerItem(
     accept?: ExtRun
     actor: ActivityActor
     apps?: OwnerApps
+    clone?: CloneRun
     deliver?: Deliver
     dispatcher?: string
     grant?: ArgvRun
     now?: Date
     reveal?: KeychainRead
+    root?: ArgvRun
     settingsData?: string
     via?: InboxAnswer["via"]
   } & Pick<Sending, "upload" | "wait">,
@@ -1691,16 +2028,19 @@ export async function answerItem(
       ok: false,
     }
   }
-  // a guard setting or an own flag is written as the card he read shows it, so its Approve names that reading
+  // a guard setting, an own flag or a root step runs as the card he read shows it, so its Approve names that reading
   if (
     input.action === "approve" &&
     input.seen === undefined &&
     current.kind === "decision" &&
-    (current.preview.type === "guard" || current.preview.type === "own")
+    (current.preview.type === "guard" ||
+      current.preview.type === "own" ||
+      current.preview.type === "root")
   ) {
     return {
       code: "VALIDATION_ERROR",
-      message: "A guard setting or an own card is approved from the card that shows it, with seen",
+      message:
+        "A guard setting, an own card or a root step is approved from the card that shows it, with seen",
       ok: false,
     }
   }
@@ -1722,14 +2062,16 @@ export async function answerItem(
     input.action === "dismiss"
       ? { ...checked.answer, at, dismissed: true, dismissedAt: at }
       : { ...checked.answer, at, ...(via && { via }) }
-  // an accept's, an apps change's, a grant's, a guard setting's or an own account change's Approve runs its step, so one with nothing to run it is refused before it is recorded
+  // an accept's, a clone's, an apps change's, a grant's, a guard setting's, an own account change's or a root step's Approve runs its step, so one with nothing to run it is refused before it is recorded
   const step =
     current.kind === "decision" && answer.choice === "approve"
       ? stepOf(current.preview, current.ref, {
           accept,
           actor: "id" in actor ? actor.id : actor.label,
           apps,
+          clone,
           grant,
+          root,
           settingsData,
         })
       : undefined
@@ -1754,47 +2096,70 @@ export async function answerItem(
     )
     .returning()
   if (!row) return { code: "CONFLICT", message: "This item is already answered", ok: false }
-  let answered = toItem(row)
-  let given: Omit<InboxAnswer, "at"> = checked.answer
-  // run once, after the claim above, so a double click or a second tab runs it once
-  if (step) {
-    const result = await step.run().catch((error: unknown) => ({
-      exitCode: 1,
-      line: runResult({
-        code: 1,
-        err: error instanceof Error ? error.message : String(error),
-        out: "",
-      }).line,
-    }))
-    given = { ...given, [step.key]: result }
-    // merged key by key, so a poster's read that landed while it ran keeps its close
-    const [recorded] = await db
-      .update(inboxItem)
-      .set({
-        answer: sql`${inboxItem.answer} || (${JSON.stringify({ [step.key]: result })}::text)::jsonb`,
-        version: sql`${inboxItem.version} + 1`,
-      })
-      .where(eq(inboxItem.id, id))
-      .returning()
-    if (recorded) answered = toItem(recorded)
+  const carryOut = async (): Promise<{ item: InboxItem; ok: true }> => {
+    let answered = toItem(row)
+    let given: Omit<InboxAnswer, "at"> = checked.answer
+    // run once, after the claim above, so a double click or a second tab runs it once
+    if (step) {
+      const result = await step.run().catch((error: unknown) => ({
+        exitCode: 1,
+        line: runResult({
+          code: 1,
+          err: error instanceof Error ? error.message : String(error),
+          out: "",
+        }).line,
+      }))
+      given = { ...given, [step.key]: result }
+      // merged key by key, so a poster's read that landed while it ran keeps its close
+      const [recorded] = await db
+        .update(inboxItem)
+        .set({
+          answer: sql`${inboxItem.answer} || (${JSON.stringify({ [step.key]: result })}::text)::jsonb`,
+          version: sql`${inboxItem.version} + 1`,
+        })
+        .where(eq(inboxItem.id, id))
+        .returning()
+      if (recorded) answered = toItem(recorded)
+    }
+    if (!deliver) return { item: answered, ok: true }
+    return {
+      item: await send(db, answered, textsOf(answered, { ...given, at: answer.at }), {
+        actor,
+        deliver,
+        dispatcher,
+        now,
+        upload,
+        wait,
+      }),
+      ok: true,
+    }
   }
-  if (!deliver) return { item: answered, ok: true }
-  return {
-    item: await send(db, answered, textsOf(answered, { ...given, at: answer.at }), {
-      actor,
-      deliver,
-      dispatcher,
-      now,
-      upload,
-      wait,
-    }),
-    ok: true,
+  // a root step waits on the password window, longer than a request stays open (Bun.serve's idleTimeout), so it runs after the answer returns, the card In progress until its result lands and its poster is told
+  if (step && "background" in step) {
+    void carryOut().catch((error: unknown) => console.error("root step:", error))
+    return { item: toItem(row), ok: true }
   }
+  return carryOut()
 }
 
 // Pure: whether an item still waits on his answer: an open decision or draft he has not replied to, archived or put off included.
 const waits = (item: InboxItem): boolean =>
   item.kind !== "update" && item.status === "open" && choiceOf(item) !== "replied"
+
+// Pure: whether its poster still carries an answer out, the web's itemState `sending`, which it shows In progress: a secret its sink has not taken, or a go with no close (ackedAt, link or noLink), no step the Dashboard ran itself and no delivery from before acks were stamped (PG-1909).
+const carrying = (item: InboxItem): boolean => {
+  const answer = item.answer
+  if (item.kind === "update" || !answer || !("choice" in answer)) return false
+  if (answer.choice === "provided") return !("results" in answer && answer.results)
+  if (!isGo(answer.choice)) return false
+  const { accepted, ackedAt, cloned, link, listed, noLink, opened, owned, rooted, set } =
+    answer as InboxAnswer
+  if (accepted ?? cloned ?? listed ?? owned ?? rooted ?? set) return false
+  if (opened && opened.exitCode !== 0) return false
+  const unstamped =
+    item.delivery?.status === "delivered" && Date.parse(answer.at) < ACKS_STAMPED_FROM.getTime()
+  return !(ackedAt || link || noLink || unstamped)
+}
 
 // the change a write is made against, so a double click or a second tab cannot write it twice
 const unchanged = (current: InboxItem) =>
@@ -1810,24 +2175,33 @@ const CHANGED: Refused = {
   ok: false,
 }
 
-// Archive: what still waits on him, or an update in his list, leaves the list and its count, unanswered, and its poster is told nothing, so it keeps waiting; Move back, Later or Dismiss takes it off the Archive shelf.
+// Archive: what still waits on him, or an update in his list, leaves the list and its count, unanswered, and its poster is told nothing, so it keeps waiting; a card on Done he has not dismissed leaves Done the same way, its dismissedAt cleared (PG-1909); Move back, Later or Dismiss takes it off the Archive shelf.
 async function archive(
   db: Database,
   current: InboxItem,
   now: Date,
 ): Promise<{ item: InboxItem; ok: true } | Refused> {
-  const dismissed = current.answer !== null && "dismissedAt" in current.answer
-  if ((!waits(current) && current.kind !== "update") || dismissed || archivedAt(current)) {
+  const answer = current.answer
+  const dismissed = answer !== null && "dismissed" in answer && answer.dismissed === true
+  // a card on Done archives too: one he sent there, or one answered that its poster no longer carries out, never one In progress, one whose send failed or a set-aside one, which the Archive shelf already holds (PG-1909)
+  const done =
+    current.status !== "cleared" &&
+    current.delivery?.status !== "failed" &&
+    answer !== null &&
+    ("dismissedAt" in answer ||
+      (current.status !== "open" && "choice" in answer && !carrying(current)))
+  if ((!waits(current) && current.kind !== "update" && !done) || dismissed || archivedAt(current)) {
     return {
       code: "CONFLICT",
-      message: "Only an item that waits on you, or an update in your list, is archived",
+      message:
+        "Only an item that waits on you, an update in your list, or a card on Done is archived",
       ok: false,
     }
   }
   const [row] = await db
     .update(inboxItem)
     .set({
-      answer: sql`(coalesce(${inboxItem.answer}, '{}'::jsonb) - 'snoozedUntil') || jsonb_build_object('archivedAt', ${now.toISOString()}::text)`,
+      answer: sql`(coalesce(${inboxItem.answer}, '{}'::jsonb) - 'snoozedUntil' - 'dismissedAt') || jsonb_build_object('archivedAt', ${now.toISOString()}::text)`,
       updatedAt: now,
       version: sql`${inboxItem.version} + 1`,
     })
@@ -1836,7 +2210,7 @@ async function archive(
   return row ? { item: toItem(row), ok: true } : CHANGED
 }
 
-// The step an Approve runs, by the decision's kind, and the answer key its result is kept under: an accept's `ext accept`, an apps change's write of the owner's list, a grant's System Settings pane, a guard setting's write at its scope, an own account change's write of usage.accounts; undefined for a decision whose poster carries it out, and a refusal when this dashboard has nothing to run it with.
+// The step an Approve runs, by the decision's kind, and the answer key its result is kept under: an accept's `ext accept`, a clone's `ext init` and `ext add`, an apps change's write of the owner's list, a grant's System Settings pane, a guard setting's write at its scope, an own account change's write of usage.accounts, a root step's pkexec, run in the background; undefined for a decision whose poster carries it out, and a refusal when this dashboard has nothing to run it with.
 function stepOf(
   preview: InboxPreview,
   ref: number,
@@ -1844,22 +2218,53 @@ function stepOf(
     accept,
     actor,
     apps,
+    clone,
     grant,
+    root,
     settingsData,
   }: {
     accept?: ExtRun
     actor: string
     apps?: OwnerApps
+    clone?: CloneRun
     grant?: ArgvRun
+    root?: ArgvRun
     settingsData?: string
   },
 ):
-  | { key: "accepted" | "listed" | "opened" | "owned" | "set"; run: () => Promise<RunResult> }
+  | {
+      background?: true
+      key: "accepted" | "cloned" | "listed" | "opened" | "owned" | "rooted" | "set"
+      run: () => Promise<RunResult>
+    }
   | { refusal: string }
   | undefined {
   if (preview.type === "accept") {
     if (!accept) return { refusal: "This dashboard cannot run an accept" }
     return { key: "accepted", run: () => acceptAll(accept, preview, ref) }
+  }
+  // checked again as it runs, since the stored card or the machine may have changed since it was posted
+  if (preview.type === "clone") {
+    const parsed = cloneSchema.safeParse(preview)
+    if (!parsed.success) return { refusal: zodMessage(parsed.error) }
+    if (!settingsData) return { refusal: "This dashboard cannot read its extensions" }
+    const held = cloneHeld(settingsData, parsed.data)
+    if (held) return { refusal: held }
+    if (!clone) return { refusal: "This dashboard clones nothing: it shows test data" }
+    return {
+      key: "cloned",
+      run: async () => {
+        const cloned = await cloneAll(clone.run, parsed.data)
+        if (cloned.exitCode !== 0) return cloned
+        const seeded = seedLists(settingsData, clone.lists, ref, actor)
+        return seeded.exitCode === 0
+          ? { exitCode: 0, line: `${cloned.line}; ${seeded.line}` }
+          : {
+              exitCode: seeded.exitCode,
+              line: `cloned ${cloned.line}; seeding the guards' lists failed: ${seeded.line}`,
+            }
+      },
+    }
   }
   if (preview.type === "apps") {
     if (!apps)
@@ -1909,7 +2314,298 @@ function stepOf(
     if (!settingsData) return { refusal: "This dashboard cannot write usage.accounts" }
     return { key: "owned", run: async () => ownWrite(settingsData, preview, ref, actor) }
   }
+  if (preview.type === "root") {
+    if (!root)
+      return {
+        refusal: "This dashboard runs nothing as root: it shows test data, or runs off Linux",
+      }
+    return { background: true, key: "rooted", run: () => rootRun(root, preview) }
+  }
   return undefined
+}
+
+// pkexec's own codes, 126 when the owner closes its window and 127 when no window could ask (onboard/fix.ts's proxy step), and 143, runArgv's kill at ROOT_TIMEOUT_MS
+const ROOT_EXITS: Record<number, string> = {
+  126: "you closed the password window, so nothing ran as root",
+  127: "your computer could not ask for your password, so nothing ran as root",
+  143: `the password window got no answer in ${ROOT_TIMEOUT_MS / 60_000} minutes, so nothing ran as root`,
+}
+
+// ssh's and pkexec's codes on a peer: 126 and 127 when its polkit rule did not answer yes, so pkexec found no one to ask, and 255 when ssh could not connect
+const PEER_EXITS: Record<number, string> = {
+  126: "that machine's rule did not let it run, so nothing ran as root: approve a new install card for it",
+  127: "that machine's rule did not let it run, so nothing ran as root: approve a new install card for it",
+  143: `that machine gave no answer in ${ROOT_TIMEOUT_MS / 60_000} minutes, so nothing ran as root`,
+  255: "ssh could not reach that machine, so nothing ran as root",
+}
+
+// A root card's seams: the machines org.cluster names with their ssh key, the secret store item an install reads its password from, the data folder this machine's record sits in (dataDir() when unset), and the peers' clone path (cloneOf, read from git when unset), whose record CLI a peer's add runs; a test passes its own.
+export type PeerSeams = {
+  clone?: string | null
+  data?: string
+  key?: string
+  peers: readonly Peer[]
+  secret: (service: string) => { read: () => Promise<string | null>; remove: () => Promise<void> }
+}
+
+const PEER_SEAMS: PeerSeams = {
+  key: org.cluster.key,
+  peers: org.cluster.peers,
+  secret: (service) => keychainItem(service),
+}
+
+// The peers' clone: this checkout's main checkout as a ~/ path (cloneOf), the place peer-sync keeps each peer's clone, or null when git cannot say or the path is not plain under home.
+const peerClone = async (run: ArgvRun): Promise<string | null> => {
+  const root = checkoutRoot()
+  const git =
+    root &&
+    (await run(["git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir"]))
+  return git && git.code === 0
+    ? cloneOf(dirname(git.out.trim()), process.env.HOME || homedir())
+    : null
+}
+
+// What a root card that ran put on its machine goes into that machine's record, here or on the peer through its one ssh; a record that fails is logged and never fails the card, since the next daily check names the path.
+async function recordRoot(
+  run: ArgvRun,
+  preview: InboxRoot,
+  seams: PeerSeams,
+  peer?: Peer,
+): Promise<void> {
+  const entries = rootEntries(preview.step, {
+    ca: !peer && !!preview.ca,
+    now: new Date(),
+    peer: !!peer,
+  })
+  try {
+    if (!peer) {
+      await addEntries(seams.data ?? dataDir(), entries)
+      return
+    }
+    // read here, not at import, since it asks git where the main checkout is
+    const clone = seams.clone === undefined ? await peerClone(run) : seams.clone
+    if (!clone) throw new Error("this checkout is not a plain path under home, so no peer clone")
+    const ran = await run(
+      peerRecordArgv(seams.key, peer.target, clone, "add"),
+      JSON.stringify(entries),
+    )
+    if (ran.code !== 0) throw new Error((ran.err || ran.out).trim() || `exit ${ran.code}`)
+  } catch (error) {
+    console.error(
+      `inbox: ${peer ? `${peer.name}'s` : "this machine's"} record of its root ${preview.step} failed, so its next check names those paths: ${(error as Error).message}`,
+    )
+  }
+}
+
+// Deletes a peer's password item, then reads it again, so the line says only what is true.
+async function forgetPassword(
+  stored: ReturnType<PeerSeams["secret"]>,
+  service: string,
+): Promise<{ gone: boolean; line: string }> {
+  await stored.remove().catch(() => undefined)
+  const gone = (await stored.read().catch(() => null)) === null
+  return {
+    gone,
+    line: gone ? `deleted ${service}` : `could not delete ${service}: remove it by hand`,
+  }
+}
+
+export const ROOT_LOST_LINE =
+  "the Dashboard restarted while it ran, so its result is unknown: check it before you approve it again"
+
+// A peer install a restart cut off never reached its own delete, so its password may still be kept: delete it now, and say so on the card.
+async function forgetLostPassword(
+  db: Database,
+  item: InboxItem,
+  secret: PeerSeams["secret"],
+  now: Date,
+): Promise<InboxItem> {
+  const preview = item.preview as InboxPreview
+  if (preview.type !== "root" || !preview.machine || preview.step !== "install") return item
+  let service: string
+  try {
+    service = peerSecret(preview.machine)
+  } catch {
+    return item
+  }
+  const forgot = await forgetPassword(secret(service), service)
+  const rooted: RunResult = { exitCode: 1, line: `${ROOT_LOST_LINE}; ${forgot.line}` }
+  console.log(`inbox: ${preview.machine}'s install was cut off by a restart; ${forgot.line}`)
+  const [row] = await db
+    .update(inboxItem)
+    .set({
+      answer: sql`${inboxItem.answer} || (${JSON.stringify({ rooted })}::text)::jsonb`,
+      updatedAt: now,
+      version: sql`${inboxItem.version} + 1`,
+    })
+    .where(eq(inboxItem.id, item.id))
+    .returning()
+  return row ? toItem(row) : item
+}
+
+// Run once at API start: ends each approved root card with no result answered before this process started, as a failed rooted that says so, then tells its poster as its own run would have; only the process that claimed a card runs it, so a restart lost each one.
+export async function endLostRoots(
+  db: Database,
+  now: Date,
+  telling?: Omit<Sending, "now">,
+  secret: PeerSeams["secret"] = PEER_SEAMS.secret,
+): Promise<InboxItem[]> {
+  const cutoff = now.toISOString()
+  const rooted: RunResult = { exitCode: 1, line: ROOT_LOST_LINE }
+  const rows = await db
+    .update(inboxItem)
+    .set({
+      answer: sql`${inboxItem.answer} || (${JSON.stringify({ rooted })}::text)::jsonb`,
+      updatedAt: now,
+      version: sql`${inboxItem.version} + 1`,
+    })
+    .where(
+      and(
+        eq(inboxItem.kind, "decision"),
+        sql`${inboxItem.preview} ->> 'type' = 'root'`,
+        sql`${inboxItem.answer} ->> 'choice' = 'approve'`,
+        sql`${inboxItem.answer} -> 'rooted' is null`,
+        sql`(${inboxItem.answer} ->> 'at')::timestamptz < ${cutoff}::timestamptz`,
+      ),
+    )
+    .returning()
+  const ended: InboxItem[] = []
+  // each card on its own, so a delete whose write throws leaves the later cut-off installs' passwords deleted
+  for (const item of rows.map(toItem)) {
+    try {
+      ended.push(await forgetLostPassword(db, item, secret, now))
+    } catch (error) {
+      console.error(`inbox: deleting #i${item.ref}'s cut-off install password failed:`, error)
+      ended.push(item)
+    }
+  }
+  if (!telling) return ended
+  const told: InboxItem[] = []
+  // each card on its own, so a send that throws (a database write) leaves the other posters told
+  for (const item of ended) {
+    try {
+      told.push(
+        await send(db, item, textsOf(item, item.answer as InboxAnswer), { ...telling, now }),
+      )
+    } catch (error) {
+      console.error(
+        `inbox: telling #i${item.ref}'s poster its root step was cut off failed:`,
+        error,
+      )
+      told.push(item)
+    }
+  }
+  return told
+}
+
+// A root card's run: the install's fixed text with the card's frozen hashes, the CA's path this machine's and its hash the card's, or a listed step's installed script once its install is root's own and current; a guard that refuses runs nothing.
+export async function rootRun(
+  run: ArgvRun,
+  preview: InboxRoot,
+  installed: typeof installedRefusal = installedRefusal,
+  seams: PeerSeams = PEER_SEAMS,
+): Promise<RunResult> {
+  if (preview.machine) return peerRootRun(run, preview, preview.machine, seams)
+  let argv: string[]
+  try {
+    if (preview.step === "install")
+      argv = installArgv(
+        preview.scripts ?? [],
+        undefined,
+        preview.ca && { path: caFile(), sha256: preview.ca.sha256 },
+      )
+    else {
+      const refused = await installed(preview.step)
+      if (refused) return { exitCode: 1, line: refused }
+      argv = stepArgv(preview.step)
+    }
+  } catch (error) {
+    return { exitCode: 1, line: error instanceof Error ? error.message : String(error) }
+  }
+  const ran = await run(argv)
+  if (ran.code === 0) await recordRoot(run, preview, seams)
+  const exit = ROOT_EXITS[ran.code]
+  return exit ? { exitCode: ran.code, line: exit } : runResult(ran)
+}
+
+// A root card's run on a peer: an install copies the scripts as the ssh user, then runs PEER_INSTALL_TEXT through sudo with the password on stdin alone, and deletes the password's item on every path; a step reads its installed script there first, then runs it through pkexec, which the install's rule lets through.
+async function peerRootRun(
+  run: ArgvRun,
+  preview: InboxRoot,
+  machine: string,
+  seams: PeerSeams,
+): Promise<RunResult> {
+  const { key, peers, secret } = seams
+  const fail = (error: unknown): RunResult => ({
+    exitCode: 1,
+    line: error instanceof Error ? error.message : String(error),
+  })
+  const result = (ran: Awaited<ReturnType<ArgvRun>>): RunResult => {
+    const exit = PEER_EXITS[ran.code]
+    return exit ? { exitCode: ran.code, line: exit } : runResult(ran)
+  }
+  let peer: Peer
+  try {
+    peer = peerOf(machine, peers)
+  } catch (error) {
+    return fail(error)
+  }
+  if (preview.step !== "install") {
+    try {
+      const read = await run(peerReadArgv(peer, key, preview.step))
+      if (read.code === 255) return result(read)
+      const mine = (await repoScripts()).find((script) => script.name === preview.step)
+      const refused = peerInstalledRefusal(read.out, preview.step, mine?.sha256 ?? "")
+      if (refused) return { exitCode: 1, line: refused }
+      const stepped = await run(peerStepArgv(peer, key, preview.step))
+      if (stepped.code === 0) await recordRoot(run, preview, seams, peer)
+      return result(stepped)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+  let service: string
+  let argv: string[]
+  try {
+    service = peerSecret(machine)
+    argv = peerInstallArgv(peer, key, preview.scripts ?? [])
+  } catch (error) {
+    return fail(error)
+  }
+  const item = secret(service)
+  const password = await item.read().catch(() => null)
+  if (!password)
+    return {
+      exitCode: 1,
+      line: `${machine}'s admin password is not in ${service}: post a secret card for it, then approve again`,
+    }
+  const cut = (text: string) => text.split(password).join("…")
+  let ran: RunResult
+  try {
+    ran = { exitCode: 0, line: "" }
+    for (const copy of peerCopyArgv(peer, key)) {
+      const copied = await run(copy)
+      if (copied.code !== 0) {
+        ran = result({ ...copied, err: cut(copied.err), out: cut(copied.out) })
+        break
+      }
+    }
+    if (ran.exitCode === 0) {
+      const installed = await run(argv, `${password}\n`)
+      ran = result({ ...installed, err: cut(installed.err), out: cut(installed.out) })
+    }
+  } catch (error) {
+    ran = fail(error instanceof Error ? cut(error.message) : "the install could not start")
+  }
+  const forgot = await forgetPassword(item, service)
+  console.log(
+    `inbox: ${machine}'s install ${ran.exitCode === 0 ? "ran" : "failed"}; ${forgot.line}`,
+  )
+  if (ran.exitCode === 0) await recordRoot(run, preview, seams, peer)
+  return {
+    exitCode: forgot.gone ? ran.exitCode : ran.exitCode || 1,
+    line: [ran.line, forgot.line].filter(Boolean).join("; "),
+  }
 }
 
 // Writes an own card's flag on its one row of usage.accounts at its scope as the owner's act, the list read whole and every other row put back as it was; a value that is not a list, or a row gone since the post, writes nothing.
@@ -1966,15 +2662,22 @@ function guardWrite(data: string, preview: InboxGuard, ref: number, actor: strin
   if (part && orgJobKey(key) && held === undefined)
     return { exitCode: 1, line: `${key} has no row at ${scope} to change` }
   const next = part ? { ...(held as object | undefined), ...(value as object) } : value
-  if (held !== undefined && isDeepStrictEqual(held, next))
+  // the owner's Approve of wa.alert stands in for that number's first message, so an alert may reach it, a value already held included (ADR 0028)
+  const seed = (approved: unknown) => {
+    if (key === "wa.alert" && typeof approved === "string" && approved)
+      seedAlert(data, approved, Date.now())
+  }
+  if (held !== undefined && isDeepStrictEqual(held, next)) {
+    seed(held)
     return {
       exitCode: 0,
       line: `${key} at ${scope} is already ${JSON.stringify(held)}, so nothing changed`,
     }
+  }
   const set = setSetting(data, { key, scope, value: next }, who)
-  return set.ok
-    ? { exitCode: 0, line: `set ${key} at ${scope} to ${JSON.stringify(set.value)}` }
-    : { exitCode: 1, line: set.message }
+  if (!set.ok) return { exitCode: 1, line: set.message }
+  seed(set.value)
+  return { exitCode: 0, line: `set ${key} at ${scope} to ${JSON.stringify(set.value)}` }
 }
 
 // Move back: an archived item returns to the list as it was; a set-aside one (the old `clear`, or a Dismiss while it waited) goes back to open with no answer, so it can be answered again. Nothing is typed into its poster, since nothing was decided.
@@ -2052,18 +2755,18 @@ type Sending = {
   wait?: (ms: number) => Promise<void>
 }
 
-// Types the answer into the posting session and records how that went; a poster that has ended hands it to the dispatcher instead. Each try goes under its own id, so one Claude Code holds (queued) is read again under it until it settles: this process's own reads, so a restart leaves it reading queued until its card offers Retry (stuckQueued).
+// Types the answer into the posting session and records how that went, its line built once any files have shared, since a Slack draft's words go with them; a poster that has ended hands it to the dispatcher instead. Each try goes under its own id, so one Claude Code holds (queued) is read again under it until it settles: this process's own reads, so a restart leaves it reading queued until its card offers Retry (stuckQueued).
 async function send(
   db: Database,
   item: InboxItem,
-  { relay, text }: { relay: string; text: string },
+  linesOf: (uploaded?: number) => { relay: string; text: string },
   { actor, deliver, dispatcher, now, upload, wait = (ms) => Bun.sleep(ms) }: Sending,
   held?: Extract<InboxDelivery, { status: "queued" }>,
 ): Promise<InboxItem> {
   // the files go first, so an upload Slack refuses fails the send with nothing typed, and Retry shares them again
   const shared = upload && filesToUpload(item)
+  let count: number | undefined
   if (shared) {
-    let count: number
     try {
       count = await upload(item)
     } catch (error) {
@@ -2073,6 +2776,7 @@ async function send(
     }
     item = (await recordUploaded(db, item.id, count)) ?? item
   }
+  const { relay, text } = linesOf(count)
   const one = (to: string, words: string) => ({ actor, id: crypto.randomUUID(), text: words, to })
   // a stuck queued answer is read again under its own id and queued time, so this try types nothing: it reads queued, delivered, lost or unconfirmed, and only a Retry after lost types it
   let sent: Delivery & { id: string } = held
@@ -2600,10 +3304,10 @@ async function recordAck(
   return linked ?? acked ?? item
 }
 
-// The ack's stamp, the first close's time, and with it why a go has no link, in one write; a closed answer moves to Done at once, as his Dismiss moves it, keeping an earlier Dismiss's time, but for one he set aside, which stays on the Archive shelf until he dismisses it.
+// The ack's stamp, the first close's time, and with it why a go has no link, in one write; a closed answer moves to Done at once, as his Dismiss moves it, keeping an earlier Dismiss's time, but for one he set aside or archived, which stays on the Archive shelf until he dismisses it.
 async function stamp(db: Database, id: string, now: Date, noLink?: string): Promise<void> {
   const at = sql`${now.toISOString()}::text`
-  const dismissal = sql`case when ${inboxItem.answer} ->> 'choice' = 'clear' then '{}'::jsonb else jsonb_build_object('dismissedAt', coalesce(${inboxItem.answer} ->> 'dismissedAt', ${at})) end`
+  const dismissal = sql`case when ${inboxItem.answer} ->> 'choice' = 'clear' or ${inboxItem.answer} ->> 'archivedAt' is not null then '{}'::jsonb else jsonb_build_object('dismissedAt', coalesce(${inboxItem.answer} ->> 'dismissedAt', ${at})) end`
   await db
     .update(inboxItem)
     .set({
@@ -2696,7 +3400,7 @@ export async function dismissItems(
       ),
     )
     .returning()
-  // Done tells an update's poster done, so it posts a new card rather than editing this one; an answered card's poster hears nothing
+  // Done tells an update's poster done, and its next edit that changes the card's words brings it back to the list (PG-1926); an answered card's poster hears nothing
   for (const row of rows) {
     const item = toItem(row)
     const was = before.get(row.id)

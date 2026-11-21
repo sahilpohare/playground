@@ -94,6 +94,13 @@ test("from the clone root with no POSTGRES_URL, ask runs as the checkout on live
   expect(run.exitCode).toBe(0)
 })
 
+test("with validation on, the clone root still hands off before ask says there is no database yet (#2318)", () => {
+  const run = ask(live, { SKIP_ENV_VALIDATION: "", SKIP_ENV_VALIDATION_SERVER: "" }, "get", "#i1")
+  expect(run.stdout.toString()).toBe(`reached ${URL} get #i1\n`)
+  expect(run.stderr.toString()).not.toContain("No database yet")
+  expect(run.exitCode).toBe(0)
+})
+
 // ask-from-clone.ts scans git's worktrees itself, since the API's build would write .d.ts files into packages/scripts/src if it imported probe.ts, so the scan is held to dashboardCheckout() here.
 test("hands off to the very checkout dashboardCheckout() finds, and to none where it finds none", () => {
   const saved = process.env.PLAYGROUND_DATA_DIR

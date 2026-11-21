@@ -3,9 +3,13 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { codexHooks, hookOf, type Hooks } from "../../packages/scripts/src/codex-hooks"
+
 const root = join(import.meta.dir, "..", "..")
 const FACTORY = join("scripts", "factory-settings.json")
 const PROJECT = join(".claude", "settings.json")
+// the hooks.json a Codex launch loads, rendered from FACTORY
+const CODEX = "codexHooks()"
 
 type Hook = { hooks: { command: string }[]; matcher?: string }
 
@@ -162,8 +166,21 @@ describe("the command finds the checkout", () => {
   )
   const both = withHook(join(scratch, "both"), 'console.log("bundle")\n')
   withHook(both, 'console.log("source")\n', join("scripts", "hooks", "guards.ts"))
+  // A checkout whose guards run the real hook over one stub guard that never answers.
+  const stuck = withHook(
+    join(scratch, "stuck"),
+    `import { hook } from ${JSON.stringify(join(root, "scripts", "hooks", "guards.ts"))}\nprocess.exit(await hook([{ factory: false, name: "stub-never-answers", run: () => new Promise(() => {}) }]))\n`,
+    join("scripts", "hooks", "guards.ts"),
+  )
 
   const command = async (file: string, hook: string, event: string) => {
+    if (file === CODEX) {
+      const factory = (await Bun.file(join(root, FACTORY)).json()) as { hooks: Hooks }
+      const groups = codexHooks(factory.hooks)[event] ?? []
+      const found = groups.flatMap((g) => g.hooks).find((h) => hookOf(h.command) === hook)
+      if (!found) throw new Error(`codexHooks() renders no ${hook} hook`)
+      return found.command
+    }
     const found = (await entries(file)).find(
       (e) =>
         new RegExp(`scripts/hooks/(bundled/)?${hook}\\.[jt]s`).test(e.command) && e.event === event,
@@ -299,4 +316,24 @@ describe("the command finds the checkout", () => {
       }
     })
   }
+
+  // #2170: Codex's handler has no onFailure, so its timeout would let the call run; the hook refuses at its own deadline under each runner's command, the three run at once at the real deadline (about 13 s), and the bound is held with the margin it leaves.
+  test("a guard that never answers is refused before the runner's 15 s timeout, naming it, under Claude Code's and Codex's commands", async () => {
+    const runs = await Promise.all(
+      [FACTORY, PROJECT, CODEX].map(async (file) => {
+        const start = performance.now()
+        const result = await run(file, "bash", outside, {
+          CLAUDE_PROJECT_DIR: outside,
+          PLAYGROUND_REPO: stuck,
+          PLAYGROUND_ROLE: "worker",
+        })
+        return { code: result.code, file, ms: performance.now() - start, stderr: result.stderr }
+      }),
+    )
+    for (const { code, file, ms, stderr } of runs) {
+      expect({ code, file }).toEqual({ code: 2, file })
+      expect(stderr).toContain("guards hook: stub-never-answers did not answer by its deadline")
+      expect(ms).toBeLessThan(15_000)
+    }
+  }, 30_000)
 })

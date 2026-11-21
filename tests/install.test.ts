@@ -17,30 +17,48 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
 
+import { scratchEnv } from "./scratch-env"
+
 const root = join(import.meta.dir, "..")
 // The repository install.sh clones, read from install.sh itself.
 const REPO = /^REPO=(\S+)$/m.exec(readFileSync(join(root, "install.sh"), "utf8"))![1]!
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "playground-install-")))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
-// What install.sh reads from the checkout it clones; the CLI is a stub that says it started.
-const SOURCE_FILES = [
-  ".gitignore",
-  "api/hono/src/lib/dev/proxy.ts",
-  "install.sh",
-  "package.json",
-  "packages/env/src/aliases.ts",
-  "packages/env/src/data-dir.ts",
-  "packages/scripts/src/ops-herdr/pin.json",
-  "packages/scripts/src/ops-herdr/pin.ts",
-  "packages/scripts/src/playground/doctor.ts",
-  "packages/scripts/src/playground/links.ts",
-  "packages/scripts/src/playground/orgs.ts",
-  "packages/scripts/src/playground/unlinked.ts",
-  "packages/settings/src/rendered.ts",
-  "scripts/factory-settings.json",
-  "scripts/link-skills.sh",
-]
+const scanner = new Bun.Transpiler({ loader: "ts" })
+// Each file, and every file inside dir its relative imports reach, walked from the entries; a stub the test writes is neither copied nor walked.
+const withImports = (dir: string, entries: string[], stubs: string[] = []): string[] => {
+  const found = new Set(entries)
+  for (const file of found) {
+    if (!file.endsWith(".ts")) continue
+    const code = readFileSync(join(dir, file), "utf8").replace(/^#!.*/, "")
+    for (const { path } of scanner.scanImports(code)) {
+      if (!path.startsWith(".")) continue
+      const imported = relative(dir, Bun.resolveSync(path, dirname(join(dir, file))))
+      if (!imported.startsWith("..") && !stubs.includes(imported)) found.add(imported)
+    }
+  }
+  return [...found].sort()
+}
+
+// What install.sh reads from the checkout it clones: these files and every file their relative imports reach; the CLI and herdr-pin.ts are stubs the test writes.
+const SOURCE_FILES = withImports(
+  root,
+  [
+    ".gitignore",
+    "install.sh",
+    "package.json",
+    "packages/scripts/src/machine-record/cli.ts",
+    "packages/scripts/src/ops-herdr/pin.json",
+    "packages/scripts/src/playground/claude-trust.ts",
+    "packages/scripts/src/playground/doctor.ts",
+    "packages/scripts/src/playground/orgs.ts",
+    "packages/scripts/src/playground/unlinked.ts",
+    "scripts/factory-settings.json",
+    "scripts/link-skills.sh",
+  ],
+  ["packages/scripts/src/playground/herdr-pin.ts"],
+)
 
 // The tools install.sh checks and the installers it calls: a run reaches only their fakes, so the system's own folders are linked in without them.
 const FAKED = [
@@ -81,20 +99,14 @@ const write = (path: string, text: string, mode = 0o644) => {
   chmodSync(path, mode)
 }
 
-// git with no system config, no GIT_* from a hook that runs the suite, and the scratch HOME's .gitconfig; Claude Code's and Playground's folders are the scratch HOME's too
-const gitEnv = (home: string) => ({
-  ...Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key]) =>
-        !key.startsWith("GIT_") && !key.startsWith("INSTALL_") && key !== "PLAYGROUND_INSTALL",
-    ),
-  ),
-  CLAUDE_CONFIG_DIR: "",
-  GIT_CONFIG_NOSYSTEM: "1",
-  HOME: home,
-  PLAYGROUND_DATA_DIR: "",
-  XDG_CONFIG_HOME: "",
-})
+// git with no system config, no GIT_* from a hook that runs the suite, and the scratch HOME's .gitconfig; Claude Code's, Playground's and portless's folders are the scratch HOME's too
+const gitEnv = (home: string) =>
+  scratchEnv(home, {
+    CLAUDE_CONFIG_DIR: "",
+    GIT_CONFIG_NOSYSTEM: "1",
+    PLAYGROUND_DATA_DIR: "",
+    XDG_CONFIG_HOME: "",
+  })
 const git = (cwd: string, home: string, ...args: string[]) =>
   Bun.spawnSync([realGit, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
     cwd,
@@ -185,7 +197,17 @@ const setup = ({
   for (const file of SOURCE_FILES) cpSync(join(root, file), join(source, file))
   write(
     join(source, "packages/scripts/src/playground/cli.ts"),
-    '#!/usr/bin/env bun\nconsole.log(process.argv[2] ? `playground ${process.argv.slice(2).join(" ")}` : "playground started")\n',
+    // bare, it first prints the folders Claude Code's config trusts as it starts, which the installer's trust step wrote before it
+    [
+      "#!/usr/bin/env bun",
+      'import { existsSync, readFileSync } from "node:fs"',
+      "const config = `${process.env.HOME}/.claude.json`",
+      'const projects = existsSync(config) ? (JSON.parse(readFileSync(config, "utf8")).projects ?? {}) : {}',
+      "const trusted = Object.keys(projects).filter((path) => projects[path]?.hasTrustDialogAccepted === true)",
+      'if (!process.argv[2]) console.log(`trusted at start: ${trusted.join(", ")}`)',
+      'console.log(process.argv[2] ? `playground ${process.argv.slice(2).join(" ")}` : "playground started")',
+      "",
+    ].join("\n"),
     0o755,
   )
   write(
@@ -265,6 +287,8 @@ const setup = ({
       `  https://bun.sh/install) ${fail.includes("bun") ? "exit 22" : `echo 'echo "bun installer $*" >> ${log}; mkdir -p "$HOME/.bun/bin" && cp ${store}/bun "$HOME/.bun/bin/bun"'`} ;;`,
       `  https://claude.ai/install.sh) ${fail.includes("claude") ? "exit 22" : `echo 'mkdir -p "$HOME/.local/bin" && cp ${store}/claude "$HOME/.local/bin/claude"'`} ;;`,
       `  https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh) ${fail.includes("claude-codex") ? "exit 22" : `echo 'mkdir -p "$HOME/.local/bin" && cp ${store}/claude-codex "$HOME/.local/bin/claude-codex"'`} ;;`,
+      // uv's installer puts uv where UV_INSTALL_DIR names, and writes a startup line unless UV_NO_MODIFY_PATH is 1
+      `  https://astral.sh/uv/install.sh) ${fail.includes("uv") ? "exit 22" : `echo 'echo "uv installer UV_INSTALL_DIR=$UV_INSTALL_DIR UV_NO_MODIFY_PATH=$UV_NO_MODIFY_PATH" >> ${log}; mkdir -p "$UV_INSTALL_DIR" && cp ${store}/uv "$UV_INSTALL_DIR/uv"; [ "$UV_NO_MODIFY_PATH" = 1 ] || echo ". uv-env" >> "$HOME/.zshrc"'`} ;;`,
       `  https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh) ${fail.includes("brew") ? "exit 22" : `echo 'read -r answer; echo "homebrew installer read $answer" >> ${log}; mkdir -p ${prefix}/bin && cp ${store}/brew ${prefix}/bin/brew'`} ;;`,
       "  *) exit 22 ;;",
       "esac",
@@ -408,6 +432,15 @@ const bunCache = (path: string) => /^(\.bun\/install|\.cache|Library)(\/|$)/.tes
 const written = (home: string) =>
   Object.fromEntries(Object.entries(snapshot(home)).filter(([path]) => !bunCache(path)))
 
+// spawn.sh's own trust walk, run as claude_trusts() runs it: whether config's yes covers folder, read up to the checkout top and no further
+const WALK =
+  /^claude_trusts\(\) \{\n  python3 -I - "\$\(own_config\)" "\$1" "\$2" <<'PY'\n([\s\S]*?)\nPY$/m.exec(
+    readFileSync(join(root, "scripts/spawn.sh"), "utf8"),
+  )![1]!
+const spawnTrusts = (config: string, folder: string, top: string) =>
+  Bun.spawnSync(["python3", "-I", "-", config, folder, top], { stdin: Buffer.from(WALK) })
+    .exitCode === 0
+
 const ALL: Tool[] = [
   "brew",
   "bun",
@@ -453,14 +486,43 @@ describe("install.sh", () => {
     )
   }, 60_000)
 
+  // A fresh install starts the dispatcher in the leads worktree, which spawn.sh refuses until Claude Code trusts the checkout, so the installer records that yes for the folder it cloned alone, before playground starts.
+  test("trusts the checkout it cloned for Claude Code before playground starts, and no other folder", () => {
+    const { dir, home, run } = setup()
+    const { code, left, out } = run()
+    expect(code).toBe(0)
+    expect(left).toEqual([])
+    expect(out).toContain(`Claude Code trusts ${dir}\n`)
+    expect(out).toEndWith(`trusted at start: ${dir}\nplayground started\n`)
+    const config = join(home, ".claude.json")
+    expect(Object.keys(JSON.parse(readFileSync(config, "utf8")).projects)).toEqual([dir])
+    expect(lstatSync(config).mode & 0o777).toBe(0o600)
+    expect(spawnTrusts(config, join(dir, ".claude/worktrees/leads"), dir)).toBe(true)
+    expect(spawnTrusts(config, join(home, "elsewhere"), join(home, "elsewhere"))).toBe(false)
+  }, 60_000)
+
+  test("when Claude Code's config cannot take the trust, it says why, lists Trust this folder and does not start playground", () => {
+    const { home, run } = setup()
+    const config = join(home, ".claude.json")
+    writeFileSync(config, "not json\n")
+    const { code, left, out } = run()
+    expect(code).toBe(1)
+    expect(out).toContain(`${config} does not read as Claude Code's config, so it is left as it is`)
+    expect(left.some((item) => item.includes("Trust this folder"))).toBe(true)
+    expect(out).not.toContain("playground started")
+    expect(readFileSync(config, "utf8")).toBe("not json\n")
+  }, 60_000)
+
   test("names every place outside its folder before it writes, and writes nowhere else", () => {
     const { home, plist, run } = setup()
     const { out } = run()
-    const places = [".bun/bin", ".playground"]
+    const places = [".bun/bin", ".claude.json", ".playground"]
     for (const place of places)
       expect(out.indexOf(join(home, place))).toBeLessThan(out.indexOf("linked "))
     expect(out.indexOf("Claude Code's user settings")).toBeLessThan(out.indexOf("linked "))
-    expect(out).toContain("Every ops job starts off but the Dashboard's own and the usage read")
+    expect(out).toContain(
+      "Every ops job starts off but the Dashboard's own, the usage read and, on a Mac, keep-awake, so nothing goes into",
+    )
     expect(out).toContain(`${plist}  portless's proxy service`)
     expect(out.indexOf(plist)).toBeLessThan(out.indexOf("linked "))
     const outside = Object.keys(snapshot(home)).filter(
@@ -1005,6 +1067,68 @@ describe("install.sh", () => {
     }, 60_000)
   })
 
+  describe("on Linux", () => {
+    const LINUX = { env: { INSTALL_OS: "Linux" } }
+    const UV_FIX = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+
+    test("a missing uv comes from uv's own installer into ~/.local/bin, which on_path puts on PATH once, with no brew", () => {
+      const { home, rc, run } = setup({ missing: ["uv"] })
+      const { calls, code, left, out } = run(LINUX)
+      expect(calls).toContain("curl -LsSf https://astral.sh/uv/install.sh")
+      expect(calls).toContain(`uv installer UV_INSTALL_DIR=${home}/.local/bin UV_NO_MODIFY_PATH=1`)
+      expect(existsSync(join(home, ".local/bin/uv"))).toBe(true)
+      expect(count(rc() ?? "", PATH_LINE(join(home, ".local/bin")))).toBe(1)
+      expect(rc()).not.toContain("uv-env")
+      expect(calls).not.toContain("brew install")
+      expect(left).toEqual([])
+      expect(code).toBe(0)
+      expect(out).toEndWith("playground started\n")
+    }, 60_000)
+
+    test("a tool that needs the system's packages or Docker Engine goes on the list with Linux's fix, and nothing names brew", () => {
+      const { calls, left } = setup({
+        fail: ["uv"],
+        missing: ["docker", "gh", "python3", "uv"],
+        tty: true,
+      }).run(LINUX)
+      expect(left).toContain(
+        "docker: install Docker Engine: https://docs.docker.com/engine/install/",
+      )
+      expect(left).toContain(
+        "gh: install gh: https://github.com/cli/cli/blob/trunk/docs/install_linux.md",
+      )
+      expect(left).toContain(
+        "python3: your distro's python3 package, such as sudo apt install python3",
+      )
+      expect(left).toContain(`uv: ${UV_FIX}`)
+      expect(left.filter((item) => /brew|Homebrew/.test(item))).toEqual([])
+      expect(calls).not.toMatch(
+        /^(brew install|open |curl -fsSL https:\/\/raw\.githubusercontent\.com\/Homebrew)/m,
+      )
+    }, 60_000)
+
+    test("with no git and node it lists Linux's fixes and stops before the clone", () => {
+      const { dir, run } = setup({ missing: ["git", "node"], tty: true })
+      const { calls, code, left } = run(LINUX)
+      expect(code).toBe(1)
+      expect(left).toContain("git: your distro's git package, such as sudo apt install git")
+      expect(left).toContain("node: install Node from https://nodejs.org/en/download")
+      expect(left.filter((item) => /brew|Homebrew/.test(item))).toEqual([])
+      expect(calls).not.toContain("brew install")
+      expect(() => lstatSync(dir)).toThrow()
+    }, 60_000)
+
+    test("--check lists a missing uv with uv's own installer and runs none", () => {
+      const { bin, run } = setup()
+      expect(run(LINUX).code).toBe(0)
+      rmSync(join(bin, "uv"))
+      const { calls, left } = run({ args: ["--check"], ...LINUX })
+      expect(left).toContain(`uv: ${UV_FIX}`)
+      expect(left.filter((item) => /brew|Homebrew/.test(item))).toEqual([])
+      expect(calls).not.toContain("uv installer")
+    }, 60_000)
+  })
+
   // A run outside the sandbox would reach the real Homebrew under /opt/homebrew or /usr/local, so this reads where the script takes the stand-ins rather than running it there.
   test("reads its INSTALL_* stand-ins only under TEST_SANDBOX_HOME", () => {
     const script = readFileSync(join(root, "install.sh"), "utf8")
@@ -1022,5 +1146,30 @@ describe("install.sh", () => {
       expect(guard![1]).toContain(name)
       expect(script.replace(guard![1], "")).not.toContain(name)
     }
+  })
+})
+
+describe("the files the test copies", () => {
+  const tree = join(scratch, "imports")
+  write(join(tree, "repo/entry.ts"), '#!/usr/bin/env bun\nimport "./lib/a"\nimport "./stub"\n')
+  write(join(tree, "repo/lib/a.ts"), 'import { b } from "../b"\nexport const a = b\n')
+  write(join(tree, "repo/b.ts"), "export const b = 1\n")
+  write(join(tree, "repo/stub.ts"), 'import "./never"\n')
+  write(
+    join(tree, "repo/out.ts"),
+    'import "../outside"\nimport "@packages/env/data-dir"\nimport "node:fs"\n',
+  )
+  write(join(tree, "outside.ts"), "export {}\n")
+
+  test("take every file an entry's relative imports reach, and no stub", () => {
+    expect(withImports(join(tree, "repo"), ["entry.ts"], ["stub.ts"])).toEqual([
+      "b.ts",
+      "entry.ts",
+      "lib/a.ts",
+    ])
+  })
+
+  test("leave out an import outside the repo and a workspace package's", () => {
+    expect(withImports(join(tree, "repo"), ["out.ts"])).toEqual(["out.ts"])
   })
 })

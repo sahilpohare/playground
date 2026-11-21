@@ -97,39 +97,102 @@ describe("serverEnv", () => {
     expect(env.LANG).toBe("en_US.UTF-8")
   })
 
-  test("gives the server this uid's account and login shell when the start carries no SHELL or USER, as a GUI app's or env -i's does", () => {
+  // A start from a GUI app or env -i carries no SHELL, USER or LOGNAME, so the server takes this uid's account and login shell from the platform's own reader, each a fake inside the sandbox.
+  const uid = process.getuid?.()
+  const { LOGNAME: _logname, SHELL: _shell, USER: _user, ...bare } = shell
+  const program = (dir: string, name: string, lines: string[]) => {
+    const file = join(dir, name)
+    writeFileSync(file, ["#!/bin/sh", ...lines, "exit 0"].join("\n"))
+    chmodSync(file, 0o755)
+    return file
+  }
+  const passwdLine = `someone:x:${uid}:20:Some One:/home/someone:/bin/made-up-sh`
+
+  test.each([
+    [
+      "macOS, through dscl",
+      "darwin",
+      (dir: string) => ({
+        PLAYGROUND_DSCL: program(dir, "dscl", [
+          `[ "$1 $2 $3 $4 $5" = ". -search /Users UniqueID ${uid}" ] && printf 'someone\\t\\tUniqueID = (\\n    1\\n)\\n'`,
+          '[ "$1 $2 $3 $4" = ". -read /Users/someone UserShell" ] && echo "UserShell: /bin/made-up-sh"',
+        ]),
+      }),
+    ],
+    [
+      "Linux, through getent passwd",
+      "linux",
+      (dir: string) => ({
+        PLAYGROUND_GETENT: program(dir, "getent", [
+          `[ "$1 $2" = "passwd ${uid}" ] && echo '${passwdLine}'`,
+        ]),
+        PLAYGROUND_PASSWD: join(dir, "no-passwd"),
+      }),
+    ],
+    [
+      "Linux, from /etc/passwd where getent does not answer",
+      "linux",
+      (dir: string) => {
+        const passwd = join(dir, "passwd")
+        writeFileSync(
+          passwd,
+          `root:x:0:0:root:/root:/bin/bash\n${passwdLine}\nother:x:${Number(uid) + 1}:20::/home/other:/bin/sh\n`,
+        )
+        return { PLAYGROUND_GETENT: join(dir, "no-getent"), PLAYGROUND_PASSWD: passwd }
+      },
+    ],
+  ] as const)("on %s, the server gets this uid's account and login shell", (_, platform, fakes) => {
     const dir = scratch()
-    const dscl = join(dir, "dscl")
-    writeFileSync(
-      dscl,
-      [
-        "#!/bin/sh",
-        `[ "$1 $2 $3 $4 $5" = ". -search /Users UniqueID ${process.getuid?.()}" ] && printf 'someone\\t\\tUniqueID = (\\n    1\\n)\\n'`,
-        '[ "$1 $2 $3 $4" = ". -read /Users/someone UserShell" ] && echo "UserShell: /bin/made-up-sh"',
-        "exit 0",
-      ].join("\n"),
-    )
-    chmodSync(dscl, 0o755)
-    const { LOGNAME: _logname, SHELL: _shell, USER: _user, ...bare } = shell
-    const sandbox = { ...bare, TEST_SANDBOX_HOME: dir }
-    const found = serverEnv({ ...sandbox, PLAYGROUND_DSCL: dscl }, "/d", "factory")
+    const env = { ...bare, ...fakes(dir), TEST_SANDBOX_HOME: dir }
+    const found = serverEnv(env, "/d", "factory", platform)
     expect([found.SHELL, found.USER, found.LOGNAME]).toEqual([
       "/bin/made-up-sh",
       "someone",
       "someone",
     ])
-    expect(
-      serverEnv({ ...sandbox, PLAYGROUND_DSCL: join(dir, "no-dscl") }, "/d", "factory").SHELL,
-    ).toBe("/bin/zsh")
-    expect(
-      serverEnv({ ...sandbox, ...shell, PLAYGROUND_DSCL: dscl, SHELL: "/bin/bash" }, "/d", "p"),
-    ).toMatchObject({
+    expect(serverEnv({ ...env, ...shell, SHELL: "/bin/bash" }, "/d", "p", platform)).toMatchObject({
       LOGNAME: "me",
       SHELL: "/bin/bash",
       USER: "me",
     })
-    // Outside the sandbox the override is ignored: the account's own dscl answers, or zsh where there is none.
-    const outside = serverEnv({ ...bare, PLAYGROUND_DSCL: dscl }, "/d", "factory")
+  })
+
+  test.each([
+    [
+      "darwin",
+      { PLAYGROUND_DSCL: "no-dscl" },
+      `dscl . -read /Users/<name> UserShell for uid ${uid}`,
+    ],
+    [
+      "linux",
+      { PLAYGROUND_GETENT: "no-getent", PLAYGROUND_PASSWD: "no-passwd" },
+      `getent passwd ${uid} or `,
+    ],
+  ] as const)(
+    "on %s with no login shell to read, the start is refused naming where it looked, never a guessed shell",
+    (platform, missing, source) => {
+      const dir = scratch()
+      const env = {
+        ...bare,
+        ...Object.fromEntries(Object.entries(missing).map(([k, v]) => [k, join(dir, v)])),
+        TEST_SANDBOX_HOME: dir,
+      }
+      expect(() => serverEnv(env, "/d", "factory", platform)).toThrow(
+        `no login shell: SHELL is unset and ${source}`,
+      )
+    },
+  )
+
+  // Outside the sandbox the fakes are ignored: this machine's own reader answers.
+  test("outside the test sandbox no fake is read", () => {
+    const dir = scratch()
+    const dscl = program(dir, "dscl", ['echo "UserShell: /bin/made-up-sh"'])
+    const getent = program(dir, "getent", [`echo '${passwdLine}'`])
+    const outside = serverEnv(
+      { ...bare, PLAYGROUND_DSCL: dscl, PLAYGROUND_GETENT: getent },
+      "/d",
+      "factory",
+    )
     expect(outside.SHELL).not.toBe("/bin/made-up-sh")
     expect(outside.SHELL).toStartWith("/")
     expect(outside.USER).not.toBe("someone")
@@ -471,7 +534,7 @@ describe("cycle", () => {
 
   test("a restore that tried no session, another's lock or an unreadable roster, is named and stays owed", async () => {
     for (const said of [
-      "another restore is running (pid 4242)\n",
+      "a restore is already running (pid 4242), so this one stops; nothing is wrong\n",
       "spawn.sh refuses restore: it cannot read the roster or the resume files\n",
     ]) {
       const { value } = deps({ sha256: PIN.sha256, version: "0.9.5" }, false)

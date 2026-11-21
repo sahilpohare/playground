@@ -123,3 +123,25 @@ test("a line past 400 characters stops at 400", async () => {
   expect(text.length).toBeGreaterThan(400)
   expect((await queued(text)).text).toBe(text.slice(0, 400))
 })
+
+// The relay tags each line with its queue file's job, so a job word that names another queue by a path would queue a line under that job's tag.
+test.each(["../wa", "x/../../outbox/ops-wa", "WA", ""])(
+  "a job outside lower-case letters, digits and hyphens (%p) is refused, and nothing is queued",
+  async (job) => {
+    const config = join(scratch, `config-${++configs}`)
+    mkdirSync(join(config, "playground", "ops", "outbox", "ops-x"), { recursive: true })
+    const proc = Bun.spawn(["bash", script, job, "a line"], {
+      env: {
+        CLAUDE_CONFIG_DIR: config,
+        PLAYGROUND_DATA_DIR: join(config, "playground"),
+        HOME: scratch,
+        PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+      },
+      stderr: "pipe",
+    })
+    expect(await proc.exited).toBe(1)
+    expect(await new Response(proc.stderr).text()).toContain("notify.sh: the job")
+    expect(existsSync(join(config, "playground", "ops", "outbox", "ops-wa.jsonl"))).toBe(false)
+    expect(existsSync(join(config, "playground", "ops", "alerts.log"))).toBe(false)
+  },
+)

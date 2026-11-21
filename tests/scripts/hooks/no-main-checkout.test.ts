@@ -142,6 +142,10 @@ describe("a build, a test run, lefthook, turbo or a file write in the main check
       "lefthook through bunx past its ignored --cwd",
       "bunx --cwd=.claude/worktrees/a lefthook run pre-commit",
     ],
+    [
+      "a commit after a run-slot call whose words cd away, which runs here",
+      "~/.playground/ops/run-slot.sh w -- cd /tmp; git commit -m x",
+    ],
   ])("%s", async (_name, command) => {
     const reason = await bash(command)
     expect(reason).toContain("no-main-checkout hook refuses")
@@ -216,6 +220,10 @@ describe("a build, a test run, lefthook, turbo or a file write in the main check
     ],
     ["a function whose body holds no cd", `function f { :; }; cd ${WORKTREE} && bun run build`],
     ["a brace group that holds no cd", `{ echo hi; }; cd ${WORKTREE} && bun run build`],
+    [
+      "a build inside run-slot's words, in the worktree its own cd names",
+      `~/.playground/ops/run-slot.sh w -- bash -c 'cd ${WORKTREE} && bun run build'`,
+    ],
   ])("from the main checkout, %s runs", async (_name, command) => {
     expect(await bash(command)).toBeUndefined()
   })
@@ -525,6 +533,10 @@ describe("what keeps the main checkout up to date, or only reads it, runs", () =
     ["git status", "git status --short"],
     ["git log", "git log --oneline -3"],
     ["a read", "cat README.md"],
+    ["an echo of an unset variable", "echo $X"],
+    ["git log of an unset variable", "git log $X"],
+    ["a commit behind a quoted unset variable, which runs no program", '"$X" git commit -m x'],
+    ["a commit behind an unset variable joined to an empty quote", '$X"" git commit -m x'],
     ["a search", "grep -rn hook scripts/hooks"],
     ["output to /dev/null", "ls > /dev/null 2>&1"],
     ["stderr into stdout", "git status 2>&1"],
@@ -544,6 +556,10 @@ describe("what keeps the main checkout up to date, or only reads it, runs", () =
       `~/.playground/ops/run-slot.sh w -- env K=V git -C ${WORKTREE} commit -m x`,
     ],
     ["run-slot with no command", "~/.playground/ops/run-slot.sh w"],
+    [
+      "a commit in a home folder a variable the line sets names",
+      "S=~/scratch/x; git -C $S commit -m x",
+    ],
     ["a read through bash run-slot", "bash ~/.playground/ops/run-slot.sh w -- git status --short"],
     ["another script through bash", "bash scripts/other.sh w -- git commit -m x"],
     ["curl to stdout", "curl -sS https://example.com"],
@@ -673,6 +689,21 @@ describe("what keeps the main checkout up to date, or only reads it, runs", () =
   test("from a worktree, bun's --cwd into another worktree runs", async () => {
     expect(await bash(`bun run --cwd ${MAIN}/.claude/worktrees/b build`, WORKTREE)).toBeUndefined()
   })
+
+  // #2397: the program a runner runs reads in the runner's own folder option, as env -C's program does (the 7-day replay's lefthook runs)
+  test.each([
+    ["bun run's --cwd", `bun run --cwd ${WORKTREE} lefthook run pre-push --all-files`],
+    [
+      "bun run's --cwd in a variable the line sets",
+      `W=${WORKTREE}; bun run --cwd $W lefthook run pre-commit`,
+    ],
+    ["pnpm's -C", `pnpm -C ${WORKTREE} exec lefthook run pre-commit`],
+  ])(
+    "from the main checkout, lefthook a runner runs past %s into a worktree runs",
+    async (_n, command) => {
+      expect(await bash(command)).toBeUndefined()
+    },
+  )
 
   // #1663: what a cd's || runs, runs where the cd failed; after an exit there, or an || that answers a later command of the cd's run, what follows runs where the cd landed
   test.each([
@@ -1176,6 +1207,26 @@ describe("a file in the worktrees folder", () => {
   })
 })
 
+describe("a runner's option the reader does not list keeps its verdict when no reading reaches a build (PG-2103)", () => {
+  test.each([
+    ["npx's help with -y", "npx -y inscope@0.18.0 --help"],
+    ["bun's evaluated script", "bun -e 'console.log(1)'"],
+    ["bun's script with no env file", "bun --no-env-file packages/scripts/src/x.ts"],
+    ["a package runner's tool", "bunx cowsay hi"],
+    ["a nested runner's version", "npx npx --version"],
+    ["a nested runner's help", "npx bunx --help"],
+  ])("in the main checkout, %s, runs", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+
+  test.each([
+    ["a quiet build", "bun run --silent build"],
+    ["a build past bun's env file option", "bun --env-file /tmp/e run build"],
+  ])("in the main checkout, %s, is refused", async (_, command) => {
+    expect(await bash(command)).toContain("no-main-checkout hook refuses")
+  })
+})
+
 describe("a GIT_DIR or GIT_WORK_TREE that names your own worktree", () => {
   test.each([
     ["set for the call", `GIT_DIR=${WORKTREE}/.git git commit -m x`],
@@ -1184,5 +1235,48 @@ describe("a GIT_DIR or GIT_WORK_TREE that names your own worktree", () => {
     ["by a relative path", "GIT_WORK_TREE=. git reset --hard"],
   ])("from the worktree, %s, runs", async (_name, command) => {
     expect(await bash(command, WORKTREE)).toBeUndefined()
+  })
+})
+
+// #2158: an xargs replace string that sits in the program's arguments alone leaves the program typed, so each keeps canary's verdict
+describe("an xargs replace string outside the program word keeps the call's verdict", () => {
+  test.each([
+    ["grep under a plain xargs", "ls /tmp | xargs grep -l x"],
+    ["echo under xargs -I{}", "echo a | xargs -I{} echo {}"],
+    ["cat under xargs -I %", "echo a | xargs -I % cat %"],
+    ["cp to /tmp under xargs -J %", "echo a | xargs -J % cp % /tmp/"],
+    ["a sh -c script holding xargs' -I{} string", "echo a | xargs -I{} sh -c 'echo {}'"],
+    ["cat under nice under xargs -J %", "echo a | xargs -J % nice cat %"],
+    [
+      "echo under env -S with xargs' -I % string in its arguments",
+      "echo a | xargs -I % env -S 'echo %'",
+    ],
+    [
+      "cat under env -S with xargs' -J % string as its argument",
+      "echo a | xargs -J % env -S cat %",
+    ],
+    ["echo under xargs -I % from input holding a quote", 'echo "it\'s" | xargs -I % echo %'],
+    ["echo under xargs -n1", "echo a b | xargs -n1 echo"],
+    ["echo under an xargs -I zz inside xargs -I %", "echo a | xargs -I % xargs -I zz echo %"],
+  ])("%s runs in the main checkout", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
+  })
+})
+
+// #2198: GNU xargs' input options, and a replace option at the end of a cluster of flags, beside a typed program leave it typed, so each keeps canary's verdict
+describe("an xargs input option beside a typed program keeps the call's verdict", () => {
+  test.each([
+    ["echo under xargs -d,", "printf 'a,b' | xargs -d, echo"],
+    ["echo under xargs --delimiter given apart", "printf 'a,b' | xargs --delimiter , echo"],
+    ["echo under xargs -d, fed a program's name", "printf 'a,turbo' | xargs -d, echo"],
+    ["grep under xargs -0 fed by find -print0", "find . -print0 | xargs -0 grep -l x"],
+    ["echo under xargs -a of a process substitution", "xargs -a <(echo a) echo"],
+    ["echo under a shortened --arg=", "xargs --arg=/tmp/list echo"],
+    ["echo under xargs -d, -I %", "printf 'a,b' | xargs -d, -I % echo %"],
+    ["cat under xargs -0I %", "printf a | xargs -0I % cat %"],
+    ["cat under nice under xargs -rJ %", "echo a | xargs -rJ % nice cat %"],
+    ["echo under a shortened --repl=%", "echo a | xargs --repl=% echo %"],
+  ])("%s runs in the main checkout", async (_, command) => {
+    expect(await bash(command)).toBeUndefined()
   })
 })

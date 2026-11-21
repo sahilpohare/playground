@@ -1,7 +1,7 @@
 Every word a person reads, an Inbox item, a chat, Slack or Yard message, an issue, a PR body, a comment or a review, takes plain-words' two rules; every word to the owner also takes plain-words' owner style and to-inbox's shape: a picture with a short note, emoji bullets, one callout at most, times in the owner's zone ({clock.ownerZone}).
 A person reads each text in seconds, on whichever surface it lands, so plain words everywhere and one shape for the owner let the point land first and every session read like every other.
 plain-words (`extensions/core/skills/plain-words/SKILL.md`) is the one source of the two rules, ASD-STE100 and ELI5, and of the owner style; load it with the Skill tool before you write for a person.
-to-inbox (`extensions/core/skills/to-inbox/SKILL.md`) is the owner shape's one source: its steps, its pictures, its emoji legend and the card width a drawing fits; load it too before you write to the owner.
+to-inbox (`extensions/core/skills/to-inbox/SKILL.md`) is the owner shape's one source: its steps, its pictures, its emoji legend and the drawing width; load it too before you write to the owner.
 A message outside the Inbox takes every to-inbox step but the card's own Choices and Post, and a relay of a session's message to the owner is one such message.
 How a session is named to the owner and the order PR status goes in stay in **voice**.
-Done when every text you wrote for a person passes plain-words' two rules, and every message you sent the owner passes plain-words' owner style, picture first, and keeps each code line within the card's width (to-inbox's Fit the card).
+Done when every text you wrote for a person passes plain-words' two rules, and every message you sent the owner passes plain-words' owner style, picture first, and keeps each code line within the drawing width (to-inbox's Fit the card).

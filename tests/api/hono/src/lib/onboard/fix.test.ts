@@ -37,8 +37,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true })
 })
 
-// A scratch HOME and a PATH of stubs alone, each logging its argv to calls.log, so no real brew, docker, gh, curl or claude runs.
-const machine = () => {
+// A scratch HOME and a PATH of stubs alone, each logging its argv to calls.log, so no real brew, docker, gh, curl or claude runs; a Mac unless platform says otherwise.
+const machine = (platform: NodeJS.Platform = "darwin") => {
   const root = mkdtempSync(join(tmpdir(), "fix-test-"))
   roots.push(root)
   const bin = join(root, "bin")
@@ -55,6 +55,7 @@ const machine = () => {
     env: () => ({ HOME: home, PATH: bin }),
     live: () => true,
     paths: [],
+    platform,
     waitMs: 1,
   })
   return {
@@ -173,6 +174,40 @@ describe("each fix runs its fixed argv", () => {
     ])
   })
 
+  test("ca-trust runs this checkout's own ca-trust script, with nothing from the request", async () => {
+    const m = machine()
+    m.stub(
+      "bun",
+      'echo "Restart Firefox if it is open, since a running browser keeps its old store."',
+    )
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/ca-trust?profile=/etc`)).status).toBe(202)
+    const done = await settled(app, `${FIX}/ca-trust`)
+    expect(done.state).toBe("ok")
+    expect(done.lines).toContain(
+      "Restart Firefox if it is open, since a running browser keeps its old store.",
+    )
+    expect(m.calls()).toEqual([
+      expect.stringMatching(
+        /^bun --no-env-file \/\S+\/packages\/scripts\/src\/playground\/ca-trust\.ts$/,
+      ),
+    ])
+  })
+
+  // #2307: Claude Code's folder trust question waits on the owner, so Trust this folder records the yes with this checkout's own script, on the owner's click
+  test("claude-trust runs this checkout's own claude-trust script, with nothing from the request", async () => {
+    const m = machine()
+    m.stub("bun")
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/claude-trust`)).status).toBe(202)
+    expect((await settled(app, `${FIX}/claude-trust`)).state).toBe("ok")
+    expect(m.calls()).toEqual([
+      expect.stringMatching(
+        /^bun --no-env-file \/\S+\/packages\/scripts\/src\/playground\/claude-trust\.ts$/,
+      ),
+    ])
+  })
+
   test("trust runs this checkout's own portless trust under node, with nothing from the request", async () => {
     const m = machine()
     m.stub("node", 'echo "Local CA added to system trust store."')
@@ -239,6 +274,74 @@ describe("each fix runs its fixed argv", () => {
     expect(proxy.state).toBe("failed")
     expect(proxy.reason).toContain("Click Set up the web address again")
     expect(proxy.reason).not.toContain("-128")
+  })
+
+  // #2314: on Linux the same root command runs through pkexec, whose window asks for the password, as separate words with no shell between, and with its text agent off so it never asks in a terminal
+  test("on Linux proxy runs the same root command through pkexec, with nothing from the request", async () => {
+    const m = machine("linux")
+    m.stub("node")
+    m.stub("pkexec", 'echo "Portless service installed."')
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/proxy?bin=/bin/sh&argv=rm`)).status).toBe(202)
+    const proxy = await settled(app, `${FIX}/proxy`)
+    expect(proxy.state).toBe("ok")
+    expect(proxy.lines).toContain("Your computer asks for your password in its own window")
+    const user = userInfo()
+    const cli = join(import.meta.dir, "../../../../../../node_modules/portless/dist/cli.js")
+    expect(m.calls()).toEqual([
+      [
+        "pkexec",
+        "--disable-internal-agent",
+        "/usr/bin/env",
+        "-i",
+        `HOME=${user.homedir}`,
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        "PORTLESS_PORT=443",
+        `PORTLESS_STATE_DIR=${join(user.homedir, ".portless")}`,
+        `SUDO_GID=${user.gid}`,
+        `SUDO_UID=${user.uid}`,
+        `SUDO_USER=${user.username}`,
+        join(m.bin, "node"),
+        cli,
+        "service",
+        "install",
+      ].join(" "),
+    ])
+  })
+
+  // pkexec exits 126 when the owner closes its window and 127 when no window could ask; each reads in plain words, the first naming the button to click again
+  test("on Linux a closed password window and one that never showed fail in plain words, naming no command", async () => {
+    for (const [code, said] of [
+      [
+        126,
+        "You closed the password window, so the web address is not set up. Click Set up the web address again and enter your password.",
+      ],
+      [127, "Your computer could not ask for your password, so the web address is not set up."],
+      [
+        1,
+        "Your computer did not set up the web address. Click Set up the web address again, and enter your password in its window.",
+      ],
+    ] as const) {
+      const m = machine("linux")
+      m.stub("node")
+      m.stub("pkexec", `echo "Error executing command as another user" >&2; exit ${code}`)
+      const app = setup(m.fixes)
+      expect((await begin(app, `${FIX}/proxy`)).status).toBe(202)
+      const proxy = await settled(app, `${FIX}/proxy`)
+      expect(proxy.state).toBe("failed")
+      expect(proxy.reason).toBe(`Setting up the web address stopped: ${said}`)
+    }
+  })
+
+  test("on Linux with no pkexec the web address setup says so and runs nothing", async () => {
+    const m = machine("linux")
+    m.stub("node")
+    m.stub("osascript")
+    const app = setup(m.fixes)
+    expect((await begin(app, `${FIX}/proxy`)).status).toBe(202)
+    const proxy = await settled(app, `${FIX}/proxy`)
+    expect(proxy.reason).toBe("Setting up the web address stopped: pkexec is not on this computer")
+    expect(m.calls()).toEqual([])
   })
 
   test("the administrator line quotes a word for the shell, then the line for AppleScript", async () => {
@@ -676,12 +779,13 @@ describe("the guards", () => {
     expect(m.calls()).toEqual([expect.stringMatching(/ trust$/)])
   })
 
-  // #1835: the harnesses' install and sign-in fixes run only on the owner's own click, from a trusted origin over loopback
-  test.each(["claude-login", "codex", "codex-login"])(
+  // #1835, #2307: the harnesses' install, sign-in and trust fixes run only on the owner's own click, from a trusted origin over loopback
+  test.each(["claude-login", "claude-trust", "codex", "codex-login"])(
     "%s runs nothing off loopback or from another origin",
     async (id) => {
       const m = machine()
       m.stub("brew")
+      m.stub("bun")
       m.stub("claude")
       m.stub("codex")
       const app = full(m.fixes, [])

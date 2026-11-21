@@ -12,7 +12,6 @@ import {
   root,
   scratch,
   spawn,
-  usage,
   unplugged,
 } from "./spawn-fake"
 

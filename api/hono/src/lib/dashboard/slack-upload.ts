@@ -6,10 +6,11 @@ import { readAttachment } from "@/lib/dashboard/attachments"
 import { checkoutRoot, readsLive } from "@/lib/dashboard/fixture"
 import { filesToUpload, getItem, type Upload } from "@/lib/dashboard/inbox"
 
-// What dm upload shares, read from the stored item alone: the place its link names, and each file's name, bytes (base64) and whether those bytes are text, which the folder's name for it says (sniffed when it was kept).
+// What dm upload shares, read from the stored item alone: the place its link names, each file's name, bytes (base64) and whether those bytes are text, which the folder's name for it says (sniffed when it was kept), and a draft's words, which go as the files' message.
 export type UploadSpec = {
   channel: string
   files: { bytes: string; name: string; text: boolean }[]
+  text?: string
   thread?: string
 }
 
@@ -37,7 +38,7 @@ export async function uploadSpec(
       text: kept.file.kind === "text",
     })
   }
-  return { ...shared.place, files }
+  return { ...shared.place, files, ...(shared.text && { text: shared.text }) }
 }
 
 // A Slack send's files, shared by `playground dm upload <item id>` from the API's own checkout, which reads the place and the files from the item itself, so the Slack token stays in that run's process (the slack skill's upload.ts reads it from the Keychain) and never passes through a session or an argv. A stack that does not read this machine (a fixture's, a test's) shares nothing and counts none, since its items are made up.

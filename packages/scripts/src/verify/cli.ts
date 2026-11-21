@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
 
-import { withPortlessCa } from "../portless-ca"
+import { portlessDir, withPortlessCa } from "../portless-ca"
 import { asideBar, asideDrift } from "./aside-bar"
 import { changelogEntry } from "./changelog-entry"
 import {
@@ -112,7 +112,7 @@ Checks (default: all)
                 on /dashboard at 1280x800, with Playground's turn written past the stream's cap,
                 writes 10 steps into that turn one at a time and counts what each component drew
                 while they landed, failing when a text part's words, a row or a row's name link
-                drew past what a step may draw (its own, plus a clock tick's row each); it writes
+                drew past what a step may draw (its own, a clock tick drawing no row); it writes
                 into the fixture's transcripts, so only on this checkout's own fixture stack
   rows          on /dashboard, at the stock sidebar width and at 11rem, every menu row above
                 the footer is 32px, every row's and member row's words fit its box and none
@@ -265,8 +265,12 @@ if (check === "screenshots" && !label) {
   process.exit(1)
 }
 
+// portless get in the folder portlessDir() picks, so the URL names the 1355 fallback's https while only it serves, never an idle ~/.portless's http.
 const portless = (name: string): string => {
-  const proc = Bun.spawnSync(["bunx", "portless", "get", name], { stderr: "ignore" })
+  const proc = Bun.spawnSync(["bunx", "portless", "get", name], {
+    env: { ...process.env, PORTLESS_STATE_DIR: portlessDir() },
+    stderr: "ignore",
+  })
   const url = proc.stdout.toString().trim()
   if (proc.exitCode !== 0 || !url) {
     console.error(
@@ -307,12 +311,16 @@ const pageFor = (route: string) =>
 
 // What the run has signed into, undone however it ends: a check undoes its own when it finishes, and an interrupt undoes whatever is still open before it exits, so no session or browser outlives the run.
 const cleanups = new Set<() => Promise<void>>()
+let stopping = false
+// A Ctrl-C reaches this run twice under withPortlessCa, from the terminal and from its parent, so a second signal waits on the first's cleanups rather than ending the run mid-close.
 const interrupted = async () => {
+  if (stopping) return
+  stopping = true
   await Promise.all([...cleanups].map((cleanup) => cleanup().catch(() => undefined)))
   process.exit(130)
 }
-process.once("SIGINT", interrupted)
-process.once("SIGTERM", interrupted)
+process.on("SIGINT", interrupted)
+process.on("SIGTERM", interrupted)
 
 const holding = async <T>(cleanup: () => Promise<void>, run: () => Promise<T>): Promise<T> => {
   cleanups.add(cleanup)

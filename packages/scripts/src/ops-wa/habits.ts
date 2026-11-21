@@ -4,14 +4,18 @@ import { join } from "node:path"
 
 import { writeAtomic } from "../write-atomic"
 
-// The ban-safety habits ops-wa keeps, each from a project that ran an unofficial WhatsApp client and lost or kept its number (OpenClaw and Hermes Agent, at the commits the plan's research page pinned): the reconnect backoff and its stop (OpenClaw reconnect.ts), the hourly connect cap (an OpenClaw user's 3,500 reconnects in 3 hours locked the number out for 72), the quiet footprint (Hermes bridge.js) and the send pacing (Hermes).
+// The ban-safety habits ops-wa keeps, each from a project that ran an unofficial WhatsApp client and lost or kept its number (OpenClaw and Hermes Agent, at the commits the plan's research page pinned): the reconnect backoff and its stop (OpenClaw reconnect.ts), the hourly connect cap (an OpenClaw user's 3,500 reconnects in 3 hours locked the number out for 72), the quiet footprint (Hermes bridge.js) and the send pacing (Hermes), with no hourly cap on sends (ADR 0033).
 export const BACKOFF = { firstMs: 2_000, maxMs: 30_000, spread: 0.25, tries: 12 }
 export const CONNECTS_PER_HOUR = 20
-export const SEND = { gapMs: 1_000, partChars: 3_500, partGapMs: 300, perHour: 60 }
+export const SEND = { gapMs: 1_000, partChars: 3_500, partGapMs: 300 }
 export const OWNER_WINDOW_MS = 24 * 3_600_000
 export const KEEP_ALIVE_DAYS = 12
 
 export const HOUR = 3_600_000
+
+// The wait before a text part or a file's caption, its typing time: 3 characters a second, a typist's mean of 36.2 WPM on a phone (Palin et al., MobileHCI 2019, http://pokristensson.com/pubs/PalinEtAlMobileHCI2019.pdf), spread by up to a fifth either way and kept between 1 s and 60 s.
+export const typingMs = (chars: number, random: () => number = Math.random): number =>
+  Math.round(Math.min(60_000, Math.max(1_000, (chars / 3) * 1_000 * (0.8 + 0.4 * random()))))
 
 // The wait before connect try n (1 the first retry): doubling from 2 s to 30 s, spread by up to a quarter either way and kept inside the two.
 export const backoffMs = (attempt: number, random: () => number = Math.random): number => {

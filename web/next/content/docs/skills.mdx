@@ -36,7 +36,7 @@ An org is a set of rules, guard lists and skills for the repos of one GitHub org
 
 A skill resolves by its folder's name, from the first scope that holds it, and only that copy loads:
 
-1. each scope in `ext.order`'s order, your login's first when the list leaves it out, an extension kept only when `ext.links` links it to the repo's GitHub owner or to every repo (`*`), so an org can override a skill in its own repos;
+1. each scope in `ext.order`'s order, your login's first when the list leaves it out, an extension kept only when `ext.links` links it to the repo's GitHub owner, to the org whose own folder `~/<org>` holds a folder with no GitHub origin, or to every repo (`*`), so an org can override a skill in its own repos;
 2. each bundled extension `ext.bundled` turns on, from `extensions/<name>/skills` in the checkout, unless an installed extension already has that name; one that is off loads no skill;
 3. core: `skills/playground`, then `skills/zerostarter`, then `extensions/core/skills`.
 

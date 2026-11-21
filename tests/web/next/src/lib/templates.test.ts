@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
-import { GLM_MODEL as SETTINGS_GLM_MODEL } from "../../../../../packages/settings/src/harnesses"
+import {
+  GLM_MODEL as SETTINGS_GLM_MODEL,
+  LOCAL_MODEL as SETTINGS_LOCAL_MODEL,
+} from "../../../../../packages/settings/src/harnesses"
 import {
   GLM_MODEL,
+  LOCAL_MODEL,
   newDefaults,
   newTemplateId,
   resetTemplate,
@@ -56,6 +60,9 @@ describe("a template picker row", () => {
 
   test("its detail is its backend or model, then its effort", () => {
     expect(templateRowView(row({ model: "glm" }), false).detail).toBe("GLM")
+    expect(templateRowView(row({ effort: "low", model: "local" }), false).detail).toBe(
+      "Local · Low",
+    )
     expect(templateRowView(row({ effort: "high", model: "opus" }), false).detail).toBe(
       "opus · High",
     )
@@ -175,6 +182,19 @@ describe("the template editor", () => {
     expect(templateForm(DEFAULTS[3])).toMatchObject({ backend: "glm", model: "" })
   })
 
+  test("a local template saves local as its model with its effort, without Claude's account and model", () => {
+    const form = {
+      ...templateForm(orchestrator),
+      account: "pat@example.com",
+      effort: "low",
+      model: "opus",
+    }
+    const local = templateOf({ ...form, backend: "local" }, "orchestrator")
+    expect(local).toEqual({ ...orchestrator, effort: "low", model: "local" })
+    expect(templateForm(local)).toMatchObject({ backend: "local", effort: "low", model: "" })
+    expect(templateWords(local)).toBe("Orchestrator · Local · Low · orchestrator.md")
+  })
+
   // Each refusal is the settings write's own words, which tests/packages/settings/src/sessions.test.ts holds the same.
   test("a bad brief's refusal shows beside the brief of the template saved", () => {
     expect(
@@ -183,6 +203,18 @@ describe("the template editor", () => {
         0,
       ),
     ).toEqual({ fields: { brief: "a brief is a file name, with no /" }, rest: null })
+  })
+
+  test("a dispatcher on the local model shows its refusal beside the kind, with no path words", () => {
+    expect(
+      templateRefusal(
+        "sessions.templates: ✖ a dispatcher or a planner plans on Claude, so it takes no local model   → at [2].kind",
+        2,
+      ),
+    ).toEqual({
+      fields: { kind: "a dispatcher or a planner plans on Claude, so it takes no local model" },
+      rest: null,
+    })
   })
 
   test("an unknown account's refusal shows beside the account, and one at another template shows whole", () => {
@@ -247,6 +279,7 @@ describe("a default added after a save", () => {
   })
 })
 
-test("the web's GLM model is the settings package's", () => {
+test("the web's GLM and local models are the settings package's", () => {
   expect(GLM_MODEL).toBe(SETTINGS_GLM_MODEL)
+  expect(LOCAL_MODEL).toBe(SETTINGS_LOCAL_MODEL)
 })

@@ -224,6 +224,12 @@ describe("passes", () => {
     expect(await bash(command)).toBeUndefined()
   })
 
+  // a runner's folder option is a folder, never the program, so a file naming agent-desktop after it is an argument alone (#2397's 7-day replay)
+  test("a test run bun run takes past a --cwd in a variable", async () => {
+    const w = join(tmpdir(), "missing-dir")
+    expect(await bash(`W=${w}; bun run --cwd $W test:file ${script}`)).toBeUndefined()
+  })
+
   test("a script file with no agent-desktop in it", async () => {
     expect(await bash(`bash ${plain}`)).toBeUndefined()
   })

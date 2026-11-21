@@ -44,6 +44,7 @@ const { changeHostedMode, SDK_PROBE, SdkHost } =
 const { DELIVERY_FAILURES } = await import("../../../../../api/hono/src/lib/dashboard/deliver")
 const { Hono } = await import("../../../../../api/hono/node_modules/hono")
 const { env } = await import("../../../../../packages/env/dist/api-hono.mjs")
+const { refuseAgentOffFixture } = await import("../../../../../api/hono/src/middlewares/agent")
 
 const PNG = Uint8Array.from(
   Buffer.from(
@@ -91,6 +92,7 @@ describe("the dashboard routes", () => {
       "/workers/s-1/transcript",
       "/workers/s-1/skills",
       "/attachments/11111111-2222-4333-8444-555555555555.png",
+      "/model-icons/anthropic",
       "/threads",
       "/threads?page=2",
       "/threads/k7mq/messages",
@@ -487,6 +489,7 @@ describe("sendMessage", () => {
   test("every refusal becomes the API's error, with its reason and its code under delivery", async () => {
     const expected: Record<string, [number, string]> = {
       AMBIGUOUS: [409, "CONFLICT"],
+      BUSY: [409, "CONFLICT"],
       COMMAND: [400, "VALIDATION_ERROR"],
       EMPTY: [400, "VALIDATION_ERROR"],
       INPUT_NOT_EMPTY: [409, "CONFLICT"],
@@ -1199,6 +1202,33 @@ describe("the setting route", () => {
     expect(held).toMatchObject({ extra: { delivery: "QUEUED" }, status: 409 })
   })
 
+  test("a local model goes to the hosted session alone: a dispatcher or the assistant gets FORBIDDEN, with nothing typed", async () => {
+    const sent: { via: string; delivery: unknown }[] = []
+    const send = (via: string) => async (delivery: Delivery | SettingChanging) => {
+      sent.push({ delivery, via })
+      return ok("s-h")()
+    }
+    const live = board([
+      { name: DISPATCHER, sessionId: "s-d" },
+      { assistant: true, name: "errands", sessionId: "s-a" },
+      { hosted: true, name: SDK_PROBE, sessionId: "s-h" },
+    ])
+    const setting = { local: "ornith-1.5-122b-nvfp4" }
+    for (const sessionId of ["s-d", "s-a"]) {
+      const refused = await changeSetting(
+        { sessionId, setting },
+        actor,
+        live,
+        send("deliver"),
+        send("hosted"),
+      ).catch((thrown) => thrown)
+      expect(refused).toMatchObject({ code: "FORBIDDEN", status: 403 })
+    }
+    expect(sent).toEqual([])
+    await changeSetting({ sessionId: "s-h", setting }, actor, live, send("deliver"), send("hosted"))
+    expect(sent).toEqual([{ delivery: { actor, sessionId: "s-h", setting }, via: "hosted" }])
+  })
+
   test("any other session is FORBIDDEN and an unknown one NOT_FOUND, before anything is sent; a delivery's refusal keeps its code under delivery", async () => {
     let sends = 0
     const send = async () => {
@@ -1353,5 +1383,14 @@ describe("the paste report route (PG-1015)", () => {
     for (let i = 0; i < 7; i++) statuses.push((await app.request("/", { method: "POST" })).status)
     expect(statuses.slice(0, 6).every((status) => status === 200)).toBe(true)
     expect(statuses[6]).toBe(429)
+  })
+})
+
+describe("a composer message refuses the agent sign-in off a fixture stack", () => {
+  test("POST /messages carries refuseAgentOffFixture", () => {
+    const handlers = dashboardRouter.routes
+      .filter((r) => r.method === "POST" && r.path === "/messages")
+      .map((r) => r.handler)
+    expect(handlers).toContain(refuseAgentOffFixture)
   })
 })

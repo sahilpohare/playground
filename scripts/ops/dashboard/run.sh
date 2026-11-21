@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The live dashboard's ops job outside any Claude session: supervisor.sh (dev + follower as its children, rolls each canary
-# merge), the off-loopback Docker watch, and a notifier that tells Ops (notify.sh) only about a FAIL,
+# The live dashboard's ops job outside any Claude session: supervisor.sh (dev + follower as its children, rolls each move
+# of the branch upstream.sh names), the off-loopback Docker watch, and a notifier that tells Ops (notify.sh) only about a FAIL,
 # DOWN or ANOMALY line in results.log, a watch alert, or the supervisor exiting. up.py runs it as a herdr pane's command, from the dashboard's
 # checkout. It follows its terminal: on SIGHUP, or once its parent has exited (the pane is gone, as when its server stops), it stops its
 # stack by the recorded process groups (procs.sh, never by name), so a detached stack never keeps the portless names.

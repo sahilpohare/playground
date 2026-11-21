@@ -53,7 +53,7 @@ describe("--memory <dir> turns auto-memory on for one launch (#1484)", () => {
     expect(both.err).toContain("--memory takes an absolute folder or off, once")
     const close = await spawn(["close", "probe-x", "--memory", "/tmp/a"], [])
     expect(close.code).not.toBe(0)
-    expect(close.err).toContain("close takes a session's name alone")
+    expect(close.err).toContain("close takes a session's name, and its session id to pick one")
   })
 })
 

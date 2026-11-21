@@ -47,6 +47,11 @@ Bun-first therefore applies to the Bun-only files: `packages/scripts/src/*.ts` (
 
 `node:path`, `node:os`, `node:util`, `node:crypto`, `node:readline/promises`, and the directory/sync parts of `node:fs` (`existsSync` in sync code, `mkdirSync`, `mkdtempSync`, `readdirSync`, `rmSync`). Bun ships no `Bun.path`/`Bun.os`, so `node:` is the idiomatic API for these even in pure-Bun files.
 
+## Bun traps
+
+- Call `process.exit()` after the import in a check that a Worker module loads, since a module that sets `self.onmessage` keeps a plain `bun -e` import alive forever and the check never returns.
+- Run each Worker module's load check in a fresh process of its own, since Bun keeps a failed package lookup for every later Worker in the same process, so one missed resolve fails every Worker the run starts after it.
+
 ## Audit
 
 No bare (unprefixed) built-in specifier may exist anywhere. The `$B` alternation is the full Node built-in list, so a new bare import cannot slip through; extend it only when Node ships a new module. This prints nothing when clean:

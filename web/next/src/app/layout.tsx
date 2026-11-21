@@ -5,6 +5,7 @@ import { site } from "@packages/config/site"
 import { SpeedInsights } from "@vercel/speed-insights/next"
 import { cn } from "cn"
 import type { Metadata } from "next"
+import { headers } from "next/headers"
 
 import { InnerProvider, OuterProvider } from "@/app/providers"
 import { Navbar } from "@/components/common/navbar"
@@ -55,11 +56,13 @@ export const metadata: Metadata = {
   },
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  // the hosted build's CSP nonce for next-themes' inline script, read only there, so the local build's pages stay static
+  const nonce = config.hosted ? ((await headers()).get("x-nonce") ?? undefined) : undefined
   return (
     <OuterProvider>
       <html
@@ -68,7 +71,7 @@ export default function RootLayout({
         suppressHydrationWarning
       >
         <body className="min-h-svh">
-          <InnerProvider>
+          <InnerProvider nonce={nonce}>
             {/* Not a div: React hydrates body by skipping nodes of another tag and taking the first of the same tag, so an extension's injected div (Scrnli's #scrnli_recorder_root) would be taken for ours. Inside the theme provider, which stays body's own child. */}
             <section className="contents">
               <Navbar />

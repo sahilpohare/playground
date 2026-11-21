@@ -16,31 +16,46 @@ import {
   readFix,
   startFix,
 } from "@/lib/onboard/fix"
+import { GuardError } from "@/lib/sessions/guard"
 import { requireLoopback, requireThisMachine, requireTrustedOrigin } from "@/middlewares/dashboard"
 
 // The API with no database, which src/main.ts serves while POSTGRES_URL is unset: GET /api/health answers up with `setup: true` and no database, so playground's wait, ops-tick's watch and verify count the stack as up, GET /api/setup reads where setup stands, POST /api/setup/container starts a local container, GET /api/v1/onboard/checks answers the first run's checks with the database as setup stands and done false, since the done mark lives in the database, GET and POST /api/v1/onboard/fix/:id read and start the first run's fixes, the database's being Start a local container or Start without Docker (PGlite), and every other route is 404. It imports no database, auth or session code, since better-auth lives in the database setup makes, so its writes are guarded by origin and loopback alone, refused when forwarded from off this machine (a tailnet or a LAN proxy), limited to 5 a minute together and run one at a time with every fix.
 
+// A failure carries exposed when the guard refused a container published beyond loopback, so the Database step offers the move as its button.
 export type SetupState =
-  | { status: "failed"; reason: string }
+  | { status: "failed"; exposed?: true; reason: string }
   | { status: "idle" }
   | { status: "starting"; step: string }
 
 export type Fetch = (request: Request, env: unknown) => Response | Promise<Response>
 
-export type StartSetup = (onStep: (step: string) => void, engine: DatabaseFix) => Promise<void>
+export type StartSetup = (
+  onStep: (step: string) => void,
+  engine: DatabaseFix,
+  move: boolean,
+) => Promise<void>
 
-// start resolves once the database the engine names (a container, or PGlite with no Docker) is ready and the API has moved on to the normal app, or throws with words for the page.
+// start resolves once the database the engine names (a container, or PGlite with no Docker) is ready and the API has moved on to the normal app, or throws with words for the page; move is true when the click answers an exposed failure, so start moves that container onto loopback first.
 export const setupApp = (start: StartSetup, runner: Fixes = shared) => {
   let state: SetupState = { status: "idle" }
   const database = async (line: (text: string) => void, engine: DatabaseFix) => {
+    const move = state.status === "failed" && state.exposed === true
     state = { status: "starting", step: "Starting" }
     try {
-      await start((step) => {
-        state = { status: "starting", step }
-        line(step)
-      }, engine)
+      await start(
+        (step) => {
+          state = { status: "starting", step }
+          line(step)
+        },
+        engine,
+        move,
+      )
     } catch (error) {
-      state = { reason: error instanceof Error ? error.message : String(error), status: "failed" }
+      state = {
+        reason: error instanceof Error ? error.message : String(error),
+        status: "failed",
+        ...(error instanceof GuardError && error.failure === "exposed" && { exposed: true }),
+      }
       throw error
     }
   }
@@ -89,8 +104,8 @@ export const setupApp = (start: StartSetup, runner: Fixes = shared) => {
 
 // Serves setupApp until start resolves, then loads the normal app and serves it from then on, so setup's routes answer 404 with no restart.
 export const firstRun = (start: StartSetup, load: () => Promise<Fetch>): Fetch => {
-  let serve: Fetch = setupApp(async (onStep, engine) => {
-    await start(onStep, engine)
+  let serve: Fetch = setupApp(async (onStep, engine, move) => {
+    await start(onStep, engine, move)
     onStep(`Opening ${site.name}`)
     serve = await load()
   }).fetch

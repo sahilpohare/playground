@@ -27,11 +27,15 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/api/hono/src/lib/dashboard/delete-targets.ts",
+        "$TURBO_ROOT$/api/hono/src/lib/dev/ca-trust.ts",
         "$TURBO_ROOT$/api/hono/src/lib/dev/live-dashboard.ts",
         "$TURBO_ROOT$/api/hono/src/lib/dev/proxy.ts",
         "$TURBO_ROOT$/api/hono/src/lib/dev/stop.ts",
         "$TURBO_ROOT$/api/hono/src/lib/keychain-items.ts",
         "$TURBO_ROOT$/api/hono/src/lib/keychain.ts",
+        "$TURBO_ROOT$/api/hono/src/lib/sessions/proc-start.ts",
+        "$TURBO_ROOT$/api/hono/src/lib/system/parse.ts",
+        "$TURBO_ROOT$/api/hono/src/lib/system/peer.ts",
         "$TURBO_ROOT$/api/hono/src/lib/usage/prices.ts",
         "$TURBO_ROOT$/api/hono/src/lib/yard/client.ts",
         "$TURBO_ROOT$/api/hono/src/lib/yard/keychain.ts",
@@ -151,7 +155,7 @@
     "NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN",
     "NEXT_PUBLIC_USERJOT_URL"
   ],
-  // CLAUDECODE, PLAYGROUND_FIXTURE, PLAYGROUND_FIXTURE_DIR, PLAYGROUND_LIVE_READS and PLAYGROUND_ROLE are read straight from the environment by the dashboard's source (api/hono/src/lib/dashboard/fixture.ts), so an exported one reaches the API as it reaches the dev launcher, and the API chooses the source the launcher checked (a factory session's role, or Claude Code with none), which writes the fixture the API then reads, and PLAYGROUND_FIXTURE_LAUNCHED is the launcher's word to its stack that it wrote that fixture; the organisation's config (packages/config/src/org.ts: PLAYGROUND_DATA_DIR, PLAYGROUND_OWNER_NAME, WORK_GITHUB_ORG and WORK_LABEL) is read straight from the environment too, and so is each live-reads stack's scratch path, by its reader: PLAYGROUND_ATTACHMENTS_DIR by the dashboard's attachments (api/hono/src/lib/dashboard/attachments.ts), which the transcript parser reads too, PLAYGROUND_CHANGELOG_DIR by the Changelog's screenshots (api/hono/src/plugins/changelog/images.ts), PLAYGROUND_DEBUG_PASTE_DIR by the composer's temporary debug report (api/hono/src/lib/dashboard/debug-report.ts), PLAYGROUND_HERDR_DIR and PLAYGROUND_HERDR_SESSIONS by the dashboard's herdr provider (api/hono/src/lib/dashboard/herdr.ts), PLAYGROUND_MERGED_PULLS by the merged pull requests' cache (api/hono/src/lib/dashboard/agents.ts), PLAYGROUND_PREVIEWS_DIR by the Previews app (api/hono/src/lib/apps/previews.ts), and PLAYGROUND_PROFILE_URL by a Claude account's profile read (api/hono/src/lib/accounts/claude-setup.ts); each old name the DESK_* wildcard passes still reads (packages/env/src/aliases.ts); PLAYGROUND_BARE_NAMES is the dev launcher's word to the live dashboard's apps that the bare names are theirs too (packages/scripts/src/portless.ts), and PORTLESS_STATE_DIR keeps portless in the apps on the routes the launcher read; PLAYGROUND_ONBOARD_MISSING is read by onboarding's checks on a fixture stack alone (api/hono/src/lib/onboard/checks.ts); PLAYGROUND_HERDR_SESSION, PLAYGROUND_LOAD_MULT and PLAYGROUND_REPO are spawn.sh's own reads (the herdr server a spawn opens on, its load gate's multiplier, the main checkout its code root and leads worktree sit on), passed so a value the stack's starter exports reaches the API task, whose session starts hand their spawn env, this list's names and the .env's PLAYGROUND_* names included, to every spawn.sh they run (tests/turbo.test.ts keeps spawn.sh's reads on these lists), and NEXT_TELEMETRY_DISABLED is the 1 the dev launcher sets for next dev, whose telemetry flush can otherwise outlive the stack and hold the worktree's files
+  // CLAUDECODE, PLAYGROUND_FIXTURE, PLAYGROUND_FIXTURE_DIR, PLAYGROUND_LIVE_READS and PLAYGROUND_ROLE are read straight from the environment by the dashboard's source (api/hono/src/lib/dashboard/fixture.ts), so an exported one reaches the API as it reaches the dev launcher, and the API chooses the source the launcher checked (a factory session's role, or Claude Code with none), which writes the fixture the API then reads, and PLAYGROUND_FIXTURE_LAUNCHED is the launcher's word to its stack that it wrote that fixture; the organisation's config (packages/config/src/org.ts: PLAYGROUND_DATA_DIR, PLAYGROUND_LEDGER_TITLE, PLAYGROUND_LOCAL_MODELS, PLAYGROUND_LOCAL_MODEL_URL, PLAYGROUND_OWNER_NAME, PLAYGROUND_PEERS, PLAYGROUND_PEER_KEY, WORK_GITHUB_ORG and WORK_LABEL) is read straight from the environment too, and so is each live-reads stack's scratch path, by its reader: PLAYGROUND_ATTACHMENTS_DIR by the dashboard's attachments (api/hono/src/lib/dashboard/attachments.ts), which the transcript parser reads too, PLAYGROUND_CHANGELOG_DIR by the Changelog's screenshots (api/hono/src/plugins/changelog/images.ts), PLAYGROUND_DEBUG_PASTE_DIR by the composer's temporary debug report (api/hono/src/lib/dashboard/debug-report.ts), PLAYGROUND_HERDR_DIR and PLAYGROUND_HERDR_SESSIONS by the dashboard's herdr provider (api/hono/src/lib/dashboard/herdr.ts), PLAYGROUND_MERGED_PULLS by the merged pull requests' cache (api/hono/src/lib/dashboard/agents.ts), PLAYGROUND_PREVIEWS_DIR by the Previews app (api/hono/src/lib/apps/previews.ts), and PLAYGROUND_PROFILE_URL by a Claude account's profile read (api/hono/src/lib/accounts/claude-setup.ts); each old name the DESK_* wildcard passes still reads (packages/env/src/aliases.ts); PLAYGROUND_BARE_NAMES is the dev launcher's word to the live dashboard's apps that the bare names are theirs too (packages/scripts/src/portless.ts), and PORTLESS_STATE_DIR keeps portless in the apps on the routes the launcher read; PLAYGROUND_ONBOARD_MISSING is read by onboarding's checks on a fixture stack alone (api/hono/src/lib/onboard/checks.ts); PLAYGROUND_HERDR_SESSION, PLAYGROUND_LOAD_MULT, PLAYGROUND_PROC and PLAYGROUND_REPO are spawn.sh's own reads (the herdr server a spawn opens on, its load gate's multiplier, the recorded /proc text its gates read under the test sandbox's TEST_SANDBOX_HOME alone, which no list here passes, the main checkout its code root and leads worktree sit on), passed so a value the stack's starter exports reaches the API task, whose session starts hand their spawn env, this list's names and the .env's PLAYGROUND_* names included, to every spawn.sh they run (tests/turbo.test.ts keeps spawn.sh's reads on these lists), NEXT_TELEMETRY_DISABLED is the 1 the dev launcher sets for next dev, whose telemetry flush can otherwise outlive the stack and hold the worktree's files, and TMPDIR keeps a task's temp folder the caller's own, since without it a tool's os.tmpdir() falls back to /tmp, which Claude Code's sandbox gives a shell no write to
   "globalPassThroughEnv": [
     "CLAUDECODE",
     "DESK_*",
@@ -167,12 +171,18 @@
     "PLAYGROUND_HERDR_DIR",
     "PLAYGROUND_HERDR_SESSION",
     "PLAYGROUND_HERDR_SESSIONS",
+    "PLAYGROUND_LEDGER_TITLE",
     "PLAYGROUND_LIVE_READS",
     "PLAYGROUND_LOAD_MULT",
+    "PLAYGROUND_LOCAL_MODELS",
+    "PLAYGROUND_LOCAL_MODEL_URL",
     "PLAYGROUND_MERGED_PULLS",
     "PLAYGROUND_ONBOARD_MISSING",
     "PLAYGROUND_OWNER_NAME",
+    "PLAYGROUND_PEERS",
+    "PLAYGROUND_PEER_KEY",
     "PLAYGROUND_PREVIEWS_DIR",
+    "PLAYGROUND_PROC",
     "PLAYGROUND_PROFILE_URL",
     "PLAYGROUND_REPO",
     "PLAYGROUND_ROLE",
@@ -181,6 +191,7 @@
     "PORTLESS_PORT",
     "PORTLESS_STATE_DIR",
     "PORTLESS_SYNC_HOSTS",
+    "TMPDIR",
     "WORK_GITHUB_ORG",
     "WORK_LABEL"
   ]

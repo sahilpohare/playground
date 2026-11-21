@@ -1,9 +1,18 @@
 import { expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { readCheck, strayRoutes } from "../../../../../packages/scripts/src/verify/checks"
+import { scratchEnv } from "../../../../scratch-env"
 
 const CLI = join(import.meta.dir, "../../../../../packages/scripts/src/verify/cli.ts")
 
@@ -138,5 +147,28 @@ test("verify closes its browser session when a browser call fails", () => {
     closesItsOwn(readFileSync(log, "utf8"))
   } finally {
     rmSync(dir, { force: true, recursive: true })
+  }
+})
+
+// On Linux the stack's API runs the 1355 proxy in ~/.portless/fallback with TLS on, so portless get names its https URL only when asked in that folder (#2418).
+test("verify asks portless get in the folder portlessDir() names, the 1355 proxy's while only it serves", () => {
+  const home = mkdtempSync(join(tmpdir(), "verify-portless-"))
+  const fallback = join(home, ".portless", "fallback")
+  const log = join(home, "bunx.log")
+  try {
+    mkdirSync(fallback, { recursive: true })
+    writeFileSync(join(fallback, "proxy.pid"), `${process.pid}\n`)
+    writeFileSync(
+      join(home, "bunx"),
+      `#!/bin/sh\necho "$*|\${PORTLESS_STATE_DIR:-}" >> "${log}"\necho http://127.0.0.1:9\n`,
+    )
+    chmodSync(join(home, "bunx"), 0o755)
+    const env = scratchEnv(home, { PATH: `${home}:${process.env.PATH}` })
+    Bun.spawnSync(["bun", CLI, "health"], { env, stdin: "ignore" })
+    expect(readFileSync(log, "utf8")).toBe(
+      `portless get api.playground|${fallback}\nportless get playground|${fallback}\n`,
+    )
+  } finally {
+    rmSync(home, { force: true, recursive: true })
   }
 })
