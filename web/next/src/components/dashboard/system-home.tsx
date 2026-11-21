@@ -1,9 +1,11 @@
 "use client"
 
-import { RiRefreshLine, RiTerminalBoxLine } from "@remixicon/react"
+import { RiRefreshLine, RiRestartLine, RiTerminalBoxLine } from "@remixicon/react"
+import { useMutation } from "@tanstack/react-query"
 import { cn } from "cn"
 import * as React from "react"
 
+import { ConfirmDialog } from "@/components/common/confirm-dialog"
 import { useDashboard } from "@/components/dashboard/dashboard"
 import { NeedsYou } from "@/components/dashboard/needs-you"
 import { NextUp } from "@/components/dashboard/next-up"
@@ -17,11 +19,46 @@ import { PageHeader } from "@/components/shell/page-header"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { toast } from "@/components/ui/toast"
 import { useInbox } from "@/lib/inbox"
 import { rosterSetup, sessionsSetup } from "@/lib/setup"
+import { restartHerdr } from "@/lib/system"
 
 export const SYSTEM_DESCRIPTION =
   "What every agent is doing, what is queued, what needs you, and this machine's room."
+
+// Restart herdr: stops every herdr server and starts them again, then the ops jobs, the Dashboard among them, so this page drops for a moment and reconnects once the Dashboard is back.
+function RestartHerdr() {
+  const [open, setOpen] = React.useState(false)
+  const restart = useMutation({
+    mutationFn: restartHerdr,
+    onError: (error) => toast.add({ title: error.message, type: "error" }),
+    onSettled: () => setOpen(false),
+    onSuccess: () =>
+      toast.add({
+        title: "Restarting herdr",
+        description: "Every session stops for a moment, then comes back with this page.",
+        type: "success",
+      }),
+  })
+  return (
+    <>
+      <Button variant="outline" className="text-xs" onClick={() => setOpen(true)}>
+        <RiRestartLine />
+        Restart herdr
+      </Button>
+      <ConfirmDialog
+        action="Restart"
+        description="Every herdr server stops and starts again, then the ops jobs. Each session and this Dashboard drop for a moment and come back with their conversations kept."
+        onConfirm={() => restart.mutate()}
+        onOpenChange={setOpen}
+        open={open}
+        pending={restart.isPending}
+        title="Restart herdr?"
+      />
+    </>
+  )
+}
 
 // The System page, which the sidebar's System item opens: every agent's status at a glance, live, then what is queued, what waits on you, the machine's room for more workers, and the ops jobs paused on purpose. A row opens that agent's own view, where its stream is. It moved here from /dashboard when the dashboard became your chat.
 export function SystemHome({ storedRows: stored = null }: { storedRows?: number | null }) {
@@ -81,7 +118,7 @@ export function SystemHome({ storedRows: stored = null }: { storedRows?: number 
 
   return (
     <>
-      <PageHeader title="System" description={SYSTEM_DESCRIPTION} />
+      <PageHeader title="System" description={SYSTEM_DESCRIPTION} actions={<RestartHerdr />} />
       <div className="flex flex-col gap-6">
         {problem && (
           <Alert variant="destructive">

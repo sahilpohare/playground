@@ -46,7 +46,7 @@
         "Sidebar dispatcher rows: in the sidebar's header under its name row, above every group, with no group title or count, one row for each dispatcher drawn as every agent's (its one icon, its label, Alpha or Bravo, its model, effort and state in its tooltip, with no count and no dropdown, and on the Claude dispatcher's row the week and the 5-hour window after its name, GLM's on the GLM dispatcher's row or, with none on GLM, the second dispatcher's row behind Z.ai's mark, each an icon and its number in mono, in its level's colour, a stale one gray and dimmed, then its provider's logo and its effort's icon at its right end); the primary's opening /dashboard, and with something waiting /dashboard#needs-you-<id>, scrolled to the first card (the newest Inbox item, else the oldest prompt), and the second's, shown only while it is live or the roster lists it neither done nor ended, opening /dashboard?worker=<sessionId>; on the live Alpha row a plus in its effort's place (on hover, keyboard focus and always on a phone) opens the template picker, whose row starts a second dispatcher or an orchestrator and whose foot links Edit templates to Settings' Templates section, /dashboard/settings#templates",
         "Sidebar Orchestrators, Subagents, AI Runners or Other: a session's row opens /dashboard?worker=<sessionId>, and with something waiting (a Feed card, or the red alarm while it is Stuck) /dashboard?worker=<sessionId>#needs-you-<id>, scrolled to the oldest card, or while it waits only on an inbox item it posted, /dashboard#needs-you-<id>, that item in Playground's Inbox",
         "System page: an agent's name in the Agents table, or a place in Needs you, opens /dashboard?worker=<sessionId>",
-        "User menu square: at the aside toolbar's end, a green dot at its top right while the build is behind, and Auto-hide tab bar then Update now first in its menu, sending the dispatcher one line naming the update and opening /dashboard",
+        "User menu square: at the aside toolbar's end, a green dot at its top right while the build is behind, and Auto-hide tab bar then Update now first in its menu, on the live dashboard asking its supervisor for a roll at once, elsewhere sending the dispatcher one line naming the update and opening /dashboard",
         "Below the owner rung: the sidebar's plain Dashboard link"
       ],
       "route": "/dashboard",
@@ -293,7 +293,8 @@
         "GET /api/v1/agents",
         "GET /api/v1/ops",
         "GET /api/v1/system",
-        "GET /api/v1/inbox"
+        "GET /api/v1/inbox",
+        "POST /api/v1/system/herdr/restart"
       ],
       "heading": "System",
       "reach": [
@@ -306,6 +307,7 @@
         "Needs you, the dispatchers alone: each one's Feed prompts, named by its label (Alpha, Bravo), and what needs you in the first one's Inbox (each count linked to its first card: the newest Inbox item, else the oldest prompt), and the first stopped on a prompt the cards do not hold.",
         "Next up, the roster's backlog still waiting, fixes first, then your own asks, then the rest.",
         "Paused, the scripts jobs.json pauses on purpose (its plain name, what it does, when it runs, last beat), muted, shown only when one is.",
+        "Restart herdr in the header, which asks first, then stops every herdr server and starts them again with the ops jobs, so each session and the page drop for a moment and come back.",
         "System, this machine's room for more workers, sampled every 30s: the capacity line (Room for ~N more workers, and what limits it), what stopping a worker's dev stack idle for 15 minutes would free, the usage windows the usage job writes, a plain table of the readings (memory with its pressure, CPU load against the cores, swap, disk free and Docker's VM), the first three with a small sparkline of their last hour, and each live session's footprint (its memory, its claude process, its dev stack with that stack's Postgres container, and its CPU), then what runs in a checkout with no session.",
         "The System page, which the sidebar header's system icons open (the status table and what goes with it moved here when /dashboard became Playground's chat) leads with Agents, a table of every agent dispatcher's roster lists or herdr runs (Agent with its one Worker Lights icon and label, Role, Doing as its roster title with its PR linked in its PR's colour, Status as the icon's word such as Working, Fixing, Waiting on checks, Ready, Stuck or (Playground's own) Waiting on you, the working or stuck worker's time left in the sidebar row's tooltip, none once its pull request is merged or it sits paused on a usage limit), in the sidebar's order (Dispatchers, Orchestrators, AI Runners, Subagents, Scripts and Other, each reviewer and tester indented under its worker), under one toolbar row of search, a Role filter, Show N idle while an Other agent has idled past three hours, and Refresh, and kept live."
       ],
@@ -477,6 +479,10 @@
     {
       "route": "POST /api/v1/stacks/stop",
       "use": "Stops a Vibeground and removes its copy, keeping the worktree, from Stop in the Inbox's Preview row's bar on every dashboard page's aside."
+    },
+    {
+      "route": "POST /api/v1/system/update",
+      "use": "The user menu's Update now on the live dashboard, which every dashboard page's aside offers: writes the supervisor's roll-now file, as playground update does, so the Dashboard rolls to its branch's head at once."
     },
     {
       "route": "PUT /api/v1/settings/:key",

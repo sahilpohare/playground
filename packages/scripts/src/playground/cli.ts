@@ -22,6 +22,7 @@ import {
   HELP,
   leftLines,
   planStart,
+  recordedJobs,
   rollOutcome,
   type RollOutcome,
   rollTimedOut,
@@ -225,7 +226,7 @@ const docker: Docker = async (args) => {
   }
 }
 
-const dashboard = async (): Promise<number> => {
+const dashboard = async (restarted: string[] = []): Promise<number> => {
   const failed: string[] = []
   const close = (): number => {
     for (const line of leftLines(failed)) console.log(line)
@@ -242,7 +243,7 @@ const dashboard = async (): Promise<number> => {
   for (const step of planStart(await probe(urls))) {
     if (step === "jobs") {
       console.log("Starting the Dashboard…")
-      const jobs = await startJobs(REPO)
+      const jobs = await startJobs(REPO, restarted)
       if (jobs !== 0) failed.push(`The Dashboard's jobs didn't start: up.py exited ${jobs}`)
     } else if (step === "dispatcher") {
       console.log(`Starting ${getSessionNames().names.dispatcher}…`)
@@ -299,7 +300,19 @@ const dashboard = async (): Promise<number> => {
 }
 
 const start = (): Promise<number> =>
-  runStart(async () => ((await opsHerdr(["start"]).exited) === 0 ? 0 : 1), dashboard)
+  runStart(
+    async () => ((await opsHerdr(["start"]).exited) === 0 ? 0 : 1),
+    () => dashboard(),
+  )
+
+// playground herdr restart: every terminal job ran in the herdr servers it stops, so each one up.py recorded starting loses its start grace and starts again in the same run
+const restartHerdr = async (): Promise<number> => {
+  if ((await opsHerdr(["stop-all"]).exited) !== 0) return 1
+  return runStart(
+    async () => ((await opsHerdr(["start"]).exited) === 0 ? 0 : 1),
+    async () => dashboard(await recordedJobs(join(dataDir(), "ops", "up-state.json"))),
+  )
+}
 
 const status = (): Promise<number> =>
   runStatus(
@@ -618,23 +631,25 @@ const code =
                                                         accountsIo(dataDir()).readSecret,
                                                       ),
                                                     )
-                                                  : command === "herdr" && rest[0] === "stop"
-                                                    ? (await opsHerdr(["stop-all"]).exited) === 0
-                                                      ? 0
-                                                      : 1
-                                                    : command === "herdr" && rest[0] === "pin"
-                                                      ? await (
-                                                          await import("./herdr-pin")
-                                                        ).runHerdrPin(rest.slice(1))
-                                                      : VERBS.includes(command)
-                                                        ? await verb(command, rest)
-                                                        : command === "ci-wait"
-                                                          ? await ciWaitFor(rest)
-                                                          : command === "model"
-                                                            ? await (
-                                                                await import("../local-model/live")
-                                                              ).runModel(rest)
-                                                            : fail(
-                                                                `no command ${command}; playground --help lists them`,
-                                                              )
+                                                  : command === "herdr" && rest[0] === "restart"
+                                                    ? await restartHerdr()
+                                                    : command === "herdr" && rest[0] === "stop"
+                                                      ? (await opsHerdr(["stop-all"]).exited) === 0
+                                                        ? 0
+                                                        : 1
+                                                      : command === "herdr" && rest[0] === "pin"
+                                                        ? await (
+                                                            await import("./herdr-pin")
+                                                          ).runHerdrPin(rest.slice(1))
+                                                        : VERBS.includes(command)
+                                                          ? await verb(command, rest)
+                                                          : command === "ci-wait"
+                                                            ? await ciWaitFor(rest)
+                                                            : command === "model"
+                                                              ? await (
+                                                                  await import("../local-model/live")
+                                                                ).runModel(rest)
+                                                              : fail(
+                                                                  `no command ${command}; playground --help lists them`,
+                                                                )
 process.exit(code)

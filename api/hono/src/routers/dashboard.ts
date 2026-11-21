@@ -53,6 +53,7 @@ import {
   type FeedFailure,
   type FeedResult,
 } from "@/lib/dashboard/feed"
+import { HerdrRestartError, restartHerdr } from "@/lib/dashboard/herdr-restart"
 import { boardFrame, dashboardHub } from "@/lib/dashboard/hub"
 import { recordReply as recordReplyItem, REPLY_RE } from "@/lib/dashboard/inbox"
 import { iconModels, localModel } from "@/lib/dashboard/local-model"
@@ -73,6 +74,7 @@ import {
 } from "@/lib/dashboard/paste-report"
 import { restartPrs, restartSession } from "@/lib/dashboard/restart"
 import { restoreCheckout, RestoreError } from "@/lib/dashboard/restore"
+import { requestRoll, RollNowError } from "@/lib/dashboard/roll-now"
 import { readRoster } from "@/lib/dashboard/roster"
 import {
   answerHosted,
@@ -617,6 +619,70 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
         return c.json({ data: await restoreCheckout() })
       } catch (error) {
         if (error instanceof RestoreError) throw new ApiError(409, "CONFLICT", error.message)
+        throw error
+      }
+    },
+  )
+  .post(
+    "/system/herdr/restart",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "The System page's Restart herdr, on the owner's click after its confirm: starts `playground herdr restart` from the main checkout, detached in its own process group, so it outlives the herdr servers it stops, this API among them. It stops every herdr server, starts them and the Dashboard again with each terminal job's start grace dropped, and brings the sessions back; its lines go to the data folder's `ops/herdr-restart.log`. A fixture or test stack spawns nothing and records the press in the fixture's scratch `herdr-restart.json`. Answers 202 at once; refused (409) on a stack that runs no herdr and within two minutes of the last start.",
+      responses: {
+        202: {
+          description: "The restart started; the Dashboard goes down and comes back",
+          content: {
+            "application/json": {
+              schema: resolver(z.object({ data: z.object({ log: z.string() }) })),
+            },
+          },
+        },
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        409: errorResponse("CONFLICT", "No herdr on this stack, or a restart already runs"),
+      },
+    }),
+    refuseAgentOffFixture,
+    (c) => {
+      try {
+        return c.json({ data: restartHerdr() }, 202)
+      } catch (error) {
+        if (error instanceof HerdrRestartError) throw new ApiError(409, "CONFLICT", error.message)
+        throw error
+      }
+    },
+  )
+  .post(
+    "/system/update",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "The user menu's Update now on the live dashboard, on the owner's click: writes the supervisor's `roll-now` file in the data folder's `ops/dashboard`, as `playground update` does, so the supervisor rolls to its branch's head at once, past its holds. A fixture or test stack writes it in the fixture's scratch folder. Answers 202 at once; refused (409) on a stack the supervisor does not roll, or while the supervisor is missing or paused.",
+      responses: {
+        202: {
+          description:
+            "The roll was asked for; the Dashboard goes down and comes back on the new head",
+          content: {
+            "application/json": {
+              schema: resolver(z.object({ data: z.object({ file: z.string() }) })),
+            },
+          },
+        },
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        409: errorResponse(
+          "CONFLICT",
+          "Not the live dashboard, or its supervisor is missing or paused",
+        ),
+      },
+    }),
+    refuseAgentOffFixture,
+    (c) => {
+      try {
+        return c.json({ data: requestRoll() }, 202)
+      } catch (error) {
+        if (error instanceof RollNowError) throw new ApiError(409, "CONFLICT", error.message)
         throw error
       }
     },
