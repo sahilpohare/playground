@@ -74,6 +74,7 @@ import {
 } from "@/lib/dashboard/paste-report"
 import { restartPrs, restartSession } from "@/lib/dashboard/restart"
 import { restoreCheckout, RestoreError } from "@/lib/dashboard/restore"
+import { requestRoll, RollNowError } from "@/lib/dashboard/roll-now"
 import { readRoster } from "@/lib/dashboard/roster"
 import {
   answerHosted,
@@ -642,11 +643,46 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
         409: errorResponse("CONFLICT", "No herdr on this stack, or a restart already runs"),
       },
     }),
+    refuseAgentOffFixture,
     (c) => {
       try {
         return c.json({ data: restartHerdr() }, 202)
       } catch (error) {
         if (error instanceof HerdrRestartError) throw new ApiError(409, "CONFLICT", error.message)
+        throw error
+      }
+    },
+  )
+  .post(
+    "/system/update",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "The user menu's Update now on the live dashboard, on the owner's click: writes the supervisor's `roll-now` file in the data folder's `ops/dashboard`, as `playground update` does, so the supervisor rolls to its branch's head at once, past its holds. A fixture or test stack writes it in the fixture's scratch folder. Answers 202 at once; refused (409) on a stack the supervisor does not roll, or while the supervisor is missing or paused.",
+      responses: {
+        202: {
+          description:
+            "The roll was asked for; the Dashboard goes down and comes back on the new head",
+          content: {
+            "application/json": {
+              schema: resolver(z.object({ data: z.object({ file: z.string() }) })),
+            },
+          },
+        },
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        409: errorResponse(
+          "CONFLICT",
+          "Not the live dashboard, or its supervisor is missing or paused",
+        ),
+      },
+    }),
+    refuseAgentOffFixture,
+    (c) => {
+      try {
+        return c.json({ data: requestRoll() }, 202)
+      } catch (error) {
+        if (error instanceof RollNowError) throw new ApiError(409, "CONFLICT", error.message)
         throw error
       }
     },

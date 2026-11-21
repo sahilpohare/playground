@@ -47,7 +47,7 @@ import {
   RiTimerLine,
 } from "@remixicon/react"
 import { useForm } from "@tanstack/react-form"
-import { useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { cn } from "cn"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
@@ -192,6 +192,7 @@ import { effortIcon, LOCAL_EFFORT_ICON, PR_TONES, prTone } from "@/lib/status-ic
 import {
   glanceReadings,
   isStale,
+  requestRoll,
   spokenReadings,
   systemHealth,
   systemReadings,
@@ -581,16 +582,34 @@ export function DashboardStats() {
   return <SystemIcons icons={icons} onNavigate={close} />
 }
 
-// The user menu card's update, while the build is behind the branch its checkout follows (main or canary): its hover says how far, the newest change and how to take it (updateHover), and Update now sends that as one message to the dispatcher's chat through the outbox (updateMessage), the owner's own click, one send a click, then opens the chat; with no dispatcher live it sends nothing and opens the chat's empty state. It never updates by itself. Below the owner rung, or with no update, null.
+// The user menu card's update, while the build is behind the branch its checkout follows (main or canary): its hover says how far, the newest change and how to take it (updateHover). On the live dashboard Update now asks its supervisor for a roll at once (requestRoll, the roll-now file `playground update` writes), so the Dashboard goes down and comes back on the new head; anywhere else it sends the hover's facts as one message to the dispatcher's chat through the outbox (updateMessage), then opens the chat, or with no dispatcher live opens the chat's empty state. It never updates by itself. Below the owner rung, or with no update, null.
 export function useDashboardUpdate(): MenuUpdate | null {
   const { allowed, dispatcher, outbox, workers } = useDashboard()
   const { data } = useSystem(allowed)
   const now = useNow()
   const router = useRouter()
   const close = useCloseSheet()
+  const roll = useMutation({
+    mutationFn: requestRoll,
+    onError: (error) => toast.add({ title: error.message, type: "error" }),
+    onSuccess: () =>
+      toast.add({
+        title: "Updating the Dashboard",
+        description: "It builds the new head, then goes down for a moment and comes back on it.",
+        type: "success",
+      }),
+  })
   const hover = updateHover(data?.update, new Date(now))
   const message = updateMessage(data?.update, new Date(now))
   if (!allowed || !hover || !message || config.hosted) return null
+  if (data?.update?.live)
+    return {
+      hover: `${hover}\nUpdate now rolls the Dashboard to it now`,
+      onUpdate: () => {
+        close()
+        if (!roll.isPending) roll.mutate()
+      },
+    }
   const live = dispatcherOf(workers, dispatcher)
   const to = live?.name ?? null
   const label = live ? chatLabel(live, dispatcher) : dispatcherLabel(null, true)

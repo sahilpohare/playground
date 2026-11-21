@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process"
 import { mkdirSync, openSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
@@ -34,10 +33,15 @@ export function restartHerdr({
   mkdirSync(ops, { recursive: true })
   const log = join(ops, "herdr-restart.log")
   const out = openSync(log, "a")
-  const child = spawn(
-    process.execPath,
-    ["--no-env-file", join(main, "packages/scripts/src/playground/cli.ts"), "herdr", "restart"],
-    { cwd: main, detached: true, env: spawnEnv(), stdio: ["ignore", out, out] },
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      join(main, "packages/scripts/src/playground/cli.ts"),
+      "herdr",
+      "restart",
+    ],
+    { cwd: main, detached: true, env: spawnEnv(), stderr: out, stdin: "ignore", stdout: out },
   )
   child.unref()
   startedAt = now

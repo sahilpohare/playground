@@ -126,7 +126,6 @@ export const verbArgv = (verb: string, words: string[]): string[] => ["run", ver
 
 export const VIEW_HINT = "Sessions: playground view opens them in herdr"
 
-// Bare playground: herdr first, since the sessions run there; a herdr failure is shown, the Dashboard's steps still run, and either failing exits 1.
 // The jobs up.py recorded starting (its up-state.json), whose start grace a herdr restart ends; none when the file is missing or unread.
 export const recordedJobs = async (file: string): Promise<string[]> => {
   try {
@@ -137,6 +136,7 @@ export const recordedJobs = async (file: string): Promise<string[]> => {
   }
 }
 
+// Bare playground: herdr first, since the sessions run there; a herdr failure is shown, the Dashboard's steps still run, and either failing exits 1.
 export async function runStart(
   herdr: () => Promise<number>,
   dashboard: () => Promise<number>,

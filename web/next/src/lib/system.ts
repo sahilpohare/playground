@@ -32,6 +32,13 @@ export async function restartHerdr() {
   return data
 }
 
+// Update now on the live dashboard: the API writes the supervisor's roll-now file and answers at once; a refusal throws its reason.
+export async function requestRoll() {
+  const { data, error } = await unwrap(apiClient.v1.system.update.$post())
+  if (error) throw new Error(error.message)
+  return data
+}
+
 // The sidebar's System status and the Dashboard's panel share this one query, so they read the same sample; only the owner rung may read it.
 export const useSystem = (enabled = true) =>
   useQuery({

@@ -46,7 +46,7 @@
         "Sidebar dispatcher rows: in the sidebar's header under its name row, above every group, with no group title or count, one row for each dispatcher drawn as every agent's (its one icon, its label, Alpha or Bravo, its model, effort and state in its tooltip, with no count and no dropdown, and on the Claude dispatcher's row the week and the 5-hour window after its name, GLM's on the GLM dispatcher's row or, with none on GLM, the second dispatcher's row behind Z.ai's mark, each an icon and its number in mono, in its level's colour, a stale one gray and dimmed, then its provider's logo and its effort's icon at its right end); the primary's opening /dashboard, and with something waiting /dashboard#needs-you-<id>, scrolled to the first card (the newest Inbox item, else the oldest prompt), and the second's, shown only while it is live or the roster lists it neither done nor ended, opening /dashboard?worker=<sessionId>; on the live Alpha row a plus in its effort's place (on hover, keyboard focus and always on a phone) opens the template picker, whose row starts a second dispatcher or an orchestrator and whose foot links Edit templates to Settings' Templates section, /dashboard/settings#templates",
         "Sidebar Orchestrators, Subagents, AI Runners or Other: a session's row opens /dashboard?worker=<sessionId>, and with something waiting (a Feed card, or the red alarm while it is Stuck) /dashboard?worker=<sessionId>#needs-you-<id>, scrolled to the oldest card, or while it waits only on an inbox item it posted, /dashboard#needs-you-<id>, that item in Playground's Inbox",
         "System page: an agent's name in the Agents table, or a place in Needs you, opens /dashboard?worker=<sessionId>",
-        "User menu square: at the aside toolbar's end, a green dot at its top right while the build is behind, and Auto-hide tab bar then Update now first in its menu, sending the dispatcher one line naming the update and opening /dashboard",
+        "User menu square: at the aside toolbar's end, a green dot at its top right while the build is behind, and Auto-hide tab bar then Update now first in its menu, on the live dashboard asking its supervisor for a roll at once, elsewhere sending the dispatcher one line naming the update and opening /dashboard",
         "Below the owner rung: the sidebar's plain Dashboard link"
       ],
       "route": "/dashboard",
@@ -479,6 +479,10 @@
     {
       "route": "POST /api/v1/stacks/stop",
       "use": "Stops a Vibeground and removes its copy, keeping the worktree, from Stop in the Inbox's Preview row's bar on every dashboard page's aside."
+    },
+    {
+      "route": "POST /api/v1/system/update",
+      "use": "The user menu's Update now on the live dashboard, which every dashboard page's aside offers: writes the supervisor's roll-now file, as playground update does, so the Dashboard rolls to its branch's head at once."
     },
     {
       "route": "PUT /api/v1/settings/:key",
