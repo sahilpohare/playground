@@ -211,6 +211,50 @@ describe("bare dispatcher", () => {
     expect(code).toBe(1)
   }, 15_000)
 
+  const opsHerdrLog = (log: string, code: string) =>
+    `import { appendFileSync } from "node:fs"\nappendFileSync(${JSON.stringify(log)}, \`ops-herdr \${process.argv.slice(2).join(" ")}\\n\`)\nprocess.exit(${code})\n`
+
+  // A restart within up.py's start grace left the Dashboard down: its stack's job ran in the herdr just stopped, but its recorded start still held it back
+  test("herdr restart stops every server, starts them again, and runs up.py with each recorded job's grace dropped", async () => {
+    const log = join(mkdtempSync(join(realpathSync(dir), "log-")), "log")
+    writeFileSync(log, "")
+    const { child, upPy } = await dispatcher(
+      'echo "python3 $*"',
+      {},
+      {
+        "packages/scripts/src/ops-herdr/cli.ts": opsHerdrLog(log, "0"),
+        "../.playground/ops/up-state.json": '{"ops-usage": 2, "ops-dashboard": 1}',
+      },
+      ["herdr", "restart"],
+    )
+    const deadline = setTimeout(() => child.kill(), 10_000)
+    let out = ""
+    const decoder = new TextDecoder()
+    for await (const chunk of child.stdout) {
+      out += decoder.decode(chunk)
+      if (out.includes(`${upPy} --restarted`)) break
+    }
+    clearTimeout(deadline)
+    child.kill()
+    await child.exited
+    expect(readFileSync(log, "utf8")).toBe("ops-herdr stop-all\nops-herdr start\n")
+    expect(out).toContain(`Starting the Dashboard…\n${upPy} --restarted ops-dashboard,ops-usage\n`)
+  }, 15_000)
+
+  test("herdr restart starts nothing when the stop fails, and exits 1", async () => {
+    const log = join(mkdtempSync(join(realpathSync(dir), "log-")), "log")
+    writeFileSync(log, "")
+    const { child } = await dispatcher(
+      'echo "python3 $*"',
+      {},
+      { "packages/scripts/src/ops-herdr/cli.ts": opsHerdrLog(log, "1") },
+      ["herdr", "restart"],
+    )
+    expect(await child.exited).toBe(1)
+    expect(readFileSync(log, "utf8")).toBe("ops-herdr stop-all\n")
+    expect(await new Response(child.stdout).text()).not.toContain("Starting the Dashboard")
+  }, 15_000)
+
   // pinHere refuses a machine the pin names no asset for before any of this runs, so it runs only where the pin names one
   const pinned = assetOf() !== null
   // Start <dispatcher> runs playground dispatcher, which on a fresh install found no herdr and no factory settings: spawn.sh refused on each in turn, since only install and the bare start set them up.

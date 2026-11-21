@@ -95,6 +95,10 @@ If an update stops partway, after your checkout has moved (a crash, a closed ter
 
 `playground herdr stop` stops every herdr server Playground started, each through its own socket in `~/.playground/herdr`, and no other herdr on your Mac. Every session running in them ends with it. It prints `ops-herdr: stopped <server>` for each one, or that none was running. The next `playground`, or **Start** in the Dashboard, starts them again; when the ops-herdr background job is turned on, it does so within a minute.
 
+## Restart herdr: `playground herdr restart`
+
+`playground herdr restart` stops every herdr server Playground started, starts them again, then starts the ops jobs, the Dashboard among them, at once rather than after their start grace. Every session drops for a moment and comes back with its conversation kept. **Restart herdr** on the Dashboard's System page runs the same command, after asking first.
+
 ## Put herdr back: `playground herdr pin`
 
 `playground herdr pin` downloads the herdr version Playground pins for your machine (a Mac with Apple silicon or Intel, or Linux on arm64 or x64) from herdr's GitHub release, checks it against the SHA-256 written in Playground, and only then keeps it at `~/.playground/bin/herdr`. A download that does not match is refused, naming both sums, and nothing is installed. When the copy already matches, it changes nothing. `--check` only reads the copy and exits 1 when it is missing or changed; `--asset <file>` installs from a file you downloaded instead. A herdr on your `PATH` is yours: Playground never runs it.

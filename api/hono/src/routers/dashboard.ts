@@ -53,6 +53,7 @@ import {
   type FeedFailure,
   type FeedResult,
 } from "@/lib/dashboard/feed"
+import { HerdrRestartError, restartHerdr } from "@/lib/dashboard/herdr-restart"
 import { boardFrame, dashboardHub } from "@/lib/dashboard/hub"
 import { recordReply as recordReplyItem, REPLY_RE } from "@/lib/dashboard/inbox"
 import { iconModels, localModel } from "@/lib/dashboard/local-model"
@@ -617,6 +618,35 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
         return c.json({ data: await restoreCheckout() })
       } catch (error) {
         if (error instanceof RestoreError) throw new ApiError(409, "CONFLICT", error.message)
+        throw error
+      }
+    },
+  )
+  .post(
+    "/system/herdr/restart",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "The System page's Restart herdr, on the owner's click after its confirm: starts `playground herdr restart` from the main checkout, detached in its own process group, so it outlives the herdr servers it stops, this API among them. It stops every herdr server, starts them and the Dashboard again with each terminal job's start grace dropped, and brings the sessions back; its lines go to the data folder's `ops/herdr-restart.log`. A fixture or test stack spawns nothing and records the press in the fixture's scratch `herdr-restart.json`. Answers 202 at once; refused (409) on a stack that runs no herdr and within two minutes of the last start.",
+      responses: {
+        202: {
+          description: "The restart started; the Dashboard goes down and comes back",
+          content: {
+            "application/json": {
+              schema: resolver(z.object({ data: z.object({ log: z.string() }) })),
+            },
+          },
+        },
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        409: errorResponse("CONFLICT", "No herdr on this stack, or a restart already runs"),
+      },
+    }),
+    (c) => {
+      try {
+        return c.json({ data: restartHerdr() }, 202)
+      } catch (error) {
+        if (error instanceof HerdrRestartError) throw new ApiError(409, "CONFLICT", error.message)
         throw error
       }
     },

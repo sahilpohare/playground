@@ -293,7 +293,8 @@
         "GET /api/v1/agents",
         "GET /api/v1/ops",
         "GET /api/v1/system",
-        "GET /api/v1/inbox"
+        "GET /api/v1/inbox",
+        "POST /api/v1/system/herdr/restart"
       ],
       "heading": "System",
       "reach": [
@@ -306,6 +307,7 @@
         "Needs you, the dispatchers alone: each one's Feed prompts, named by its label (Alpha, Bravo), and what needs you in the first one's Inbox (each count linked to its first card: the newest Inbox item, else the oldest prompt), and the first stopped on a prompt the cards do not hold.",
         "Next up, the roster's backlog still waiting, fixes first, then your own asks, then the rest.",
         "Paused, the scripts jobs.json pauses on purpose (its plain name, what it does, when it runs, last beat), muted, shown only when one is.",
+        "Restart herdr in the header, which asks first, then stops every herdr server and starts them again with the ops jobs, so each session and the page drop for a moment and come back.",
         "System, this machine's room for more workers, sampled every 30s: the capacity line (Room for ~N more workers, and what limits it), what stopping a worker's dev stack idle for 15 minutes would free, the usage windows the usage job writes, a plain table of the readings (memory with its pressure, CPU load against the cores, swap, disk free and Docker's VM), the first three with a small sparkline of their last hour, and each live session's footprint (its memory, its claude process, its dev stack with that stack's Postgres container, and its CPU), then what runs in a checkout with no session.",
         "The System page, which the sidebar header's system icons open (the status table and what goes with it moved here when /dashboard became Playground's chat) leads with Agents, a table of every agent dispatcher's roster lists or herdr runs (Agent with its one Worker Lights icon and label, Role, Doing as its roster title with its PR linked in its PR's colour, Status as the icon's word such as Working, Fixing, Waiting on checks, Ready, Stuck or (Playground's own) Waiting on you, the working or stuck worker's time left in the sidebar row's tooltip, none once its pull request is merged or it sits paused on a usage limit), in the sidebar's order (Dispatchers, Orchestrators, AI Runners, Subagents, Scripts and Other, each reviewer and tester indented under its worker), under one toolbar row of search, a Role filter, Show N idle while an Other agent has idled past three hours, and Refresh, and kept live."
       ],

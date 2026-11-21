@@ -25,6 +25,13 @@ export async function fetchSystem(): Promise<SystemReport> {
   return data
 }
 
+// Restart herdr: the API starts `playground herdr restart` and answers at once, before the restart takes it down; a refusal throws its reason.
+export async function restartHerdr() {
+  const { data, error } = await unwrap(apiClient.v1.system.herdr.restart.$post())
+  if (error) throw new Error(error.message)
+  return data
+}
+
 // The sidebar's System status and the Dashboard's panel share this one query, so they read the same sample; only the owner rung may read it.
 export const useSystem = (enabled = true) =>
   useQuery({
