@@ -120,7 +120,7 @@ Under the key, this Mac lists the last 20 writes from Yard that your paired key 
 
 When the branch this copy follows (`main` or `canary`) has new changes, the user menu's square wears a green dot, and the menu shows **Update now** at its top, under Auto-hide tab bar on a wide screen.
 
-**Update now** sends that update to the dispatcher as a message from you, then opens your chat. On the `live.branch` branch, which updates itself on a schedule, the message asks for the update now; on any other branch it carries the update and how to take it. The app never updates by itself.
+On the `live.branch` branch, which updates itself on a schedule, **Update now** updates the Dashboard at once, as `playground update` does: it builds the new version, then drops for a moment and comes back on it. On any other branch it sends the update and how to take it to the dispatcher as a message from you, then opens your chat. The app never updates by itself.
 
 ## If the app restarts
 

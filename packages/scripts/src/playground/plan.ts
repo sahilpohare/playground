@@ -46,6 +46,8 @@ playground update [--to <tag>]
 playground doctor     one line per need, as ok, MISSING with its fix, or optional: the tools, the data folder, the pinned herdr, the links into this checkout, the release it is at, and each ops job launchd, or on Linux systemd, should hold
 playground herdr pin [--check | --asset <file>]
                       put the pinned herdr's release asset for this machine (macOS or Linux, on arm64 or x64) at the data folder's bin/herdr, after checking its SHA-256 against the pin, refusing a mismatch with both sums; --check reads the copy alone, exit 1 when it is missing or changed; --asset installs from a file instead of downloading
+playground herdr restart
+                      stop every herdr server as herdr stop does, then start them and the Dashboard as playground does, every terminal job's start grace dropped (up.py --restarted) so the Dashboard's stack starts again in the same run; the Dashboard's System page runs it on Restart herdr
 playground herdr stop stop every herdr server Playground started, each through its own socket in the data folder's herdr folder; every session in them ends with it, and the next playground or Start brings them back
 playground version    this checkout's tag and sha, the extensions' last commit and Claude Code's version
 playground ask <command> ...
@@ -124,6 +126,16 @@ export const verbArgv = (verb: string, words: string[]): string[] => ["run", ver
 
 export const VIEW_HINT = "Sessions: playground view opens them in herdr"
 
+// The jobs up.py recorded starting (its up-state.json), whose start grace a herdr restart ends; none when the file is missing or unread.
+export const recordedJobs = async (file: string): Promise<string[]> => {
+  try {
+    const starts: unknown = await Bun.file(file).json()
+    return starts && typeof starts === "object" ? Object.keys(starts).sort() : []
+  } catch {
+    return []
+  }
+}
+
 // Bare playground: herdr first, since the sessions run there; a herdr failure is shown, the Dashboard's steps still run, and either failing exits 1.
 export async function runStart(
   herdr: () => Promise<number>,
@@ -181,6 +193,7 @@ export const WORDS: Record<string, number | "rest"> = {
   "focus off": 0,
   "focus on": 0,
   "herdr pin": "rest",
+  "herdr restart": 0,
   "herdr stop": 0,
   migrate: 0,
   "model use": 1,

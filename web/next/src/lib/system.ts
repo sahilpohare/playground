@@ -25,6 +25,20 @@ export async function fetchSystem(): Promise<SystemReport> {
   return data
 }
 
+// Restart herdr: the API starts `playground herdr restart` and answers at once, before the restart takes it down; a refusal throws its reason.
+export async function restartHerdr() {
+  const { data, error } = await unwrap(apiClient.v1.system.herdr.restart.$post())
+  if (error) throw new Error(error.message)
+  return data
+}
+
+// Update now on the live dashboard: the API writes the supervisor's roll-now file and answers at once; a refusal throws its reason.
+export async function requestRoll() {
+  const { data, error } = await unwrap(apiClient.v1.system.update.$post())
+  if (error) throw new Error(error.message)
+  return data
+}
+
 // The sidebar's System status and the Dashboard's panel share this one query, so they read the same sample; only the owner rung may read it.
 export const useSystem = (enabled = true) =>
   useQuery({
@@ -951,11 +965,10 @@ export const accountLine = (
 ): string | null =>
   !read.owner ? signIn : read.pending ? null : (read.account?.email ?? "No Claude account")
 
-// Pure: the line a click on the user menu's Update now sends to the dispatcher's chat, or null while the build is current: the live dashboard asks for its roll now, naming the changes and the newest; anywhere else the hover's facts and how to take them, on one line in the owner's lowercase.
+// Pure: the line a click on the user menu's Update now sends to the dispatcher's chat off the live dashboard, or null while the build is current: the hover's facts and how to take them, on one line in the owner's lowercase.
 export const updateMessage = (update: Update | null | undefined, now: Date): string | null => {
   if (!update || update.behind < 1) return null
   const changes = `${update.behind} new ${update.behind === 1 ? "change" : "changes"} on ${update.upstream}, newest "${update.newest.title}"`
-  if (update.live) return `update the dashboard now: ${changes}`
   const hint = updateHint(update)
   return `update available: ${changes} ${relativeTime(update.newest.at, now)}. ${hint[0]?.toLowerCase()}${hint.slice(1)}.`
 }

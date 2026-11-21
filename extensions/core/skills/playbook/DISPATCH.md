@@ -10,7 +10,6 @@ The steps to spawn and brief a session are in [SESSIONS.md](SESSIONS.md#spawn), 
   and a task the owner calls priority (both below).
   The work org's work (one of its tickets) skips the Planner too, and stays outside the lanes.
   The dispatcher keeps the owner's conversation, the routing and the Inbox.
-  A message reading `update the dashboard now: ...` is his click on the Dashboard's Update now: route it to Ops, who rolls the live dashboard at once with `playground update` (`.agents/dashboard/live.md`).
 - The dispatcher routes every ask of the owner's to a thread, as it routes the ask, in the live dashboard's checkout (each thread has an ID that a reply carries, so the reply stays with its thread):
   - A message that opens with a marker, `[thread:<id>]`, is already routed: he sent it from the thread's view (the main chat's New thread is off for now), and ingest routes it as it reads it.
   - A new ask with no marker opens a thread titled with what he asked (`bun run thread new "<title>"` prints its id), and the ask is routed to it (`bun run thread route <id> --quote "<its opening words>"`), quoting enough of them that no other untagged message of the session starts the same way.
