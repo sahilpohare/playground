@@ -1148,17 +1148,6 @@ describe("updateHover", () => {
     )
   })
 
-  test("on the live dashboard it asks for the update now, with nothing about a roll to wait for", () => {
-    const line = updateMessage({ ...update, branch: "live/dashboard", live: true }, now)
-    expect(line).toBe(
-      'update the dashboard now: 3 new changes on canary, newest "feat: a new filter"',
-    )
-    expect(updateMessage({ ...update, behind: 1, branch: "live/dashboard", live: true }, now)).toBe(
-      'update the dashboard now: 1 new change on canary, newest "feat: a new filter"',
-    )
-    expect(line).not.toContain("nothing to do")
-  })
-
   test("main and canary pull then restart, a pulled checkout only restarts, and the live dashboard rolls now or next", () => {
     expect(updateHint({ live: false, pulled: false })).toBe("To update: git pull, then restart")
     expect(updateHint({ live: false, pulled: false })).toBe("To update: git pull, then restart")

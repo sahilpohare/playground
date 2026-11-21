@@ -604,7 +604,7 @@ export function useDashboardUpdate(): MenuUpdate | null {
   if (!allowed || !hover || !message || config.hosted) return null
   if (data?.update?.live)
     return {
-      hover: `${hover}\nUpdate now rolls the Dashboard to it now`,
+      hover,
       onUpdate: () => {
         close()
         if (!roll.isPending) roll.mutate()

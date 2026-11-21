@@ -965,11 +965,10 @@ export const accountLine = (
 ): string | null =>
   !read.owner ? signIn : read.pending ? null : (read.account?.email ?? "No Claude account")
 
-// Pure: the line a click on the user menu's Update now sends to the dispatcher's chat, or null while the build is current: the live dashboard asks for its roll now, naming the changes and the newest; anywhere else the hover's facts and how to take them, on one line in the owner's lowercase.
+// Pure: the line a click on the user menu's Update now sends to the dispatcher's chat off the live dashboard, or null while the build is current: the hover's facts and how to take them, on one line in the owner's lowercase.
 export const updateMessage = (update: Update | null | undefined, now: Date): string | null => {
   if (!update || update.behind < 1) return null
   const changes = `${update.behind} new ${update.behind === 1 ? "change" : "changes"} on ${update.upstream}, newest "${update.newest.title}"`
-  if (update.live) return `update the dashboard now: ${changes}`
   const hint = updateHint(update)
   return `update available: ${changes} ${relativeTime(update.newest.at, now)}. ${hint[0]?.toLowerCase()}${hint.slice(1)}.`
 }
