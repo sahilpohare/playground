@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import {
   chmodSync,
   copyFileSync,
@@ -382,6 +382,7 @@ test("the pre-commit marker check refuses a staged conflict marker before lint-s
 
 // pre-push's jobs that read the pushed refs on stdin run as scripts, since lefthook 2.2.2 skips every pre-push command and job while the checked-out branch has nothing new against its upstream, and runs a script on every push
 const PUSH_SCRIPTS = {
+  "commit-trailer.sh": 'bun --no-env-file packages/scripts/src/commit-trailer.ts --push "$1"',
   "conflict-markers.sh": "bun --no-env-file packages/scripts/src/conflict-markers.ts --push",
   "keeps-canary.sh": "bun --no-env-file packages/scripts/src/pr-merge/prepush.ts",
 }
@@ -420,16 +421,6 @@ test("pre-push runs its stdin jobs as scripts, each execing its check", async ()
     })
     expect(index.stdout.toString()).toStartWith("100755 ")
   }
-})
-
-// PG-1344: prepush.ts imports @packages/config, whose dist no install route builds, so keeps-canary builds it first
-test("keeps-canary builds the config dist before it execs prepush.ts", async () => {
-  const text = await Bun.file(join(ROOT, ".lefthook/pre-push/keeps-canary.sh")).text()
-  const build = text.indexOf(
-    "\nbun --no-env-file packages/scripts/src/pr-merge/config-dist.ts || exit 1\n",
-  )
-  expect(build).toBeGreaterThan(-1)
-  expect(build).toBeLessThan(text.indexOf("\nexec "))
 })
 
 // this repo's pre-push marker job, its script run from this checkout, in a scratch repo whose commits go in with hooks off, fed git's pre-push lines: each pushed ref is read from its remote sha when this clone has it, else from its merge-base with origin/canary, and a delete reads nothing
@@ -492,6 +483,288 @@ test("the pre-push marker check refuses a pushed conflict marker a hooks-off com
     expect(branch.code).not.toBe(0)
     expect(branch.out).toContain("scripts/hooks/bundled/guard.js:2")
     expect(push(ZERO, marked)).toEqual({ code: 0, out: "" })
+  } finally {
+    rmSync(dir, { force: true, recursive: true })
+  }
+}, 60_000)
+
+// this repo's pre-push trailer job, its script run from this checkout, in a scratch repo whose commits go in with --no-verify, the route that once let a Co-Authored-By trailer past commit-msg: a pushed commit that no live branch of the remote it pushes to holds yet is refused when its message holds the trailer, naming the amend that drops it, and that amend, run with commit-msg's step, clears the push
+test("the pre-push trailer check refuses a pushed commit a --no-verify commit let a Co-authored-by trailer into", async () => {
+  const trailer = await pushScript("commit-trailer.sh")
+  const dir = mkdtempSync(join(tmpdir(), "lefthook-push-trailer-"))
+  const hooks = join(dir, ".hooks")
+  const run = (argv: string[], stdin?: string) => {
+    const result = Bun.spawnSync(argv, {
+      cwd: dir,
+      env: SCRATCH_ENV,
+      stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
+    })
+    return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() }
+  }
+  const git = (...args: string[]) =>
+    run([
+      "git",
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      `core.hooksPath=${hooks}`,
+      ...args,
+    ])
+  const commit = async (path: string, message: string) => {
+    await Bun.write(join(dir, path), message)
+    await Bun.write(join(dir, ".msg"), message)
+    expect(git("add", path)).toMatchObject({ code: 0 })
+    expect(git("commit", "-q", "--no-verify", "-F", ".msg")).toMatchObject({ code: 0 })
+    return git("rev-parse", "HEAD").out.trim()
+  }
+  const ZERO = "0".repeat(40)
+  // pre-push's first argument names the remote it pushes to, whose live branches hold what it leaves out
+  const push = (local: string) =>
+    run(
+      ["bash", "-c", trailer, "pre-push", "origin"],
+      `refs/heads/b ${local} refs/heads/b ${ZERO}\n`,
+    )
+  try {
+    expect(git("init", "-q")).toMatchObject({ code: 0 })
+    expect(git("init", "-q", "--bare", ".origin")).toMatchObject({ code: 0 })
+    expect(git("remote", "add", "origin", join(dir, ".origin"))).toMatchObject({ code: 0 })
+    // commit-msg's step alone, run by its path in this checkout, as lefthook would run it
+    mkdirSync(hooks)
+    await Bun.write(
+      join(hooks, "commit-msg"),
+      `#!/usr/bin/env bash\nexec bun --no-env-file ${ROOT}/packages/scripts/src/commit-trailer.ts "$1"\n`,
+    )
+    chmodSync(join(hooks, "commit-msg"), 0o755)
+    const base = await commit("a.txt", "chore: base\n\nCo-Authored-By: A <a@b.c>\n")
+    expect(git("push", "-q", "--no-verify", "origin", `${base}:refs/heads/canary`)).toMatchObject({
+      code: 0,
+    })
+    // a commit every remote already holds is not read, the trailer on canary's base included
+    expect(push(base)).toEqual({ code: 0, out: "" })
+    const mention = await commit(
+      "b.txt",
+      "fix: a change\n\nThe hook drops a Co-authored-by trailer.\n",
+    )
+    expect(push(mention)).toMatchObject({ code: 0 })
+    const tip = await commit(
+      "c.txt",
+      "build: rebuild\n\nCo-Authored-By: Claude <noreply@example.com>\n",
+    )
+    const last = push(tip)
+    expect(last.code).not.toBe(0)
+    expect(last.out).toContain(`${tip.slice(0, 9)} build: rebuild`)
+    expect(last.out).toContain("git commit --amend --no-edit")
+    const top = await commit("d.txt", "fix: after\n")
+    const older = push(top)
+    expect(older.code).not.toBe(0)
+    expect(older.out).toContain(`${tip.slice(0, 9)} build: rebuild`)
+    expect(older.out).toContain(
+      `git rebase --rebase-merges --exec 'git commit --amend --no-edit' ${tip.slice(0, 9)}^`,
+    )
+    expect(push(ZERO)).toEqual({ code: 0, out: "" })
+    // the amend the refusal names, with commit-msg's step on, drops the trailer and clears the push
+    expect(
+      git(
+        "rebase",
+        "-q",
+        "--rebase-merges",
+        "--exec",
+        "git commit -q --amend --no-edit",
+        `${tip}^`,
+      ),
+    ).toMatchObject({ code: 0 })
+    const fixed = git("rev-parse", "HEAD").out.trim()
+    expect(git("log", "-1", "--format=%B", "HEAD^").out).not.toContain("Co-Authored-By")
+    expect(push(fixed)).toMatchObject({ code: 0 })
+  } finally {
+    rmSync(dir, { force: true, recursive: true })
+  }
+}, 60_000)
+
+// the trailer check leaves out only what the remote it pushes to holds now, read live; each test builds on the one before
+describe("the pre-push trailer check reads the remote's live branches, not its tracking refs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lefthook-push-live-"))
+  const work = join(dir, "work")
+  const run = (argv: string[], stdin?: string, cwd = work) => {
+    const result = Bun.spawnSync(argv, {
+      cwd,
+      env: SCRATCH_ENV,
+      stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
+    })
+    return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() }
+  }
+  const git = (cwd: string, ...args: string[]) =>
+    run(
+      [
+        "git",
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "core.hooksPath=/dev/null",
+        ...args,
+      ],
+      undefined,
+      cwd,
+    )
+  const commit = (cwd: string, path: string, message: string) => {
+    writeFileSync(join(cwd, path), message)
+    expect(git(cwd, "add", path)).toMatchObject({ code: 0 })
+    expect(git(cwd, "commit", "-q", "-m", message)).toMatchObject({ code: 0 })
+    return git(cwd, "rev-parse", "HEAD").out.trim()
+  }
+  const ZERO = "0".repeat(40)
+  const TRAILER = "\n\nCo-Authored-By: A <a@b.c>\n"
+  let trailer = ""
+  let held = ""
+  const push = (local: string, remote = "origin") =>
+    run(["bash", "-c", trailer, "pre-push", remote], `refs/heads/n ${local} refs/heads/n ${ZERO}\n`)
+
+  beforeAll(async () => {
+    trailer = await pushScript("commit-trailer.sh")
+    expect(git(dir, "init", "-q", "--bare", "-b", "main", "origin.git")).toMatchObject({ code: 0 })
+    expect(git(dir, "clone", "-q", join(dir, "origin.git"), "work")).toMatchObject({ code: 0 })
+    held = commit(work, "a.txt", `chore: held${TRAILER}`)
+    expect(git(work, "push", "-q", "origin", "HEAD:refs/heads/main")).toMatchObject({ code: 0 })
+  })
+
+  afterAll(() => rmSync(dir, { force: true, recursive: true }))
+
+  test("a commit a live branch holds stays out", () => {
+    expect(push(held)).toEqual({ code: 0, out: "" })
+  })
+
+  test("a remote it cannot read leaves every commit in", () => {
+    const unread = push(held, join(dir, "nowhere.git"))
+    expect(unread.code).not.toBe(0)
+    expect(unread.out).toContain(`${held.slice(0, 9)} chore: held`)
+  })
+
+  test("a commit only a stale tracking ref holds, its branch deleted on the remote, is read", () => {
+    const gone = commit(work, "b.txt", `chore: gone${TRAILER}`)
+    expect(git(work, "push", "-q", "origin", "HEAD:refs/heads/gone")).toMatchObject({ code: 0 })
+    expect(git(join(dir, "origin.git"), "branch", "-D", "gone")).toMatchObject({ code: 0 })
+    expect(git(work, "rev-parse", "-q", "--verify", "refs/remotes/origin/gone").out.trim()).toBe(
+      gone,
+    )
+    const stale = push(gone)
+    expect(stale.code).not.toBe(0)
+    expect(stale.out).toContain(`${gone.slice(0, 9)} chore: gone`)
+    expect(stale.out).not.toContain(`${held.slice(0, 9)} chore: held`)
+  })
+
+  // a live branch's tip this repo has not fetched stands in by its own tracking ref, a stale read kept narrow on purpose: it misses a commit that branch dropped in a force-push this repo has not fetched
+  test("a live branch whose new tip this repo lacks stands in by its tracking ref", () => {
+    const other = join(dir, "other")
+    expect(git(dir, "clone", "-q", "-b", "main", join(dir, "origin.git"), "other")).toMatchObject({
+      code: 0,
+    })
+    commit(other, "c.txt", "chore: ahead")
+    expect(git(other, "push", "-q", "origin", "HEAD:refs/heads/main")).toMatchObject({ code: 0 })
+    expect(push(held)).toEqual({ code: 0, out: "" })
+    // the residual: the branch force-pushed back past held, which this repo has not fetched, still stands in
+    expect(git(other, "checkout", "-q", "--orphan", "fresh")).toMatchObject({ code: 0 })
+    commit(other, "d.txt", "chore: rewritten")
+    expect(git(other, "push", "-q", "-f", "origin", "HEAD:refs/heads/main")).toMatchObject({
+      code: 0,
+    })
+    expect(push(held)).toEqual({ code: 0, out: "" })
+  })
+})
+
+// the same pre-push job reads each new commit's message and the pushed branch or tag name against no-public-leak's list, a made-up one in a scratch data folder here, so a --no-verify commit holding a list term is refused before it reaches the remote; the refusal names the sha and the kind, never the term
+test("the pre-push list check refuses a pushed commit message or branch or tag name holding a list term", async () => {
+  const trailer = await pushScript("commit-trailer.sh")
+  const dir = mkdtempSync(join(tmpdir(), "lefthook-push-lists-"))
+  const data = join(dir, ".data")
+  mkdirSync(join(data, "extensions", "hooks"), { recursive: true })
+  const LIST = {
+    companies: ["Vantorix"],
+    handles: ["qmarsh"],
+    linearKeys: ["MADEVX"],
+    names: ["Quilla Marsh"],
+    slackIds: ["C0MADE0401"],
+  }
+  writeFileSync(join(data, "extensions", "hooks", "no-public-leak.json"), JSON.stringify(LIST))
+  const run = (
+    argv: string[],
+    stdin?: string,
+    env = { ...SCRATCH_ENV, PLAYGROUND_DATA_DIR: data },
+  ) => {
+    const result = Bun.spawnSync(argv, {
+      cwd: dir,
+      env,
+      stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
+    })
+    return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() }
+  }
+  const git = (...args: string[]) =>
+    run([
+      "git",
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "core.hooksPath=/dev/null",
+      ...args,
+    ])
+  const commit = (path: string, message: string) => {
+    writeFileSync(join(dir, path), message)
+    expect(git("add", path)).toMatchObject({ code: 0 })
+    expect(git("commit", "-q", "--no-verify", "-m", message)).toMatchObject({ code: 0 })
+    return git("rev-parse", "HEAD").out.trim()
+  }
+  const ZERO = "0".repeat(40)
+  const push = (local: string, branch = "b") =>
+    run(
+      ["bash", "-c", trailer, "pre-push", "origin"],
+      `refs/heads/${branch} ${local} refs/heads/${branch} ${ZERO}\n`,
+    )
+  const printsNoTerm = (out: string) =>
+    expect(
+      ["vantorix", "qmarsh", "quilla"].filter((term) => out.toLowerCase().includes(term)),
+    ).toEqual([])
+  try {
+    expect(git("init", "-q")).toMatchObject({ code: 0 })
+    expect(git("init", "-q", "--bare", ".origin")).toMatchObject({ code: 0 })
+    expect(git("remote", "add", "origin", join(dir, ".origin"))).toMatchObject({ code: 0 })
+    const base = commit("a.txt", "chore: base for Vantorix")
+    expect(git("push", "-q", "origin", `${base}:refs/heads/canary`)).toMatchObject({ code: 0 })
+    // a commit a remote already holds is not read
+    expect(push(base)).toEqual({ code: 0, out: "" })
+    const clean = commit("b.txt", "fix: a plain change")
+    expect(push(clean)).toEqual({ code: 0, out: "" })
+    const named = push(clean, "fix-qmarsh-page")
+    expect(named.code).not.toBe(0)
+    expect(named.out).toContain("the pushed ref's name holds a handles term")
+    printsNoTerm(named.out)
+    // a tag's name is read as a branch's is
+    const tag = run(
+      ["bash", "-c", trailer, "pre-push", "origin"],
+      `refs/tags/v1-qmarsh ${clean} refs/tags/v1-qmarsh ${ZERO}\n`,
+    )
+    expect(tag.code).not.toBe(0)
+    expect(tag.out).toContain("the pushed ref's name holds a handles term")
+    printsNoTerm(tag.out)
+    const term = commit("c.txt", "fix: thanks Quilla Marsh")
+    const refused = push(term)
+    expect(refused.code).not.toBe(0)
+    expect(refused.out).toContain(`${term.slice(0, 9)}'s message holds a names term`)
+    printsNoTerm(refused.out)
+    // a delete reads nothing
+    expect(push(ZERO)).toEqual({ code: 0, out: "" })
+    // a list file that is not the list is refused by its path, as the commit step refuses it
+    writeFileSync(join(data, "extensions", "hooks", "no-public-leak.json"), "{")
+    const broken = push(clean)
+    expect(broken.code).not.toBe(0)
+    expect(broken.out).toContain("is not no-public-leak's list")
+    // with no list in the data folder the push passes
+    rmSync(join(data, "extensions", "hooks", "no-public-leak.json"))
+    expect(push(term)).toEqual({ code: 0, out: "" })
   } finally {
     rmSync(dir, { force: true, recursive: true })
   }
@@ -815,7 +1088,13 @@ test("the pre-commit rule test runs when the rules change, and a broken pin refu
   const git = (...args: string[]) =>
     run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args])
   const topics = [...new Bun.Glob(".agents/dashboard/*.md").scanSync({ cwd: ROOT, dot: true })]
-  const files = [".claude/settings.json", "AGENTS.md", "tests/AGENTS.test.ts", ...topics]
+  const files = [
+    ".agents/shipping.md",
+    ".claude/settings.json",
+    "AGENTS.md",
+    "tests/AGENTS.test.ts",
+    ...topics,
+  ]
   // stage these edits, run the hook, then put the tree back
   const hookWith = async (edits: Record<string, (text: string) => string>) => {
     for (const [file, edit] of Object.entries(edits)) {
@@ -1001,8 +1280,8 @@ test("the pre-commit trace count refuses a commit that raises a count or holds a
   }
 }, 120_000)
 
-// lefthook on this repo's own commit-msg steps, commitlint and its config included, in a scratch repo: a ticket scope in either case passes, a Co-authored-by trailer in any case is refused by name, and a body that only mentions it passes
-test("commit-msg takes a ticket scope in either case and refuses a Co-authored-by trailer in any case", async () => {
+// lefthook on this repo's own commit-msg steps, commitlint and its config included, in a scratch repo: a ticket scope in either case passes, a Co-authored-by trailer in any case is dropped from the message with one line saying so, and a body that only mentions it passes as written
+test("commit-msg takes a ticket scope in either case and drops a Co-authored-by trailer in any case", async () => {
   const config = Bun.YAML.parse(await Bun.file(join(ROOT, "lefthook.yml")).text()) as {
     "commit-msg": unknown
   }
@@ -1027,7 +1306,7 @@ test("commit-msg takes a ticket scope in either case and refuses a Co-authored-b
       new Response(proc.stderr).text(),
       proc.exited,
     ])
-    return { code, out: out + err }
+    return { code, message: await Bun.file(msg).text(), out: out + err }
   }
   try {
     expect(run(["git", "init", "-q"])).toMatchObject({ code: 0 })
@@ -1045,18 +1324,28 @@ test("commit-msg takes a ticket scope in either case and refuses a Co-authored-b
     expect((await hookWith("Fix: A change\n")).code).not.toBe(0)
     // the rest at once: each starts commitlint, whose start grows with the machine's load, and seven in a row took 60s on a loaded runner
     const trailers = ["Co-authored-by", "Co-Authored-By", "co-authored-by"]
-    const [upper, lower, mention, ...refused] = await Promise.all(
+    const mention = "fix: a change\n\nThe hook drops a Co-authored-by trailer.\n"
+    // a trailer past commitlint's 100-character footer line, which commitlint would refuse were it read before the drop
+    const long = `Co-Authored-By: ${"A".repeat(90)} <a@b.c>`
+    const [upper, lower, kept, ...dropped] = await Promise.all(
       [
         "feat(PG-1): x\n",
         "feat(pg-1): x\n",
-        "fix: a change\n\nThe hook refuses a Co-authored-by trailer.\n",
-        ...trailers.map((trailer) => `fix: a change\n\nWhy it changed.\n\n${trailer}: A <a@b.c>\n`),
+        mention,
+        ...[...trailers.map((trailer) => `${trailer}: A <a@b.c>`), long].map(
+          (trailer) => `fix: a change\n\nWhy it changed.\n\n${trailer}\n`,
+        ),
       ].map(hookWith),
     )
-    expect([upper, lower, mention]).toMatchObject([{ code: 0 }, { code: 0 }, { code: 0 }])
-    for (const result of refused) {
-      expect(result.code).not.toBe(0)
-      expect(result.out).toContain("Co-authored-by")
+    expect([upper, lower, kept]).toMatchObject([{ code: 0 }, { code: 0 }, { code: 0 }])
+    expect(kept!.message).toBe(mention)
+    expect(kept!.out).not.toContain("dropped")
+    for (const result of dropped) {
+      expect(result.code).toBe(0)
+      expect(result.message).toBe("fix: a change\n\nWhy it changed.\n\n")
+      expect(result.out.match(/commit-trailer: dropped the Co-authored-by trailer/g)).toHaveLength(
+        1,
+      )
     }
   } finally {
     rmSync(dir, { force: true, recursive: true })
@@ -1302,6 +1591,80 @@ test("pre-commit runs the native-title and dashboard-map tests when a file they 
   }
 }, 60_000)
 
+// Two text tests went red only in CI after a push on 14 Nov: no-raw-delete reads every tracked file, as text-tests' tests do, and workflow-runners reads the workflows; checked on lefthook itself with each run swapped for an echo
+test("pre-commit runs the no-raw-delete test on any text commit and the workflow-runners test on a workflow commit", async () => {
+  type Job = { exclude?: string[]; glob?: string[]; run?: string }
+  const config = Bun.YAML.parse(await Bun.file(join(ROOT, "lefthook.yml")).text()) as {
+    "pre-commit": { commands: Record<string, Job>; piped?: boolean }
+  }
+  const {
+    "no-raw-delete": del,
+    "text-tests": text,
+    "workflow-runners": workflows,
+  } = config["pre-commit"].commands
+  expect(del?.run).toBe("bun run test:file tests/no-raw-delete.test.ts")
+  expect(del?.glob).toBeUndefined()
+  expect(del?.exclude).toEqual(text!.exclude)
+  expect(workflows?.run).toBe(
+    "bun run test:file tests/packages/scripts/src/workflow-runners.test.ts",
+  )
+  expect(workflows?.glob).toEqual([
+    ".github/workflows/*",
+    "packages/scripts/src/workflow-runners.ts",
+    "tests/packages/scripts/src/workflow-runners.test.ts",
+  ])
+  const dir = mkdtempSync(join(tmpdir(), "lefthook-delete-runners-"))
+  const run = (argv: string[]) => {
+    const result = Bun.spawnSync(argv, { cwd: dir, env: SCRATCH_ENV, stdin: "ignore" })
+    return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() }
+  }
+  const git = (...args: string[]) =>
+    run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args])
+  // stage one file, run the hook, then put the tree back
+  const ran = async (file: string) => {
+    await Bun.write(join(dir, file), "staged\n")
+    expect(git("add", file)).toMatchObject({ code: 0 })
+    const hook = run(["bun", join(ROOT, LEFTHOOK_BIN), "run", "pre-commit"])
+    expect(git("reset", "-q", "--hard")).toMatchObject({ code: 0 })
+    expect(git("clean", "-q", "-fd")).toMatchObject({ code: 0 })
+    expect(hook.code).toBe(0)
+    return { del: hook.out.includes("delete-ran"), workflows: hook.out.includes("workflows-ran") }
+  }
+  try {
+    expect(git("init", "-q")).toMatchObject({ code: 0 })
+    // JSON is YAML, so the steps go in as lefthook read them
+    await Bun.write(
+      join(dir, "lefthook.yml"),
+      JSON.stringify({
+        "pre-commit": {
+          commands: {
+            "no-raw-delete": { ...del, run: "echo delete-ran" },
+            "workflow-runners": { ...workflows, run: "echo workflows-ran" },
+          },
+          piped: config["pre-commit"].piped,
+        },
+      }),
+    )
+    expect(git("add", ".")).toMatchObject({ code: 0 })
+    expect(git("commit", "-q", "--no-verify", "-m", "base")).toMatchObject({ code: 0 })
+
+    expect(await ran(".github/workflows/auto-test.yml")).toEqual({ del: true, workflows: true })
+    expect(await ran("packages/scripts/src/workflow-runners.ts")).toEqual({
+      del: true,
+      workflows: true,
+    })
+    expect(await ran("tests/packages/scripts/src/workflow-runners.test.ts")).toEqual({
+      del: true,
+      workflows: true,
+    })
+    expect(await ran("scripts/ops/clean.sh")).toEqual({ del: true, workflows: false })
+    expect(await ran("docs/playground/x.md")).toEqual({ del: true, workflows: false })
+    expect(await ran("web/next/public/logo.png")).toEqual({ del: false, workflows: false })
+  } finally {
+    rmSync(dir, { force: true, recursive: true })
+  }
+}, 60_000)
+
 // The hooks-bundle job of a lefthook stage, as lefthook.yml holds it.
 const hooksBundleJob = async (stage: "pre-commit" | "pre-push" = "pre-commit") =>
   (
@@ -1332,6 +1695,91 @@ test("a pre-push job checks the bundles of the head merged with origin/canary, o
   expect(push?.glob).toContain("bun.lock")
   expect(push).not.toHaveProperty("skip")
 })
+
+// CI's test check runs test:skills, which went red on 16 Nov after a branch changed the sandbox its steps run in while no local run caught it; checked on lefthook itself with the run swapped for an echo, over every file a step names, read from test-skills.ts, so a new step's file fails here until the glob holds it
+test("pre-push runs test:skills through the commit slot when the branch changed a file its steps read since origin/canary, and skips it otherwise", async () => {
+  const { steps } = await import("../packages/scripts/src/test-skills")
+  const config = Bun.YAML.parse(await Bun.file(join(ROOT, "lefthook.yml")).text()) as {
+    "pre-push": { commands: Record<string, Record<string, unknown>> }
+  }
+  const job = config["pre-push"].commands["test-skills"]
+  expect(job).toMatchObject({
+    files: "git diff --name-only origin/canary...HEAD",
+    run: "bun --no-env-file packages/scripts/src/commit-slot.ts bun run test:skills # {files}",
+  })
+  const named = steps.flatMap(([, argv]) =>
+    argv.filter((arg) => /^(extensions|packages|scripts|tests)\/.+\.(py|sh|ts)$/.test(arg)),
+  )
+  expect(named).toContain("tests/test_ops_jobs.py")
+  const dir = mkdtempSync(join(tmpdir(), "lefthook-test-skills-"))
+  const run = (argv: string[]) => {
+    const result = Bun.spawnSync(argv, { cwd: dir, env: SCRATCH_ENV, stdin: "ignore" })
+    return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() }
+  }
+  const git = (...args: string[]) =>
+    run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args])
+  // commit one file on the branch, run the hook, then put the branch back at canary
+  const ran = async (file: string) => {
+    await Bun.write(join(dir, file), "changed\n")
+    expect(git("add", file)).toMatchObject({ code: 0 })
+    expect(git("commit", "-q", "--no-verify", "-m", file)).toMatchObject({ code: 0 })
+    const hook = run(["bun", join(ROOT, LEFTHOOK_BIN), "run", "pre-push"])
+    expect(git("reset", "-q", "--hard", "origin/canary")).toMatchObject({ code: 0 })
+    expect(git("clean", "-q", "-fd")).toMatchObject({ code: 0 })
+    expect(hook.code).toBe(0)
+    return hook.out.includes("skills-ran")
+  }
+  try {
+    expect(git("init", "-q", "-b", "work")).toMatchObject({ code: 0 })
+    // JSON is YAML, so the job goes in as lefthook read it
+    await Bun.write(
+      join(dir, "lefthook.yml"),
+      JSON.stringify({
+        "pre-push": { commands: { "test-skills": { ...job, run: "echo skills-ran # {files}" } } },
+      }),
+    )
+    expect(git("add", ".")).toMatchObject({ code: 0 })
+    expect(git("commit", "-q", "--no-verify", "-m", "base")).toMatchObject({ code: 0 })
+    expect(git("update-ref", "refs/remotes/origin/canary", "HEAD")).toMatchObject({ code: 0 })
+
+    for (const file of [
+      ...named,
+      "extensions/core/skills/playbook/SKILL.md",
+      // what a step's entry file loads first: the sandbox's scratch folders, test-sandbox's helpers, state.test.ts's gates and the ops jobs test's renderers
+      "packages/config/src/kinds.ts",
+      "packages/env/src/data-dir.ts",
+      "packages/safe-delete/src/index.ts",
+      "packages/scripts/src/clock-exempt.ts",
+      "packages/scripts/src/pr-merge/gates.ts",
+      "packages/scripts/src/sandbox.ts",
+      "packages/scripts/src/test-sandbox.ts",
+      "packages/scripts/src/test-skills.ts",
+      "packages/scripts/src/verify/prebuild.ts",
+      "packages/settings/src/folder.ts",
+      "packages/settings/src/rendered.ts",
+      "tests/scripts/hooks/render-set.ts",
+      "tests/session-names.ts",
+      "scripts/factory-settings.json",
+      "scripts/hooks/bundled/guards.js",
+      "scripts/hooks/no-raw-delete.ts",
+      "scripts/ops/run-slot.sh",
+      "scripts/spawn.sh",
+      "skills/zerostarter/dev/SKILL.md",
+    ])
+      expect({ file, ran: await ran(file) }).toEqual({ file, ran: true })
+    for (const file of [
+      "api/hono/src/index.ts",
+      "docs/playground/playbook.md",
+      "extensions/core/skills/playbook/SESSIONS.md",
+      "packages/scripts/src/pr-merge/held.ts",
+      "scripts/README.md",
+      "scripts/briefs/brief-rush.md",
+    ])
+      expect({ file, ran: await ran(file) }).toEqual({ file, ran: false })
+  } finally {
+    rmSync(dir, { force: true, recursive: true })
+  }
+}, 120_000)
 
 // Each committed bundle names every module it holds in a `// <path>` comment, so the folders the job must watch are read from the bundles themselves: a guard that starts importing another folder fails here until the glob holds it.
 test("the hooks-bundle job's glob holds every folder a committed bundle imports", async () => {

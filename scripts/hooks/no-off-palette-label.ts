@@ -1,4 +1,5 @@
 // PreToolUse hook, for every session: refuses a GitHub label create or edit whose color is not a Tailwind 500, and a create with no color, since GitHub then picks one, so any label created from now on is a Tailwind 500.
+import { input } from "./input"
 import {
   type Command,
   type Env,
@@ -169,7 +170,7 @@ export async function check(raw: string): Promise<string | undefined> {
 }
 
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text())
+  const reason = await check(await input("no-off-palette-label", "guard"))
   if (reason) {
     console.error(reason)
     process.exit(2)

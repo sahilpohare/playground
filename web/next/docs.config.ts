@@ -104,6 +104,14 @@ const docsConfig = {
         },
       },
     ],
+    Yard: [
+      {
+        "/docs/yard-bot": {
+          title: "Connect a bot",
+          description: "How a bot reads and sends messages in its own DM with you on Yard.",
+        },
+      },
+    ],
     Help: [
       {
         "/docs/troubleshooting": {

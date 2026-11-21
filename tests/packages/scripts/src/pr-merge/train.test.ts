@@ -32,8 +32,8 @@ const ENV = {
   GIT_COMMITTER_NAME: "t",
 }
 
-// A scratch world: a bare origin with canary, a clone pr:train runs git in, and each PR's head pushed to origin as refs/pull/<n>/head. edits names, per PR, the files it writes over the base.
-function world(edits: Record<number, Record<string, string>>) {
+// A scratch world: a bare origin with canary, a clone pr:train runs git in, and each PR's head pushed to origin as refs/pull/<n>/head, or as its branch pr<n> alone for a PR branchOnly names, as GitHub leaves a PR whose pull ref it has not made yet. edits names, per PR, the files it writes over the base.
+function world(edits: Record<number, Record<string, string>>, branchOnly: number[] = []) {
   const root = mkdtempSync(join(scratch, "world-"))
   const origin = join(root, "origin.git")
   const work = join(root, "work")
@@ -57,7 +57,13 @@ function world(edits: Record<number, Record<string, string>>) {
     sh(work, "add", "-A")
     sh(work, "commit", "--quiet", "--no-verify", "-m", `pr ${n}`)
     heads[Number(n)] = sh(work, "rev-parse", "HEAD")
-    sh(work, "push", "--quiet", "origin", `HEAD:refs/pull/${n}/head`)
+    sh(
+      work,
+      "push",
+      "--quiet",
+      "origin",
+      branchOnly.includes(Number(n)) ? `HEAD:refs/heads/pr${n}` : `HEAD:refs/pull/${n}/head`,
+    )
   }
   sh(work, "checkout", "--quiet", "--detach", "canary")
   const git: Run = async (args) => {
@@ -79,6 +85,10 @@ function hub(w: World, open: number[], drafts: number[] = []) {
       return ok(
         open.map((n) => JSON.stringify({ author: OWNER, draft: drafts.includes(n), n })).join("\n"),
       )
+    }
+    if (joined.startsWith("pr view") && joined.includes("headRefName")) {
+      const n = Number(args[2])
+      return ok(JSON.stringify({ headRefName: `pr${n}`, headRefOid: w.heads[n] ?? "" }))
     }
     if (joined.startsWith("pr view") && joined.includes("headRefOid")) {
       return ok(w.heads[Number(args[2])] ?? "")
@@ -149,6 +159,27 @@ describe("pr:train", () => {
     expect(result.order).toEqual([81, 82, 83])
     expect(result.conflicts).toMatchObject([{ files: ["AGENTS.md"], n: 83, with: "#81" }])
     expect(h.calls.filter((args) => args[1] === "comment")).toEqual([])
+  })
+
+  test("forecast fetches a PR's branch when GitHub has not made its pull ref yet, and merges it at that head (#2389)", async () => {
+    const w = world({ 84: { "a.txt": edit("A") }, 85: { "a.txt": edit("B") } }, [85])
+    const h = hub(w, [84, 85])
+    const result = await forecast({ repo: REPO }, h.run, localOf(w, h, { queue: [84, 85] }))
+    expect(result.order).toEqual([84, 85])
+    expect(result.conflicts).toMatchObject([{ files: ["a.txt"], n: 85, with: "#84" }])
+  })
+
+  test("forecast refuses a branch that moved past the PR's head, so it never merges another commit (#2389)", async () => {
+    const w = world({ 86: { "a.txt": edit("A") } }, [86])
+    w.sh(w.work, "checkout", "--quiet", "pr86")
+    writeFileSync(join(w.work, "b.txt"), edit("later"))
+    w.sh(w.work, "commit", "--quiet", "--no-verify", "-am", "later")
+    w.sh(w.work, "push", "--quiet", "origin", "HEAD:refs/heads/pr86")
+    w.sh(w.work, "checkout", "--quiet", "--detach", "canary")
+    const h = hub(w, [86])
+    await expect(forecast({ repo: REPO }, h.run, localOf(w, h, { queue: [86] }))).rejects.toThrow(
+      `refs/pull/86/head is missing, and its branch pr86 is at `,
+    )
   })
 
   test("the gated PRs keep the queue's order, then PRs it does not list by number, and a red one is held", async () => {

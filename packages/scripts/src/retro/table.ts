@@ -16,7 +16,7 @@ export const QUERY = `query ($q: String!, $after: String) {
         firstCommit: commits(first: 1) { nodes { commit { authoredDate } } }
         allCommits: commits { totalCount }
         comments(first: 100) { totalCount nodes { author { login } body } }
-        timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 1) { totalCount }
+        timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 1) { filteredCount }
       }
     }
   }
@@ -32,7 +32,7 @@ export type Pr = {
   mergedAt: string | null
   number: number
   state: string
-  timelineItems: { totalCount: number }
+  timelineItems: { filteredCount: number }
   title: string
 }
 
@@ -111,7 +111,7 @@ export const rowsOf = (prs: Pr[], owner: string, now: Date): string[] => {
         clock(p.mergedAt),
         first ? `${Math.round((Date.parse(end) - Date.parse(first)) / 60_000)}m` : "-",
         `c${p.allCommits.totalCount}`,
-        `fp${p.timelineItems.totalCount}`,
+        `fp${p.timelineItems.filteredCount}`,
         `r${reviews.length}`,
         `[${reviews.map((v) => `${v.round}:${v.score}`).join(" ")}]`,
         `t${tests.filter((v) => v.pass).length}/${tests.length}`,

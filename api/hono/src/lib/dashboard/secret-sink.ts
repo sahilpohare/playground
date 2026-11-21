@@ -3,6 +3,8 @@ import { tmpdir } from "node:os"
 import { readsLive } from "@/lib/dashboard/fixture"
 import type { KeychainRead, KeychainSave, SinkRun } from "@/lib/dashboard/inbox"
 import { keychainItem, type Run } from "@/lib/keychain"
+import { KEYCHAIN_ITEMS, keychainSpec } from "@/lib/keychain-items"
+import { keychain } from "@/lib/yard/keychain"
 
 // A sink that waits on a prompt is stopped after this long, so a Submit never hangs.
 const SINK_TIMEOUT_MS = 60_000
@@ -65,9 +67,13 @@ export async function spawnSink(
 export const runSink: SinkRun = (argv, value) =>
   readsLive() ? spawnSink(argv, value) : Promise.resolve(0)
 
-// A keychain sink's writer, on the same terms: only a stack that reads the live machine writes this Mac's Keychain, and any other saves nothing.
+// The item a keychain sink writes: the Mac's one Yard item through keychain(), so a token saved there also deletes the old relay item, and any other item as itself.
+export const keychainWriter = (item: string, run?: Run) =>
+  keychainSpec(item) === KEYCHAIN_ITEMS.yard ? keychain(run) : keychainItem(item, { run })
+
+// A keychain sink's writer, on the same terms: only a stack that reads the live machine writes this computer's secret store, and any other saves nothing.
 export const saveToKeychain: KeychainSave = (item, value) =>
-  readsLive() ? keychainItem(item).write(value) : Promise.resolve()
+  readsLive() ? keychainWriter(item).write(value) : Promise.resolve()
 
 // The value a fixture or test stack's reveal shows, made up, so no shot or test holds a real one.
 export const FIXTURE_REVEAL = "made-up-value-from-the-fixture"

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -18,10 +18,16 @@ import {
   hostedEnv,
   hostedSettings,
   hosts,
+  LOAD_POLL_MS,
+  LOAD_WAIT_MS,
+  LOCAL_READ_MS,
+  LOCAL_TOKEN,
+  localPlan,
   resultOf,
   SDK_PROBE,
   SdkHost,
   sendToHosted,
+  servedModels,
   SESSION_FILE,
   startSdkProbe,
   TIMED_OUT,
@@ -29,7 +35,10 @@ import {
   type HostDeps,
   type HostedMode,
 } from "../../../../../../api/hono/src/lib/dashboard/sdk"
-import type { SessionSetting } from "../../../../../../api/hono/src/lib/dashboard/setting"
+import type {
+  HostedSetting,
+  SessionSetting,
+} from "../../../../../../api/hono/src/lib/dashboard/setting"
 import {
   hostedNow,
   hostSessions,
@@ -55,9 +64,15 @@ const question = {
   ],
 }
 
-// A stand-in for the SDK's query(): it records the options it was given, every message put on the input and every mode, model and effort set, and ends a turn for each message. A message `report:<mode>` has the session report that mode itself, as its status message does when it leaves plan mode, and `init:<model>` has it report its model as its init message does.
+// A stand-in for the SDK's query(): it records the options it was given, every message put on the input and every mode, model and effort set, and ends a turn for each message; close() ends its stream, as the SDK's ends the session's process. A message `report:<mode>` has the session report that mode itself, as its status message does when it leaves plan mode, and `init:<model>` has it report its model as its init message does.
 function fakeQuery({ refuseMode = false, refuseSetting = false } = {}) {
-  const calls: { modes: string[]; options: Options; sent: string[]; settings: string[] }[] = []
+  const calls: {
+    closed: boolean
+    modes: string[]
+    options: Options
+    sent: string[]
+    settings: string[]
+  }[] = []
   const run = ({
     options,
     prompt,
@@ -65,9 +80,19 @@ function fakeQuery({ refuseMode = false, refuseSetting = false } = {}) {
     options: Options
     prompt: AsyncIterable<SDKUserMessage>
   }) => {
-    const call = { modes: [] as string[], options, sent: [] as string[], settings: [] as string[] }
+    const call = {
+      closed: false,
+      modes: [] as string[],
+      options,
+      sent: [] as string[],
+      settings: [] as string[],
+    }
     calls.push(call)
-    const stream = (async function* () {
+    let stop = () => {}
+    const stopped = new Promise<IteratorResult<SDKMessage>>(
+      (resolve) => (stop = () => resolve({ done: true, value: undefined })),
+    )
+    const inner = (async function* () {
       for await (const message of prompt) {
         const text = String(message.message.content)
         call.sent.push(text)
@@ -78,11 +103,22 @@ function fakeQuery({ refuseMode = false, refuseSetting = false } = {}) {
         if (text.startsWith("init:")) {
           yield { model: text.slice("init:".length), subtype: "init", type: "system" } as SDKMessage
         }
+        if (text === "hold") continue
         yield { type: "assistant" } as SDKMessage
         yield { type: "result" } as SDKMessage
       }
     })()
+    const stream = {
+      [Symbol.asyncIterator]() {
+        return this
+      },
+      next: () => Promise.race([inner.next(), stopped]),
+    }
     return Object.assign(stream, {
+      close: () => {
+        call.closed = true
+        stop()
+      },
       setPermissionMode: async (mode: string) => {
         if (refuseMode) throw new Error("the session refused the mode")
         call.modes.push(mode)
@@ -102,8 +138,17 @@ function fakeQuery({ refuseMode = false, refuseSetting = false } = {}) {
 
 const CLAUDE = "/usr/local/bin/claude"
 
+const LOCAL = {
+  models: [
+    { id: "ornith-1.5-122b-nvfp4", label: "M" },
+    { id: "ornith-1.5-35b-a3b-nvfp4", label: "K" },
+  ],
+  url: "http://127.0.0.1:18000",
+}
+
 const deps = (query: HostDeps["query"], timeoutMs = 60_000, transcripts = true): HostDeps => ({
   exists: () => transcripts,
+  local: LOCAL,
   now: () => new Date(AT),
   query,
   timeoutMs,
@@ -222,6 +267,74 @@ describe("the hosted session's start", () => {
       expect(again.calls[0]?.options).toMatchObject({ resume: id })
       expect(again.calls[0]?.options.sessionId).toBeUndefined()
     } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a start whose login is the own account's seat token carries it in its environment alone: no log line, row or file holds it", () => {
+    const dir = scratch()
+    const token = `made-up-seat-${crypto.randomUUID()}`
+    const logged: unknown[][] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args)
+    try {
+      const { calls, query } = fakeQuery()
+      const host = new SdkHost({
+        ...deps(query),
+        login: () => ({ email: "owner@example.test", token }),
+      })
+      host.start(dir, CLAUDE, "default")
+      expect(calls[0]?.options.env).toEqual({ ...hostedEnv(), CLAUDE_CODE_OAUTH_TOKEN: token })
+      expect(JSON.stringify(logged)).not.toContain(token)
+      expect(JSON.stringify(logged)).toContain("owner@example.test's seat token")
+      expect(JSON.stringify(host.worker())).not.toContain(token)
+      expect(host.worker()?.loginExpired).toBeUndefined()
+      expect(readFileSync(join(dir, SESSION_FILE), "utf8")).not.toContain(token)
+    } finally {
+      console.error = error
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a start on a local model never asks for a login, so no seat token reaches its server", () => {
+    const dir = scratch()
+    try {
+      const { calls, query } = fakeQuery()
+      let asked = 0
+      const login = () => {
+        asked += 1
+        return { email: "owner@example.test", token: `made-up-seat-${crypto.randomUUID()}` }
+      }
+      new SdkHost({ ...deps(query), login }).start(dir, CLAUDE, "default", {
+        id: LOCAL.models[0]!.id,
+        url: LOCAL.url,
+      })
+      expect(asked).toBe(0)
+      expect(calls[0]?.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a start with an ended login and no seat token runs as before, its row shows the expired login, and the log names the cause", () => {
+    const dir = scratch()
+    const cause =
+      "its Claude Code login has ended (loginEnded: time_limit), and the Keychain holds no acme-claude item for it to start on"
+    const logged: unknown[][] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args)
+    try {
+      const { calls, query } = fakeQuery()
+      const host = new SdkHost({
+        ...deps(query),
+        login: () => ({ cause, email: "owner@example.test" }),
+      })
+      host.start(dir, CLAUDE, "default")
+      expect(calls[0]?.options.env).toEqual(hostedEnv())
+      expect(host.worker()?.loginExpired).toBe(true)
+      expect(JSON.stringify(logged)).toContain(cause)
+    } finally {
+      console.error = error
       rmSync(dir, { force: true, recursive: true })
     }
   })
@@ -551,6 +664,10 @@ describe("changeHostedSetting", () => {
         await run()
         recorded.push(`${event.action}: ${event.summary}`)
       },
+      keptModel: () => "",
+      served: async () => null,
+      sleep: async () => {},
+      start: async () => ({ code: 0, line: "" }),
     }
     const changing = (setting: SessionSetting, sessionId = host.sessionId!) => ({
       actor,
@@ -611,6 +728,419 @@ describe("changeHostedSetting", () => {
     } finally {
       rmSync(dir, { force: true, recursive: true })
     }
+  })
+})
+
+describe("the hosted session on a local model", () => {
+  const M = LOCAL.models[0]!
+  const K = LOCAL.models[1]!
+
+  // A host on a fake session whose server serves what served holds, read by reference so a test can change it mid-load; record waits a tick before it runs, as recordWhileSending awaits the database, and sleep moves the clock on.
+  const started = (
+    first: string[] | null = [M.id],
+    { kept = "", start = { code: 0, line: "started" } } = {},
+  ) => {
+    const dir = scratch()
+    const fake = fakeQuery()
+    const host = new SdkHost(deps(fake.query))
+    host.start(dir, CLAUDE, "plan")
+    const recorded: string[] = []
+    const reads: string[] = []
+    const starts: string[] = []
+    const clock = { at: Date.parse(AT) }
+    const server = { served: first }
+    const on = {
+      host,
+      keptModel: () => kept,
+      now: () => new Date(clock.at),
+      record: async (event: { action: string; summary: string }, run: () => Promise<void>) => {
+        await Bun.sleep(0)
+        await run()
+        recorded.push(`${event.action}: ${event.summary}`)
+      },
+      served: async (url: string) => {
+        reads.push(url)
+        return server.served
+      },
+      sleep: async (ms: number) => {
+        clock.at += ms
+        await Bun.sleep(0)
+      },
+      start: async (model: string) => {
+        starts.push(model)
+        return start
+      },
+    }
+    const pick = (setting: HostedSetting) =>
+      changeHostedSetting({ actor, sessionId: host.sessionId!, setting }, on)
+    // Waits for a load running past its request to end, loaded or failed.
+    const loaded = async () => {
+      for (let i = 0; i < 500 && host.loading(); i++) await Bun.sleep(1)
+    }
+    return { clock, dir, fake, host, loaded, on, pick, reads, recorded, server, starts }
+  }
+
+  test("on a local model the session gets its server, a placeholder token in place of the login's, the model under every alias, and few retries", () => {
+    const env = hostedEnv(
+      { ANTHROPIC_AUTH_TOKEN: "the-api's", HOME: "/h", PATH: "/bin" },
+      "/stack-data",
+      { id: M.id, url: LOCAL.url },
+    )
+    expect(env).toEqual({
+      ANTHROPIC_AUTH_TOKEN: LOCAL_TOKEN,
+      ANTHROPIC_BASE_URL: LOCAL.url,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: M.id,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: M.id,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: M.id,
+      CLAUDE_CODE_MAX_RETRIES: "2",
+      HOME: "/h",
+      PATH: "/bin",
+      PLAYGROUND_DATA_DIR: "/stack-data",
+      PLAYGROUND_ROLE: "probe",
+    })
+    expect(hostedEnv({ HOME: "/h" }, "/d")).not.toHaveProperty("ANTHROPIC_BASE_URL")
+  })
+
+  test("picking a local model closes the session and resumes it on that server in the same mode, and a cloud pick then resumes it on the default endpoint", async () => {
+    const { dir, fake, host, pick, reads, recorded } = started()
+    try {
+      const id = host.sessionId!
+      expect(await pick({ local: M.id })).toMatchObject({ ok: true, sessionId: id })
+      expect(reads).toEqual([LOCAL.url])
+      expect(fake.calls[0]!.closed).toBe(true)
+      expect(fake.calls[1]!.options).toMatchObject({
+        model: M.id,
+        permissionMode: "plan",
+        resume: id,
+      })
+      expect(fake.calls[1]!.options.env).toMatchObject({ ANTHROPIC_BASE_URL: LOCAL.url })
+      expect(host.worker()).toMatchObject({ model: M.id, sessionId: id })
+      expect(host.localModel()).toBe(M.id)
+      expect(await pick({ model: "opus" })).toMatchObject({ ok: true })
+      expect(fake.calls[1]!.closed).toBe(true)
+      expect(fake.calls[2]!.options).toMatchObject({ model: "opus", resume: id })
+      expect(fake.calls[2]!.options.env).not.toHaveProperty("ANTHROPIC_BASE_URL")
+      expect(host.localModel()).toBeNull()
+      expect(recorded).toEqual([
+        `dashboard.setting: Set ${SDK_PROBE}'s model to ${M.id} (local)`,
+        `dashboard.setting: Set ${SDK_PROBE}'s model to opus`,
+      ])
+      // a cloud pick on the default endpoint keeps setModel, with no restart
+      await pick({ model: "sonnet" })
+      expect(fake.calls).toHaveLength(3)
+      expect(fake.calls[2]!.settings).toEqual(["model sonnet"])
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("while a turn runs, a switch is refused as BUSY and the session is left running", async () => {
+    const { dir, fake, host, pick, recorded } = started()
+    try {
+      host.send("hold")
+      await Bun.sleep(0)
+      expect(await pick({ local: M.id })).toEqual({
+        code: "BUSY",
+        ok: false,
+        reason: "The chat is answering; switch the model once it's done.",
+      })
+      expect(fake.calls).toHaveLength(1)
+      expect(fake.calls[0]!.closed).toBe(false)
+      expect(recorded).toEqual([])
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a second switch while one restarts the session, as from another tab, is refused as BUSY", async () => {
+    const { dir, fake, pick, recorded } = started()
+    try {
+      const results = await Promise.all([pick({ local: M.id }), pick({ local: M.id })])
+      expect(results.map((result) => (result.ok ? "ok" : result.code)).sort()).toEqual([
+        "BUSY",
+        "ok",
+      ])
+      expect(fake.calls).toHaveLength(2)
+      expect(recorded).toHaveLength(1)
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("the claim holds until switchTo lets it go, so a pick right after a restart reads BUSY (PG-2647)", async () => {
+    const { dir, host } = started()
+    try {
+      expect(host.claim()).toBe(true)
+      await host.restart(null, "opus")
+      expect(host.claim()).toBe(false)
+      host.release()
+      expect(host.claim()).toBe(true)
+      host.release()
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a pick made as the first switch's restart ends reads BUSY, and a pick once that switch lets go switches (PG-2647)", async () => {
+    const { dir, fake, on, pick } = started()
+    try {
+      const record = on.record
+      let during: Awaited<ReturnType<typeof pick>> | undefined
+      on.record = async (event, run) => {
+        on.record = record
+        await record(event, async () => {
+          await run()
+          during = await pick({ model: "sonnet" })
+        })
+      }
+      expect(await pick({ local: M.id })).toMatchObject({ ok: true })
+      expect(during).toMatchObject({ code: "BUSY", ok: false })
+      expect(await pick({ model: "opus" })).toMatchObject({ ok: true })
+      expect(fake.calls).toHaveLength(3)
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a switch keeps the effort picked before it, on the local server and back", async () => {
+    const { dir, fake, host, pick } = started()
+    try {
+      await pick({ effort: "high" })
+      await pick({ local: M.id })
+      expect(fake.calls[1]!.settings).toEqual(["effort high"])
+      expect(host.worker()).toMatchObject({ effort: "high", model: M.id })
+      await pick({ model: "opus" })
+      expect(fake.calls[2]!.settings).toEqual(["effort high"])
+      expect(host.worker()).toMatchObject({ effort: "high", model: "opus" })
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a pick while the server is down starts the kept model, shows it loading, then switches once the server serves it", async () => {
+    const { dir, fake, host, loaded, pick, recorded, server, starts } = started(null, {
+      kept: "m-folder",
+    })
+    try {
+      expect(await pick({ local: M.id })).toMatchObject({ ok: true })
+      expect(starts).toEqual(["m-folder"])
+      expect(host.worker()!.localLoad).toEqual({ label: "M", state: "loading" })
+      expect(fake.calls).toHaveLength(1)
+      server.served = [M.id]
+      await loaded()
+      expect(host.worker()!.localLoad).toBeUndefined()
+      expect(host.localModel()).toBe(M.id)
+      expect(fake.calls).toHaveLength(2)
+      expect(recorded).toEqual([`dashboard.setting: Set ${SDK_PROBE}'s model to ${M.id} (local)`])
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a start the machine refuses shows its words on the row, the chat untouched, and the next model pick clears them", async () => {
+    const { dir, fake, host, loaded, pick, recorded } = started(null, {
+      kept: "m-folder",
+      start: { code: 1, line: "spark-9dfb has 9 GiB free, under the 15 GiB floor" },
+    })
+    try {
+      await pick({ local: M.id })
+      await loaded()
+      expect(host.worker()!.localLoad).toEqual({
+        label: "M",
+        reason:
+          "The local model server couldn't start M, so the chat stays on its model: spark-9dfb has 9 GiB free, under the 15 GiB floor",
+        state: "failed",
+      })
+      expect(fake.calls).toHaveLength(1)
+      expect(recorded).toEqual([])
+      await pick({ model: "opus" })
+      expect(host.worker()!.localLoad).toBeUndefined()
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("while a model loads, another local pick is BUSY, and a cloud pick cancels the switch", async () => {
+    const { dir, fake, host, loaded, pick, server } = started(null, { kept: "m-folder" })
+    try {
+      await pick({ local: M.id })
+      expect(await pick({ local: M.id })).toEqual({
+        code: "BUSY",
+        ok: false,
+        reason: "M is still loading on the local model server.",
+      })
+      expect(await pick({ model: "opus" })).toMatchObject({ ok: true })
+      expect(host.worker()!.localLoad).toBeUndefined()
+      server.served = [M.id]
+      await Bun.sleep(5)
+      await loaded()
+      expect(host.localModel()).toBeNull()
+      expect(fake.calls).toHaveLength(1)
+      expect(fake.calls[0]!.settings).toEqual(["model opus"])
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a server that answers with another model ends the load at once in plain words, and one that never answers fails after LOAD_WAIT_MS", async () => {
+    for (const [served, reason, waited] of [
+      [[K.id], "K is loaded on the local model server right now, not M.", [0, LOAD_POLL_MS]],
+      [
+        null,
+        "M didn't come up on the local model server within 15 minutes, so the chat stays on its model.",
+        [LOAD_WAIT_MS, LOAD_WAIT_MS + LOAD_POLL_MS],
+      ],
+    ] as const) {
+      const { clock, dir, fake, host, loaded, pick, server } = started(null, { kept: "m-folder" })
+      try {
+        await pick({ local: M.id })
+        server.served = served === null ? null : [...served]
+        await loaded()
+        expect(host.worker()!.localLoad).toEqual({ label: "M", reason, state: "failed" })
+        // one read of the server may land before the test sets what it serves
+        const elapsed = clock.at - Date.parse(AT)
+        expect(elapsed).toBeGreaterThanOrEqual(waited[0])
+        expect(elapsed).toBeLessThanOrEqual(waited[1])
+        expect(fake.calls).toHaveLength(1)
+      } finally {
+        rmSync(dir, { force: true, recursive: true })
+      }
+    }
+    expect([LOAD_WAIT_MS, LOAD_POLL_MS]).toEqual([15 * 60_000, 5_000])
+  })
+
+  test("a model served while a turn runs past LOAD_WAIT_MS waits for the turn to end, then switches", async () => {
+    const { clock, dir, fake, host, loaded, pick, server } = started(null, { kept: "m-folder" })
+    try {
+      await pick({ local: M.id })
+      host.send("hold")
+      server.served = [M.id]
+      for (let i = 0; i < 2_000 && clock.at - Date.parse(AT) <= LOAD_WAIT_MS; i++)
+        await Bun.sleep(0)
+      expect(clock.at - Date.parse(AT)).toBeGreaterThan(LOAD_WAIT_MS)
+      expect(host.worker()!.localLoad).toEqual({ label: "M", state: "loading" })
+      host.send("done")
+      await loaded()
+      expect(host.worker()!.localLoad).toBeUndefined()
+      expect(host.localModel()).toBe(M.id)
+      expect(fake.calls).toHaveLength(2)
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  test("a server that does not answer, or serves another model, refuses the pick in plain words and leaves the session where it was", async () => {
+    for (const [served, code, reason] of [
+      [
+        null,
+        "SESSIONS_FAILED",
+        "The local model server isn't answering, so the chat stays on its model, not M.",
+      ],
+      [[K.id], "BUSY", "K is loaded on the local model server right now, not M."],
+      [[], "BUSY", "No model is loaded on the local model server right now, so M can't answer."],
+    ] as const) {
+      const { dir, fake, pick, recorded } = started(served === null ? null : [...served])
+      try {
+        expect(await pick({ local: M.id })).toEqual({ code, ok: false, reason })
+        expect(fake.calls).toHaveLength(1)
+        expect(fake.calls[0]!.closed).toBe(false)
+        expect(recorded).toEqual([])
+      } finally {
+        rmSync(dir, { force: true, recursive: true })
+      }
+    }
+  })
+
+  test("a local id config does not name is NOT_FOUND, and the row lists config's local models", async () => {
+    const { dir, fake, host, pick } = started()
+    try {
+      expect(await pick({ local: "other-model" })).toMatchObject({ code: "NOT_FOUND", ok: false })
+      expect(fake.calls).toHaveLength(1)
+      expect(host.worker()).toMatchObject({ localModels: LOCAL.models })
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  })
+})
+
+// The stub local server (tests/local-model-stub.ts) on 127.0.0.1 alone, its port read from its first line; stopped by its own pid.
+async function stubServer(...args: string[]) {
+  const stub = Bun.spawn(
+    ["bun", join(import.meta.dir, "../../../../../local-model-stub.ts"), ...args],
+    {
+      stderr: "pipe",
+      stdout: "pipe",
+    },
+  )
+  const reader = stub.stdout.getReader()
+  let out = ""
+  while (!out.includes("\n")) {
+    const { done, value } = await reader.read()
+    if (done) break
+    out += new TextDecoder().decode(value)
+  }
+  reader.releaseLock()
+  return { stop: () => stub.kill(), stub, url: `http://127.0.0.1:${out.trim()}` }
+}
+
+describe("servedModels", () => {
+  test("it reads the ids a local server lists, and null when the server is gone or does not answer in time", async () => {
+    const up = await stubServer("ornith-1.5-122b-nvfp4", "0")
+    try {
+      expect(await servedModels(up.url)).toEqual(["ornith-1.5-122b-nvfp4"])
+    } finally {
+      up.stop()
+      await up.stub.exited
+    }
+    expect(await servedModels(up.url, 1_000)).toBeNull()
+    const hung = await stubServer("ornith-1.5-122b-nvfp4", "0", "--silent-models")
+    try {
+      const started = Date.now()
+      expect(await servedModels(hung.url, 200)).toBeNull()
+      expect(Date.now() - started).toBeLessThan(2_000)
+    } finally {
+      hung.stop()
+      await hung.stub.exited
+    }
+    expect(LOCAL_READ_MS).toBe(5_000)
+  })
+
+  test("a server still loading its model reads as not answering until it serves it", async () => {
+    const loading = await stubServer("ornith-1.5-122b-nvfp4", "0", "--down-for", "1")
+    try {
+      expect(await servedModels(loading.url)).toBeNull()
+      await Bun.sleep(1_100)
+      expect(await servedModels(loading.url)).toEqual(["ornith-1.5-122b-nvfp4"])
+    } finally {
+      loading.stop()
+      await loading.stub.exited
+    }
+  })
+})
+
+describe("localPlan", () => {
+  test("it loads when the server does not answer and a kept model can start there, and only then", () => {
+    const [M, K] = LOCAL.models as [(typeof LOCAL.models)[0], (typeof LOCAL.models)[0]]
+    expect(localPlan(M, null, LOCAL.models, true)).toEqual({ do: "load" })
+    expect(localPlan(M, null, LOCAL.models, false)).toMatchObject({ do: "refuse", down: true })
+    expect(localPlan(M, [K.id], LOCAL.models, true)).toMatchObject({ do: "refuse", down: false })
+    expect(localPlan(M, [M.id], LOCAL.models, true)).toEqual({ do: "switch" })
+  })
+
+  test("it switches when the server serves the pick, and its refusals name the models in words, with no command to type", () => {
+    const [M, K] = LOCAL.models as [(typeof LOCAL.models)[0], (typeof LOCAL.models)[0]]
+    expect(localPlan(M, [M.id], LOCAL.models)).toEqual({ do: "switch" })
+    const refusals = [
+      localPlan(M, [K.id], LOCAL.models),
+      localPlan(M, null, LOCAL.models),
+      localPlan(M, ["x/y"], LOCAL.models),
+    ]
+    expect(refusals.map((plan) => plan.do)).toEqual(["refuse", "refuse", "refuse"])
+    expect(refusals[2]).toMatchObject({
+      reason: "x/y is loaded on the local model server right now, not M.",
+    })
+    for (const plan of refusals)
+      expect(JSON.stringify(plan)).not.toMatch(/playground |`|\bbun\b|ssh/)
   })
 })
 

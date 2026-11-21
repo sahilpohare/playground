@@ -13,10 +13,11 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import { GUARD_LISTS, loginPath } from "../../packages/settings/src/rendered"
 import { OLD_NAMES } from "../session-names"
+import { FAKE_SLEEP } from "./fixtures/proc"
 import { storeWith } from "./hooks/render-set"
 
 // spawn.sh's fakes and its spawn() for the spawn*.test.ts files, split so the parallel pass spreads them; test-sandbox's --parallel loads this afresh for each file, so the afterAll is that file's own
@@ -33,6 +34,41 @@ export const script = join(root, "scripts", "spawn.sh")
 export const scratch = mkdtempSync(join(tmpdir(), "spawn-sh-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
+// A copy of spawn.sh's main checkout, found as spawn.sh finds its own: git's common folder's parent, else the folder above the script's, each link followed before its .. as `cd -P` does.
+const mainOf = (script: string): string => {
+  let repo: string
+  try {
+    repo = realpathSync.native(`${dirname(script)}/..`)
+  } catch {
+    return resolve(dirname(script), "..")
+  }
+  const common = Bun.spawnSync([
+    "git",
+    "-C",
+    repo,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ])
+  return common.exitCode === 0 ? dirname(common.stdout.toString().trim()) : repo
+}
+
+// This checkout's main checkout, which a case's own spawn.sh runs in.
+export const TRUSTED = [mainOf(join(root, "scripts", "spawn.sh"))]
+
+// Pure: a Claude Code config's text with the owner's yes to its folder trust question for each of dirs, as first run's Trust this folder records it; a config that does not read as an object stays as it is.
+export const trusting = (text: string | undefined, dirs: string[] = TRUSTED): string => {
+  let config: Record<string, unknown> = {}
+  try {
+    config = text === undefined ? {} : JSON.parse(text)
+  } catch {
+    return text!
+  }
+  if (!config || typeof config !== "object") return text!
+  const projects = Object.fromEntries(dirs.map((dir) => [dir, { hasTrustDialogAccepted: true }]))
+  return JSON.stringify({ ...config, projects: { ...projects, ...(config.projects as object) } })
+}
+
 export const LSTART = "Tue Oct 13 04:43:59 2026"
 
 // Fake cmux (which spawn.sh never calls), ps, sysctl, uptime and bun on PATH, each logging what it was asked; bun fakes spawn.sh's roster write alone.
@@ -45,6 +81,36 @@ export const fake = (name: string, body: string) => {
   chmodSync(join(bin, name), 0o755)
 }
 fake("cmux", `printf '%s\\n' "$@" > "$HOME/cmux.args"`)
+// gh answers `pr view` with FAKE_GH_PR ("<branch> <sha>", the headRefName and headRefOid spawn.sh asks for) and fails every other call, so no case reaches GitHub.
+fake(
+  "gh",
+  `[ "$1 $2" = "pr view" ] && [ -n "$FAKE_GH_PR" ] && { echo "$FAKE_GH_PR"; exit 0; }
+exit 1`,
+)
+// macOS's getconf naming the user's temp folder, a folder of the suite's own, so no checkout a test makes sits under the temp folder a sandbox may write; under LINUX_GETCONF or FAKE_LINUX it is Linux's, which has no such name.
+export const userTemp = join(scratch, "user-temp")
+fake(
+  "getconf",
+  `[ -n "$LINUX_GETCONF$FAKE_LINUX" ] && { echo "getconf: Unrecognized variable $1" >&2; exit 1; }
+[ "$1" = DARWIN_USER_TEMP_DIR ] && { echo ${userTemp}/; exit 0; }
+exec /usr/bin/getconf "$@"`,
+)
+// A sandboxed start reads this machine's sandbox before its pane opens: uname reads Linux under LINUX_GETCONF or FAKE_LINUX, and bwrap prints FAKE_BWRAP_SAYS on stderr and exits FAKE_BWRAP_RC (0 by default), so no case runs the machine's own sandbox.
+fake(
+  "uname",
+  `[ "$1" = -s ] && [ -n "$LINUX_GETCONF$FAKE_LINUX" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"`,
+)
+fake("bwrap", `[ -z "$FAKE_BWRAP_SAYS" ] || echo "$FAKE_BWRAP_SAYS" >&2\nexit \${FAKE_BWRAP_RC:-0}`)
+fake("socat", "exit 0")
+// mktemp, but a session's Linux temp folder spawn.sh makes under /tmp lands in linuxTemp, so a test leaves nothing in the machine's /tmp.
+export const linuxTemp = join(scratch, "linux-tmp")
+mkdirSync(linuxTemp)
+fake(
+  "mktemp",
+  `[ "$1" = -d ] && case "$2" in /tmp/playground-*) exec /usr/bin/mktemp -d "${linuxTemp}/\${2#/tmp/}" ;; esac
+exec /usr/bin/mktemp "$@"`,
+)
 fake(
   "ps",
   `[ -n "$FAKE_PS_BROKEN" ] && exit 1
@@ -64,11 +130,20 @@ fake(
 case " $* " in *" -w "*) [ -n "$FAKE_EMPTY_TOKEN" ] || echo "${TOKEN}" ;; *) echo 'keychain: "/fake.keychain-db"' ;; esac
 exit 0`,
 )
+// The local model's server, which no case reaches: curl logs its args to curl.args and answers the model list with FAKE_LOCAL_MODELS (K's served name and its 131072-token window by default), or fails as a closed port does under FAKE_LOCAL_DOWN.
+fake(
+  "curl",
+  `printf '%s\\n' "$*" >> "$HOME/curl.args"
+[ -n "$FAKE_LOCAL_DOWN" ] && { echo "curl: (7) Failed to connect to 127.0.0.1 port 8000" >&2; exit 7; }
+[ -n "$FAKE_LOCAL_MODELS" ] && { echo "$FAKE_LOCAL_MODELS"; exit 0; }
+echo '{"object":"list","data":[{"id":"local","max_model_len":131072}]}'`,
+)
 // A leads worktree's install, bun install <args>: the args as one line to bun-install.log, failing as a frozen lockfile does under FAKE_INSTALL_FAIL. The roster write, bun <checkout>/scripts/roster.ts <args>: the script's path to roster.script, the args one a line to roster.args and as one line to roster.log. A read, roster.ts who, and the data folder's and a setting's reads (bun --no-env-file) run the real bun, but the skill resolver, orgs.ts, the settings reader, setting.ts, and playground's cli.ts run from this checkout, since a case's copy of spawn.sh sits in a scratch checkout without them.
 fake(
   "bun",
   `[ "$1" = install ] && { printf '%s\\n' "$*" >> "$HOME/bun-install.log"; [ -z "$FAKE_INSTALL_FAIL" ] || { echo "error: lockfile had changes, but lockfile is frozen"; exit 1; }; exit 0; }
 case "$2" in */playground/orgs.ts) exec "${process.execPath}" "$1" "${join(root, "packages", "scripts", "src", "playground", "orgs.ts")}" "\${@:3}" ;; esac
+case "$2" in */playground/setting.ts) exec "${process.execPath}" "$1" "${join(root, "packages", "scripts", "src", "playground", "setting.ts")}" "\${@:3}" ;; esac
 case "$2" in */playground/cli.ts) exec "${process.execPath}" "$1" "${join(root, "packages", "scripts", "src", "playground", "cli.ts")}" "\${@:3}" ;; esac
 case "$1" in */setting.ts) shift; exec "${process.execPath}" "${join(root, "packages", "scripts", "src", "playground", "setting.ts")}" "$@" ;; esac
 [ "$2" = who ] || [ "$1" = --no-env-file ] && exec "${process.execPath}" "$@"
@@ -85,10 +160,12 @@ fake(
   `printf '%s\\n' "$*" >> "$HOME/claude.args"
 exit 0`,
 )
+// FAKE_LINUX answers as Ubuntu does: procps's sysctl names each macOS name it cannot stat and exits 255, its top has no -l, and there is no vm_stat, so every reading comes from PLAYGROUND_PROC's recorded text (tests/scripts/fixtures/proc.ts).
 fake(
   "sysctl",
   // spawn.sh always reads with -n, so the name is $2.
-  `[ -n "$FAKE_SYSCTL_BROKEN" ] && exit 1
+  `[ -n "$FAKE_LINUX" ] && { echo "sysctl: cannot stat /proc/sys/\${2//.//}: No such file or directory" >&2; exit 255; }
+[ -n "$FAKE_SYSCTL_BROKEN" ] && exit 1
 [ -n "$FAKE_SYSCTL_SANDBOXED" ] && { echo "sysctl: sysctl fmt -1 1024 1: Operation not permitted" >&2; exit 1; }
 [ "$1" = -n ] || exit 1
 case "$2" in
@@ -99,10 +176,11 @@ case "$2" in
   *) exit 1 ;;
 esac`,
 )
-// The CPU read, top -l 2 -n 0, which run-slot's gauges take and spawn.sh does not: each call logged to top.calls, idle at FAKE_CPU_IDLE (0 by default).
+// The CPU read, top -l 2 -n 0, which run-slot's gauges and spawn.sh's load gate for a manager take: each call logged to top.calls, idle at FAKE_CPU_IDLE (0 by default).
 fake(
   "top",
   `echo "$*" >> "$HOME/top.calls"
+[ -n "$FAKE_LINUX" ] && { echo "top: unknown option 'l'" >&2; exit 1; }
 echo "CPU usage: 30.00% user, 20.00% sys, 50.00% idle"
 echo "CPU usage: 60.00% user, 40.00% sys, \${FAKE_CPU_IDLE:-0.00}% idle"`,
 )
@@ -112,15 +190,21 @@ fake(
   `[ -n "$FAKE_UPTIME_BROKEN" ] && exit 1
 echo "22:15  2 users, load averages: \${FAKE_LOAD1:-1.00} \${FAKE_LOAD5:-2.00} 3.00"`,
 )
-// The swap-in read, vm_stat -c 2 1: its first row the totals since boot, its second the last second's, swap-ins at FAKE_SWAPINS (0 by default).
+// The swap-in read, vm_stat -c <n> 1: its first row the totals since boot, then one row a second for the n-1 seconds after, swap-ins at FAKE_SWAPINS's words in turn (0 by default), its last word held for any second past them.
 fake(
   "vm_stat",
-  `[ -n "$FAKE_VMSTAT_BROKEN" ] && exit 1
+  `[ -n "$FAKE_LINUX" ] && { echo "vm_stat: command not found" >&2; exit 127; }
+[ -n "$FAKE_VMSTAT_BROKEN" ] && exit 1
 echo "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
 echo "    free  pageins  pageout  swapins swapouts"
 echo "    8023  346118K   502178  9966113 12153731"
-echo "    7698      542        0  \${FAKE_SWAPINS:-0}        0"`,
+vals=(\${FAKE_SWAPINS:-0})
+for ((i = 0; i < \${2:-2} - 1; i++)); do
+  echo "    7698      542        0  \${vals[i]:-\${vals[\${#vals[@]} - 1]}}        0"
+done`,
 )
+// sleep as it is, but first the next second read's /proc text moves in (FAKE_SLEEP)
+fake("sleep", FAKE_SLEEP.replace("#!/bin/bash\n", ""))
 // grep as it is, but a resume's name check over a folder's transcripts, its one call naming customTitle, is logged to grep.calls first, so a case sees whether that read ran.
 fake(
   "grep",
@@ -132,16 +216,10 @@ export let homes = 0
 // A brief's text, which must never reach herdr's argv, the roster or the output.
 export const BRIEF_TEXT = "secret-handoff-text"
 export type Session = { name?: string; pid: number; procStart?: string; raw?: string }
-// The factory's settings as link-skills.sh links them, which every launch rebuilds into its own file with the factory's one compact window.
-export const FACTORY_SETTINGS = {
-  autoCompactWindow: 400000,
-  autoMemoryEnabled: false,
-  env: { KEEP: "1" },
-  hooks: {
-    PreToolUse: [{ hooks: [{ command: "no-env-dump", type: "command" }], matcher: "Bash" }],
-  },
-  skipDangerousModePermissionPrompt: true,
-}
+// The factory's settings, which spawn.sh reads from its own checkout's scripts/ folder and every launch rebuilds into its own file with the factory's one compact window.
+export const FACTORY_SETTINGS = JSON.parse(
+  readFileSync(join(root, "scripts", "factory-settings.json"), "utf8"),
+)
 
 // Healthy usage readings, one per backend, which a test replaces with raw JSON of its own to opt a refusal in.
 export const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString()
@@ -257,12 +335,10 @@ export async function spawn(
     // A machine with extensions has the login ext init wrote, which the skill resolver reads first.
     writeFileSync(loginPath(join(home, ".playground")), "tester\n")
   }
-  if (!env.NO_FACTORY_SETTINGS) {
-    writeFileSync(
-      join(home, ".playground", "factory-settings.json"),
-      JSON.stringify(FACTORY_SETTINGS),
-    )
-  }
+  // A case's copy of spawn.sh in a scratch checkout reads the settings beside it, which NO_FACTORY_SETTINGS leaves off.
+  const source = join(dirname(path), "factory-settings.json")
+  if (!env.NO_FACTORY_SETTINGS && path !== script && !existsSync(source))
+    writeFileSync(source, JSON.stringify(FACTORY_SETTINGS))
   // The gate reads both backends' usage, so every test starts from healthy files and opts a refusal in;
   // a fixture of "absent" leaves the file off, as it is on a machine the meter has not reached.
   const acme = join(home, ".playground")
@@ -274,6 +350,9 @@ export async function spawn(
     writeFileSync(join(acme, name), raw ?? JSON.stringify(good))
   }
   file("usage.json", env.USAGE_JSON, usage())
+  // --account spare@example.com's own reading, which the ops tick's other-logins beat writes; unset leaves it off, as on a machine that has not read that login.
+  if (env.SPARE_USAGE_JSON !== undefined)
+    writeFileSync(join(acme, "usage-spare.json"), env.SPARE_USAGE_JSON)
   file("zai-usage.json", env.ZAI_USAGE_JSON, zai(1400, 7000))
   file(join("ops", "ops-zai-usage.json"), env.ZAI_HEARTBEAT_JSON, beat())
   if (env.CAPACITY_JSONL !== undefined)
@@ -281,10 +360,19 @@ export async function spawn(
   // The week-pace override the dispatcher writes; unset leaves the file off, as it is on most days.
   if (env.PACE_OFF_UNTIL !== undefined)
     writeFileSync(join(acme, "usage-pace-off-until"), env.PACE_OFF_UNTIL)
-  // Claude Code's own config, which names this machine's login: ~/.claude.json, or the config folder's with CONFIG_DIR_CLAUDE_JSON.
-  if (env.CLAUDE_JSON !== undefined) writeFileSync(join(home, ".claude.json"), env.CLAUDE_JSON)
-  if (env.CONFIG_DIR_CLAUDE_JSON !== undefined)
-    writeFileSync(join(home, ".claude", ".claude.json"), env.CONFIG_DIR_CLAUDE_JSON)
+  // Claude Code's own config, which names this machine's login: ~/.claude.json, or the config folder's with CONFIG_DIR_CLAUDE_JSON; each holds the yes to Claude Code's folder trust question for each checkout the case's spawn.sh checks, its own main checkout and PLAYGROUND_REPO, which NO_CLAUDE_TRUST leaves off, as on a fresh machine.
+  const checkouts = [
+    ...new Set([mainOf(path), env.PLAYGROUND_REPO ?? join(home, "code", "factory")]),
+  ]
+  const config = (text: string | undefined) =>
+    env.NO_CLAUDE_TRUST ? text : trusting(text, checkouts)
+  const own = config(env.CLAUDE_JSON)
+  if (own !== undefined) writeFileSync(join(home, ".claude.json"), own)
+  const folder = config(env.CONFIG_DIR_CLAUDE_JSON)
+  if (folder !== undefined) {
+    mkdirSync(join(home, ".claude"), { recursive: true })
+    writeFileSync(join(home, ".claude", ".claude.json"), folder)
+  }
   if (env.BRIEF_FILE) {
     const brief = join(home, ".playground", env.BRIEF_FILE)
     mkdirSync(dirname(brief), { recursive: true })
@@ -342,8 +430,11 @@ export async function spawn(
     env: {
       FAKE_LSTART: LSTART,
       HOME: home,
+      // the readings' /proc text: none unless a case records its own, under the test sandbox's marker, which alone lets spawn.sh read it
+      PLAYGROUND_PROC: join(home, "no-proc"),
       PLAYGROUND_REPO: join(home, "code", "factory"),
       PATH: `${bin}:${process.env.PATH}`,
+      TEST_SANDBOX_HOME: scratch,
       ...env,
     },
     stderr: "pipe",
@@ -365,6 +456,7 @@ export async function spawn(
     rosterLog: (await read("roster.log"))?.filter(Boolean),
     rosterAtClose: (await read("roster-at-close.log"))?.filter(Boolean),
     rosterAtRun: (await read("roster-at-run.log"))?.filter(Boolean),
+    curl: (await read("curl.args"))?.filter(Boolean),
     security: (await read("security.args"))?.filter(Boolean),
   }
 }
@@ -471,6 +563,8 @@ case "$1 \${2:-}" in
     [ -z "$FAKE_HERDR_LIST_FAIL" ] || exit 1
     [ -z "$FAKE_HERDR_LIST_ENDS" ] || ends "$FAKE_HERDR_LIST_ENDS"
     cat "$HOME/herdr.panes" 2>/dev/null || echo '{"result":{"panes":[]}}' ;;
+  # pane process-info --pane <id>: the pane's foreground processes, from herdr.process/<id> when a case writes one
+  "pane process-info") cat "$HOME/herdr.process/$4" 2>/dev/null || { echo "error: pane $4 not found" >&2; exit 1; } ;;
   "pane rename")
     [ -z "$FAKE_HERDR_RENAME_EATS" ] || rm -f "$HOME"/.playground/launch/*.herdr
     [ -z "$FAKE_HERDR_RENAME_FAIL" ] || { echo "error: label taken" >&2; exit 1; } ;;
@@ -505,7 +599,9 @@ case "$1 \${2:-}" in
     [[ $l =~ $5 ]] || { echo '{"error":{"code":"timeout","message":"timed out waiting for output match"}}'; exit 1; }
     printf '{"result":{"matched_line":"%s"}}\\n' "$l" ;;
   "pane read")
-    n=$(( $(cat "$HOME/herdr.screen" 2>/dev/null || echo 1) - 1 ))
+    # a pane's own text, for spawn.sh read
+    [ -z "$FAKE_PANE_TEXT" ] || { printf '%s\\n' "$FAKE_PANE_TEXT"; exit 0; }
+    n=$(($(cat "$HOME/herdr.screen" 2>/dev/null || echo 1) - 1 ))
     IFS=, read -ra screens <<<"\${FAKE_SCREENS:-ready}"
     one= many=
     case "\${screens[$n]:-ready}" in

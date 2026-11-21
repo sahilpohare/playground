@@ -3,8 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const { CODEX_LIVE_REFUSAL, HARNESS_COMMANDS, codexHome, compareVersions, harnessCards } =
-  await import("../../../../../../api/hono/src/lib/onboard/harness")
+const {
+  CODEX_LIVE_REFUSAL,
+  HARNESS_COMMANDS,
+  codexHome,
+  compareVersions,
+  harnessCards,
+  trustsFolder,
+} = await import("../../../../../../api/hono/src/lib/onboard/harness")
 const { fixtureFixed } = await import("../../../../../../api/hono/src/lib/onboard/fix-ids")
 type Reader = import("../../../../../../api/hono/src/lib/onboard/machine").Reader
 type HarnessCard = import("../../../../../../api/hono/src/lib/onboard/harness").HarnessCard
@@ -57,21 +63,43 @@ const rows = (c: HarnessCard) =>
 
 const CLAUDE_OK = { "claude --version": { stdout: "2.1.322 (Claude Code)\n" } }
 
+// The API's own checkout, a worktree, and the main checkout git names for it, whose leads worktree the first dispatcher starts in.
+const ROOT = "/code/playground/.claude/worktrees/desk"
+const MAIN = "/code/playground"
+const IN_MAIN = {
+  [HARNESS_COMMANDS.checkoutOf(ROOT).join(" ")]: { stdout: `${MAIN}/.git\n` },
+}
+// Claude Code's config with the owner's yes to its folder trust question for folder.
+const trusting = (folder: string, more: object = {}) =>
+  JSON.stringify({ ...more, projects: { [folder]: { hasTrustDialogAccepted: true } } })
+
 describe("each harness's card on a machine it reads (#1835)", () => {
   test("Claude Code at the tested version, signed in by claude auth status; its plan not read yet", async () => {
     const env = homes()
-    const m = machine(["claude"], {
-      ...CLAUDE_OK,
-      "claude auth status": { stdout: '{"loggedIn": true, "authMethod": "claude.ai"}\n' },
-    })
-    const cards = await harnessCards({ ...m, env, source: live })
+    const m = machine(
+      ["claude"],
+      {
+        ...CLAUDE_OK,
+        ...IN_MAIN,
+        "claude auth status": { stdout: '{"loggedIn": true, "authMethod": "claude.ai"}\n' },
+      },
+      { files: { [join(env.HOME, ".claude.json")]: trusting(MAIN) } },
+    )
+    const cards = await harnessCards({ ...m, env, root: ROOT, source: live })
     expect(cards.map((c) => c.id)).toEqual(["claude-code", "codex"])
     const claude = card(cards, "claude-code")
     expect(rows(claude)).toEqual({
       Installed: ["ok", "2.1.322"],
       Plan: ["optional", "not read yet"],
       "Signed in": ["ok", "signed in"],
+      Trusted: ["ok", "trusted"],
     })
+    expect(claude.checks.map((check) => check.name)).toEqual([
+      "Installed",
+      "Signed in",
+      "Trusted",
+      "Plan",
+    ])
     expect(claude).toMatchObject({ label: "Claude Code", ready: true, refusal: null })
     expect(m.ran).toContain("claude --version")
     expect(m.ran).toContain("claude auth status")
@@ -87,6 +115,56 @@ describe("each harness's card on a machine it reads (#1835)", () => {
     expect(
       rows(card(await harnessCards({ ...m, env, source: live }), "claude-code")),
     ).toMatchObject({ "Signed in": ["ok", "signed in"] })
+  })
+
+  // #2307: Claude Code asks whether you trust a folder before its first session there, and the first dispatcher waited on that question with No, exit marked.
+  test("Claude Code with no yes for the main checkout offers Trust this folder, and holds the start", async () => {
+    const env = homes()
+    const signedIn = {
+      ...CLAUDE_OK,
+      ...IN_MAIN,
+      "claude auth status": { stdout: '{"loggedIn": true}' },
+    }
+    const config = join(env.HOME, ".claude.json")
+    for (const files of [{}, { [config]: trusting(`${MAIN}/elsewhere`) }, { [config]: "{" }]) {
+      const m = machine(["claude"], signedIn, { files })
+      const claude = card(
+        await harnessCards({ ...m, env, root: ROOT, source: live }),
+        "claude-code",
+      )
+      expect(rows(claude)).toMatchObject({ Trusted: ["MISSING", "not trusted"] })
+      const trust = claude.checks.find((check) => check.name === "Trusted")!
+      expect(trust.action).toEqual({ id: "claude-trust", label: "Trust this folder" })
+      expect(trust.note).toContain("Alpha would wait on that question")
+      expect(trust.note).toContain("The installer trusts the folder it cloned")
+      expect(claude.ready).toBe(false)
+    }
+    const missing = card(
+      await harnessCards({ ...machine([], {}), env, root: ROOT, source: live }),
+      "claude-code",
+    )
+    expect(rows(missing)).toMatchObject({ Trusted: ["waiting", "waits for the install"] })
+    expect(
+      card(
+        await harnessCards({ ...machine([], {}), env, root: ROOT, source: live }),
+        "codex",
+      ).checks.map((c) => c.name),
+    ).not.toContain("Trusted")
+  })
+
+  test("only a yes on the checkout itself counts, never one on a folder above it", () => {
+    const yes = { projects: { [MAIN]: { hasTrustDialogAccepted: true } } }
+    expect(trustsFolder(yes, MAIN)).toBe(true)
+    expect(trustsFolder(yes, `${MAIN}/`)).toBe(true)
+    expect(trustsFolder({ projects: { "/code": { hasTrustDialogAccepted: true } } }, MAIN)).toBe(
+      false,
+    )
+    expect(trustsFolder(yes, "/code/other")).toBe(false)
+    expect(trustsFolder({ projects: { [MAIN]: { hasTrustDialogAccepted: false } } }, MAIN)).toBe(
+      false,
+    )
+    expect(trustsFolder({ projects: { [MAIN]: {} } }, MAIN)).toBe(false)
+    expect(trustsFolder(null, MAIN)).toBe(false)
   })
 
   test("Claude Code not signed in offers Sign in; newer than tested still lets it start", async () => {
@@ -189,6 +267,7 @@ describe("on a fixture stack", () => {
     const m = machine([], {})
     const before = await harnessCards({ ...m, env, source: fixture })
     expect(card(before, "claude-code").ready).toBe(true)
+    expect(rows(card(before, "claude-code"))).toMatchObject({ Trusted: ["ok", "trusted"] })
     expect(rows(card(before, "codex"))).toMatchObject({ "Signed in": ["MISSING", "not signed in"] })
     fixtureFixed.add("codex-login")
     const after = await harnessCards({ ...m, env, source: fixture })

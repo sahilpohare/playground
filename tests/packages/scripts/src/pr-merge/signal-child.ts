@@ -19,6 +19,7 @@ const git: Run = async (args) => {
   if (args.includes("--git-common-dir")) return ok(join(root, ".git"))
   if (args.includes("--show-toplevel")) return ok(root)
   if (args.includes("add")) mkdirSync(args.at(-2) ?? "", { recursive: true })
+  if (args[0] === "diff") return ok("")
   if (args[0] === "rev-list") return ok("")
   if (args[0] === "show") return ok(PR_TEMPLATE)
   if (args[0] === "merge-tree") return ok(`${"1".repeat(40)}\n`)

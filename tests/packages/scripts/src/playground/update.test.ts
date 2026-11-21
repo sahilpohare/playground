@@ -19,6 +19,9 @@ import {
 } from "../../../../../packages/scripts/src/playground/update"
 import { watchTorn } from "../torn-reads"
 
+// a run under run-slot would give its own real lane back from the rows that roll, so every row starts with none
+delete process.env.RUN_SLOT_HELD
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "playground-update-")))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
 
@@ -102,6 +105,72 @@ describe("runUpdate", () => {
         "HEAD",
       ],
     ])
+  })
+
+  test("the brief refresh runs after link-skills with the commit the update started from, and its failure is logged while the update goes on (#2317)", async () => {
+    const { calls, run } = fakeRun({ "rev-parse": { out: "old\n" } })
+    const seen: { calls: number; old: string }[] = []
+    const briefs = async (old: string) => {
+      seen.push({ calls: calls.length, old })
+    }
+    expect(await runUpdate(repo, run, async () => 0, quiet, undefined, undefined, briefs)).toBe(0)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.old).toBe("old")
+    expect(calls[seen[0]!.calls - 1]).toEqual(["bash", `${repo}/scripts/link-skills.sh`])
+    const said: string[] = []
+    const failing = async () => {
+      throw new Error("a made-up git failure")
+    }
+    expect(
+      await runUpdate(
+        repo,
+        fakeRun().run,
+        async () => 0,
+        (l) => said.push(l),
+        undefined,
+        undefined,
+        failing,
+      ),
+    ).toBe(0)
+    expect(said).toContain("playground update: brief refresh failed: a made-up git failure")
+  })
+
+  test("the peer sync runs after ops-restart and before the roll, with the commit HEAD reached, on --to too, and its failure is logged while the update succeeds (#2449)", async () => {
+    const order: string[] = []
+    const { calls, run } = fakeRun({ "rev-parse": { out: "new\n" } })
+    const peers = async (sha: string) => {
+      order.push(`peers ${sha} after ${calls.at(-1)?.join(" ")}`)
+    }
+    const roll = async () => (order.push("roll"), 0)
+    expect(await runUpdate(repo, run, roll, quiet, undefined, undefined, undefined, peers)).toBe(0)
+    expect(order).toEqual([`peers new after git -C ${repo} rev-parse HEAD`, "roll"])
+    expect(calls.at(-2)?.[2]).toContain("ops-restart")
+    const tagged = fakeRun({ "rev-parse": { out: "tagged\n" } })
+    const seen: string[] = []
+    const atTag = async (sha: string) => {
+      seen.push(sha)
+    }
+    expect(
+      await runUpdate(repo, tagged.run, roll, quiet, "v1.0.0", undefined, undefined, atTag),
+    ).toBe(0)
+    expect(seen).toEqual(["tagged"])
+    const said: string[] = []
+    const failing = async () => {
+      throw new Error("a made-up ssh failure")
+    }
+    expect(
+      await runUpdate(
+        repo,
+        fakeRun().run,
+        async () => 0,
+        (l) => said.push(l),
+        undefined,
+        undefined,
+        undefined,
+        failing,
+      ),
+    ).toBe(0)
+    expect(said).toContain("playground update: peer sync failed: a made-up ssh failure")
   })
 
   test("a merge that changed a skill names it and the folder in the checkout a live session reads it from; one that changed none says nothing of skills", async () => {
@@ -355,6 +424,60 @@ describe("runUpdate", () => {
   test("the roll's own code is the update's", async () => {
     const { run } = fakeRun()
     expect(await runUpdate(repo, run, async () => 3, quiet)).toBe(3)
+  })
+
+  // #2644: the roll only waits on the supervisor, whose own clone queues in run-slot, so an update run through run-slot gives its lane back first, and the queue behind it moves while the roll waits
+  describe("under run-slot (RUN_SLOT_HELD)", () => {
+    const slot = join(scratch, "ops", "run-slot")
+    const hold = (pid: number) => {
+      mkdirSync(slot, { recursive: true })
+      writeFileSync(`${slot}.holder`, `ops-ship ${pid} 2026-11-17T12:00:00Z 2 medium\n`)
+      writeFileSync(`${slot}.child`, "4243\n")
+    }
+    const update = async (roll: () => Promise<number>, said: string[] = [], to?: string) => {
+      const was = process.env.RUN_SLOT_HELD
+      process.env.RUN_SLOT_HELD = `${slot} 4242`
+      try {
+        const { run } = fakeRun({ "rev-parse": { out: "old\n" } })
+        return await runUpdate(repo, run, roll, (line) => said.push(line), to)
+      } finally {
+        if (was === undefined) delete process.env.RUN_SLOT_HELD
+        else process.env.RUN_SLOT_HELD = was
+      }
+    }
+
+    test("the lane is given back before the roll starts", async () => {
+      hold(4242)
+      const said: string[] = []
+      let held: boolean | undefined
+      expect(
+        await update(
+          async () => ((held = existsSync(slot) || existsSync(`${slot}.holder`)), 0),
+          said,
+        ),
+      ).toBe(0)
+      expect(held).toBe(false)
+      expect(existsSync(`${slot}.child`)).toBe(false)
+      expect(said).toContain(
+        "playground update: gave its run slot back for the Dashboard roll, whose own steps queue in run-slot",
+      )
+    })
+
+    test("a lane another run has taken since stays that run's", async () => {
+      hold(9999)
+      let held: boolean | undefined
+      await update(async () => ((held = existsSync(slot)), 0))
+      expect(held).toBe(true)
+      expect(readFileSync(`${slot}.holder`, "utf8")).toStartWith("ops-ship 9999 ")
+      rmSync(slot, { force: true, recursive: true })
+    })
+
+    test("--to rolls nothing, so it keeps its lane to the end", async () => {
+      hold(4242)
+      await update(async () => 0, [], "v1.0.0")
+      expect(existsSync(slot)).toBe(true)
+      rmSync(slot, { force: true, recursive: true })
+    })
   })
 })
 

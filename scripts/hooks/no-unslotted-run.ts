@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve, sep } from "node:path"
 
 import { atOnce, buildName, DOCKERS, dockerBuild, portlessCompose } from "./docker-build"
+import { input } from "./input"
 import {
   bunCall,
   cwdFlag,
@@ -13,8 +14,12 @@ import {
   RUNNER_TAKES,
   ranIn,
   runnerFolders,
+  runnerReadings,
+  runnerTarget,
+  STARTED_RUNNERS,
   toolName,
   turboWords,
+  UNREAD_CWD,
   unreadFolder,
   withChained,
   X,
@@ -293,6 +298,9 @@ function heavy(
       what: string
     }
   | undefined {
+  // a call past the readings runnerReadings makes may run any program in any folder, so it fails closed at any depth
+  if (args[1] === UNREAD_CWD)
+    return { also: [undefined], dir: undefined, what: `${name} past the readings the hook makes` }
   const compose = portlessCompose(name, args)
   if (DOCKERS.has(name) || compose) {
     const build = compose
@@ -346,7 +354,11 @@ function heavy(
       }
     if (packagedTools(args).includes("next") && nextBuild(values))
       return { also: runnerFolders(name, args, env, []), dir: env.cwd, what: `${name} next build` }
-    return name === "bunx" ? heavy("bun", [X, ...args], env) : undefined
+    if (name === "bunx") return heavy("bun", [X, ...args], env)
+    // a runner npx starts is read as the shell would read it, as bun x's program is below
+    const at = runnerTarget(args)
+    const started = toolName(args[at]?.value)
+    return STARTED_RUNNERS.has(started) ? heavy(started, args.slice(at + 1), env) : undefined
   }
   if (name !== "bun") return
   const { at, chained, cwd, filtered, sub, words } = bunCall(args, env)
@@ -470,29 +482,31 @@ function inspect(raw: string, environment: Record<string, string | undefined>, m
     }
     // a line that names more folders than the reader carries may run in a worktree, whatever folder it started in
     if (env.cwdAnywhere) {
-      const found = heavy(name, args, { ...env, cwd: undefined })
+      const found = runnerReadings(name, args)
+        .map((reading) => heavy(name, reading, { ...env, cwd: undefined }))
+        .find(
+          (found) =>
+            found &&
+            (found.anywhere ||
+              ranIn(found.dir, found.also).some((dir) => dir === undefined || inWorktree(dir))),
+        )
       const line = words()
       if (found?.anywhere && line !== undefined)
         return refuseDocker(found.what, "", line, found.fix)
-      if (
-        found &&
-        line !== undefined &&
-        ranIn(found.dir, found.also).some((dir) => dir === undefined || inWorktree(dir))
-      )
-        return anywhere(found.what, line)
+      if (found && line !== undefined) return anywhere(found.what, line)
     }
     // every folder the shell may be in, so a heavy run after a cd the reader cannot be sure of is caught wherever that cd may have left it
     for (const here of places(env)) {
-      const found = heavy(name, args, here)
-      if (
-        !found ||
-        !(
-          found.anywhere ||
-          unreadFolder(found.also) ||
-          ranIn(found.dir, found.also).some(inWorktree)
+      const found = runnerReadings(name, args)
+        .map((reading) => heavy(name, reading, here))
+        .find(
+          (found) =>
+            found &&
+            (found.anywhere ||
+              unreadFolder(found.also) ||
+              ranIn(found.dir, found.also).some(inWorktree)),
         )
-      )
-        continue
+      if (!found) continue
       // run-slot execs the first word after its --, so the fix keeps the program, its words and every assignment before it behind env, and drops every wrapper (exec, timeout, env's own options)
       const line = words()
       if (line === undefined) return
@@ -534,7 +548,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-unslotted-run", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

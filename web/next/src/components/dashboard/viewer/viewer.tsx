@@ -42,7 +42,7 @@ import { Separator } from "@/components/ui/separator"
 import { opensInAside } from "@/lib/aside-docs"
 import { saveFrom } from "@/lib/download"
 import { BAR_ITEM, FLOATING_BAR } from "@/lib/floating-bar"
-import { pageTab } from "@/lib/viewer"
+import { documentNonce, pageTab } from "@/lib/viewer"
 
 const KIND_LABELS: Record<InboxAttachmentKind, string> = {
   code: "Code",
@@ -176,7 +176,9 @@ function useFramedPage(name: string, html: string | null | false): string | null
   const [framed, setFramed] = useState<string | null>(null)
   useEffect(() => {
     if (typeof html !== "string") return
-    const href = URL.createObjectURL(new Blob([pageTab(name, html)], { type: "text/html" }))
+    const href = URL.createObjectURL(
+      new Blob([pageTab(name, html, documentNonce())], { type: "text/html" }),
+    )
     setFramed(href)
     return () => {
       URL.revokeObjectURL(href)

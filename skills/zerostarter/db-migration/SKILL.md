@@ -17,7 +17,7 @@ Generate nothing until the shape is settled (the owner, 9 Oct: everything is aut
 
 Done when the reviewer's findings on the shape are settled and, before the merge, the PR names the dump's path (additive), or the owner has said go (breaking).
 
-Two reasons this is a hard step rather than a courtesy. A shape is cheap to argue about and expensive to change once rows exist, so the review has to happen before the write. And the live dashboard's database already holds every real session and transcript, and the runner hosting the dashboard applies a migration there on its first roll onto canary after the merge, so a shape that slips past review lands under the running dashboard.
+Two reasons this is a hard step rather than a courtesy. A shape is cheap to argue about and expensive to change once rows exist, so the review has to happen before the write. And the live dashboard's database already holds every real session and transcript, and the runner hosting the dashboard applies a migration there on its first roll onto a head that holds the merge, so a shape that slips past review lands under the running dashboard.
 
 ## 1. Edit the schema
 
@@ -45,14 +45,14 @@ docker run -d --name playground-<worktree>-db -e POSTGRES_PASSWORD=<pw> -p 127.0
 docker port playground-<worktree>-db 5432    # 127.0.0.1:<port>, the host port Docker picked
 ```
 
-With `POSTGRES_URL` left empty, `bun run dev` opens `/dashboard` on first run's checks, whose Database row's Start a local container starts its container with pglaunch instead, listening on every interface with pglaunch's own credentials (or, with Docker not running, Start without Docker starts the checkout's own PGlite on loopback), then migrates and writes the URL into `.env` (`.agents/dashboard/stack.md`); a worktree's test database keeps the loopback `docker run` above.
+With `POSTGRES_URL` left empty, `bun run dev` opens `/dashboard` on first run's checks, whose Database row's Start a local container starts its container on loopback alone with the container's own credentials (or, with Docker not running, Start without Docker starts the checkout's own PGlite on loopback), then migrates and writes the URL into `.env` (`.agents/dashboard/stack.md`); a worktree's test database keeps the loopback `docker run` above.
 
 `127.0.0.1::5432` publishes the database on loopback alone, so nothing on the network reaches it. Start the worktree's `.env` from `.env.example` rather than a copy of another checkout's, which carries that checkout's database (the live dashboard's included), and set `POSTGRES_URL=postgres://postgres:<pw>@127.0.0.1:<port>/postgres` in it; then migrate and seed into it. Docker picks a new port each time the container starts again (`docker start` of a stopped container, `docker restart`, or Docker itself restarting), so read it again with `docker port playground-<worktree>-db 5432` then and update `POSTGRES_URL` in `.env`; a password unique to the worktree makes a stale URL fail to sign in rather than reach whichever container took its old port. One container per worktree, so two branches with different migrations cannot corrupt each other. Two things follow:
 
 - Seed your own fake rows rather than copying real ones. The live dashboard's database holds real sessions, secrets and customer data among them, and a screenshot or a response body from it must never reach a PR.
 - Applying to the live dashboard's database is the dashboard runner's act, after the change merges, not while it is being built.
 
-Two containers stand apart from that rule, each by the owner's choice: first run's pglaunch database, on all interfaces (above), and a Vibeground's copy, which holds real data so a Vibeground shows real rows while its database changes stay in a copy that is thrown away, seeded by the one read above (`api/hono/src/lib/dashboard/vibe.ts`). Its real rows stay out of every screenshot and PR, and only the owner's own clicks start or stop one.
+Two containers stand apart from that rule, each by the owner's choice: first run's container, on loopback alone (above), and a Vibeground's copy, which holds real data so a Vibeground shows real rows while its database changes stay in a copy that is thrown away, seeded by the one read above (`api/hono/src/lib/dashboard/vibe.ts`). Its real rows stay out of every screenshot and PR, and only the owner's own clicks start or stop one.
 
 A worktree that works on the merge lock's Redis (`@packages/redis`) runs its own the same way, `docker run -d --name playground-<worktree>-redis -p 127.0.0.1::6379 redis:alpine`, with `REDIS_URL` in its `.env`; left blank, the lock keeps to its folder.
 
@@ -70,6 +70,7 @@ Apply with `db:migrate` alone: with no TTY attached, `drizzle-kit push` stops at
 
 For the dashboard, which is never deployed, this is local or ad-hoc only, so ZeroStarter's deploy-time auto-apply never runs for it: the runner hosting the live dashboard runs `bun run db:migrate` in its checkout after a reset that brings a migration (the dev skill's "The live dashboard's build").
 The hosted build (Yard, `PLAYGROUND_HOSTED=1`) is the one deploy: `api/hono/vercel.json` runs that auto-apply, `packages/scripts/src/migrate-on-deploy.ts`, before `build:vercel`, so a production or `canary` deploy applies pending migrations to the hosted database, while a PR preview skips them.
+The release skill's step 4 deploys it with `bun run ship:yard <tag>`, which stops on a tag that changes the schema or a migration until it runs again with `--schema-cleared <Inbox id>` naming this step 0's decision.
 
 Done when `bun run db:migrate` exits 0 and `docker exec playground-<worktree>-db psql -U postgres -d postgres -c '\d <table>'` lists the new table or column.
 

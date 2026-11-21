@@ -3,27 +3,18 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import {
-  GATE_LABEL,
-  stubs,
-  usageReading,
-} from "../../../../../packages/scripts/src/new-user-gate/stubs"
+import { stubs, usageReading } from "../../../../../packages/scripts/src/new-user-gate/stubs"
 
 const box = realpathSync(mkdtempSync(join(tmpdir(), "gate-stubs-")))
 afterAll(() => rmSync(box, { force: true, recursive: true }))
 
-// The box's stand-ins, with a docker that logs its argv and answers port with a loopback address, and a real bunx that logs what it was handed
+// The box's stand-ins, with a real bunx that logs what it was handed
 const bin = join(box, "bin")
 for (const [name, text] of Object.entries(stubs(box, join(bin, "real-bunx")))) {
   await Bun.write(join(bin, name), text)
   chmodSync(join(bin, name), 0o755)
 }
-writeFileSync(
-  join(bin, "docker"),
-  `#!/bin/sh\necho "$*" >> ${box}/docker.log\n[ "$1" = inspect ] && exit 1\n[ "$1" = port ] && echo 127.0.0.1:54321\nexit 0\n`,
-)
 writeFileSync(join(bin, "real-bunx"), `#!/bin/sh\necho "real $*"\n`)
-chmodSync(join(bin, "docker"), 0o755)
 chmodSync(join(bin, "real-bunx"), 0o755)
 const call = (name: string, ...args: string[]) => {
   const out = Bun.spawnSync([join(bin, name), ...args], {
@@ -32,31 +23,16 @@ const call = (name: string, ...args: string[]) => {
   return { code: out.exitCode, out: out.stdout.toString() }
 }
 
-describe("the gate's pglaunch stand-in", () => {
-  test("starts a labelled container published on loopback alone, and prints what first run reads as pglaunch's", () => {
-    const { code, out } = call(
-      "bunx",
-      "--bun",
-      "pglaunch@5.5.7",
-      "-k",
-      "-n",
-      "playground-dashboard-db",
-    )
-    expect(code).toBe(0)
-    // the two lines parseLaunch in api/hono/src/lib/setup/container.ts reads from pglaunch: the started name, a dash and 4 letters as the live dashboard's name rule takes, and the URL
-    expect(out).toBe(
-      'name "playground-dashboard-db-gate :54321" started\npostgres://postgres:postgres@localhost:54321/postgres\n',
-    )
-    const run = readFileSync(join(box, "docker.log"), "utf8")
-      .split("\n")
-      .find((line) => line.startsWith("run "))
-    expect(run).toContain(`--label ${GATE_LABEL}`)
-    expect(run).toContain("-p 127.0.0.1::5432")
-  })
+test("the box's systemctl and loginctl refuse every call and log it, so the box's jobs render never reaches the user's live manager", () => {
+  expect(call("systemctl", "--user", "stop", "com.playground.ops-tick.service").code).toBe(1)
+  expect(call("loginctl", "enable-linger", "1000").code).toBe(1)
+  const calls = readFileSync(join(box, "calls.log"), "utf8")
+  expect(calls).toContain("systemctl --user stop com.playground.ops-tick.service\n")
+  expect(calls).toContain("loginctl enable-linger 1000\n")
+})
 
-  test("hands every other bunx call to the real one", () => {
-    expect(call("bunx", "portless", "get", "playground").out).toBe("real portless get playground\n")
-  })
+test("the box's bunx hands every call to the real one", () => {
+  expect(call("bunx", "portless", "get", "playground").out).toBe("real portless get playground\n")
 })
 
 describe("the gate's gh stand-in", () => {

@@ -49,6 +49,7 @@ describe("the document viewers", () => {
       createElement(PageFrame, { name: "report.html", page: "<p>hi</p>" }),
     )
     expect(html).toContain('sandbox="allow-scripts"')
+    // no same-origin, ever: on the hosted build the frame's scripts carry the Dashboard page's nonce (asViewerPage), which an opaque origin keeps from the Dashboard's storage
     expect(html).not.toContain("allow-same-origin")
     expect(html).toContain('aria-label="report.html"')
     // handed in as srcdoc, never as its blob's URL, which a new tab would run with the Dashboard's origin

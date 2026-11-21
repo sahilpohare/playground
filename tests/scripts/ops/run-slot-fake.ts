@@ -1,5 +1,6 @@
-import { afterAll, expect } from "bun:test"
+import { afterAll, afterEach, expect } from "bun:test"
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -15,9 +16,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { Subprocess } from "bun"
+import type { SpawnOptions, Subprocess } from "bun"
 
+import { orphanReapers } from "../../../packages/scripts/src/orphan-reapers"
 import { slowChild } from "../../slow-child"
+import { FAKE_SLEEP } from "../fixtures/proc"
 
 // run-slot.sh's fakes and the scratch machine for the run-slot*.test.ts files, split so the parallel pass spreads them; test-sandbox's --parallel loads this afresh for each file, so the afterAll is that file's own
 // Load is weighed by size, so a big plan never blocks small runs: small, medium and big weigh 1, 2 and 3.
@@ -32,8 +35,40 @@ export const stop = async (p: Subprocess) => {
   await p.exited
 }
 
+// each machine's clock stands at NOW, so a line `ago` seconds back stays inside or outside the minute however long the looks take
+export const NOW = Math.floor(Date.now() / 1000)
+export const iso = (ago: number) =>
+  new Date((NOW - ago) * 1000).toISOString().replace(/\.\d+Z$/, "Z")
+// run-slot.runs.log's start line for a run on slot `ago` seconds back, and its end line `ended` seconds back when given
+export const ran = (ops: string, pid: number, slot: string, ago: number, ended?: number) =>
+  appendFileSync(
+    join(ops, "run-slot.runs.log"),
+    `${iso(ago)} start worker-r ${pid} ${slot} waited=0s\n` +
+      (ended === undefined ? "" : `${iso(ended)} end worker-r ${pid} rc=0 ran=${ago - ended}s\n`),
+  )
+
 // Ubuntu 26.04's default mkdir, uutils 0.10.0, reports success when another process made the folder between its own check and its mkdir (fixed in uutils 0.11.0), so two looks could each take one of run-slot.sh's mkdir locks; the image keeps GNU's as gnumkdir, which fails there as the Mac's mkdir does, so a machine's fake bin runs that one where it exists
 const GNU_MKDIR = Bun.which("gnumkdir")
+
+// every run a test starts through spawn, stopped after each test it outlives, so a test that fails or times out before its own stop leaves no run-slot.sh behind (issue 1316, 7 Nov: five lived on for days with ppid 1, waiting on gates in removed scratch folders); it starts through runSlot, so the child sits in endChildren's record too, and its TERM trap ends its command's process group while endChildren reaps the group once run-slot.sh is gone without its trap
+const running = new Set<Subprocess>()
+export const spawn = <
+  const In extends SpawnOptions.Writable = "ignore",
+  const Out extends SpawnOptions.Readable = "pipe",
+  const Err extends SpawnOptions.Readable = "inherit",
+>(
+  cmd: string[],
+  options?: RunSlotOptions<In, Out, Err>,
+) => {
+  const p = runSlot(cmd, options)
+  running.add(p)
+  void p.exited.then(() => running.delete(p))
+  return p
+}
+// the sweep's own budget is one stop() at the worst (TERM grace, then KILL wait), so the hook takes 30 s rather than the 5 s default a hook without one reads
+afterEach(async () => {
+  await Promise.all([...running].map(stop))
+}, 30_000)
 
 // 7 Nov 00:38Z, issue 1316: five run-slot.sh processes from these fixtures outlived their tests, each with ppid 1, since a child left running when its test fails or times out is stopped by nothing. runSlot records every run-slot.sh child of these tests, and the file's afterAll ends each one still running, with the command it started, through endChildren. The child stays in the test run's own process group, so a TERM to the run (Ctrl-C, TaskStop, run-slot's trap, the sandbox's deadline) reaches it as canary's helper let it, ending it and, through its trap, its command.
 type RunSlotOptions<
@@ -78,6 +113,7 @@ export const endChildren = async () => {
     }
   }
   const live: { p: { exited: Promise<number> }; pid: number; groups: number[] }[] = []
+  const reapers = orphanReapers()
   for (const child of children.splice(0)) {
     const done = await exited(child.p)
     const groups: number[] = []
@@ -107,7 +143,8 @@ export const endChildren = async () => {
           Date.now() -
           (Number(days) * 86_400 + rest.split(":").reduce((s, n) => s * 60 + Number(n), 0)) * 1_000
         const runsIt = started <= written + 1_000
-        if (done ? Number(ppid) === 1 && runsIt : Number(ppid) === child.p.pid) groups.push(command)
+        if (done ? reapers.has(Number(ppid)) && runsIt : Number(ppid) === child.p.pid)
+          groups.push(command)
       }
     if (!done || groups.length > 0) live.push({ p: child.p, pid: child.p.pid, groups })
   }
@@ -154,6 +191,8 @@ export type Setup = {
   // the seconds between two looks of a waiting run (run-slot.sh's RUN_SLOT_POLL: 15 real for a queued run's looks, 5 for a clone's and an --after wait; 0.2 in the tests, 0.05 in the commit-lane files)
   poll?: number
   pressure?: number
+  // a folder of recorded /proc text (tests/scripts/fixtures/proc.ts): the machine answers as Ubuntu does, procps's sysctl knowing no macOS name, its top no -l, no vm_stat and sysstat's iostat refusing macOS's flags, so every reading comes from that text
+  proc?: string
   roster?: unknown
   sandboxed?: boolean
   swapins?: number
@@ -175,6 +214,7 @@ export const machine = ({
   plan,
   poll,
   pressure = 1,
+  proc,
   roster,
   sandboxed = false,
   swapins = 0,
@@ -229,6 +269,24 @@ esac
     `#!/bin/bash\necho "              disk0 "\necho "    KB/t  tps  MB/s "\necho "   32.98 2576 82.98 "\necho "   30.00 ${disk[0]} ${disk[1].toFixed(2)} "\n`,
   )
   chmodSync(join(bin, "iostat"), 0o755)
+  if (proc) {
+    const ubuntu = {
+      iostat: 'echo "Usage: iostat [ options ] [ <interval> [ <count> ] ]" >&2\nexit 1',
+      sysctl:
+        'echo "sysctl: cannot stat /proc/sys/${2//.//}: No such file or directory" >&2\nexit 255',
+      top: "echo \"top: unknown option 'l'\" >&2\nexit 1",
+      vm_stat: 'echo "vm_stat: command not found" >&2\nexit 127',
+    }
+    for (const [name, body] of Object.entries(ubuntu)) {
+      writeFileSync(
+        join(bin, name),
+        `#!/bin/bash\necho "$2" >> ${join(root, `${name}.log`)}\n${body}\n`,
+      )
+      chmodSync(join(bin, name), 0o755)
+    }
+    writeFileSync(join(bin, "sleep"), FAKE_SLEEP)
+    chmodSync(join(bin, "sleep"), 0o755)
+  }
   if (sandboxed) {
     writeFileSync(
       join(bin, "ps"),
@@ -260,8 +318,11 @@ esac
     PLAYGROUND_DATA_DIR: join(config, "playground"),
     HOME: root,
     PATH: `${bin}:${process.env.PATH}`,
+    // the readings' /proc text, read under the test sandbox's marker alone: none unless the machine has recorded text
+    PLAYGROUND_PROC: proc ?? join(root, "no-proc"),
     RUN_SLOT_OPS: ops,
     RUN_SLOT_POLL: poll === undefined ? "0.2" : String(poll),
+    TEST_SANDBOX_HOME: root,
     ...extra,
   })
   // A slot already held by this test's own process, which stays alive throughout, taken at `at`.
@@ -485,13 +546,29 @@ touch "\${@: -1}"
   chmodSync(join(m.bin, "git"), 0o755)
   return m
 }
-// a fake bun whose `turbo run build --dry=json` reads every task with the cache status given, or fails for null, passing anything else to the machine's own
-export const turbo = (m: ReturnType<typeof machine>, status: string | null) => {
+// a fake bun whose `turbo run build --dry=json` reads `hits` cached tasks and `count` more with the cache status given, fails for null, prints text that is no dry run's for "unreadable" and outlasts run-slot's 10 s for "slow", passing anything else to the machine's own
+export const turbo = (
+  m: ReturnType<typeof machine>,
+  status: string | null | "slow" | "unreadable",
+  count = 1,
+  hits = 1,
+) => {
   renameSync(join(m.bin, "bun"), join(m.bin, "bun-machine"))
+  const tasks = [
+    ...Array.from({ length: hits }, (_, i) => ({
+      cache: { status: "HIT" },
+      command: `cached ${i}`,
+    })),
+    ...Array.from({ length: count }, (_, i) => ({ cache: { status }, command: `tsdown ${i}` })),
+  ]
   const dry =
     status === null
       ? "exit 1"
-      : `echo '{"tasks":[{"command":"next build","cache":{"status":"HIT"}},{"command":"tsc","cache":{"status":"${status}"}}]}'; exit 0`
+      : status === "slow"
+        ? "exec sleep 15"
+        : status === "unreadable"
+          ? "echo '{\"tasks\":'; exit 0"
+          : `echo '${JSON.stringify({ tasks })}'; exit 0`
   writeFileSync(
     join(m.bin, "bun"),
     `#!/bin/bash\ncase " $* " in *" turbo run build --dry=json "*) ${dry} ;; esac\nexec ${join(m.bin, "bun-machine")} "$@"\n`,
@@ -672,4 +749,23 @@ export const starts = async (
   await Promise.all(waiters.map((w) => stop(w.p)))
   expect(waiters.every((w) => !existsSync(w.marker))).toBe(true)
   return rate
+}
+
+type Machine = ReturnType<typeof machine>
+// a run through run-slot that ends with `rc` once the test writes its gate file
+export const gated = (m: Machine, who: string, rc: number) => {
+  const gate = join(m.root, `gate-${Math.random()}`)
+  const p = spawn(
+    [
+      "bash",
+      SCRIPT,
+      who,
+      "--",
+      "bash",
+      "-c",
+      `until [ -e "${gate}" ]; do sleep 0.1; done; exit ${rc}`,
+    ],
+    { cwd: m.root, env: m.env(), stderr: "ignore", ops: m.ops },
+  )
+  return { open: () => writeFileSync(gate, ""), p }
 }

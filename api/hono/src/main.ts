@@ -17,13 +17,13 @@ const root = resolve(process.cwd(), "../..")
 
 const serve: Fetch = process.env.POSTGRES_URL
   ? await normal()
-  : firstRun(async (onStep, engine) => {
+  : firstRun(async (onStep, engine, move) => {
       const branch = branchOf(root)
       const start = { envFile: resolve(root, ".env"), name: setupName(root, branch), onStep }
       process.env.POSTGRES_URL =
         engine === "pglite"
           ? await startPgliteDatabase(start)
-          : await startLocal({ ...start, branch })
+          : await startLocal({ ...start, branch, move })
     }, normal)
 
 const front = new Hono()

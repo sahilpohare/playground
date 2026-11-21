@@ -2,7 +2,7 @@ import { SQL } from "bun"
 
 import { identifierOf, servingPort } from "@/lib/pglite"
 
-// Transcripts hold secrets and customer data, so the importer writes only to a Postgres it can prove is on this machine: the URL names a loopback host, a local Docker container publishes the URL's port on loopback alone (but first run's own, below) or this machine's PGlite server listens on it (lib/pglite.ts, which binds 127.0.0.1 alone), and the server the URL reaches is that one's own (the same system identifier). A tunnel to a remote database (an SSH forward, cloud-sql-proxy, a Neon pooler) bound to 127.0.0.1 fails the last two.
+// Transcripts hold secrets and customer data, so the importer writes only to a Postgres it can prove is on this machine: the URL names a loopback host, a local Docker container publishes the URL's port on loopback alone (first run's own included) or this machine's PGlite server listens on it (lib/pglite.ts, which binds 127.0.0.1 alone), and the server the URL reaches is that one's own (the same system identifier). A tunnel to a remote database (an SSH forward, cloud-sql-proxy, a Neon pooler) bound to 127.0.0.1 fails the last two.
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"])
 
@@ -23,6 +23,7 @@ export class GuardError extends Error {
   constructor(
     readonly failure: GuardFailure,
     message: string,
+    readonly located?: Located,
   ) {
     super(message)
     this.name = "GuardError"
@@ -92,9 +93,6 @@ export const publishedOn = (inspect: unknown, port: number): Published[] =>
 export const loopbackOnly = (addresses: string[]): boolean =>
   addresses.length > 0 && addresses.every((address) => LOOPBACK_ADDRESSES.has(address))
 
-// First run's own database (lib/setup/container.ts): pglaunch, which the owner chose as it is for that step, publishes on every interface and names the container the checkout's name plus a dash and 4 letters or digits, so that container alone may be published beyond loopback.
-const FIRST_RUN_CONTAINER = /^playground(?:-[a-zA-Z0-9_.-]+)?-db-[0-9a-zA-Z]{4}$/
-
 export const systemIdentifierOf = (controlData: string): string | null =>
   /Database system identifier:\s*(\d+)/.exec(controlData)?.[1] ?? null
 
@@ -147,7 +145,11 @@ const publishers = (port: number, run: Docker): Published[] => {
   }
 }
 
-// The running PGlite server on the URL's port, else the one running container that publishes it, on loopback alone but for first run's own, read from Docker's metadata: nothing runs inside it and nothing connects to it, so a caller can refuse a container by name before touching it.
+// The one command that keeps a container's data and re-publishes it on loopback alone: it stops the container, moves its name aside, and starts the same image under the name on the same host port with the old one's volumes and its password, read from the old container at run time so the refusal never prints it.
+const keepDataFix = (name: string, port: number): string =>
+  `docker stop ${name} && docker rename ${name} ${name}-old && docker run -d --name ${name} -p 127.0.0.1:${port}:5432 -e POSTGRES_PASSWORD="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ${name}-old | sed -n 's/^POSTGRES_PASSWORD=//p')" --volumes-from ${name}-old "$(docker inspect -f '{{.Image}}' ${name}-old)"`
+
+// The running PGlite server on the URL's port, else the one running container that publishes the URL's port, on loopback alone and first run's own included, read from Docker's metadata: nothing runs inside it and nothing connects to it, so a caller can refuse a container by name before touching it; an exposed refusal carries the container, so a caller can still name it.
 export const locate = (
   url: string,
   run: Docker = docker,
@@ -167,11 +169,12 @@ export const locate = (
       `no single running Docker container publishes port ${target.port}`,
     )
   }
-  if (!loopbackOnly(owner.addresses) && !FIRST_RUN_CONTAINER.test(owner.name)) {
+  if (!loopbackOnly(owner.addresses)) {
     const where = owner.addresses.map((address) => address || "every interface").join(", ")
     throw new GuardError(
       "exposed",
-      `${owner.name} publishes port ${target.port} beyond loopback (${where})`,
+      `${owner.name} publishes port ${target.port} beyond loopback (${where}); keep its data and re-publish it on 127.0.0.1 alone: \`${keepDataFix(owner.name, target.port)}\`; if a step fails, the database is left stopped, so \`docker start ${owner.name}\` brings it back when the rename failed, and \`docker rename ${owner.name}-old ${owner.name} && docker start ${owner.name}\` once the rename has run`,
+      { owner, target },
     )
   }
   return { owner, target }

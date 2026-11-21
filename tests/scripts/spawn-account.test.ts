@@ -2,6 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 
+import { machineTest, zshMissing } from "../machine"
 import { OLD } from "../session-names"
 import {
   homes,
@@ -80,7 +81,7 @@ describe("--account logs the session in as another Claude account", () => {
     expect(cmd).not.toContain(TOKEN)
   })
 
-  test("an empty token ends the launch before claude runs", async () => {
+  machineTest(zshMissing(), "an empty token ends the launch before claude runs", async () => {
     const r = await spawn(["worker", "worker-brave-otter", "b.md", "--account", email], [], {
       FAKE_EMPTY_TOKEN: "1",
     })
@@ -144,12 +145,21 @@ describe("--account logs the session in as another Claude account", () => {
   test.each([
     ["another login", own("quilla@example.org")],
     ["no login", JSON.stringify({ oauthAccount: null })],
-    ["a config that does not read", "{"],
   ])("a config naming %s lets --account through", async (_, config) => {
     const r = await spawn(["worker", "worker-brave-otter", "b.md", "--account", email], [], {
       CLAUDE_JSON: config,
     })
     expect(r.code).toBe(0)
+  })
+
+  // a config that does not read holds no yes to Claude Code's folder trust question either, so the start stops there, past the --account check
+  test("a config that does not read lets --account through to the folder trust refusal", async () => {
+    const r = await spawn(["worker", "worker-brave-otter", "b.md", "--account", email], [], {
+      CLAUDE_JSON: "{",
+    })
+    expect(r.code).toBe(1)
+    expect(r.err).not.toContain("--account")
+    expect(r.err).toContain("folder trust question")
   })
 
   test("an account with no Keychain item is refused before herdr runs", async () => {

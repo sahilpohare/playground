@@ -4,7 +4,7 @@ import { dirname, join } from "node:path"
 
 import { quarantine, type Roots } from "@packages/safe-delete"
 
-import { opsDir, REPO, run, scheduled } from "../ops-job/job"
+import { opsDir, REPO, run, scheduled, sendAs } from "../ops-job/job"
 import { preToolUseGuards } from "../ops-tick/guard-probe"
 import type { Beat, Context } from "../ops-tick/tick"
 import { machineRoots } from "../trash"
@@ -28,6 +28,13 @@ type Modified = { last: string; since: Record<string, string> }
 
 // The file a healthy look keeps origin's URL in, since a lost .git takes the URL with it, and the Dashboard's checkout, a worktree of the main checkout, reads its git through that .git too.
 export const originPath = (ops: string): string => join(ops, "restore", "origin.txt")
+
+const keptOrigin = async (ops: string): Promise<string> =>
+  (
+    await Bun.file(originPath(ops))
+      .text()
+      .catch(() => "")
+  ).trim()
 
 // The registered guards whose bundle and source are both gone from the main checkout.
 export const missingGuards = (main: string, guards: string[]): string[] =>
@@ -151,6 +158,88 @@ export type Restore = {
   upkeep?: (ctx: Context) => Promise<boolean>
 }
 
+type Stopped = { statusFile: string; step: string; why: string }
+
+// Steps 1 to 3 of LIFECYCLE.md's restore: the files put back (from HEAD while .git is in place, else in place from origin's main), the install and link-skills.sh, then the guards read again; what the checkout held before it, or the step it stopped at with that step's last line. The beat and the Dashboard's Restore now (--now) both run it.
+export const restoreSteps = async (
+  ctx: Context,
+  main: string,
+  registered: string[],
+): Promise<{ held: string } | Stopped> => {
+  const dir = join(ctx.ops, "restore")
+  await mkdir(dir, { recursive: true })
+  const now = ctx.now.toISOString()
+  let statusFile = ""
+  const stop = (step: string, out: string): Stopped => ({
+    statusFile,
+    step,
+    why: out.trim().split("\n").filter(Boolean).at(-1)?.slice(0, 160) ?? "",
+  })
+  const git = (...args: string[]) => ctx.run(gitIn(main, ...args), 300_000)
+  // what the checkout held before a checkout throws it away, kept whole in a file and named in the report, since the main checkout stays clean and anything but the loss is news
+  const keep = async (lines: string[]) => {
+    const other = lines.filter((line) => line[0] !== "D" && line[1] !== "D")
+    statusFile = join(dir, `status-${now}.txt`)
+    await writeAtomic(statusFile, `${lines.join("\n")}\n`)
+    return `${lines.length - other.length} files deleted and ${other.length ? `also held ${other.slice(0, 5).join("; ")}${other.length > 5 ? ` and ${other.length - 5} more` : ""}` : "nothing else"} (git status in ${statusFile})`
+  }
+  // the checkout's git status lines, or a stop when git status fails
+  const status = async (): Promise<string[] | Stopped> => {
+    const read = await git("status", "--porcelain")
+    return read.code === 0 ? read.out.split("\n").filter(Boolean) : stop("git status", read.out)
+  }
+  let held = ""
+  if (existsSync(join(main, ".git"))) {
+    const lines = await status()
+    if (!Array.isArray(lines)) return lines
+    held = `had ${await keep(lines)}`
+    // from HEAD, since a loss already staged (a `git rm`, or a `git add -A` after a wipe) is gone from the index too
+    const back = await git("checkout", "HEAD", "--", ".")
+    if (back.code !== 0) return stop("git checkout HEAD -- .", back.out)
+  } else {
+    const url = await keptOrigin(ctx.ops)
+    if (!url) return stop("reading origin's URL", `none kept in ${originPath(ctx.ops)}`)
+    for (const args of [
+      ["init"],
+      ["remote", "add", "origin", url],
+      ["fetch", "origin"],
+      ["read-tree", "origin/main"],
+    ]) {
+      const step = await git(...args)
+      if (step.code !== 0) return stop(`git ${args.join(" ")}`, step.out)
+    }
+    // read against origin/main's tree, a file the same as origin's reads `A  `, so only a change, a loss or a stray file is kept
+    const lines = await status()
+    if (!Array.isArray(lines)) return lines
+    held = `had no .git and was restored in place; against origin/main it had ${await keep(lines.filter((line) => !line.startsWith("A  ")))}; every worktree of the lost .git, the Dashboard's included, has lost its link to it, which a fresh .git cannot repair, so Ops reattaches each`
+    const back = await git("checkout", "-f", "-B", "main", "origin/main")
+    if (back.code !== 0) return stop("git checkout -f -B main origin/main", back.out)
+  }
+  const runSlot = join(ctx.repo, "scripts", "ops", "run-slot.sh")
+  const install = await ctx.run(
+    ["bash", runSlot, "ops-restore", "--", "bun", "install", "--cwd", main],
+    1_800_000,
+  )
+  if (install.code !== 0) return stop("bun install", install.out)
+  const link = await ctx.run(["bash", join(main, "scripts", "link-skills.sh")], 600_000)
+  if (link.code !== 0) return stop("link-skills.sh", link.out)
+  const left = missingGuards(main, registered)
+  if (left.length) return stop("the check after it", `still gone: ${left.join(", ")}`)
+  return { held }
+}
+
+const goneOf = (missing: string[], main: string) =>
+  `${missing.length} ${missing.length === 1 ? "guard was" : "guards were"} gone from ${main}`
+
+// A stopped restore in words: the step, its last line, the status file, and what comes next, which depends on whether the guards are back.
+const stoppedText = (gone: string, done: Stopped, back: boolean, next: [string, string]) =>
+  `${gone}, and its restore stopped at ${done.step}${done.why ? `: ${done.why}` : ""}.${done.statusFile ? ` Its git status before it began is in ${done.statusFile}.` : ""} ${back ? next[1] : next[0]}`
+
+const tell = async (ctx: Context, text: string) => {
+  for (const to of ["ops", "dispatcher"])
+    await ctx.send(to, `ops-restore: ${text}`).catch(() => false)
+}
+
 // One look: with every guard there, it puts back each tracked file modified on two looks in a row (putBack); a guard gone on two looks in a row, with no upkeep holding the main checkout, runs the restore once, records what the checkout held before it, and tells ops and the dispatcher what it did; a failed step is told once and runs no step again until the guards have come back.
 export const restoreBeat =
   ({ guards, main, roots = machineRoots, upkeep = upkeepHeld }: Restore) =>
@@ -163,14 +252,10 @@ export const restoreBeat =
       .json()
       .catch(() => null)) as State | null
     const now = ctx.now.toISOString()
-    const inMain = (...args: string[]) => gitIn(main, ...args)
     if (!missing.length) {
       if (state) await Bun.file(statePath).delete()
-      const url = await ctx.run(inMain("remote", "get-url", "origin"), 30_000)
-      const kept = await Bun.file(originPath(ctx.ops))
-        .text()
-        .catch(() => "")
-      if (url.code === 0 && url.out.trim() && kept.trim() !== url.out.trim()) {
+      const url = await ctx.run(gitIn(main, "remote", "get-url", "origin"), 30_000)
+      if (url.code === 0 && url.out.trim() && (await keptOrigin(ctx.ops)) !== url.out.trim()) {
         await mkdir(dir, { recursive: true })
         await writeAtomic(originPath(ctx.ops), `${url.out.trim()}\n`)
       }
@@ -188,76 +273,55 @@ export const restoreBeat =
     const apart = ctx.now.getTime() - Date.parse(state.since)
     if (apart < SECOND_LOOK_MS) return
     if (await upkeep(ctx)) return
-    const gone = `${missing.length} ${missing.length === 1 ? "guard was" : "guards were"} gone from ${main}`
-    const tell = async (text: string) => {
-      for (const to of ["ops", "dispatcher"]) await ctx.send(to, text).catch(() => false)
-    }
-    let statusFile = ""
-    const fail = async (step: string, out: string) => {
-      const why = out.trim().split("\n").filter(Boolean).at(-1)?.slice(0, 160) ?? ""
-      await writeAtomic(statePath, JSON.stringify({ ...state, failed: step, last: now }))
-      const next = missingGuards(main, registered).length
-        ? "The guards are still gone, a true block: it runs no step again until they are back, and LIFECYCLE.md's true-block route restores the rest."
-        : "The guards are back, so it runs nothing more: Ops finishes the rest by LIFECYCLE.md's steps."
-      await tell(
-        `ops-restore: ${gone}, and its restore stopped at ${step}${why ? `: ${why}` : ""}.${statusFile ? ` Its git status before it began is in ${statusFile}.` : ""} ${next}`,
+    const gone = goneOf(missing, main)
+    const done = await restoreSteps(ctx, main, registered)
+    if ("step" in done) {
+      await writeAtomic(statePath, JSON.stringify({ ...state, failed: done.step, last: now }))
+      return tell(
+        ctx,
+        stoppedText(gone, done, !missingGuards(main, registered).length, [
+          "The guards are still gone, a true block: it runs no step again until they are back, and LIFECYCLE.md's true-block route restores the rest.",
+          "The guards are back, so it runs nothing more: Ops finishes the rest by LIFECYCLE.md's steps.",
+        ]),
       )
     }
-    const git = (...args: string[]) => ctx.run(inMain(...args), 300_000)
-    // what the checkout held before a checkout throws it away, kept whole in a file and named in the report, since the main checkout stays clean and anything but the loss is news
-    const keep = async (lines: string[]) => {
-      const other = lines.filter((line) => line[0] !== "D" && line[1] !== "D")
-      statusFile = join(dir, `status-${now}.txt`)
-      await writeAtomic(statusFile, `${lines.join("\n")}\n`)
-      return `${lines.length - other.length} files deleted and ${other.length ? `also held ${other.slice(0, 5).join("; ")}${other.length > 5 ? ` and ${other.length - 5} more` : ""}` : "nothing else"} (git status in ${statusFile})`
-    }
-    let held = ""
-    if (existsSync(join(main, ".git"))) {
-      const status = await git("status", "--porcelain")
-      if (status.code !== 0) return fail("git status", status.out)
-      held = `had ${await keep(status.out.split("\n").filter(Boolean))}`
-      // from HEAD, since a loss already staged (a `git rm`, or a `git add -A` after a wipe) is gone from the index too
-      const back = await git("checkout", "HEAD", "--", ".")
-      if (back.code !== 0) return fail("git checkout HEAD -- .", back.out)
-    } else {
-      const url = (
-        await Bun.file(originPath(ctx.ops))
-          .text()
-          .catch(() => "")
-      ).trim()
-      if (!url) return fail("reading origin's URL", `none kept in ${originPath(ctx.ops)}`)
-      for (const args of [
-        ["init"],
-        ["remote", "add", "origin", url],
-        ["fetch", "origin"],
-        ["read-tree", "origin/main"],
-      ]) {
-        const step = await git(...args)
-        if (step.code !== 0) return fail(`git ${args.join(" ")}`, step.out)
-      }
-      // read against origin/main's tree, a file the same as origin's reads `A  `, so only a change, a loss or a stray file is kept
-      const status = await git("status", "--porcelain")
-      if (status.code !== 0) return fail("git status", status.out)
-      const lines = status.out.split("\n").filter((line) => line && !line.startsWith("A  "))
-      held = `had no .git and was restored in place; against origin/main it had ${await keep(lines)}; every worktree of the lost .git, the Dashboard's included, has lost its link to it, which a fresh .git cannot repair, so Ops reattaches each`
-      const back = await git("checkout", "-f", "-B", "main", "origin/main")
-      if (back.code !== 0) return fail("git checkout -f -B main origin/main", back.out)
-    }
-    const runSlot = join(ctx.repo, "scripts", "ops", "run-slot.sh")
-    const install = await ctx.run(
-      ["bash", runSlot, "ops-restore", "--", "bun", "install", "--cwd", main],
-      1_800_000,
-    )
-    if (install.code !== 0) return fail("bun install", install.out)
-    const link = await ctx.run(["bash", join(main, "scripts", "link-skills.sh")], 600_000)
-    if (link.code !== 0) return fail("link-skills.sh", link.out)
-    const left = missingGuards(main, registered)
-    if (left.length) return fail("the check after it", `still gone: ${left.join(", ")}`)
     await Bun.file(statePath).delete()
     await tell(
-      `ops-restore: ${gone} on looks ${Math.round(apart / 60_000)} minutes from the first to the last; it restored the checkout by LIFECYCLE.md's steps, installed and ran link-skills.sh, and every guard's script is back. The checkout ${held}.`,
+      ctx,
+      `${gone} on looks ${Math.round(apart / 60_000)} minutes from the first to the last; it restored the checkout by LIFECYCLE.md's steps, installed and ran link-skills.sh, and every guard's script is back. The checkout ${done.held}.`,
     )
   }
+
+export type Pressed = { code: 0 | 1 | 3; text: string }
+
+// The Dashboard's Restore now: one look, then the restore's steps at once, since the owner's press stands in for the beat's second look and for a turned-off job. A checkout whose guards are all there is left as it is (exit 3), as is one an upkeep run holds; otherwise it tells ops and the dispatcher what it did, as the beat does, and the words go back to the page, exit 0 restored, 1 stopped.
+export const restoreNow = async (
+  ctx: Context,
+  { guards, main, upkeep = upkeepHeld }: Restore,
+): Promise<Pressed> => {
+  if (!existsSync(main))
+    return { code: 1, text: `No checkout is at ${main}, so nothing was restored.` }
+  const registered = typeof guards === "function" ? await guards() : guards
+  const missing = missingGuards(main, registered)
+  if (!missing.length)
+    return { code: 3, text: `Every guard is in place in ${main}, so nothing was restored.` }
+  if (await upkeep(ctx))
+    return {
+      code: 1,
+      text: `An install, link-skills.sh or playground update holds ${main} now, so nothing was restored: press Restore now again once it ends.`,
+    }
+  const gone = goneOf(missing, main)
+  const done = await restoreSteps(ctx, main, registered)
+  const text =
+    "step" in done
+      ? stoppedText(gone, done, !missingGuards(main, registered).length, [
+          "The guards are still gone: fix what the step names, then press Restore now again.",
+          "The guards are back: Ops finishes the rest by LIFECYCLE.md's steps.",
+        ])
+      : `${gone}; Restore now on the Dashboard restored the checkout by LIFECYCLE.md's steps, installed and ran link-skills.sh, and every guard's script is back. The checkout ${done.held}.`
+  await tell(ctx, text)
+  return { code: "step" in done ? 1 : 0, text }
+}
 
 // The main checkout the job restores, named by --main, since the job runs from the Dashboard's checkout.
 const mainOf = (argv: string[]): string => {
@@ -276,6 +340,13 @@ const guardsOf = (main: string) => async () =>
 
 if (import.meta.main) {
   const main = mainOf(process.argv)
+  // --now: the Dashboard's Restore now, one run of restoreNow, its words on stdout's last line
+  if (process.argv.includes("--now")) {
+    const ctx = { now: new Date(), ops: opsDir(), repo: REPO, run, send: sendAs("ops-restore") }
+    const pressed = await restoreNow(ctx, { guards: guardsOf(main), main })
+    console.log(pressed.text)
+    process.exit(pressed.code)
+  }
   const beats: Beat[] = [
     {
       cron: "*/5 * * * *",

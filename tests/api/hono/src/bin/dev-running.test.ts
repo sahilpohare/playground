@@ -31,11 +31,17 @@ const step = async (record: string) => {
 }
 
 describe("pre-commit's dev-stack step", () => {
-  // a fresh worktree has no packages/*/dist, and the step runs before the build that makes them; safe-delete's bun export is its own source, which imports node: built-ins and config's kinds, whose name its tsconfig maps to config's source, so both load unbuilt
-  test("imports no workspace package but safe-delete and config's kinds, which resolves to source", async () => {
+  // a fresh worktree has no packages/*/dist, and the step runs before the build that makes them; safe-delete's bun export is its own source, which imports node: built-ins and config's kinds, whose name its tsconfig maps to config's source, so both load unbuilt; @packages/scripts's exports serve its own source too, which no build writes (stop.ts's orphan-reapers)
+  test("imports no workspace package but safe-delete, config's kinds and scripts' orphan-reapers, each resolving to source", async () => {
     expect(
       Bun.resolveSync("@packages/config/kinds", join(ROOT, "packages/safe-delete/src/index.ts")),
     ).toBe(join(ROOT, "packages/config/src/kinds.ts"))
+    expect(
+      Bun.resolveSync(
+        "@packages/scripts/orphan-reapers",
+        join(ROOT, "api/hono/src/lib/dev/stop.ts"),
+      ),
+    ).toBe(join(ROOT, "packages/scripts/src/orphan-reapers.ts"))
     const reached: string[] = []
     const built = await Bun.build({
       entrypoints: [join(ROOT, SCRIPT)],
@@ -44,7 +50,7 @@ describe("pre-commit's dev-stack step", () => {
           name: "workspace-packages",
           setup(build) {
             build.onResolve(
-              { filter: /^@packages\/(?!safe-delete$|config\/kinds$)/ },
+              { filter: /^@packages\/(?!safe-delete$|config\/kinds$|scripts\/orphan-reapers$)/ },
               ({ path }) => {
                 reached.push(path)
                 return { external: true, path }

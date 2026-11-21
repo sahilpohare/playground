@@ -3,12 +3,21 @@ export type ParsedHost = {
   domain: string | null
   isIp: boolean
   isPrivate: boolean | null
+  // a runtime .localhost URL's port, "" on 443 or none
+  port?: string
   publicSuffix: string | null
   subdomain: string | null
 }
 
 // Reconcile the app host's tldts breakdown into the session cookie config, plus tldts's own isPrivate flag passed through.
-export function cookieConfig({ domain, isIp, isPrivate, publicSuffix, subdomain }: ParsedHost): {
+export function cookieConfig({
+  domain,
+  isIp,
+  isPrivate,
+  port,
+  publicSuffix,
+  subdomain,
+}: ParsedHost): {
   cookieDomain?: string
   cookiePrefix?: string
   isPrivate: boolean | null
@@ -25,6 +34,8 @@ export function cookieConfig({ domain, isIp, isPrivate, publicSuffix, subdomain 
   if (publicSuffix === "localhost" && subdomain) {
     const labels = subdomain.split(".")
     if (labels.at(-1) === "api") labels.pop()
+    // cookies ignore the port, so a stack on another port (a Dashboard tunnelled from another machine on 1355) names its port too, or its sign-in replaces the 443 stack's
+    if (port) labels.push(`p${port}`)
     if (labels.length > 0) cookiePrefix = labels.join(".")
   } else if (subdomain) {
     const labels = subdomain.split(".")
@@ -38,8 +49,9 @@ export function cookieConfig({ domain, isIp, isPrivate, publicSuffix, subdomain 
 // Portless serves dev over .localhost subdomains (api.<name>.localhost) injected at runtime, which the build-time breakdown, baked from the fixed-ports .env, cannot see. Re-derive the host from a runtime .localhost app URL so web and api share one Domain cookie; no Public Suffix List is needed since ".localhost" is the known suffix. Bare localhost (Docker, PORTLESS=0) and every real deploy return null and fall through to the baked breakdown.
 export function localhostHost(appUrl: string): ParsedHost | null {
   let hostname: string
+  let port: string
   try {
-    hostname = new URL(appUrl).hostname
+    ;({ hostname, port } = new URL(appUrl))
   } catch {
     return null
   }
@@ -49,6 +61,7 @@ export function localhostHost(appUrl: string): ParsedHost | null {
     domain: labels.slice(-2).join("."),
     isIp: false,
     isPrivate: false,
+    port,
     publicSuffix: "localhost",
     subdomain: labels.slice(0, -2).join("."),
   }

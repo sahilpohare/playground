@@ -13,6 +13,8 @@ import {
   type Kept,
   list,
   listGate,
+  listKindsIn,
+  listSince,
   located,
   lowered,
   refusal,
@@ -64,6 +66,7 @@ describe("the trace count", () => {
       issueRefs: 1,
       lightWords: 0,
       linearKeys: 1,
+      macOnly: 0,
       names: 1,
       oldNames: 2,
       oldSkillNames: 2,
@@ -226,9 +229,9 @@ describe("the ratchet", () => {
     expect(risen({ emails: 2 }, { emails: 3 })).toEqual([])
   })
 
-  test("a risen issueRefs count names its fix, and another kind keeps the plain reason", () => {
+  test("a risen issueRefs count names its fix and where the number goes, and another kind keeps the plain reason", () => {
     expect(refusal(risen({ emails: 2, issueRefs: 4 }, { emails: 3, issueRefs: 3 }))).toBe(
-      "trace-count: a count rose; write the new text in plain words; describe the case in words; a doc cites no issue number:\nissueRefs: 4 in the tree, counts.json allows 3",
+      "trace-count: a count rose; write the new text in plain words; describe the case in words; a doc cites no issue number, and the PR body's Merge Danger or Links carry it:\nissueRefs: 4 in the tree, counts.json allows 3",
     )
     expect(refusal(risen({ emails: 4 }, { emails: 3 }))).toBe(
       "trace-count: a count rose; write the new text in plain words:\nemails: 4 in the tree, counts.json allows 3",
@@ -557,5 +560,118 @@ describe("the commit's list gate", () => {
     expect(await listGate(root, listAt({ names: "Quilla" }))).toContain(
       "is not no-public-leak's list",
     )
+  })
+})
+
+// CI's list step: the pull request's changed files, their paths, its commit messages and its branch's name, against a list the step writes outside the checkout; a refusal names each place and kind and never the term, since the log is public.
+describe("the pull request's list gate", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "trace-count-pr-"))
+  afterAll(() => rmSync(scratch, { force: true, recursive: true }))
+  const listPath = join(scratch, "list.json")
+  writeFileSync(listPath, JSON.stringify(LIST))
+  const repo = () => {
+    const dir = join(scratch, `repo-${crypto.randomUUID()}`)
+    mkdirSync(join(dir, "docs"), { recursive: true })
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(
+        [
+          "git",
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@t",
+          "-c",
+          "core.hooksPath=/dev/null",
+          ...args,
+        ],
+        { cwd: dir, env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined } },
+      )
+      expect(result.exitCode).toBe(0)
+      return result.stdout.toString().trim()
+    }
+    const commit = (path: string, text: string, message: string) => {
+      writeFileSync(join(dir, path), text)
+      git("add", path)
+      git("commit", "-q", "-m", message)
+      return git("rev-parse", "HEAD")
+    }
+    git("init", "-q", "-b", "base")
+    commit("docs/a.md", "Plain text.\n", "docs: start")
+    git("branch", "canary")
+    git("checkout", "-q", "-b", "work")
+    return { commit, dir }
+  }
+  const TERMS = [...LIST.companies, ...LIST.handles, ...LIST.names].map((t) => t.toLowerCase())
+  const printsNoTerm = (out: string) =>
+    expect(TERMS.filter((term) => out.toLowerCase().includes(term))).toEqual([])
+
+  test("a term the pull request adds to a file, a path or a message fails, by place and kind alone", async () => {
+    const { commit, dir } = repo()
+    commit("docs/a.md", `Plain text.\nBuilt for ${LIST.companies[0]}.\n`, "docs: a line")
+    const sha = commit("docs/b.md", "More.\n", `docs: thanks ${LIST.handles[0]}`)
+    commit(`docs/${LIST.handles[0]}.md`, "Plain.\n", "docs: a page")
+    const refused = await listSince(
+      dir,
+      "canary",
+      listPath,
+      `${LIST.names[0]!.split(" ")[0]}-${LIST.names[0]!.split(" ")[1]}`,
+    )
+    expect(refused).toContain("docs/a.md: companies")
+    expect(refused).toContain(`${sha.slice(0, 9)}'s message: handles`)
+    expect(refused).toContain("a changed file's path: handles")
+    printsNoTerm(refused)
+  })
+
+  // the log is every byte the process writes, git's own stderr included, which once named a new file's path
+  test("the gate's process prints no term on any stream", () => {
+    const { commit, dir } = repo()
+    commit(`docs/${LIST.handles[0]}.md`, `By ${LIST.names[0]}.\n`, `docs: for ${LIST.companies[0]}`)
+    const count = join(import.meta.dir, "../../../../../packages/scripts/src/trace-count/count.ts")
+    const ran = Bun.spawnSync(
+      [
+        "bun",
+        "-e",
+        `const { listSince } = await import(${JSON.stringify(count)}); const out = await listSince(${JSON.stringify(dir)}, "canary", ${JSON.stringify(listPath)}); console.error(out); process.exit(out ? 1 : 0)`,
+      ],
+      { cwd: dir, stderr: "pipe", stdout: "pipe" },
+    )
+    const out = ran.stdout.toString() + ran.stderr.toString()
+    expect(ran.exitCode).toBe(1)
+    expect(out).toContain("a changed file's path: handles")
+    expect(out).toContain("a changed file's path: names")
+    printsNoTerm(out)
+  })
+
+  test("the branch's name holding a term fails, and the name is not printed", async () => {
+    const { commit, dir } = repo()
+    commit("docs/b.md", "More.\n", "docs: more")
+    const refused = await listSince(dir, "canary", listPath, `fix-${LIST.handles[0]}-page`)
+    expect(refused).toContain("the branch's name: handles")
+    printsNoTerm(refused)
+  })
+
+  test("a clean pull request, a term already at the merge-base and no list pass", async () => {
+    const { commit, dir } = repo()
+    commit("docs/b.md", "More.\n", "docs: more")
+    expect(await listSince(dir, "canary", listPath, "docs-more")).toBe("")
+    const held = repo()
+    held.commit("docs/a.md", `Plain text.\n${LIST.companies[0]} once.\n`, "docs: held")
+    const { dir: later } = held
+    Bun.spawnSync(["git", "branch", "-f", "canary", "HEAD"], { cwd: later })
+    held.commit(
+      "docs/a.md",
+      `Plain text.\n${LIST.companies[0]} once.\nA new line.\n`,
+      "docs: after",
+    )
+    expect(await listSince(later, "canary", listPath, "docs-after")).toBe("")
+    expect(await listSince(dir, "canary", join(scratch, "none.json"), "x")).toBe("")
+  })
+
+  test("a list kind in a text is named by kind alone", () => {
+    expect(listKindsIn(`ping ${LIST.handles[0]} at ${LIST.companies[0]}`, LIST)).toEqual([
+      "companies",
+      "handles",
+    ])
+    expect(listKindsIn("plain words", LIST)).toEqual([])
   })
 })

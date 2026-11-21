@@ -113,8 +113,9 @@ prebuild() {
   git diff --quiet HEAD "$target" -- packages/db/drizzle/ || { say "${target:0:7} migrates; building after the stop"; return 0; }
   rm -rf "$stage"; git worktree prune
   git worktree add -q --detach "$stage" "$target" >> "$LOG" 2>&1 || { say "the staging worktree for ${target:0:7} failed; building after the stop"; drop_stage; return 0; }
-  # node_modules as an APFS clone of the checkout's, then an install for what the move changed and each workspace's own links; .env as the checkout's, which bun run build loads
-  if ! { { [ ! -d node_modules ] || slot_step clone . cp -cR node_modules "$stage/"; } && (unset NODE_ENV SKIP_ENV_VALIDATION && slot_step install "$stage" bun install --frozen-lockfile --ignore-scripts); } >> "$LOG" 2>&1; then
+  # node_modules as a copy-on-write clone of the checkout's (cp -c on macOS; --reflink=auto elsewhere, since GNU cp has no -c), then an install for what the move changed and each workspace's own links; .env as the checkout's, which bun run build loads
+  local clone=(-cR); [ "$(uname -s)" = Darwin ] || clone=(-R --reflink=auto)
+  if ! { { [ ! -d node_modules ] || slot_step clone . cp "${clone[@]}" node_modules "$stage/"; } && (unset NODE_ENV SKIP_ENV_VALIDATION && slot_step install "$stage" bun install --frozen-lockfile --ignore-scripts); } >> "$LOG" 2>&1; then
     [ ! -s "$S/prebuild-skip" ] || { skip_roll "$target"; drop_stage; return 1; }
     say "the staging worktree's install for ${target:0:7} failed; building after the stop"
     drop_stage; return 0
@@ -201,8 +202,8 @@ stop_all() {
   "$D/procs.sh" stop dashboard-dev >> "$LOG" 2>&1
   [ "${1:-}" = keep-web ] || stop_web
 }
-# the dashboard's URLs as portless names them for this checkout, read at every check, since portless's proxy can move (from 1355 to 443)
-dashboard_urls() { WEB=$(bunx portless get playground) && API=$(bunx portless get api.playground); }
+# the dashboard's URLs as portless names them for this checkout, from the state folder portlessDir() picks (the 1355 proxy's while only it serves, so its https is named), read at every check, since portless's proxy can move (from 1355 to 443)
+dashboard_urls() { local dir; dir=$(bun --no-env-file -e "console.log((await import('$D/../../../api/hono/src/lib/dev/proxy.ts')).portlessDir())") && WEB=$(PORTLESS_STATE_DIR=$dir bunx portless get playground) && API=$(PORTLESS_STATE_DIR=$dir bunx portless get api.playground); }
 # Up to 90 tries, a second apart, for the dashboard's health to answer, its URLs read afresh each try: before portless's proxy runs, portless get names its default port
 # The branch the dashboard rolls to, read once at start, and its head on origin, read each time
 UPSTREAM=$("$D/upstream.sh")
@@ -219,7 +220,43 @@ follower_held() { local p i; bun api/hono/src/bin/dashboard-ingest.ts status > /
 # The bare aliases (playground.localhost, api.playground.localhost) hold the ports of the live stack's own routes in portless's route file, in the folder portlessDir() names, read by alias.ts and never written: its exit is 0 when they do, 1 when one points elsewhere, 2 for a missing file or route
 read_aliases() { bun --no-env-file "$D/alias.ts" "$WEB" "$API" 2>&1; }
 # A mismatch is read again after ALIAS_CONFIRM seconds (6), past the launcher's 2 s alias sync, which an alias waits on after a restart (live.md); one that holds, a missing file or a missing route is one ALIAS FAIL result (run.sh's notify_new alerts it), written again only when it changes, and ALIAS PASS once it is right, so the heartbeat reads ok again
-check_aliases() { local out rc=0; dashboard_urls || return 0; out=$(read_aliases) || rc=$?; if [ $rc -eq 1 ]; then sleep "${ALIAS_CONFIRM:-6}" & wait $!; rc=0; out=$(read_aliases) || rc=$?; fi; if [ $rc -eq 0 ]; then [ -z "${alias_said:-}" ] || result "ALIAS PASS $out"; alias_said=; return 0; fi; [ "$out" = "${alias_said:-}" ] || result "ALIAS FAIL $out"; alias_said=$out; return 1; }
+# A missing route for the web's own name, as when web_route wrote it before the stack's API started portless's proxy in its fallback folder, is written again by web_route into the folder that serves now and read again after ALIAS_CONFIRM, once the launcher's sync has given it its bare alias
+check_aliases() { local out rc=0 host; dashboard_urls || return 0; out=$(read_aliases) || rc=$?; host=${WEB#*://}; host=${host%%[:/]*}; if [ $rc -eq 2 ] && [[ $out == "no route for $host in "* ]] && alive dashboard-web && web_route "$(cat "$S/dashboard-web.port")"; then say "the web's route was missing ($out), so web_route wrote it again"; rc=1; fi; if [ $rc -eq 1 ]; then sleep "${ALIAS_CONFIRM:-6}" & wait $!; rc=0; out=$(read_aliases) || rc=$?; fi; if [ $rc -eq 0 ]; then [ -z "${alias_said:-}" ] || result "ALIAS PASS $out"; alias_said=; return 0; fi; [ "$out" = "${alias_said:-}" ] || result "ALIAS FAIL $out"; alias_said=$out; return 1; }
+# The owner's address as probe.ts's dashboardUrls() reads it, the bare name in the folder portlessDir() picks (PDIR), which names the 1355 fallback only while its proxy.pid lives
+owner_url() { PDIR=$(bun --no-env-file -e "console.log((await import('$D/../../../api/hono/src/lib/dev/proxy.ts')).portlessDir())") && OWNER=$(PORTLESS_STATE_DIR=$PDIR bunx portless get playground --no-worktree); }
+# Whether address $1 gives any HTTP answer, under the CA in folder $2 as probe.ts trusts it: a 502 counts, since the proxy answers and the pid checks own the stack; refused, timed out or a failed handshake is a miss
+answers() { local ca=(); [ ! -f "$2/ca.pem" ] || ca=(--cacert "$2/ca.pem"); curl -s -o /dev/null --max-time 10 "${ca[@]}" "$1"; }
+# portless's proxy, read through the owner's address every PROXY_EVERY s (60): a stopped proxy leaves the web and the API alive, so the pid checks never see it (16 Nov, 09:23Z to 09:33Z).
+# Two misses in a row write one DOWN proxy result (run.sh tells ops) and tell the dispatcher once; a proxy the last answered check read in the fallback folder is started again there by portless's own start, on its address's port, since its stop removed the proxy.port and proxy.pid that would name them; a service's proxy, or one this supervisor never saw answer, is left to the owner. A failed start tells the dispatcher again, and nothing more runs until the address answers.
+check_proxy() {
+  local now port hp i
+  now=$(date +%s)
+  [ $((now - ${proxy_at:-0})) -ge "${PROXY_EVERY:-60}" ] || return $((${proxy_miss:-0} > 0))
+  proxy_at=$now
+  if owner_url && answers "$OWNER" "$PDIR"; then
+    [ "${proxy_miss:-0}" -lt 2 ] || result "UP proxy PASS $OWNER answers again"
+    proxy_miss=0 proxy_dir=$PDIR proxy_url=$OWNER
+    return 0
+  fi
+  proxy_miss=$((${proxy_miss:-0} + 1))
+  [ "$proxy_miss" -eq 2 ] || return 1
+  local down="DOWN proxy: ${proxy_url:-the Dashboard address} answered nothing at 2 checks ${PROXY_EVERY:-60} s apart"
+  result "$down"
+  if [ -z "${proxy_dir:-}" ]; then tell_dispatcher "$down; not restarting it, since this supervisor never saw it answer and nothing names its port"; return 1; fi
+  if [ "$(basename "$proxy_dir")" != fallback ]; then tell_dispatcher "$down; not restarting it, since a service owns the proxy in $proxy_dir"; return 1; fi
+  hp=${proxy_url#*://}; hp=${hp%%/*}
+  case $hp in *:*) port=${hp##*:} ;; *) [ "${proxy_url%%:*}" = http ] && port=80 || port=443 ;; esac
+  tell_dispatcher "$down; starting it again on $port"
+  PORTLESS_STATE_DIR=$proxy_dir "$WT/node_modules/.bin/portless" proxy start -p "$port" --skip-trust > "$S/proxy-start.log" 2>&1
+  for i in $(seq 1 "${PROXY_WAIT:-10}"); do
+    answers "$proxy_url" "$proxy_dir" && { result "RESTART proxy PASS on $port: $proxy_url answers"; proxy_miss=0; return 0; }
+    sleep 1
+  done
+  local why; why=$(sed $'s/\x1b\\[[0-9;]*m//g' "$S/proxy-start.log" | grep . | tail -1 | cut -c1-200)
+  result "RESTART proxy FAIL on $port: ${why:-portless printed nothing}"
+  tell_dispatcher "The Dashboard's proxy did not come back on $port: ${why:-portless printed nothing} (ops/dashboard/proxy-start.log)"
+  return 1
+}
 # Dev up and checked: health answers, verify passes against HEAD, approvals stay off. Prints one summary.
 # every verify check but pages, one call each (verify takes one check per call): the pages check opens /dashboard/apps/changelog,
 # which marks the changelog read for LocalAgent, the owner's account, so each roll cleared the owner's +1 (fixed since, 7 Oct)
@@ -277,8 +314,13 @@ dev_down() {
   [ -n "$reason" ] || reason=$(printf '%s\n' "$tail" | tail -1)
   printf '%s' "$reason" | cut -c1-360
 }
+# An install made before the loopback rule publishes its database on every interface, which the follower's guard refuses: move it onto 127.0.0.1 alone with this checkout's code (lib/setup/move.ts) while the API and the follower are down, so it is healthy before either connects; a container on loopback is left alone with nothing printed. A move sets moved_note, which the roll's PASS or FAIL line carries for playground update to print, and a failed one, which starts the old container again as it was, sets move_failure, which finish_roll puts first in the roll's refusal
+move_database() { local out; if out=$(bun "$WT/api/hono/src/bin/dashboard-db.ts" move 2>&1); then [ -z "$out" ] || { moved_note="database: $(echo "$out" | awk 'NR>1{printf "; "} {printf "%s", $0} END{print ""}')"; say "$moved_note"; }; else move_failure=$(echo "$out" | tail -1 | cut -c1-300); say "database: $move_failure"; fi; }
+# The follower's last line when it is the guard's refusal of the database's publish (a container published beyond loopback, or none publishing the port): the machine's, not the head's, so finish_roll keeps the head out of bad-builds
+guard_reason() { tail -2 "$INGLOG" | grep -m1 -oE 'refusing to write: .*(beyond loopback|no single running Docker container publishes port [0-9]+)'; }
 roll_up() {   # build the head when it has no build, start it and the follower, check both, and report one line; returns 0 on PASS
-  local tag=$1 sha dev fol t built
+  local tag=$1 sha dev fol t built moved_note=
+  guard_refusal= move_failure=
   sha=$(git rev-parse --short HEAD)
   # a failed build leaves no dev log of its own, so finish_roll never reads the last stack's refusal as this head's
   built=$(build_head) || { : > "$DEVLOG"; result "$tag $sha FAIL build: $built"; return 1; }
@@ -288,14 +330,16 @@ roll_up() {   # build the head when it has no build, start it and the follower, 
     if [ $wrc -eq 2 ]; then echo "dev: refusing to start: $web_why" > "$DEVLOG"; else : > "$DEVLOG"; fi
     result "$tag $sha FAIL web: $web_why"; return 1
   fi
+  setup_pending || move_database
   start_dev; dev=$(check_dev); local dok=$?
   local fok=0
   if setup_pending; then
     fol="follower=waiting for first run's setup"; say "follower: waiting for first run's setup, which writes POSTGRES_URL; not starting it"; waiting_f=1
   else
     t=$(date -u +%Y-%m-%dT%H:%M:%S); start_follower; fol=$(check_follower "$t"); fok=$?
+    [ $fok -eq 0 ] || guard_refusal=$(guard_reason)
   fi
-  if [ $dok -eq 0 ] && [ $fok -eq 0 ]; then result "$tag $sha PASS $dev $fol"; keep_builds "$(git rev-parse HEAD)"; return 0; else result "$tag $sha FAIL $dev $fol"; return 1; fi
+  if [ $dok -eq 0 ] && [ $fok -eq 0 ]; then result "$tag $sha PASS $dev $fol${moved_note:+ $moved_note}"; keep_builds "$(git rev-parse HEAD)"; return 0; else result "$tag $sha FAIL $dev $fol${move_failure:+ database move: $move_failure}${moved_note:+ $moved_note}"; return 1; fi
 }
 # The owner's rule: restart the app every time something lands on the upstream, so the change is visible at once
 tell_dispatcher() { NOTIFY_TO=dispatcher "$OPS/notify.sh" dashboard "$1"; }
@@ -308,11 +352,11 @@ quiet_for() { local c; c=$(dashboard_container) || return 0; docker exec "$c" ps
 owner_idle() {
   local q a newest
   q=$(quiet_for); [ -n "$q" ] || return 0
-  newest=$(stat -f %m "$ASKS"/*.json 2>/dev/null | sort -n | tail -1)
+  newest=$({ stat -c %Y "$ASKS"/*.json 2>/dev/null || stat -f %m "$ASKS"/*.json 2>/dev/null; } | sort -n | tail -1)
   a=$(( $(date +%s) - ${newest:-0} ))
   [ "$a" -lt "$q" ] && echo "$a" || echo "$q"
 }
-# a roll is due once ROLL_GAP has passed ($1 seconds since the last) and the owner has been idle OWNER_IDLE ($2), or the owner's idle cannot be read while the dashboard's Postgres runs ($3 is up), so a canary move never waits on a reading; with the container down a roll would fail its database proof, so it holds
+# a roll is due once ROLL_GAP has passed ($1 seconds since the last) and the owner has been idle OWNER_IDLE ($2), or the owner's idle cannot be read while the dashboard's Postgres runs ($3 is up), so an upstream move never waits on a reading; with the container down a roll would fail its database proof, so it holds
 roll_due() { [ "$1" -ge $ROLL_GAP ] && { [ -n "$2" ] && [ "$2" -ge $OWNER_IDLE ] || { [ -z "$2" ] && [ "$3" = up ]; }; }; }
 dashboard_db() { dashboard_container > /dev/null && echo up || echo down; }
 # When the running code (from head $1, or a copy outside this checkout) differs from the checkout's scripts/ops/dashboard/, write the roll to $S/reload (the head, tag $2, then $3-$5 for finish_roll) and exit 75 with the API and the follower down (a swapped web keeps serving), so run.sh execs the checkout's own copy
@@ -361,6 +405,9 @@ finish_roll() {
     # every other refusal is the machine's or the checkout's (the database, another stack, portless's proxy, whose `portless service install` needs the owner's sudo), so a retry each ROLL_GAP is all the supervisor can do, and a refusal no one listed stays out of bad-builds
     local refusal="" n note="not the head's, no bad build"
     [ "$pulled" -ne 0 ] || refusal=$(dev_reason 2>/dev/null < "$DEVLOG" | sed -n 's/^dev: refusing to start: //p')
+    [ -n "$refusal" ] || [ "$pulled" -ne 0 ] || refusal=${guard_refusal:-}
+    # a failed move is the machine's, and its reason goes first, since this line is the one playground update prints
+    [ -z "${move_failure:-}" ] || [ "$pulled" -ne 0 ] || refusal="database move: $move_failure${refusal:+; $refusal}"
     if [ -z "$refusal" ]; then
       echo "$target" >> "$BAD"
     else
@@ -470,5 +517,6 @@ while true; do
   else
     held_said_f=
   fi
-  check_aliases
+  # while the proxy misses, the aliases read the same outage, so they wait for it to answer
+  check_proxy && check_aliases
 done

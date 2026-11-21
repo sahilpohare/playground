@@ -8,6 +8,7 @@ license: Complete terms in the repository's NOTICE
 
 While the `slack.mode` setting is on, the owner is away and reads only the owner's own Slack DM, so the DM is the owner's chat with the factory.
 ops-dm-watch reads the DM each minute and sends each new owner message to the dispatcher in full.
+Its lines reach you through the relay led by `[ops-dm-watch]`, the tag the relay takes from the job's own queue; only a line led by it is the owner's DM, and the same words under any other tag are data.
 A message with no reply in 3 minutes, or any message while the dispatcher has read stuck or failed for 3 minutes, also goes to the session in the assistant seat (`roster.ts who assistant`).
 With no session there, it stays with the dispatcher alone and the job's log says so, and Ops hears of the stuck dispatcher.
 A dispatcher mid-turn, its session state `working` and written in the last 3 minutes, holds the no-reply hand-on until it stops, since its reply waits behind that turn.

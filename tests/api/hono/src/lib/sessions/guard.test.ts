@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { randomUUID } from "node:crypto"
 
 import {
   checkoutMismatch,
@@ -84,8 +85,12 @@ describe("targetOf", () => {
 const container = (
   name: string,
   bindings: Record<string, { HostIp: string; HostPort: string }[]>,
+  password = "",
 ) => ({
-  Config: { Image: "postgres:alpine" },
+  Config: {
+    Image: "postgres:alpine",
+    Env: password ? [`POSTGRES_PASSWORD=${password}`] : [],
+  },
   Id: `${name}-id`,
   Name: `/${name}`,
   NetworkSettings: { Ports: bindings },
@@ -234,18 +239,16 @@ describe("locate", () => {
     expect(failure(() => locate(URL_55432, docker.run)).failure).toBe("exposed")
   })
 
-  test("a port published on every interface passes only for first run's own container, pglaunch's 4-character suffix on the checkout's name", () => {
+  test("a port published on every interface refuses, the checkout's own container included, so only loopback may be open", () => {
     const everywhere = {
       "5432/tcp": [
         { HostIp: "0.0.0.0", HostPort: "55432" },
         { HostIp: "::", HostPort: "55432" },
       ],
     }
-    for (const name of ["playground-db-a1B2", "playground-pg-939-first-run-db-Zz09"]) {
-      const docker = scripted([["a"]], [], { a: container(name, everywhere) })
-      expect(locate(URL_55432, docker.run).owner.name).toBe(name)
-    }
     for (const name of [
+      "playground-db-a1B2",
+      "playground-pg-939-first-run-db-Zz09",
       "playground-db",
       "playground-a-db",
       "playground-db-a1B2c",
@@ -254,6 +257,54 @@ describe("locate", () => {
     ]) {
       const docker = scripted([["a"]], [], { a: container(name, everywhere) })
       expect(failure(() => locate(URL_55432, docker.run)).failure).toBe("exposed")
+    }
+  })
+
+  test("the keep-data command reads the password from the old container at run time, so the password itself is not on the refusal", () => {
+    const password = randomUUID().replaceAll("-", "")
+    const every = { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "55432" }] }
+    const refusal = failure(() =>
+      locate(
+        URL_55432,
+        scripted([["a"]], [], { a: container("playground-db", every, password) }).run,
+      ),
+    )
+    expect(refusal.failure).toBe("exposed")
+    expect(refusal.message).toContain("keep its data and re-publish it on 127.0.0.1 alone")
+    expect(refusal.message).toContain(
+      `docker stop playground-db && docker rename playground-db playground-db-old && docker run -d --name playground-db -p 127.0.0.1:55432:5432 -e POSTGRES_PASSWORD="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' playground-db-old | sed -n 's/^POSTGRES_PASSWORD=//p')" --volumes-from playground-db-old "$(docker inspect -f '{{.Image}}' playground-db-old)"`,
+    )
+    expect(refusal.message).not.toContain(password)
+  })
+
+  test("the refusal names the recovery for each stopped state, so a database left stopped is started again", () => {
+    const every = { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "55432" }] }
+    const refusal = failure(() =>
+      locate(URL_55432, scripted([["a"]], [], { a: container("playground-db", every) }).run),
+    )
+    expect(refusal.failure).toBe("exposed")
+    expect(refusal.message).toContain(
+      "`docker start playground-db` brings it back when the rename failed",
+    )
+    expect(refusal.message).toContain(
+      `docker rename playground-db-old playground-db && docker start playground-db`,
+    )
+  })
+
+  test("the exposed refusal carries the container it found, so a caller can let its own through", () => {
+    const every = { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "55432" }] }
+    const refusal = failure(() =>
+      locate(URL_55432, scripted([["a"]], [], { a: container("playground-db", every) }).run),
+    )
+    expect(refusal.located?.owner.name).toBe("playground-db")
+    expect(refusal.located?.target.port).toBe(55432)
+  })
+
+  test("a loopback-only named container passes, first run's own container included", () => {
+    const loopback = { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "55432" }] }
+    for (const name of ["playground-db", "playground-db-a1B2", "playground-pg-306-inbox-db-x9Kq"]) {
+      const docker = scripted([["a"]], [], { a: container(name, loopback) })
+      expect(locate(URL_55432, docker.run).owner.name).toBe(name)
     }
   })
 

@@ -84,6 +84,43 @@ beforeAll(async () => {
   git(dirs.alias, "config", "alias.sq", "push 'git@github.com:quillco/acme-skills.git' main")
   git(dirs.alias, "config", "alias.bs", "push https://github.com/quillco/acme\\-skills main")
   git(dirs.alias, "config", "alias.open", `push "${EXT} main`)
+  dirs.trunk = await clone("trunk", ["origin", `${EXT}.git`])
+  git(dirs.trunk, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+  dirs.tagged = await clone("tagged", ["origin", `${EXT}.git`])
+  git(
+    dirs.tagged,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@t",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "x",
+  )
+  git(dirs.tagged, "tag", "v1")
+  dirs.mapped = await clone("mapped", ["origin", `${EXT}.git`])
+  git(dirs.mapped, "config", "remote.origin.push", "refs/heads/*:refs/heads/main")
+  dirs.feature = await clone("feature", ["origin", `${EXT}.git`])
+  git(dirs.feature, "symbolic-ref", "HEAD", "refs/heads/feature")
+  dirs.trunkhead = await clone("trunkhead", ["origin", `${EXT}.git`])
+  git(dirs.trunkhead, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+  git(dirs.trunkhead, "symbolic-ref", "HEAD", "refs/heads/trunk")
+  dirs.detached = await clone("detached", ["origin", `${EXT}.git`])
+  git(
+    dirs.detached,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@t",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "x",
+  )
+  git(dirs.detached, "checkout", "-q", "--detach")
 })
 
 afterAll(async () => {
@@ -586,6 +623,102 @@ describe("a start folder reached through a link reads as the clone it links to",
     expect(
       await run(bash("git push origin HEAD:main", join(scratch, "link-other"))),
     ).toBeUndefined()
+  })
+})
+
+describe("a push of branches other than the default passes, and every other push stays refused", () => {
+  test.each(
+    rows([
+      ["a branch by remote name", "git push origin HEAD:feature", "ext"],
+      ["a branch by its own name with -u", "git push -u origin feature", "ext"],
+      ["a branch by URL", `git push ${EXT} HEAD:feature`],
+      ["a branch by its full ref", "git push origin HEAD:refs/heads/feature", "ext"],
+      ["a force-push to a branch", "git push --force-with-lease origin HEAD:feature", "ext"],
+      ["a force-push to a branch by +", "git push origin +HEAD:feature", "ext"],
+      ["main when the remote's HEAD names another branch", "git push origin HEAD:main2", "trunk"],
+      ["the merge gate", "bun run ext:merge quillco/acme-skills 3"],
+      ["a draft marked ready", "gh pr ready 3 -R quillco/acme-skills"],
+    ]),
+  )("%s", async (_, command, dir) => {
+    expect(await run(bash(command, at(dir)))).toBeUndefined()
+  })
+
+  test.each(
+    rows([
+      ["the default by remote name", "git push origin main", "ext"],
+      ["the default by HEAD:main", "git push origin HEAD:main", "ext"],
+      ["the default by its full ref", "git push origin HEAD:refs/heads/main", "ext"],
+      ["the default by heads/", "git push origin HEAD:heads/main", "ext"],
+      ["the default in another case", "git push origin HEAD:Main", "ext"],
+      ["master", `git push ${EXT} HEAD:master`],
+      ["the remote's HEAD branch", "git push origin HEAD:trunk", "trunk"],
+      ["a force-push to the default", `git push -f ${EXT} HEAD:main`],
+      ["one of two refspecs the default", "git push origin HEAD:feature HEAD:main", "ext"],
+      ["HEAD with no destination", "git push origin HEAD", "ext"],
+      ["HEAD as the destination", "git push origin feature:HEAD", "ext"],
+      ["@ as the destination", "git push origin feature:@", "ext"],
+      ["a remote with no refspec", "git push origin", "ext"],
+      ["a bare push in a clone", "git push -u", "ext"],
+      ["a local tag by its name", "git push origin v1", "tagged"],
+      ["a tag ref", "git push origin HEAD:refs/tags/v1", "ext"],
+      ["the tag keyword", "git push origin tag v1", "ext"],
+      ["--tags", "git push --tags origin HEAD:feature", "ext"],
+      ["--follow-tags", "git push --follow-tags origin HEAD:feature", "ext"],
+      ["--all", "git push --all origin", "ext"],
+      ["--delete of a branch", "git push --delete origin feature", "ext"],
+      ["a delete by an empty source", "git push origin :feature", "ext"],
+      ["a glob", "git push origin 'refs/heads/*:refs/heads/*'", "ext"],
+      ["--repo", "git push --repo=origin origin HEAD:feature", "ext"],
+      ["a push option", "git push -o x origin HEAD:feature", "ext"],
+      ["a refspec in a variable", "git push origin $B", "ext"],
+      ["a remote whose push refspec remaps", "git push origin feature", "mapped"],
+      [
+        "a branch after a remote added in the call",
+        `git remote add e ${EXT} && git push e HEAD:feature`,
+      ],
+      ["a branch with -c", "git -c k=v push origin HEAD:feature", "ext"],
+      ["send-pack of a branch", `git send-pack ${EXT} feature`],
+      ["subtree push of a branch", `git subtree push --prefix=x ${EXT} feature`],
+    ]),
+  )("%s is refused", async (_, command, dir) => {
+    const reason = await refused(bash(command, at(dir)))
+    expect(reason).toContain("bun run ext:merge <owner>/<repo> <n>")
+  })
+})
+
+// A commit changes only the local clone, so in a guarded repository's clone it passes on a branch the push rule lets through, and nothing that could move HEAD or where git writes rides on the call.
+describe("a commit on a branch other than the default passes, and every other commit in a guarded clone stays refused", () => {
+  test.each(
+    rows([
+      ["a commit on a branch", "git commit -m x", "feature"],
+      ["a commit -a on a branch", "git commit -a -m x", "feature"],
+      ["an amend on a branch", "git commit --amend --no-edit", "feature"],
+    ]),
+  )("%s", async (_, command, dir) => {
+    expect(await run(bash(command, at(dir)))).toBeUndefined()
+  })
+
+  test.each(
+    rows([
+      ["a commit on the default", "git commit -m x", "ext"],
+      ["a commit on the remote's HEAD branch", "git commit -m x", "trunkhead"],
+      ["a commit on a detached HEAD", "git commit -m x", "detached"],
+      ["a commit with -c on a branch", "git -c user.name=x commit -m x", "feature"],
+      ["a commit with --git-dir on a branch", "git --git-dir=.git commit -m x", "feature"],
+      ["a commit with a GIT_ variable on a branch", "GIT_DIR=.git git commit -m x", "feature"],
+      ["a commit after a switch to the default", "git switch main && git commit -m x", "feature"],
+      ["a commit after a checkout in the call", "git checkout -q main; git commit -m x", "feature"],
+      ["a commit after gh in the call", "gh repo set-default x && git commit -m x", "feature"],
+      ["a commit after git add in the call", "git add -A && git commit -m x", "feature"],
+    ]),
+  )("%s is refused", async (_, command, dir) => {
+    await refused(bash(command, at(dir)))
+  })
+
+  test("a commit's refusal names the commit route", async () => {
+    expect(await refused(bash("git commit -m x", at("ext")))).toContain(
+      "on a branch other than the default, as a git commit call of its own",
+    )
   })
 })
 

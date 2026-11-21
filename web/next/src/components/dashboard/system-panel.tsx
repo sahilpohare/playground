@@ -27,6 +27,7 @@ import { useNow } from "@/lib/dashboard"
 import {
   byWeekReset,
   checkoutLabel,
+  clusterOf,
   isStale,
   joinedLine,
   PRESSURE_LABELS,
@@ -97,55 +98,82 @@ const series = (history: SystemPoint[], pick: (p: SystemPoint) => number | null)
 const toGb = (bytes: number | null): number | null =>
   bytes === null ? null : Math.round((bytes / GB) * 10) / 10
 
-// One reading: what it is, its value now, what qualifies it, and its last hour where one is kept.
+// One reading: what it is, its value now with its split by machine on hover in a cluster and, while a machine does not read, its marker under it, what qualifies it, and its last hour where one is kept.
 type Reading = {
   detail: string
   hour: React.ReactNode
+  hover?: string
   id: string
   label: string
+  marker?: string | null
   value: string
 }
 
-function readingsOf(report: SystemReport): Reading[] {
+// Pure: what qualifies the swap reading: macOS grows swap as it needs it, while Linux keeps it at the size its swap partition or file was given.
+export const swapDetail = (platform: string): string =>
+  platform === "linux" ? "Linux keeps swap at a set size" : "macOS grows swap as it needs it"
+
+// Pure: the readings table's rows, each summed over the cluster with its split on hover once report.machines names peers, else this machine's own, which memory, CPU and swap say in their detail; Docker is always this machine's.
+export function readingsOf(report: SystemReport, now: Date): Reading[] {
   const { cpu, disk, docker, history, memory } = report
   const swap = memory.swap
   const containersBytes = docker.containers.reduce((sum, c) => sum + (c.bytes ?? 0), 0)
+  const cluster = clusterOf(report.machines, memory.pressure, now)
+  const alone = cluster ? "" : " · This machine only"
+  const maxBytes = cluster
+    ? report.machines.reduce((sum, m) => sum + (m.reading?.memory.totalBytes ?? 0), 0)
+    : memory.totalBytes
   return [
     {
-      detail: `${memory.freePercent === null ? "Free share unknown" : `${memory.freePercent}% free`} · pressure ${memory.pressure ? PRESSURE_LABELS[memory.pressure] : "unknown"}`,
+      detail:
+        cluster?.memory.detail ??
+        `${memory.freePercent === null ? "Free share unknown" : `${memory.freePercent}% free`} · pressure ${memory.pressure ? PRESSURE_LABELS[memory.pressure] : "unknown"}${alone}`,
       hour: (
         <Sparkline
           label="RAM used, GB"
-          max={toGb(memory.totalBytes) ?? undefined}
+          max={toGb(maxBytes) ?? undefined}
           points={series(history, (p) => toGb(p.usedBytes))}
         />
       ),
+      hover: cluster?.memory.hover,
       id: "memory",
       label: "Memory",
-      value: `${sizeLabel(memory.usedBytes)} of ${sizeLabel(memory.totalBytes)}`,
+      marker: cluster?.memory.marker,
+      value:
+        cluster?.memory.value ??
+        `${sizeLabel(memory.usedBytes)} of ${sizeLabel(memory.totalBytes)}`,
     },
     {
-      detail: `1, 5 and 15 min.: ${cpu.load.join(" / ")}`,
+      detail: cluster?.cpu.detail ?? `1, 5 and 15 min.: ${cpu.load.join(" / ")}${alone}`,
       hour: <Sparkline label="Load, 1 min." points={series(history, (p) => p.load1)} />,
+      hover: cluster?.cpu.hover,
       id: "cpu",
       label: "CPU load",
-      value: `${cpu.load[0]} on ${cpu.cores} cores`,
+      marker: cluster?.cpu.marker,
+      value: cluster?.cpu.value ?? `${cpu.load[0]} on ${cpu.cores} cores`,
     },
     {
-      detail: "macOS grows swap as it needs it",
+      detail: `${swapDetail(report.platform)}${alone}`,
       hour: (
         <Sparkline label="Swap used, GB" points={series(history, (p) => toGb(p.swapUsedBytes))} />
       ),
+      hover: cluster?.swap.hover,
       id: "swap",
       label: "Swap",
-      value: swap ? `${sizeLabel(swap.usedBytes)} of ${sizeLabel(swap.totalBytes)}` : "-",
+      marker: cluster?.swap.marker,
+      value:
+        cluster?.swap.value ??
+        (swap ? `${sizeLabel(swap.usedBytes)} of ${sizeLabel(swap.totalBytes)}` : "-"),
     },
     {
-      detail: disk ? `of ${sizeLabel(disk.totalBytes)}` : "Could not be read",
+      detail:
+        cluster?.disk.detail ?? (disk ? `of ${sizeLabel(disk.totalBytes)}` : "Could not be read"),
       hour: null,
+      hover: cluster?.disk.hover,
       id: "disk",
       label: "Disk free",
-      value: disk ? sizeLabel(disk.freeBytes) : "-",
+      marker: cluster?.disk.marker,
+      value: cluster?.disk.value ?? (disk ? sizeLabel(disk.freeBytes) : "-"),
     },
     {
       detail:
@@ -161,7 +189,7 @@ function readingsOf(report: SystemReport): Reading[] {
 
 const readingsConfig: Record<string, ColumnConfig> = {
   label: { extra: 12 },
-  value: { extra: 24 },
+  value: { extra: 24, wrap: true },
   detail: { extra: 36, flex: true, wrap: true },
   hour: { width: 36 },
 }
@@ -181,7 +209,18 @@ const readingsColumns: ColumnDef<Features, Reading, unknown>[] = [
     header: ({ column }) => <DataTableColumnHeader column={column} />,
     cell: ({ column, row }) => (
       <DataTableCellText column={column} className="tabular-nums">
-        {row.original.value}
+        {row.original.hover ? (
+          <Hint content={row.original.hover}>
+            <span>
+              <span className="block">{row.original.value}</span>
+              {row.original.marker && (
+                <span className="text-muted-foreground block">{row.original.marker}</span>
+              )}
+            </span>
+          </Hint>
+        ) : (
+          row.original.value
+        )}
       </DataTableCellText>
     ),
     enableSorting: false,
@@ -207,12 +246,12 @@ const readingsColumns: ColumnDef<Features, Reading, unknown>[] = [
   },
 ]
 
-// The machine's totals, one plain row each, with the last hour as a small sparkline.
-function Readings({ report }: { report: SystemReport }) {
+// The machine's totals, or the cluster's, one plain row each, with the last hour as a small sparkline.
+function Readings({ now, report }: { now: Date; report: SystemReport }) {
   const table = useStaticTable({
     columnConfig: readingsConfig,
     columns: readingsColumns,
-    data: readingsOf(report),
+    data: readingsOf(report, now),
     getRowId: (row) => row.id,
   })
   return <DataTable aria-label="Readings" size="sm" table={table} />
@@ -419,7 +458,7 @@ export function SystemPanel() {
               </AlertDescription>
             </Alert>
           )}
-          <Readings report={report} />
+          <Readings now={now} report={report} />
           <Footprints now={now} report={report} />
         </>
       )}

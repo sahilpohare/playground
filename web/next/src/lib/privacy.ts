@@ -68,14 +68,17 @@ export const readPrivacySetting = async (key: PrivacyKey): Promise<unknown> => {
   return data.value
 }
 
-// PUT one field's setting at your login's scope.
+export type OneWord = { files: string[]; name: string }
+
+// PUT one field's setting at your login's scope; the answer names each one-word name with the tracked files the trace count finds it in.
 export const savePrivacySetting = async (
   key: PrivacyKey,
   value: string | string[],
   scope: string,
-) => {
-  const { error } = await unwrap(
+): Promise<OneWord[]> => {
+  const { data, error } = await unwrap(
     apiClient.v1.settings[":key"].$put(privacyWrite(key, value, scope)),
   )
   if (error) throw new Error(error.message)
+  return "oneWords" in data && data.oneWords ? data.oneWords : []
 }

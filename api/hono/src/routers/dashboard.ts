@@ -1,3 +1,5 @@
+import { join } from "node:path"
+
 import { sValidator } from "@hono/standard-validator"
 import type { Session } from "@packages/auth"
 import { SESSION_EFFORTS, SESSION_MODELS } from "@packages/config/console"
@@ -53,12 +55,14 @@ import {
 } from "@/lib/dashboard/feed"
 import { boardFrame, dashboardHub } from "@/lib/dashboard/hub"
 import { recordReply as recordReplyItem, REPLY_RE } from "@/lib/dashboard/inbox"
+import { iconModels, localModel } from "@/lib/dashboard/local-model"
 import {
   clearManagersOrder,
   managersOrderSchema,
   unknownManager,
   writeManagersOrder,
 } from "@/lib/dashboard/managers-order"
+import { serveModelIcon } from "@/lib/dashboard/model-icons"
 import { readOps } from "@/lib/dashboard/ops"
 import {
   PASTE_REPORT_BYTES,
@@ -68,6 +72,7 @@ import {
   storePasteReport,
 } from "@/lib/dashboard/paste-report"
 import { restartPrs, restartSession } from "@/lib/dashboard/restart"
+import { restoreCheckout, RestoreError } from "@/lib/dashboard/restore"
 import { readRoster } from "@/lib/dashboard/roster"
 import {
   answerHosted,
@@ -81,7 +86,7 @@ import {
   type ModeResult,
   type SettingChanging,
 } from "@/lib/dashboard/sdk"
-import { settingRequestSchema, type SessionSetting } from "@/lib/dashboard/setting"
+import { settingRequestSchema, type HostedSetting } from "@/lib/dashboard/setting"
 import { readStacks } from "@/lib/dashboard/stacks"
 import {
   createThread,
@@ -112,7 +117,9 @@ import {
   validationErrorResponses,
   type ErrorCode,
 } from "@/lib/error"
+import { org } from "@/lib/org"
 import { upgradeWebSocket } from "@/lib/server"
+import { dataDir } from "@/lib/sessions/paths"
 import { listAccounts } from "@/lib/store/accounts"
 import { systemReport } from "@/lib/system/sampler"
 import {
@@ -122,6 +129,7 @@ import {
   requireConsoleRole,
   requireTrustedOrigin,
 } from "@/middlewares"
+import { refuseAgentOffFixture } from "@/middlewares/agent"
 
 // A person types a handful of messages a minute; this stops a stuck client or a loop from flooding a session's input.
 export const messageLimiter = createRateLimiter({
@@ -476,9 +484,9 @@ export async function changeMode(
   return { at: result.at, mode: result.mode }
 }
 
-// The setting route's work once the request is through its guards: a model or an effort for a dispatcher or the assistant, typed as its one slash command through deliver() under the composer's id, or for the session the dashboard hosts, set through the SDK by changeHostedSetting(); any other session is refused as FORBIDDEN before anything is sent, and a delivery's refusal is turned into the API's error envelope with its code under `delivery`.
+// The setting route's work once the request is through its guards: a model or an effort for a dispatcher or the assistant, typed as its one slash command through deliver() under the composer's id, or for the session the dashboard hosts, set through the SDK by changeHostedSetting(), which alone takes a local model; any other session, and a local model for a typed one, is refused as FORBIDDEN before anything is sent, and a delivery's refusal is turned into the API's error envelope with its code under `delivery`.
 export async function changeSetting(
-  { id, sessionId, setting }: { id?: string; sessionId: string; setting: SessionSetting },
+  { id, sessionId, setting }: { id?: string; sessionId: string; setting: HostedSetting },
   actor: Delivery["actor"],
   live: () => Promise<Live> = listLive,
   send: (delivery: Delivery) => Promise<DeliveryResult> = deliver,
@@ -494,9 +502,13 @@ export async function changeSetting(
       `A model or effort is set on ${[...DISPATCHERS, "the assistant", SDK_PROBE].join(", ")} only`,
     )
   }
-  const result = typed
-    ? await send({ actor, setting, text: "", to: worker.name, ...(id && { id }) })
-    : await setHosted({ actor, sessionId, setting })
+  if ("local" in setting && !worker.hosted) {
+    throw new ApiError(403, "FORBIDDEN", `A local model is set on ${SDK_PROBE} only`)
+  }
+  const result =
+    typed && !("local" in setting)
+      ? await send({ actor, setting, text: "", to: worker.name, ...(id && { id }) })
+      : await setHosted({ actor, sessionId, setting })
   if (!result.ok) {
     const [status, code] = FAILURE_STATUS[result.code]
     throw new ApiError(status, code, result.reason, { delivery: result.code })
@@ -539,7 +551,7 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
     describeRoute({
       tags: ["Dashboard"],
       description:
-        "Every agent the roster lists or herdr runs, for the dashboard: its role, task, live state, last activity, last report to the dispatcher, branch and pull request, with the roster's backlog still waiting, in the order they go out",
+        "Every agent the roster lists or herdr runs, for the dashboard: its role, task, live state, last activity, last report (to the dispatcher, or a runner's to Ops too), branch and pull request, with the roster's backlog still waiting, in the order they go out",
       responses: { 200: { description: "OK" }, ...authErrorResponses },
     }),
     async (c) => c.json({ data: await agentsBoard() }),
@@ -563,10 +575,51 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
     describeRoute({
       tags: ["Dashboard"],
       description:
-        "The ops jobs that run as scripts with no Claude session, A to Z: one for each `ops/ops-*.json` heartbeat in the data folder and each job `ops/jobs.json` lists, with or without the `ops-` prefix (`report.json`, `alerts.log` and any other file no row names are not jobs), so a new job shows with no code change: what each does (core's line for a registry job, else its own `jobs.json` description, else the generic `NO_DESCRIPTION` line), its status (`running`; `waiting` with the reason after `waiting: ` in its last result, when it has nothing to read yet; `failing` with its last result; `down` when its file is malformed, its loop has exited, its process is gone or it has not beaten for three cycles, with the reason), its last beat, and `paused`: true for a job `ops/jobs.json` marks disabled, which the sidebar leaves out and the System page lists as Paused. A job jobs.json expects to run with no heartbeat file is `down`. Beside those, `callsModel` and `model`, the marks jobs.json gives each job: the sidebar shows a model label, or AI, on a job marked callsModel. Read-only.",
+        "The ops jobs that run as scripts with no Claude session, A to Z: one for each `ops/ops-*.json` heartbeat in the data folder and each job `ops/jobs.json` lists, with or without the `ops-` prefix (`report.json`, `alerts.log` and any other file no row names are not jobs, nor is a job `RETIRED` names, whose files outlive it), so a new job shows with no code change: what each does (core's line for a registry job, else its own `jobs.json` description, else the generic `NO_DESCRIPTION` line), its status (`running`; `waiting` with the reason after `waiting: ` in its last result, when it has nothing to read yet; `failing` with its last result; `down` when its file is malformed, its loop has exited, its process is gone or it has not beaten for three cycles, with the reason), its last beat, and `paused`: true for a job `ops/jobs.json` marks disabled, which the sidebar leaves out and the System page lists as Paused. A job jobs.json expects to run with no heartbeat file is `down`. Beside those, `callsModel` and `model`, the marks jobs.json gives each job: the sidebar shows a model label, or AI, on a job marked callsModel. Read-only.",
       responses: { 200: { description: "OK" }, ...authErrorResponses },
     }),
     async (c) => c.json({ data: await readOps() }),
+  )
+  .post(
+    "/ops/restore",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "Settings > Jobs' Restore now, on the owner's click: runs ops-restore's own steps once (`packages/scripts/src/ops-restore/cli.ts --now`) from this API's checkout, for a main checkout whose guards are gone while the job is stopped or off. The checkout comes from the server alone: the main checkout this API's checkout sits in on a stack that reads this machine, the fixture's scratch `checkout` folder on a fixture or test stack. A checkout whose guards are all there is left as it is (`intact`), as is one an install, `link-skills.sh` or `playground update` holds; otherwise it puts the files back, installs and runs `link-skills.sh` (`restored`), or names the step it stopped at (`stopped`), and tells ops and the dispatcher. Refused (409) on a stack with no checkout to restore and while a restore runs. The request waits for the whole run, past the server's 10 s idle limit.",
+      responses: {
+        200: {
+          description: "What the restore did, in words",
+          content: {
+            "application/json": {
+              schema: resolver(
+                z.object({
+                  data: z.object({
+                    status: z.enum(["intact", "restored", "stopped"]),
+                    text: z.string(),
+                  }),
+                }),
+              ),
+            },
+          },
+        },
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        409: errorResponse("CONFLICT", "No checkout to restore, or a restore already runs"),
+      },
+    }),
+    async (c) => {
+      // a restore (a run-slot wait, an install, link-skills.sh) outlasts Bun.serve's 10 s idle limit, so this one request waits for its words
+      ;(c.env as { timeout?: (request: Request, seconds: number) => void } | undefined)?.timeout?.(
+        c.req.raw,
+        0,
+      )
+      try {
+        return c.json({ data: await restoreCheckout() })
+      } catch (error) {
+        if (error instanceof RestoreError) throw new ApiError(409, "CONFLICT", error.message)
+        throw error
+      }
+    },
   )
   .get(
     "/stacks",
@@ -648,7 +701,7 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
     describeRoute({
       tags: ["Dashboard"],
       description:
-        "This machine's room for more workers, read every 30s while anyone reads it: RAM used and free with macOS's memory pressure, swap, the load average against the cores, disk free, Docker's VM and containers, each live session's footprint (its claude process, everything under it, and the dev stack it serves with that stack's Postgres container) and processes left running in a checkout with no session, an hour of totals, the usage windows the usage job writes, `account`, the Claude account the usage windows reflect (its email and display name alone), `pulls`, the pull requests page of the checkout's GitHub origin, and `update`, how many commits this build is behind the branch its checkout follows (main on origin/main, canary and the live dashboard's branch on origin/canary, fetched at most every 10 minutes in the background) with the newest one's title and time, and `live` when that branch is the live dashboard's. `capacity.line` says how many more workers fit and what limits them, `capacity.orchestrators` how many more orchestrators (a claude with no dev stack, `capacity.perOrchestrator`); `capacity.idle.line` how much stopping a worker's dev stack idle for 15 minutes would free. Read-only but for the update check's fetch, which moves only origin/<upstream>: every other command it runs only reports.",
+        "This machine's room for more workers, read every 30s while anyone reads it: RAM used and free with the memory pressure (macOS's level, on Linux PSI's), swap, the load average against the cores, disk free, Docker's VM and containers, each live session's footprint (its claude process, everything under it, and the dev stack it serves with that stack's Postgres container) and processes left running in a checkout with no session, an hour of totals, the usage windows the usage job writes, `account`, the Claude account the usage windows reflect (its email and display name alone), `pulls`, the pull requests page of the checkout's GitHub origin, and `update`, how many commits this build is behind the branch its checkout follows (main on origin/main, canary on origin/canary, and the live dashboard's branch on the branch the main checkout sits on, fetched at most every 10 minutes in the background) with the newest one's title and time, and `live` when that branch is the live dashboard's. `capacity.line` says how many more workers fit and what limits them, `capacity.orchestrators` how many more orchestrators (a claude with no dev stack, `capacity.perOrchestrator`); `capacity.idle.line` how much stopping a worker's dev stack idle for 15 minutes would free. Read-only but for the update check's fetch, which moves only origin/<upstream>: every other command it runs only reports.",
       responses: { 200: { description: "OK" }, ...authErrorResponses },
     }),
     async (c) => c.json({ data: await systemReport() }),
@@ -870,6 +923,7 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
       },
     }),
     messageLimiter,
+    refuseAgentOffFixture,
     sValidator("json", messageSchema, (result) => {
       if (!result.success) {
         throw new ApiError(400, "VALIDATION_ERROR", "Invalid input", { issues: result.error })
@@ -987,7 +1041,7 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
     "/workers/:sessionId/setting",
     describeRoute({
       tags: ["Dashboard"],
-      description: `Set the model or the effort of a dispatcher (${DISPATCHERS.join(" or ")}), of the session the roster seats as the assistant, or of ${SDK_PROBE}, the session the dashboard hosts on the Agent SDK, as the owner's own pick in the composer: \`model\` one of ${SESSION_MODELS.join(", ")}, or \`effort\` one of ${SESSION_EFFORTS.join(", ")}, never both. For a dispatcher the API builds the one slash command (\`/model <alias>\` or \`/effort <level>\`) from those lists and types it as a message is typed; the hosted session takes it through the SDK's own calls. Either way it records a dashboard.setting row naming the session and the value. Any other session is refused as FORBIDDEN before anything is sent. \`id\`, the composer's own for the pick, lets a dispatcher that holds the command while it compacts read QUEUED rather than INTERRUPTED, and makes a retry under it safe, as the message route's does. A delivery's refusal names its reason in \`delivery\`, as the message route's does.`,
+      description: `Set the model or the effort of a dispatcher (${DISPATCHERS.join(" or ")}), of the session the roster seats as the assistant, or of ${SDK_PROBE}, the session the dashboard hosts on the Agent SDK, as the owner's own pick in the composer: \`model\` one of ${SESSION_MODELS.join(", ")}, \`effort\` one of ${SESSION_EFFORTS.join(", ")}, or, for ${SDK_PROBE} alone, \`local\`, the id of a local model PLAYGROUND_LOCAL_MODELS names, which restarts it on that model's server, or, while that server is down, answers at once and starts the model its machine keeps, switching once it is served (any other session FORBIDDEN, and refused as BUSY mid-turn, while a model loads or when the server serves another model); one of the three alone. For a dispatcher the API builds the one slash command (\`/model <alias>\` or \`/effort <level>\`) from those lists and types it as a message is typed, and for a model answers the switch confirm Claude Code may draw and waits for its status line to name the model, refused as BUSY with nothing typed while it works a turn or compacts; the hosted session takes it through the SDK's own calls. Either way it records a dashboard.setting row naming the session and the value. Any other session is refused as FORBIDDEN before anything is sent. \`id\`, the composer's own for the pick, lets a dispatcher that holds an effort command while it compacts read QUEUED rather than INTERRUPTED, and makes a retry under it safe, as the message route's does. A delivery's refusal names its reason in \`delivery\`, as the message route's does.`,
       responses: {
         200: {
           description:
@@ -1024,7 +1078,7 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
     describeRoute({
       tags: ["Dashboard"],
       description:
-        "Restart a live session whose Claude login expired, with no terminal step: spawn.sh closes the pane it opened and resumes the same conversation in its folder, a reviewer or tester naming the PRs its roster row lists (`--pr`: its prs, else its pr), on `account` (a Claude account added in Settings > Accounts, with its token kept) or, with none, on this Mac's own login. A fixture stack runs nothing and clears the session's login block. A refusal names its reason: NOT_FOUND for no such live session or no such kept account, CONFLICT for a reviewer or tester whose row names no pull request, refused before the close since spawn.sh would refuse its resume, ERROR for spawn.sh's own words.",
+        "Restart a live session whose Claude login expired, with no terminal step: spawn.sh closes the pane it opened and resumes the same conversation in its folder, a reviewer or tester naming the PRs its roster row lists (`--pr`: its prs, else its pr), on `account` (a Claude account added in Settings > Accounts, with its token kept) or, with none, on this Mac's own login. A fixture stack runs nothing and clears the session's login block. A refusal names its reason: NOT_FOUND for no such live session or no such kept account, CONFLICT for a reviewer or tester whose row names no pull request, refused before the close since spawn.sh would refuse its resume, ERROR for spawn.sh's own words, or for a probe started with --ssh, refused before the close since spawn.sh does not resume one.",
       responses: {
         200: {
           description: "Restarted: the session runs again on the account named",
@@ -1087,6 +1141,7 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
         cwd: worker.cwd,
         name: worker.name,
         prs,
+        ...(worker.remote && { remote: worker.remote }),
         sessionId,
       })
       if (restarted.status === "refused") throw new ApiError(502, "ERROR", restarted.detail)
@@ -1246,6 +1301,25 @@ const dashboardRoutes = new Hono<{ Variables: Session }>()
       },
     }),
     (c) => serveAttachment(c.req.param("id")),
+  )
+  .get(
+    "/model-icons/:maker",
+    describeRoute({
+      tags: ["Dashboard"],
+      description:
+        "One model maker's icon, for a session row's logo: a maker config names (each backend's, and the Hugging Face org of each local model's repo id) or the org of the repo the local model server serves, fetched once from models.dev (under the id models.dev lists it by, MODELS_DEV_IDS, taken as it is), else its Hugging Face avatar, and served from the data folder's cache after (fetched again once 7 days old, a failed fetch keeping the old one), never able to run a script; 404 for a maker with none, one config does not name, or one not yet fetched while offline",
+      responses: {
+        200: { description: "The icon" },
+        ...authErrorResponses,
+        ...forbiddenErrorResponses,
+        ...notFoundErrorResponses,
+      },
+    }),
+    async (c) =>
+      serveModelIcon(c.req.param("maker"), {
+        dir: join(dataDir(), "model-icons"),
+        local: iconModels(org.local.models, await localModel()),
+      }),
   )
   .get(
     "/ws",

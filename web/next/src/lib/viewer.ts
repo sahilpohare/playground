@@ -74,15 +74,27 @@ export const frameLoad = (ready: boolean, restored: boolean): FrameLoad =>
 const PAGE_POLICY =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
 
+// On the hosted build the Dashboard page's CSP holds a nonce, which a frame's srcdoc and a blob it makes inherit, so each script tag in a framed page's text carries it to run, one a script's own string names too; it goes in unquoted, since the proxy's base64 has no padding, so that string stays whole, and with a space after it, so a self-closing slash never runs into it. The frame's sandbox, with no same-origin, keeps the nonce from the Dashboard's storage, and the local build's page holds none, so its pages are served as before.
+const withNonce = (html: string, nonce?: string): string =>
+  nonce ? html.replace(/<script(?=[\s/>])/gi, `<script nonce=${nonce} `) : html
+
+// The nonce the Dashboard page's own scripts carry, which the browser keeps on each script's nonce property alone; none on the local build or off the browser.
+export const documentNonce = (
+  doc: Pick<Document, "querySelector"> | undefined = globalThis.document,
+): string | undefined => doc?.querySelector<HTMLScriptElement>("script[nonce]")?.nonce || undefined
+
 const escapeHtml = (text: string): string =>
   text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
 // A card's page on a browser tab of its own, since its route answers the Dashboard's own fetch alone: a document that runs no script, holding the page in a frame whose sandbox allows its own script and never same-origin, so the page reads nothing of the Dashboard's though the tab's blob URL takes its origin; the frame takes the page as srcdoc and inherits the holder's policy, PAGE_POLICY, as Previews serves a kept page.
-export const pageTab = (name: string, html: string): string =>
-  `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PAGE_POLICY}"><title>${escapeHtml(name)}</title><style>html,body,iframe{display:block;width:100%;height:100%;margin:0;border:0}</style><iframe sandbox="allow-scripts" srcdoc="${escapeHtml(html)}" title="${escapeHtml(name)}"></iframe>`
+export const pageTab = (name: string, html: string, nonce?: string): string =>
+  `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PAGE_POLICY}"><title>${escapeHtml(name)}</title><style>html,body,iframe{display:block;width:100%;height:100%;margin:0;border:0}</style><iframe sandbox="allow-scripts" srcdoc="${escapeHtml(withNonce(html, nonce))}" title="${escapeHtml(name)}"></iframe>`
 
 // The page as the viewer's frame takes it: its doctype first when it opens with one, so it keeps its standards mode, then the policy, its own markup, and the keys script.
-export const asViewerPage = (html: string): string => {
+export const asViewerPage = (html: string, nonce?: string): string => {
   const doctype = /^\s*<!doctype[^>]*>/i.exec(html)?.[0] ?? ""
-  return `${doctype}<meta http-equiv="Content-Security-Policy" content="${PAGE_POLICY}">${html.slice(doctype.length)}\n<script>${VIEWER_KEYS}</script>`
+  return withNonce(
+    `${doctype}<meta http-equiv="Content-Security-Policy" content="${PAGE_POLICY}">${html.slice(doctype.length)}\n<script>${VIEWER_KEYS}</script>`,
+    nonce,
+  )
 }

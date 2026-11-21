@@ -552,14 +552,8 @@ describe("the slot-stuck alert", () => {
   const queue = (held: boolean, { older = false, took = false } = {}) => {
     const config = scratch()
     const ops = join(config, "playground", "ops")
-    const bin = join(config, "bin")
+    const { bin } = machine()
     mkdirSync(join(ops, "run-slot.waiters"), { recursive: true })
-    mkdirSync(bin)
-    writeFileSync(
-      join(bin, "sysctl"),
-      `#!/bin/bash\ncase "$2" in vm.loadavg) echo "{ 2.00 2.00 2.00 }" ;; esac\n`,
-    )
-    chmodSync(join(bin, "sysctl"), 0o755)
     for (const off of ["run-slot.3-off", "run-slot.4-off"]) writeFileSync(join(ops, off), "")
     if (held) {
       mkdirSync(join(ops, "run-slot-2"))
@@ -596,7 +590,7 @@ describe("the slot-stuck alert", () => {
     expect(alert.line).not.toContain("held by")
   })
 
-  // issue 1842: under the battery's or focus's hold can-take reads closed, so the alert names the hold the queue waits on, not a stall, and sends nothing
+  // issue 1842: under focus's hold can-take reads closed, so the alert names the hold the queue waits on, not a stall, and sends nothing
   const HOLD = `
 import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("run", sys.argv[1])
@@ -609,6 +603,7 @@ run.notify = lambda text, to="dispatcher": sent.append([to, text])
 run.log = lambda line: None
 for fn in ("stall", "ending_alert", "api_stop_alerts", "slot_idle_alerts", "docker_check", "memory_files", "heavy_jobs", "slot_alerts", "capped_alert"):
     setattr(run, fn, lambda *a, **k: [])
+run.heavy_cap = lambda: 4  # heavy_cap's run-slot.sh slots is a call no case here tests (issue 2839)
 run.herdr_sessions = lambda: []
 run.moving = lambda now_t=None: None
 os.makedirs(run.HERE, exist_ok=True)
@@ -619,7 +614,7 @@ run.cycle(state)
 alerts = json.load(open(os.path.join(run.OPS, "alerts-pending.json")))["alerts"]
 print(json.dumps({"alerts": [a for a in alerts if a["kind"] == "slot-stuck"], "sent": sent}))
 `
-  // two cycles over an ops folder `setup` fills, with `path` ahead of the run's PATH for a fake machine's load
+  // two cycles over an ops folder `setup` fills, with `path` ahead of the run's PATH for a fake machine's load, a load-2 one by default, so this Mac's own load never picks the path run-slot.sh takes (issue 2839)
   const cycled = async (setup: (ops: string) => void, path?: string) => {
     const config = scratch()
     const ops = join(config, "playground", "ops")
@@ -630,7 +625,7 @@ print(json.dumps({"alerts": [a for a in alerts if a["kind"] == "slot-stuck"], "s
         CLAUDE_CONFIG_DIR: config,
         PLAYGROUND_DATA_DIR: join(config, "playground"),
         HOME: process.env.HOME,
-        PATH: path ? `${path}:${process.env.PATH}` : process.env.PATH,
+        PATH: `${path ?? machine().bin}:${process.env.PATH}`,
         RUN_SLOT_SIZE: "medium",
         TZ: "UTC",
         UV_CACHE_DIR: process.env.UV_CACHE_DIR,
@@ -683,20 +678,6 @@ print(json.dumps({"alerts": [a for a in alerts if a["kind"] == "slot-stuck"], "s
     expect(sent[0][1]).toContain("could take it and takes nothing")
   })
 
-  test("names the battery's hold and sends no stall line", async () => {
-    const { alerts, sent } = await held(
-      "run-slot.battery",
-      "ops 2026-11-11T12:00:00Z 2099-01-01T00:00:00Z held for the row\n",
-    )
-    expect(sent).toEqual([])
-    expect(alerts).toHaveLength(1)
-    expect(alerts[0].case).toBe("hold")
-    expect(alerts[0].name).toBe("worker-m")
-    expect(alerts[0].line).toContain("held by the battery's red mark (run-slot.battery)")
-    expect(alerts[0].line).not.toContain("fit no open slot")
-    expect(alerts[0].line).not.toContain("could take")
-  })
-
   test("names the focus hold with its holder and sends no stall line", async () => {
     const { alerts, sent } = await held(
       "run-slot.focus",
@@ -719,14 +700,8 @@ print(json.dumps({"alerts": [a for a in alerts if a["kind"] == "slot-stuck"], "s
   test("names the free slot no waiter fits, with the head's own ticket units", async () => {
     const config = scratch()
     const ops = join(config, "playground", "ops")
-    const bin = join(config, "bin")
+    const { bin } = machine()
     mkdirSync(join(ops, "run-slot.waiters"), { recursive: true })
-    mkdirSync(bin)
-    writeFileSync(
-      join(bin, "sysctl"),
-      `#!/bin/bash\ncase "$2" in vm.loadavg) echo "{ 2.00 2.00 2.00 }" ;; esac\n`,
-    )
-    chmodSync(join(bin, "sysctl"), 0o755)
     for (const off of ["run-slot.3-off", "run-slot.4-off"]) writeFileSync(join(ops, off), "")
     mkdirSync(join(ops, "run-slot-2"))
     writeFileSync(
@@ -768,6 +743,7 @@ run.notify = lambda text, to="dispatcher": sent.append([to, text])
 run.log = lambda line: None
 for fn in ("stall", "ending_alert", "api_stop_alerts", "slot_idle_alerts", "docker_check", "memory_files", "heavy_jobs", "slot_alerts", "capped_alert"):
     setattr(run, fn, lambda *a, **k: [])
+run.heavy_cap = lambda: 4  # heavy_cap's run-slot.sh slots is a call no case here tests (issue 2839)
 run.herdr_sessions = lambda: []
 run.moving = lambda now_t=None: None
 os.makedirs(run.HERE, exist_ok=True)
@@ -791,6 +767,7 @@ clock[0] += 200
 run.cycle(state)
 print(json.dumps(sent))
 `
+  // issue 2839: each run-slot.sh head or can-take forks about 170 processes, 0.6 to 3.5 s apiece on a loaded Mac (measured), and this case makes 8: 8 x 3.5 s is 28 s, within 2 s of the 30 s default, so 60 s
   test("sends once per episode, and again for a new head ticket", async () => {
     const config = scratch()
     const ops = join(config, "playground", "ops")
@@ -807,7 +784,7 @@ print(json.dumps(sent))
         CLAUDE_CONFIG_DIR: config,
         PLAYGROUND_DATA_DIR: join(config, "playground"),
         HOME: process.env.HOME,
-        PATH: process.env.PATH,
+        PATH: `${machine().bin}:${process.env.PATH}`,
         TZ: "UTC",
         UV_CACHE_DIR: process.env.UV_CACHE_DIR,
         UV_PYTHON_INSTALL_DIR: process.env.UV_PYTHON_INSTALL_DIR,
@@ -828,7 +805,7 @@ print(json.dumps(sent))
     expect(sent[0][1]).toContain("run-slot-2 holds 3 units")
     expect(sent[0][1]).not.toContain("could take")
     expect(sent[1][1]).toContain("worker-big2")
-  })
+  }, 60_000)
 
   // the same episode's kind change: after the no-fit send the holder in run-slot-2 ends, the same head's can-take passes,
   // and the could-take line sends too, once, the two lines keyed per kind on the episode the head ticket holds
@@ -844,6 +821,7 @@ run.notify = lambda text, to="dispatcher": sent.append([to, text])
 run.log = lambda line: None
 for fn in ("stall", "ending_alert", "api_stop_alerts", "slot_idle_alerts", "docker_check", "memory_files", "heavy_jobs", "slot_alerts", "capped_alert"):
     setattr(run, fn, lambda *a, **k: [])
+run.heavy_cap = lambda: 4  # heavy_cap's run-slot.sh slots is a call no case here tests (issue 2839)
 run.herdr_sessions = lambda: []
 run.moving = lambda now_t=None: None
 os.makedirs(run.HERE, exist_ok=True)
@@ -859,6 +837,7 @@ clock[0] += 200
 run.cycle(state)
 print(json.dumps(sent))
 `
+  // issue 2839: 7 run-slot.sh calls, as the case above; with this 60 s taken out it ran past 30 s alone at load5 22 (measured), so 60 s
   test("sends the could-take line when the holder ends and the same head can take it", async () => {
     const config = scratch()
     const ops = join(config, "playground", "ops")
@@ -876,7 +855,7 @@ print(json.dumps(sent))
         CLAUDE_CONFIG_DIR: config,
         PLAYGROUND_DATA_DIR: join(config, "playground"),
         HOME: process.env.HOME,
-        PATH: process.env.PATH,
+        PATH: `${machine().bin}:${process.env.PATH}`,
         TZ: "UTC",
         UV_CACHE_DIR: process.env.UV_CACHE_DIR,
         UV_PYTHON_INSTALL_DIR: process.env.UV_PYTHON_INSTALL_DIR,
@@ -898,7 +877,7 @@ print(json.dumps(sent))
     expect(sent[0][1]).not.toContain("could take")
     expect(sent[1][1]).toContain("worker-big")
     expect(sent[1][1]).toContain("could take it and takes nothing")
-  })
+  }, 60_000)
 
   // 31 Oct: both alerts named a big session's ticket, the oldest, which ranks behind a newer medium one by design
   test("watches the queue's head, so an older big ticket behind a newer medium one fires nothing", async () => {
@@ -2140,5 +2119,34 @@ describe("the memory files alert and the memory trial (#1484)", () => {
   test("names the off session's note alone", async () => {
     const found = (await call(machineWith(), "memory_files")) as { line: string; name: string }[]
     expect(found.map((f) => f.name)).toEqual(["worker-off"])
+  })
+})
+
+// On Linux the live dashboard's 1355 proxy keeps its TLS marker, routes and CA in ~/.portless/fallback, so its URL and its health read come from the folder portlessDir() names (#2418).
+describe("the live dashboard's db reading", () => {
+  test("asks portless get in the folder portlessDir() names, and curl trusts that folder's CA", async () => {
+    const config = scratch()
+    const dashboard = join(config, "dashboard")
+    const pdir = join(config, "portless", "fallback")
+    const bin = join(config, "bin")
+    const log = join(config, "calls.log")
+    for (const dir of [dashboard, pdir, bin]) mkdirSync(dir, { recursive: true })
+    writeFileSync(join(pdir, "ca.pem"), "ca\n")
+    const stub = (name: string, body: string) => {
+      writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`)
+      chmodSync(join(bin, name), 0o755)
+    }
+    stub(
+      "bun",
+      `case "$*" in *setting.ts*) echo live-branch;; *portlessDir*) echo '${pdir}';; *) exit 1;; esac`,
+    )
+    stub("git", `printf 'worktree ${dashboard}\\nHEAD 0\\nbranch refs/heads/live-branch\\n'`)
+    stub("bunx", `echo "bunx $*|\${PORTLESS_STATE_DIR:-}" >> '${log}'; echo http://127.0.0.1:9`)
+    stub("curl", `echo "curl $*" >> '${log}'; echo '{"data":{"db":"ok"}}'`)
+    const env = { PATH: `${bin}:${process.env.PATH}`, PLAYGROUND_REPO: config }
+    expect(await callWith(env, config, "dashboard_db")).toBe("ok")
+    expect(readFileSync(log, "utf8")).toBe(
+      `bunx portless get api.playground|${pdir}\ncurl -s -m 5 --cacert ${pdir}/ca.pem http://127.0.0.1:9/api/health\n`,
+    )
   })
 })

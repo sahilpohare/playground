@@ -11,6 +11,7 @@ import {
   orderByStatus,
   rowLines,
   rowText,
+  runnerNote,
   runnerWhen,
   sentMessage,
   sessionsKey,
@@ -142,7 +143,7 @@ describe("liveAgents", () => {
     expect(liveAgents([agent("worker-a", { state: "idle" })], null)[0]?.state).toBe("idle")
   })
 
-  test("in the sidebar's order: managers, workers, runners; each group as the dashboard's board holds it, then the down ones", () => {
+  test("in the sidebar's order: managers, runners, workers; each group as the dashboard's board holds it, then the down ones", () => {
     const agents = [
       agent("runner-pride", { role: "runner" }),
       agent("worker-d", { sessionId: null, state: "down" }),
@@ -167,11 +168,11 @@ describe("liveAgents", () => {
     // Working before idle whatever the times; a tie keeps the board's order; the session that is down last.
     expect(liveAgents(agents, board).map((a) => a.name)).toEqual([
       "dispatcher",
+      "runner-pride",
       "worker-b",
       "worker-e",
       "worker-c",
       "worker-d",
-      "runner-pride",
     ])
   })
 
@@ -197,7 +198,7 @@ describe("liveAgents", () => {
     ])
   })
 
-  test("groups go as the sidebar's: managers, workers, runners, then a session outside the factory's names", () => {
+  test("groups go as the sidebar's: managers, runners, workers, then a session outside the factory's names", () => {
     const agents = [
       agent("stray", { role: "other" }),
       agent("runner-pride", { role: "runner" }),
@@ -206,8 +207,8 @@ describe("liveAgents", () => {
     ]
     expect(liveAgents(agents, null).map((a) => a.name)).toEqual([
       "builder",
-      "worker-a",
       "runner-pride",
+      "worker-a",
       "stray",
     ])
   })
@@ -227,7 +228,10 @@ type Pull = NonNullable<Agent["pr"]>
 const pull = (fields: Partial<Pull> = {}): Pull => ({
   approvals: 0,
   ci: "passing",
+  conflicts: false,
   draft: false,
+  gates: null,
+  head: "",
   number: 36,
   queued: false,
   reviewed: false,
@@ -278,7 +282,11 @@ describe("statusOf", () => {
     expect(phrase({ state: "working" })).toEqual({ text: "Working", tone: "normal" })
     expect(phrase({ state: "idle" })).toEqual({ text: "Idle", tone: "muted" })
     expect(phrase({ pr: pull({ ci: "failing" }) }).text).toBe("Fixing")
-    expect(phrase({ pr: pull({ score: "5/5" }), state: "idle" }).text).toBe("Ready")
+    expect(phrase({ pr: pull({ gates: [], score: "5/5" }), state: "idle" }).text).toBe("Ready")
+    expect(phrase({ pr: pull({ gates: ["tester"], score: "5/5" }), state: "idle" }).text).toBe(
+      "Gated · tester",
+    )
+    expect(phrase({ pr: pull({ score: "5/5" }), state: "idle" }).text).toBe("Idle")
     expect(phrase({ pr: pull({ approvals: 2 }), state: "idle" }).text).toBe("Waiting on approvals")
     expect(phrase({ parked: "held", state: "idle" })).toEqual({ text: "Parked", tone: "muted" })
     expect(phrase({ pr: pull({ state: "closed" }), state: "idle" }).text).toBe("Idle")
@@ -506,6 +514,7 @@ describe("status words", () => {
 
 describe("rowLines and rowText", () => {
   const pr = pull({
+    gates: [],
     number: 197,
     reviewed: true,
     score: "5/5",
@@ -814,7 +823,7 @@ describe("orderByStatus", () => {
         }),
         row("worker-idle", "idle"),
         row("worker-parked", "idle", { parked: "held for a ship" }),
-        row("worker-ready", "idle", { pr: pull({ number: 2, score: "5/5" }) }),
+        row("worker-ready", "idle", { pr: pull({ gates: [], number: 2, score: "5/5" }) }),
         row("worker-waiting", "idle", {
           pr: pull({ ci: "pending", number: 3 }),
         }),
@@ -923,7 +932,7 @@ describe("orderByStatus", () => {
         row("builder", "idle", { role: "manager", title: "Builder" }, { role: "manager" }),
         row("ops", "needs-you", { role: "manager", title: "Ops" }, { role: "manager" }),
       ]),
-    ).toEqual(["builder", "ops", "worker-a", "runner-a"])
+    ).toEqual(["builder", "ops", "runner-a", "worker-a"])
   })
 
   // Managers read Builder, Ops, Optimizer, Planner, and drag and drop reorders them.
@@ -1055,5 +1064,36 @@ describe("line 2 for managers and AI runners", () => {
   test("a worker's reads its model, then its state, with no name of its own", () => {
     const lines = rowLines(worker("worker-greed", "working", opus), agent("worker-greed"), NOW)
     expect(rowText(lines).second).toBe("Opus 5.5 high · Working")
+  })
+})
+
+// #2429: a runner's row says what it last did, so its work shows without opening it
+describe("runnerNote", () => {
+  const NOW = Date.parse("2026-11-16T18:30:00Z")
+
+  test("its latest report's first line, with the whole report and its age for the tooltip", () => {
+    const report = {
+      at: "2026-11-16T18:18:00Z",
+      text: "\n  Rolled canary 795c4c6  \nThe stack restarted clean.",
+    }
+    expect(runnerNote({ report, task: "Keep the dashboard up" }, NOW, "en")).toEqual({
+      full: `Report 12 min. ago: ${report.text.trim()}`,
+      line: "Rolled canary 795c4c6",
+    })
+    expect(runnerNote({ report: { at: null, text: "Done" }, task: null }, NOW, "en")).toEqual({
+      full: "Report: Done",
+      line: "Done",
+    })
+  })
+
+  test("its roster task when it has no report, and nothing when it has neither", () => {
+    expect(
+      runnerNote({ report: null, task: "Keep the dashboard up\non canary" }, NOW, "en"),
+    ).toEqual({
+      full: "Task: Keep the dashboard up\non canary",
+      line: "Keep the dashboard up",
+    })
+    expect(runnerNote({ report: { at: null, text: "  " }, task: null }, NOW, "en")).toBeNull()
+    expect(runnerNote(null, NOW, "en")).toBeNull()
   })
 })

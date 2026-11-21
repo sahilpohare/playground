@@ -7,8 +7,8 @@ describe("ROLE_OPTIONS", () => {
     expect(ROLE_OPTIONS.map(({ value }) => value)).toEqual([
       "Dispatchers",
       "Orchestrators",
-      "Subagents",
       "AI Runners",
+      "Subagents",
       "Other",
     ])
   })

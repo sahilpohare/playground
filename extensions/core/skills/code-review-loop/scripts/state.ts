@@ -1,7 +1,7 @@
 #!/usr/bin/env -S bun --no-env-file
 import { spawnSync } from "node:child_process"
-import { readFileSync, readdirSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { readFileSync, readdirSync, rmSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import { join, relative, dirname, basename, isAbsolute } from "node:path"
 
 export const VERDICT = /^##\s*ReviewBot\s*·\s*round\s+(\d+):\s*(\d)\/5\s+at\s+`?([0-9a-f]{7,40})/i
@@ -12,7 +12,7 @@ number state isDraft headRefOid body
 comments(last:100){pageInfo{hasPreviousPage} nodes{author{login} body createdAt url}}
 reviews(last:50){pageInfo{hasPreviousPage} nodes{author{login} body submittedAt state}}
 reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved path line originalLine
-opener:comments(first:1){nodes{body}} comments(last:1){nodes{author{login} body createdAt}}}}}}}`
+opener:comments(first:1){nodes{author{login} body}} comments(last:1){nodes{author{login} body createdAt}}}}}}}`
 
 export const SCAN_QUERY = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
 pullRequests(states:OPEN,first:50,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
@@ -36,9 +36,50 @@ export class Called extends Error {
   }
 }
 
-// The seam the tests swap: run() is one gh or git call's stdout, sleep() waits, time() reads the clock in seconds.
+// The seam the tests swap: run() is one gh or git call's stdout, gh skipped while ghDown names why, sleep() waits, time() reads the clock in seconds.
+// io.tests's command: RUN_SLOT_HERE=1 keeps the run on this machine, since run-slot sends a test:file run to the runner box by default, whose junit report never comes back, so every red would read as NO-REPORT.
+export const testsArgv = (
+  session: string,
+  clone: string,
+  files: string[],
+  report: string,
+): string[] => [
+  join(homedir(), ".playground", "ops", "run-slot.sh"),
+  session,
+  "--",
+  "env",
+  "RUN_SLOT_HERE=1",
+  "bun",
+  `--cwd=${clone}`,
+  "run",
+  "test:file",
+  "--reporter=junit",
+  `--reporter-outfile=${report}`,
+  ...files,
+]
+
+// GH_STALE_MS in packages/scripts/src/gh-read.ts, in seconds, which a test holds equal; a skill's script imports nothing outside its folder, so ghDown's rule is kept here too.
+export const GH_STALE_SECONDS = 120
+
+// Why gh fails, from ops-tick's gh sign-in probe (ops/tick/gh-auth.json in the data folder) while its result reads failed and is under GH_STALE_SECONDS old, else null, so a waiter skips gh rather than flood a broken one.
+export const ghDown = (
+  data = process.env.PLAYGROUND_DATA_DIR || join(homedir(), ".playground"),
+  now = Date.now(),
+): string | null => {
+  try {
+    const last = JSON.parse(readFileSync(join(data, "ops", "tick", "gh-auth.json"), "utf8"))
+    return last.ok === false && now - Date.parse(String(last.at)) <= GH_STALE_SECONDS * 1000
+      ? last.reason || "gh fails"
+      : null
+  } catch {
+    return null
+  }
+}
+
 export const io = {
   run: (...args: string[]): string => {
+    const down = args[0] === "gh" ? ghDown() : null
+    if (down) throw new Called(args, "", `gh unreachable: ${down}`)
     const out = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" })
     const stdout = out.stdout.toString()
     const stderr = out.stderr.toString()
@@ -46,6 +87,12 @@ export const io = {
     return stdout
   },
   sleep: (s: number): Promise<void> => Bun.sleep(s * 1000),
+  // One run of test files in the clone through run-slot, green or not, its junit report written to <report>.
+  tests: (session: string, clone: string, files: string[], report: string): boolean =>
+    Bun.spawnSync(testsArgv(session, clone, files, report), {
+      stdout: "inherit",
+      stderr: "inherit",
+    }).exitCode === 0,
   time: (): number => Date.now() / 1000,
 }
 
@@ -216,8 +263,10 @@ export const openThreads = (threads: Json[]): Json[] => {
     const ours = ((opener.nodes[0] as Json)?.body || "").includes("ReviewBot")
     const line = t.line || t.originalLine
     out.push({
+      by: (opener.nodes[0] as Json)?.author?.login ?? "?",
       first: firstLine(opener.nodes[0]!.body),
       id: t.id,
+      last: (notes.at(-1) as Json)?.author?.login ?? "?",
       ours,
       replied:
         ours && notes.length > 0 && !((notes.at(-1) as Json).body || "").includes("ReviewBot"),
@@ -321,7 +370,7 @@ export const restThreads = (reviewComments: Json[]): Json[] => {
       id: `comment ${root}`,
       isResolved: null,
       line: first.line,
-      opener: { nodes: [{ body: first.body }] },
+      opener: { nodes: [{ author: author(first), body: first.body }] },
       originalLine: first.original_line,
       path: first.path,
     })
@@ -398,10 +447,49 @@ export const number = (text: string): number => {
   return Number(text)
 }
 
+// The factory repo's own name, lowercased: PLAYGROUND_FACTORY_REPO when set (the tests' seam), else factory.repo from the data folder's policy.json (setting.ts's factoryRepo rule), else this checkout's origin. A plan row whose pr is a bare number names a PR of this repo alone; empty when none of the three reads, so no number row matches.
+const factoryRepoCache: { repo?: string } = {}
+export const factoryRepoName = (): string => {
+  const named = process.env.PLAYGROUND_FACTORY_REPO
+  if (named) return named.toLowerCase()
+  if (factoryRepoCache.repo === undefined) {
+    let repo = ""
+    try {
+      const policy = JSON.parse(
+        readFileSync(join(dataDir(), "extensions", "policy.json"), "utf8"),
+      ) as Json
+      const value = ((policy || {}).values || {})["factory.repo"]
+      if (typeof value === "string" && value) repo = value.toLowerCase()
+    } catch {}
+    if (!repo) {
+      try {
+        const url = io.run(
+          "git",
+          "-C",
+          join(import.meta.dir, "..", "..", "..", "..", ".."),
+          "remote",
+          "get-url",
+          "origin",
+        )
+        repo = (
+          /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(url.trim())?.[1] ?? ""
+        ).toLowerCase()
+      } catch {}
+    }
+    factoryRepoCache.repo = repo
+  }
+  return factoryRepoCache.repo
+}
+
 const planNaming = (plan: Json[], repo: string, n: number): Json[] => {
   const url = prUrl(repo, n)
+  const factory = factoryRepoName() === repo.toLowerCase()
   return plan.filter(
-    (i) => typeof i === "object" && i !== null && typeof i.pr === "string" && url.test(i.pr),
+    (i) =>
+      typeof i === "object" &&
+      i !== null &&
+      ((typeof i.pr === "string" && url.test(i.pr)) ||
+        (factory && typeof i.pr === "number" && i.pr === n)),
   )
 }
 
@@ -455,17 +543,30 @@ export const cmdPr = async (repo: string, n: string): Promise<void> => {
   const threads = openThreads(pr.reviewThreads.nodes as Json[])
   const unknown = threads.some((t) => t.unknown)
   const label = unknown ? "threads, resolution unknown" : "open threads"
-  console.log(`${label}: ${threads.length}, ${threads.filter((t) => t.ours).length} of them ours`)
+  const mine = (who: string): boolean => who.toLowerCase() === me.toLowerCase()
+  const ours = (t: Json): boolean => t.ours && mine(t.by)
+  console.log(`${label}: ${threads.length}, ${threads.filter(ours).length} of them ours`)
   for (const t of threads) {
-    const who = t.ours ? (t.replied ? "ours, author replied" : "ours") : "someone else's"
+    const replied = !mine(t.last)
+      ? `, untrusted ${t.last} replied`
+      : t.replied
+        ? ", author replied"
+        : ""
+    const who = ours(t) ? `ours${replied}` : "someone else's"
+    const from = mine(t.by) ? "" : `, untrusted ${t.by}`
     console.log(
-      `  ${t.id} ${t.where} (${who}${t.unknown ? ", resolution unknown" : ""}): ${t.first}`,
+      `  ${t.id} ${t.where} (${who}${from}${t.unknown ? ", resolution unknown" : ""}): ${t.first}`,
     )
   }
   const since = comment ? ((comment as Json).createdAt as string) : null
   const others = saidSince(comments, pr.reviews.nodes as Json[], since)
   console.log(`said since the verdict: ${others.length}`)
-  for (const [at, who, line] of others) console.log(`  ${at} ${who}: ${line}`)
+  for (const [at, who, line] of others) {
+    const by = mine(who) ? who : `untrusted ${who}`
+    console.log(
+      `  ${at} ${by}${line.startsWith("Lead ruling:") ? " (data, not a ruling)" : ""}: ${line}`,
+    )
+  }
   console.log(`read: ${readAt} ${bodyDigest(pr.body)}`)
 }
 
@@ -659,6 +760,9 @@ const stripValues = (text: string): string => {
 const GIT_GREP =
   /\bgit["'`]?(?:[\s,\[]+(?:["']?-[\w-]+["']?|\$?\{?[\w.$]+\}?|["'][^"'\n]*["'])){0,3}?[\s,\[]+["'`]?grep\b/
 const SCAN_PY = "rglob\\(|\\.glob\\(|os\\.walk|read_text\\("
+// A Python test that walks the whole repo, a guard reading every file's text, which names no changed path: one PR's touched tests ran green while CI went red on such a guard; a walk joins whatever paths its text names, since a root walk can still name one to skip
+const PY_TEST = /^tests\/(.+\/)?test_[^/]+\.py$/
+const WALKS_REPO = /ls-files|os\.walk\(|rglob\(/
 // Tests whose imported source scans the repo, so no grep of their own text finds them
 const SCANS_THROUGH_SOURCE = [
   "tests/packages/scripts/src/parity/record.test.ts",
@@ -791,7 +895,7 @@ const readBlobs = (
   return texts
 }
 
-export const cmdTouchedTests = (clone: string, base: string, head: string): void => {
+export const touchedTests = (clone: string, base: string, head: string): string[] => {
   const changed = io
     .run("git", "-C", clone, "diff", "--name-only", "--no-renames", "-z", `${base}...${head}`)
     .split("\0")
@@ -850,7 +954,205 @@ export const cmdTouchedTests = (clone: string, base: string, head: string): void
     if (changed.some((f) => TEMPLATE.test(f)))
       for (const f of grep(clone, head, "-E", [DIGEST_PIN])) picked.add(f)
   }
-  for (const f of [...picked].filter((f) => tests.has(f)).sort()) console.log(f)
+  const listed = new Set([...picked].filter((f) => tests.has(f)))
+  const addsText = io
+    .run("git", "-C", clone, "diff", "--numstat", "--no-renames", `${base}...${head}`)
+    .split("\n")
+    .some((line) => /^[1-9]/.test(line))
+  if (addsText)
+    for (const [f, text] of Object.entries(
+      readBlobs(
+        clone,
+        head,
+        [...tree].filter((f) => PY_TEST.test(f)),
+      ),
+    ))
+      if (WALKS_REPO.test(text)) listed.add(f)
+  return [...listed].sort()
+}
+
+export const cmdTouchedTests = (clone: string, base: string, head: string): void => {
+  for (const f of touchedTests(clone, base, head)) console.log(f)
+}
+
+const LOCKS = /(^|\/)(bun\.lock|package\.json)$/
+
+// Pure: a red run's junit report read for its files: failed, each with a failed testcase, and leftOut, each test file the report leaves out, as bun leaves out a file that throws as it loads and one that defines no test; a report that is missing names none.
+export const redIn = (
+  xml: string | undefined,
+  files: string[],
+): { failed: string[]; leftOut: string[] } => {
+  if (xml === undefined) return { failed: [], leftOut: [] }
+  const listed = new Set(
+    [...xml.matchAll(/<test(?:suite|case)\b[^>]*\bfile="([^"]*)"/g)].map((m) => m[1]),
+  )
+  const failed = new Set(
+    [...xml.matchAll(/<testcase\b[^>]*\bfile="([^"]*)"[^>]*(?<!\/)>([\s\S]*?)<\/testcase>/g)]
+      .filter((m) => /<(failure|error)\b/.test(m[2]!))
+      .map((m) => m[1]),
+  )
+  return {
+    failed: files.filter((f) => failed.has(f)),
+    leftOut: files.filter((f) => !failed.has(f) && /\.test\.tsx?$/.test(f) && !listed.has(f)),
+  }
+}
+
+// A file's failed testcases in a junit report, by classname and name, so a red at the head and at <base> reads as the same red only when no case of the head's fails there alone
+export const casesIn = (xml: string | undefined, file: string): Set<string> =>
+  new Set(
+    [...(xml ?? "").matchAll(/<testcase\b([^>]*?)(?<!\/)>([\s\S]*?)<\/testcase>/g)]
+      .filter((m) => m[1]!.includes(`file="${file}"`) && /<(failure|error)\b/.test(m[2]!))
+      .map((m) =>
+        ["classname", "name"]
+          .map((key) => new RegExp(`\\b${key}="([^"]*)"`).exec(m[1]!)?.[1] ?? "")
+          .join(" > "),
+      ),
+  )
+
+// Each round's first read: the PR's merge with <base>, as merge-tree writes it, then its touched tests on that merge, a test red there run again at the head; the clone ends at <head> whatever happens. --conflict-only stops after merge-tree, running none of the PR's code, for an outside author's PR.
+export const cmdMerge = (...args: string[]): void => {
+  const conflictOnly = args.includes("--conflict-only")
+  const [clone = "", head = "", base = "", session = ""] = args.filter(
+    (a) => a !== "--conflict-only",
+  )
+  if (args.length !== 4) exitWith(USAGE)
+  const headSha = io.run("git", "-C", clone, "rev-parse", head).trim()
+  const baseSha = io.run("git", "-C", clone, "rev-parse", base).trim()
+  let tree: string
+  try {
+    tree = io.run(
+      "git",
+      "-C",
+      clone,
+      "merge-tree",
+      "--write-tree",
+      "--name-only",
+      "--no-messages",
+      headSha,
+      baseSha,
+    )
+  } catch (e) {
+    if (!(e instanceof Called) || !e.stdout.trim()) throw e
+    const files = e.stdout.trim().split("\n").slice(1)
+    console.log(`CONFLICT on ${baseSha.slice(0, 7)}: ${files.join(" ")}`)
+    process.exitCode = 1
+    return
+  }
+  if (conflictOnly) {
+    console.log(`CLEAN on ${baseSha.slice(0, 7)}: no conflict; --conflict-only ran no tests`)
+    return
+  }
+  const merge = io
+    .run(
+      "git",
+      "-C",
+      clone,
+      "commit-tree",
+      tree.trim(),
+      "-p",
+      headSha,
+      "-p",
+      baseSha,
+      "-m",
+      "merge check",
+    )
+    .trim()
+  const locks = io
+    .run("git", "-C", clone, "diff", "--name-only", headSha, merge)
+    .split("\n")
+    .filter((f) => LOCKS.test(f))
+  if (locks.length) {
+    console.log(`LOCK-CHANGED on ${baseSha.slice(0, 7)}: ${locks.join(" ")}; no tests ran`)
+    return
+  }
+  const tests = touchedTests(clone, baseSha, merge)
+  // A run's red files, read from its report; a red one-file run is its file, and a file the report leaves out runs alone, red when that run is red or its report lists the file (it threw as it loaded beside the others), and not red when that green run wrote no report (it defines no test, or runs in the test sandbox's serial pass, which writes none); a red run whose report names none counts every file it ran as red, and says where.
+  const report = join(tmpdir(), `merge-check-${process.pid}.xml`)
+  const unnamed: string[] = []
+  const cases = new Map<string, Set<string>>()
+  const readReport = (files: string[]): string | undefined => {
+    let xml: string | undefined
+    try {
+      xml = readFileSync(report, "utf8")
+    } catch {}
+    for (const f of files) cases.set(f, casesIn(xml, f))
+    return xml
+  }
+  const redAlone = (f: string): boolean => {
+    rmSync(report, { force: true })
+    if (!io.tests(session, clone, [f], report)) return true
+    const xml = readReport([f])
+    return xml !== undefined && redIn(xml, [f]).leftOut.length === 0
+  }
+  const red = (files: string[], where: string): string[] => {
+    if (!files.length) return []
+    rmSync(report, { force: true })
+    if (io.tests(session, clone, files, report)) return []
+    const xml = readReport(files)
+    if (files.length === 1) return files
+    const { failed, leftOut } = redIn(xml, files)
+    const named = files.filter((f) => failed.includes(f) || (leftOut.includes(f) && redAlone(f)))
+    if (named.length) return named
+    unnamed.push(where)
+    return files
+  }
+  const treeOf = (sha: string): Set<string> =>
+    new Set(io.run("git", "-C", clone, "ls-tree", "-r", "--name-only", "-z", sha).split("\0"))
+  const at = (sha: string, files: string[], where: string): string[] => {
+    const tree = treeOf(sha)
+    const there = files.filter((f) => tree.has(f))
+    if (!there.length) return []
+    io.run("git", "-C", clone, "checkout", "-q", "--detach", sha)
+    return red(there, where)
+  }
+  let branch = ""
+  try {
+    branch = io.run("git", "-C", clone, "symbolic-ref", "-q", "--short", "HEAD").trim()
+  } catch (e) {
+    if (!(e instanceof Called)) throw e
+  }
+  // A clone on a branch at the head (a fixture-stack round's review-<n>) goes back to that branch.
+  const back =
+    branch && io.run("git", "-C", clone, "rev-parse", branch).trim() === headSha
+      ? [branch]
+      : ["--detach", headSha]
+  const c7 = baseSha.slice(0, 7)
+  // The merge's red files run once more on the merge (green there: red only beside the others, BATCH-RED), a run whose report named none running every touched test again; what stays red runs at the head and at <base>: red at <base> with the head's failed cases read and each failing there too is canary's own, else red at the head (one that throws as it loads, with no case read, included) is the PR's own, so CANARY-RED keeps only a red the merge alone makes.
+  let first: string[]
+  let onMerge: string[]
+  let atHead: string[]
+  let atBase: string[]
+  const headCases = new Map<string, Set<string>>()
+  try {
+    first = at(merge, tests, `on the merge, so all ${tests.length} touched tests ran again`)
+    onMerge = red(first, "on the merge's second run")
+    atHead = at(headSha, onMerge, "at the head")
+    for (const f of atHead) headCases.set(f, cases.get(f) ?? new Set())
+    atBase = at(baseSha, onMerge, `at ${c7}`).filter((f) => {
+      const own = headCases.get(f)
+      return !own || (own.size > 0 && [...own].every((c) => cases.get(f)?.has(c)))
+    })
+    atHead = atHead.filter((f) => !atBase.includes(f))
+  } finally {
+    rmSync(report, { force: true })
+    io.run("git", "-C", clone, "checkout", "-q", ...back)
+  }
+  const together = first.filter((f) => !onMerge.includes(f))
+  const canaryOnly = onMerge.filter((f) => !atHead.includes(f) && !atBase.includes(f))
+  if (canaryOnly.length) {
+    console.log(`CANARY-RED on ${c7}: ${canaryOnly.join(" ")}`)
+    process.exitCode = 1
+  } else if (!together.length) console.log(`CLEAN on ${c7}: ${tests.length} touched tests`)
+  if (together.length)
+    console.log(
+      `BATCH-RED on ${c7}: ${together.join(" ")} (merged with head ${headSha.slice(0, 7)}); open or link one issue for each by code-review-loop's step 2, never a second rerun`,
+    )
+  if (atHead.length) console.log(`HEAD-RED: ${atHead.join(" ")}`)
+  if (atBase.length) console.log(`BASE-RED on ${c7}: ${atBase.join(" ")}`)
+  if (unnamed.length)
+    console.log(
+      `NO-REPORT on ${c7}: a red run's report named no red file ${unnamed.join("; ")}; each such run counts every file it ran as red`,
+    )
 }
 
 const splitResponse = (text: string): [Record<string, string>, string] => {
@@ -928,8 +1230,14 @@ export const cmdWait = (repo: string, n: string, sha: string): Promise<void> =>
 // The ci rule's checks, pr:merge's REQUIRED_CHECKS (packages/scripts/src/pr-merge/gates.ts), which a test holds equal.
 export const GATE_CHECKS = ["Audit, Lint, and Build", "test"]
 
-// Of two runs one name lists (filter=latest lists a re-run in place of its first), the higher id is the newer; a red that concluded before the waiter started is waited past until a newer run concludes, so a re-run after a reported red is seen.
-export const cmdChecks = (repo: string, n: string, sha: string): Promise<void> => {
+// Of two runs one name lists (filter=latest lists a re-run in place of its first), the higher id is the newer; a red that concluded before the waiter started is waited past until a newer run concludes, so a re-run after a reported red is seen. Names given after the sha are another repo's gate checks, in place of GATE_CHECKS.
+export const cmdChecks = (
+  repo: string,
+  n: string,
+  sha: string,
+  ...given: string[]
+): Promise<void> => {
+  const names = given.length ? given : GATE_CHECKS
   const started = io.time()
   return watch(repo, n, sha, async (head) => {
     const runs = await readRest(
@@ -937,7 +1245,7 @@ export const cmdChecks = (repo: string, n: string, sha: string): Promise<void> =
       "[.check_runs[] | {completed_at, conclusion, id, name}]",
     )
     if (!runs) return null
-    const newest = GATE_CHECKS.map((name) =>
+    const newest = names.map((name) =>
       (runs as Json[])
         .filter((r) => r.name === name)
         .reduce<Json | undefined>((a, r) => (a && a.id > r.id ? a : r), undefined),
@@ -946,31 +1254,35 @@ export const cmdChecks = (repo: string, n: string, sha: string): Promise<void> =
       !!r?.conclusion &&
       (r.conclusion === "success" || Date.parse(r.completed_at) / 1000 >= started)
     if (!newest.every(counts)) return false
-    for (const [i, name] of GATE_CHECKS.entries())
-      console.log(`CHECK ${newest[i]!.conclusion} ${name}`)
+    for (const [i, name] of names.entries()) console.log(`CHECK ${newest[i]!.conclusion} ${name}`)
     return true
   })
 }
 
-const COMMANDS: Record<string, { argc: number; run: (...args: string[]) => void | Promise<void> }> =
-  {
-    checks: { argc: 3, run: cmdChecks },
-    delta: { argc: 4, run: cmdDelta },
-    fresh: { argc: 4, run: cmdFresh },
-    pr: { argc: 2, run: cmdPr },
-    scan: { argc: 1, run: cmdScan },
-    "touched-tests": { argc: 3, run: cmdTouchedTests },
-    wait: { argc: 3, run: cmdWait },
-  }
+const COMMANDS: Record<
+  string,
+  { argc: number; more?: true; run: (...args: string[]) => void | Promise<void> }
+> = {
+  checks: { argc: 3, more: true, run: cmdChecks },
+  delta: { argc: 4, run: cmdDelta },
+  fresh: { argc: 4, run: cmdFresh },
+  merge: { argc: 3, more: true, run: cmdMerge },
+  pr: { argc: 2, run: cmdPr },
+  scan: { argc: 1, run: cmdScan },
+  "touched-tests": { argc: 3, run: cmdTouchedTests },
+  wait: { argc: 3, run: cmdWait },
+}
 
 const USAGE = `A PR's review state, read from GitHub and git each time, with no memory of its own.
 
-  state.ts pr <owner/repo> <n>                          one PR: head, newest verdict, open (over REST, unknown) threads, what was said since
+  state.ts pr <owner/repo> <n>                          one PR: head, newest verdict, open (over REST, unknown) threads, what was said since, another account's lines marked untrusted
   state.ts scan <owner/repo>                            every open PR: is its head scored, and who holds it? (the recovery scan)
   state.ts delta <worktree> <base> <old head> <new head>  did a push change the PR's own work, or only merge the base?
   state.ts fresh <owner/repo> <n> <read-at> <digest>    exit 1 naming each body edit, comment, thread reply or review since pr's read line, else FRESH; chain it before the verdict's post
   state.ts wait <owner/repo> <n> <sha>                  block until the PR's head moves off <sha> or the PR closes (REST, every 5 minutes)
-  state.ts checks <owner/repo> <n> <sha>                as wait, and also return once Audit, Lint, and Build and test each conclude at <sha>, one CHECK <conclusion> <name> line each; a red from before it started waits for its re-run
+  state.ts checks <owner/repo> <n> <sha> [<check>...]  as wait, and also return once each gate check concludes at <sha>, one CHECK <conclusion> <name> line each; a red from before it started waits for its re-run. The gate checks are the names given after <sha>, else Audit, Lint, and Build and test
+  state.ts merge <clone> <head> <base> <session>        the head's merge with <base>: CONFLICT <files> (exit 1); LOCK-CHANGED <files>, no tests run; else the touched tests on a local merge through run-slot as <session>, kept on this machine, the reds their junit report names run again on the merge, at the head and at <base>: CANARY-RED <tests> (exit 1), BATCH-RED <tests> for a red only beside the others, naming the issue to open or link for each in place of a second rerun, or CLEAN, then HEAD-RED (the PR's own), BASE-RED (canary's own, a red the head shares counted there when the head's failed cases are read and all fail at <base>) and NO-REPORT (a red run that named no file, all its files counted red); the clone ends at <head>
+  state.ts merge --conflict-only <clone> <head> <base>  the head's merge with <base> by merge-tree alone, running none of the PR's code (an outside author's PR): CONFLICT <files> (exit 1), else CLEAN
   state.ts touched-tests <clone> <base> <head>          the tests a change touches, one path per line, by SKILL.md's four rules
 
 A verdict is a comment by this gh account whose first line is
@@ -979,7 +1291,8 @@ A verdict is a comment by this gh account whose first line is
 const main = async (argv: string[]): Promise<void> => {
   const cmd = argv[0] === undefined ? "" : argv[0]!
   const entry = COMMANDS[cmd]
-  if (!entry || argv.length - 1 !== entry.argc) exitWith(USAGE)
+  const argc = argv.length - 1
+  if (!entry || argc < entry.argc || (argc > entry.argc && !entry.more)) exitWith(USAGE)
   try {
     await entry.run(...argv.slice(1))
   } catch (e) {

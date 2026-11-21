@@ -8,7 +8,6 @@ import { COMMANDS, WAITING, machine, shim, stop, subshells, waiter } from "./run
 setDefaultTimeout(300_000)
 
 // issue 1654: one look's process starts climbed with queue depth, 21 a ticket over a base of about 516 (measured at canary 628d629: 516 at depth 0, 936 at depth 20), because ordered_waiters paid a printf|cut and a stat per ticket and first_waiter paid a cat per ticket it walked, so a full folder made every look about twice the process starts of an empty one; this row bounds one head waiter's look beside 20 ranked tickets within a small margin of one beside none. The look's segment is counted from its trace, the external commands it runs and the subshells it enters, from look_mark to the sleep that ends it, since a time window would count the polls that land in it, which varies with the box's load
-type Machine = ReturnType<typeof machine>
 const EXECS = new Set(COMMANDS)
 // `line` is the tickets' holder line: a medium beside 6 held units does not fit, so those rows walk the whole order, while the small rows name a pick at their first ticket
 const look = async (depth: number, line = "s2 21 1 small") => {

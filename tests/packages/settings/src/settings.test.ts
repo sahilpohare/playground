@@ -44,8 +44,6 @@ describe("defineSettings", () => {
         .map(({ key }) => key)
         .filter((key) => !key.startsWith("jobs.")),
     ).toEqual([
-      "battery.alert",
-      "battery.ask",
       "channel.skipUser",
       "channel.slackId",
       "clock.ownerZone",
@@ -63,6 +61,7 @@ describe("defineSettings", () => {
       "gates.glmSwapinsMax",
       "gates.memoryFreeMin",
       "gates.reviewReserve",
+      "gates.sessionCap",
       "gates.smallReserve",
       "gates.startsWindow",
       "github.pollMinutes",
@@ -70,6 +69,16 @@ describe("defineSettings", () => {
       "harness.alpha",
       "live.branch",
       "live.container",
+      "localModels.boxLanes",
+      "localModels.boxRunGiB",
+      "localModels.hereModel",
+      "localModels.hereReserveGiB",
+      "localModels.idleMinutes",
+      "localModels.machine",
+      "localModels.maxFirstTokenSeconds",
+      "localModels.minTps",
+      "localModels.models",
+      "localModels.peerModel",
       "models.checker",
       "models.claude",
       "models.default",
@@ -79,6 +88,7 @@ describe("defineSettings", () => {
       "owner.names",
       "owner.voice",
       "paths.codeRoot",
+      "paths.factoryHomes",
       "release.hours",
       "release.merges",
       "sessions.aliases",
@@ -97,8 +107,16 @@ describe("defineSettings", () => {
       "usage.accounts",
       "usage.keychainService",
       "usage.switchAccount",
+      "wa.alert",
+      "wa.alertCheck",
+      "wa.alertDelayMinutes",
       "wa.device",
+      "wa.guestPolicy",
       "wa.owner",
+      "wa.quietEndHour",
+      "wa.quietStartHour",
+      "wa.replyPolicy",
+      "yard.logReaders",
     ])
     const zone = settingFields().find(({ key }) => key === "clock.ownerZone")!.field.schema
     expect(zone.safeParse("Asia/Kolkata").success).toBe(true)
@@ -108,6 +126,13 @@ describe("defineSettings", () => {
     const set = settingsFor([{ key: "fixture.limit", scope: "me", value: 7 }], "me")
     expect(fixture.get(set, "fixture.limit")).toBe(7)
     expect(set.schemaVersion).toBe(SCHEMA_VERSION)
+  })
+
+  test("yard.logReaders binds each bot's login to the DM it was made with (#1888)", () => {
+    const readers = settingFields().find(({ key }) => key === "yard.logReaders")!.field.schema
+    expect(readers.safeParse({ "scout[bot]": crypto.randomUUID() }).success).toBe(true)
+    expect(readers.safeParse(["scout[bot]"]).success).toBe(false)
+    expect(readers.safeParse({ scout: crypto.randomUUID() }).success).toBe(false)
   })
 
   test("refuses a key or an alias defined twice, and a default its schema refuses", () => {

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 
-// Made-up numbers alone: the owner's, a stranger's and the spare phone's, none a real one.
+// Made-up numbers alone: the owner's, a stranger's, the spare phone's and the alert number's, none a real one.
+export const ALERT = "+15550100003"
 export const OWNER = "+15550100001"
 export const STRANGER = "+15550100777"
 export const SPARE = "+15550100002"
@@ -8,7 +9,13 @@ export const jid = (e164: string) => `${e164.slice(1)}@s.whatsapp.net`
 // A group's chat id, by WhatsApp's group suffix.
 export const groupJid = (id: string) => `${id}@g.us`
 
-type Content = { linkPreview?: null; text: string }
+// a text's, a file's, a poll's or a reaction's message, as ops-wa's Content holds them
+type Content = {
+  linkPreview?: null
+  poll?: { messageSecret: Uint8Array; name: string; selectableCount: number; values: string[] }
+  react?: { key: { fromMe: boolean; id: string; remoteJid: string }; text: string }
+  text?: string
+} & Record<string, unknown>
 
 // A Baileys socket held in memory, answering the calls ops-wa makes: its events are fired by the test, each send and pairing code request recorded, and end and logout close it as Baileys does.
 export function fakeSocket(registered = true) {
@@ -36,6 +43,8 @@ export function fakeSocket(registered = true) {
       return { key: { id: `m${sent.length}` } }
     },
     sendPresenceUpdate: async () => void calls.push("sendPresenceUpdate"),
+    // the linked device's own chat id, a device of the spare phone's number
+    user: { id: jid(SPARE).replace("@", ":7@") },
   }
   const message = (from: string, text: string, extra: Record<string, unknown> = {}) => ({
     key: { fromMe: false, id: `in${Math.random()}`, remoteJid: from, ...extra },

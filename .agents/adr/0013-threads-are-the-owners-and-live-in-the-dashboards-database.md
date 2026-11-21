@@ -18,5 +18,5 @@ Four choices differ from zerosdk or are costly to reverse:
 
 - Read state is the one owner's, as the dashboard has one owner; read state per person waits for a second.
 - The live dashboard's database takes the table on its next roll onto canary, so the migration is additive only: a new table, three nullable columns and one partial index.
-- A fixture stack's made-up threads are written by `bun run ingest`, never by a read, and only on a fixture source (`.agents/dashboard/asks.md`).
+- A fixture stack's made-up threads are written by `bun run ingest` and, while the thread table is empty, by the API's start; never by a read, and only on a fixture source (`.agents/dashboard/asks.md`).
 - A later change routes a line by a leading `[thread:<id>]` marker as ingest stores it, so the session's own replies route too, not only the owner's and a peer's messages; it needs no column beyond `thread_id` and `thread_seq` (`.agents/dashboard/asks.md`, Threads).

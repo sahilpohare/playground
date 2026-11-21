@@ -138,4 +138,9 @@ export const groups: Group[] = [
   },
 ]
 
-export const allowed: string[] = ["a git worktree list read by an awk whose regex reads as a glob"]
+// PG-2173: an awk program with no string, no | and nothing awkRuns finds is text on a line read whole, and git alone writes nothing in the root here
+export const allowed: string[] = [
+  "a git worktree list read by an awk whose regex reads as a glob",
+  "git given a word the hook cannot read, before an awk whose regex reads as a glob",
+  "git worktree prune, which writes, before an awk whose regex reads as a glob",
+]

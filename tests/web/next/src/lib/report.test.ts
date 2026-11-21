@@ -93,7 +93,10 @@ describe("laneNow", () => {
     const pr = {
       approvals: 0,
       ci: "passing" as const,
+      conflicts: false,
       draft: false,
+      gates: null,
+      head: "",
       number: 109,
       queued: false,
       reviewed: true,
@@ -123,7 +126,10 @@ describe("laneNow", () => {
     const pr = {
       approvals: 0,
       ci: "passing" as const,
+      conflicts: false,
       draft: false,
+      gates: null,
+      head: "",
       number: 90,
       queued: false,
       reviewed: false,

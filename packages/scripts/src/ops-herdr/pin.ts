@@ -15,6 +15,8 @@ export const PIN_SOURCE = JSON.parse(
 export const ASSET_NAMES: Record<string, string> = {
   "darwin-arm64": "herdr-macos-aarch64",
   "darwin-x64": "herdr-macos-x86_64",
+  "linux-arm64": "herdr-linux-aarch64",
+  "linux-x64": "herdr-linux-x86_64",
 }
 
 export const assetOf = (

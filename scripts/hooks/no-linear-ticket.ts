@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 
 import { dataDirOf } from "../../packages/env/src/data-dir"
 import { eachInput } from "./codex"
+import { input } from "./input"
 import { sessionOf, sessionRole } from "./role"
 import {
   type Command,
@@ -449,7 +450,7 @@ async function inspect(
 }
 
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text())
+  const reason = await check(await input("no-linear-ticket", "guard"))
   if (reason) {
     console.error(reason)
     process.exit(2)

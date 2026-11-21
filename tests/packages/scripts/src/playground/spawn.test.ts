@@ -176,6 +176,21 @@ describe("startDispatcher", () => {
     expect(readFileSync(join(data, "brief-dispatcher.md"), "utf8")).toBe("The owner's own edit.\n")
   })
 
+  test("a start sends its manager the template's diff an update held for it, once (#2317)", async () => {
+    const { data, spawn, template } = setup()
+    mkdirSync(data)
+    writeFileSync(join(data, "brief-dispatcher.diff"), "+A new template line.\n")
+    const sent: string[] = []
+    const send = async (to: string, text: string) => sent.push(`${to}: ${text}`) > 0
+    await startDispatcher({ data, live: [], name: "dispatcher", send, spawn, template })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toStartWith("dispatcher: ")
+    expect(sent[0]).toContain(join(data, "brief-dispatcher.sent.diff"))
+    expect(existsSync(join(data, "brief-dispatcher.diff"))).toBe(false)
+    await startDispatcher({ data, live: [], name: "dispatcher", send, spawn, template })
+    expect(sent).toHaveLength(1)
+  })
+
   test("--harness codex reaches spawn.sh manager with --harness codex (#1835)", async () => {
     const { data, home, spawn, template } = setup()
     const started = await startDispatcher({

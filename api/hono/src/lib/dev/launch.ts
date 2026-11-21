@@ -22,7 +22,7 @@ import {
   livePair,
   unreusedLiveDatabase,
 } from "@/lib/dev/live-dashboard"
-import { listening, portlessDir } from "@/lib/dev/proxy"
+import { listening, portlessDir, prefixOf } from "@/lib/dev/proxy"
 import { ensurePglite } from "@/lib/pglite"
 import {
   GuardError,
@@ -31,6 +31,7 @@ import {
   locate as locateOwner,
   prove as proveOwner,
 } from "@/lib/sessions/guard"
+import { isNamedContainer, setupName } from "@/lib/setup/container"
 
 // What `bun run dev` hands turbo: the shell's environment, less what would boot the wrong stage, plus the settings and the sha the stack runs with.
 
@@ -279,19 +280,6 @@ export const othersLiveDashboard = (
   liveDashboard: LiveDashboard = livePair(),
 ): boolean => isLiveDatabase(container, liveDashboard) && branch !== liveDashboard.branch
 
-const UNPREFIXED = new Set(["main", "master"])
-
-// The prefix portless gives a linked worktree's stack, as its cli.js names it (branchToPrefix and sanitizeForHostname): the branch's last segment, lowercased, with anything but letters, digits and hyphens turned to hyphens, runs of them merged and the ends trimmed; none on main or master, or when nothing is left. Its truncation of a label past 63 characters ends in a hash, so it never yields a short prefix such as dashboard.
-export const prefixOf = (branch: string): string | null => {
-  if (UNPREFIXED.has(branch)) return null
-  const prefix = (branch.split("/").at(-1) ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-+|-+$/g, "")
-  return prefix || null
-}
-
 const OWN_DATABASE =
   "start this worktree's .env from .env.example and point POSTGRES_URL at a container of its own, published on loopback alone: `docker run -d --name playground-<worktree>-db -e POSTGRES_PASSWORD=<pw> -p 127.0.0.1::5432 postgres:alpine`, then `docker port playground-<worktree>-db 5432` for its port (the db-migration skill's step 3)"
 
@@ -314,7 +302,7 @@ export type Dashboard =
   | { kind: "live"; rule: DashboardRule }
 
 export type Preflight =
-  | { dashboard: Dashboard; ok: true; proof: string }
+  | { dashboard: Dashboard; ok: true; proof: string; warning?: string }
   | { ok: false; refusal: string }
 
 const refuse = (refusal: string): Preflight => ({ ok: false, refusal })
@@ -438,11 +426,22 @@ export async function preflight(
   }
   if (!url) return { dashboard, ok: true, proof: SETUP_MODE }
   let located: Located
+  let warning: string | undefined
   try {
     await revive(url)
     located = locate(url)
   } catch (error) {
-    return refuseFor(error)
+    // First run's own container predates the loopback rule, so the guard refuses it as exposed though it holds this stack's data: let it through to the checks below, and warn with the guard's keep-data fix.
+    if (
+      !(error instanceof GuardError) ||
+      error.failure !== "exposed" ||
+      !error.located ||
+      !isNamedContainer(setupName(root, branch, liveDashboard), error.located.owner.name)
+    ) {
+      return refuseFor(error)
+    }
+    located = error.located
+    warning = error.message
   }
   if (othersLiveDashboard(located.owner.name, branch, liveDashboard)) {
     return refuse(
@@ -458,7 +457,7 @@ export async function preflight(
         `database lacks ${lacking} migration${lacking === 1 ? "" : "s"}: run bun run db:migrate`,
       )
     }
-    return { dashboard, ok: true, proof }
+    return { dashboard, ok: true, proof, ...(warning && { warning }) }
   } catch (error) {
     return refuseFor(error)
   }

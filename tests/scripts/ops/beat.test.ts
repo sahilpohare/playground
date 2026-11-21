@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+
+import { GH_STALE_MS } from "../../../packages/scripts/src/gh-read"
 
 const ops = join(import.meta.dir, "..", "..", "..", "scripts", "ops")
 
@@ -47,4 +49,41 @@ test("checkout() is its own checkout where the job's folder is none, else the co
   expect(from(copy)).toBe(join(code, "playground"))
   writeFileSync(join(code, "copy", "scripts", "spawn.sh"), "")
   expect(from(copy)).toBe(join(code, "copy"))
+})
+
+// the merge train's job reads gh every cycle, so it skips gh while ops-tick's gh sign-in probe reads failed (#2526)
+describe("gh_down", () => {
+  const ghDownOf = (result: unknown, now: number) => {
+    const dir = scratch()
+    const path = join(dir, "gh-auth.json")
+    writeFileSync(path, typeof result === "string" ? result : JSON.stringify(result))
+    const run = Bun.spawnSync(
+      [
+        "python3",
+        "-I",
+        "-c",
+        `import sys; sys.path.insert(0, ${JSON.stringify(ops)}); import beat; print(beat.gh_down(${JSON.stringify(path)}, ${now / 1000}))`,
+      ],
+      { cwd: dir, env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" } },
+    )
+    expect(run.exitCode).toBe(0)
+    return run.stdout.toString().trim()
+  }
+  const AT = "2026-11-17T01:50:00.000Z"
+  const at = Date.parse(AT)
+
+  test("reads a fresh failed result's reason, and anything else as None", () => {
+    expect(ghDownOf({ at: AT, ok: false, reason: "gh token invalid" }, at + 60_000)).toBe(
+      "gh token invalid",
+    )
+    expect(ghDownOf({ at: AT, ok: false }, at)).toBe("gh fails")
+    expect(ghDownOf({ at: AT, ok: false, reason: "x" }, at + GH_STALE_MS + 1_000)).toBe("None")
+    expect(ghDownOf({ at: AT, ok: true }, at)).toBe("None")
+    expect(ghDownOf("{", at)).toBe("None")
+  })
+
+  test("holds gh-read.ts's stale age", () => {
+    const beat = readFileSync(join(ops, "beat.py"), "utf8")
+    expect(Number(beat.match(/^GH_STALE = (\d+)/m)?.[1]) * 1000).toBe(GH_STALE_MS)
+  })
 })

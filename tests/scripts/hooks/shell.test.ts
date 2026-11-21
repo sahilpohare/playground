@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -7,9 +7,12 @@ import {
   type Env,
   GIT_TAKES,
   lex,
+  parse,
+  type Parsed,
   pastDeadline,
   places,
   run,
+  runsScript,
   stdinShell,
   type StdinKind,
   UNKNOWN,
@@ -373,5 +376,157 @@ describe("an unquoted heredoc body's substitutions are lexed as the commands the
     const [sub, cmd] = lex("true <<EOF\n$(probe a)\nEOF").commands
     expect(sub.words.map((w) => w.value)).toEqual(["probe", "a"])
     expect(cmd.redirects[0].body?.unknown).toBe("an expansion in an unquoted heredoc")
+  })
+})
+
+// #2198: GNU xargs' input options: xargs fills its program from each item of the input -a names in place of stdin, split at a -d or -0 delimiter, and the reader reads the program as unread wherever it cannot read that input or decode that delimiter
+describe("xargs fills its program from the input GNU's input options name", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shell-xargs-input-"))
+  afterAll(() => rmSync(dir, { force: true, recursive: true }))
+  writeFileSync(join(dir, "f"), "turbo\n")
+  writeFileSync(join(dir, "big"), "turbo ".repeat(200_000))
+  writeFileSync(join(dir, "h"), "zz\n")
+  mkdirSync(join(dir, "sub"))
+  writeFileSync(join(dir, "sub", "h"), "turbo\n")
+  const filled = async (line: string) => {
+    const env: Env = { cwd: dir, files: new Map(), known: {}, process: {}, vars: new Map() }
+    const seen: string[] = []
+    await run(lex(line), env, async (_cmd, parsed) => {
+      seen.push([parsed.name, ...parsed.args.map((a) => a.value)].join(" "))
+      return undefined
+    })
+    return seen
+  }
+
+  test.each([
+    ["an item -d's comma splits off", "printf 'a,turbo' | xargs -d, -I X nice X run"],
+    ["an item -d's hex escape splits off", "printf 'a,turbo' | xargs -d '\\x2c' -I X nice X run"],
+    ["an item -d's octal escape splits off", "printf 'a,turbo' | xargs -d '\\054' -I X nice X run"],
+    ["an item -0 splits off", "printf 'a\\0turbo' | xargs -0 -I X nice X run"],
+    ["a line of -a's file", "echo a | xargs -a f -I X nice X run"],
+    ["a line of -a's process substitution", "echo a | xargs -a <(echo turbo) -I X nice X run"],
+    ["a line of -a's file in env -C's folder", "echo a | env -C sub xargs -a h -I X nice X run"],
+    [
+      "a line of -a's file in env --chdir='s folder",
+      "echo a | env --chdir=sub xargs -a h -I X nice X run",
+    ],
+  ])("%s fills the program", async (_, line) => {
+    expect(await filled(line)).toContain("turbo run")
+  })
+
+  test.each([
+    ["a -d escape the reader cannot decode", "printf 'a,turbo' | xargs -d '\\q' -I X nice X run"],
+    ["a -d delimiter in a variable", "printf 'a,turbo' | xargs -d \"$D\" -I X nice X run"],
+    ["a -d of more than one character", "printf 'a,turbo' | xargs -d ab -I X nice X run"],
+    ["an -a file that does not exist", "echo a | xargs -a missing -I X nice X run"],
+    ["an -a folder", "echo a | xargs -a . -I X nice X run"],
+    ["an -a descriptor other than stdin", "echo a | xargs -a /dev/fd/3 -I X nice X run"],
+    ["an -a file over the reader's size cap", "echo a | xargs -a big -I X nice X run"],
+    ["an -a file in a variable", 'echo a | xargs -a "$F" -I X nice X run'],
+    [
+      "an -a relative file sudo -D may read from its folder",
+      "echo a | sudo -D sub xargs -a h -I X nice X run",
+    ],
+    [
+      "an -a relative file sudo --chdir= may read from its folder",
+      "echo a | sudo --chdir=sub xargs -a h -I X nice X run",
+    ],
+    [
+      "an -a absolute file after sudo -D",
+      `echo a | sudo -D sub xargs -a ${dir}/sub/h -I X nice X run`,
+    ],
+    [
+      "an -a absolute file sudo -R reads under its root",
+      `echo a | sudo -R sub xargs -a ${dir}/h -I X nice X run`,
+    ],
+    [
+      "an -a absolute file sudo --chroot= reads under its root",
+      `echo a | sudo --chroot=sub xargs -a ${dir}/h -I X nice X run`,
+    ],
+  ])("%s reads the program as unread", async (_, line) => {
+    expect(await filled(line)).toContain(`${UNKNOWN} run`)
+  })
+})
+
+// #2292: a paren where a wrapper's program word goes keeps its subshell reading in the command list, and its opener carries zsh's glob reading beside it
+describe("a wrapper's group word keeps the command list and carries the glob reading on its opener", () => {
+  const read = (line: string) => {
+    const { commands } = lex(line)
+    return {
+      commands: commands.map((c) => c.words.map((w) => w.value)),
+      glob: commands.flatMap((c) => (c.glob ? [c.glob.words.map((w) => w.value)] : [])),
+    }
+  }
+  test.each([
+    ["nice (r|x)m a", [["nice"], ["r"], ["x"], ["m", "a"]], [["nice", "(r|x)m", "a"]]],
+    [
+      "nice (r|x)(m|y) a",
+      [["nice"], ["r"], ["x"], [], ["m"], ["y"], ["a"]],
+      [["nice", "(r|x)(m|y)", "a"]],
+    ],
+    ["nice (bun test | tail)", [["nice"], ["bun", "test"], ["tail"], []], []],
+    ['nice (a|")") ; ls x', [["nice"], ["a"], [")"], [], ["ls", "x"]], [["nice", '(a|")")']]],
+  ])("%s", (line, commands, glob) => {
+    expect(read(line)).toEqual({ commands, glob })
+  })
+})
+
+// #2397: a package runner's program is one more reading beside the runner's own, marked with the runner it runs through
+describe("a package runner's program reads beside the runner", () => {
+  const readings = (p: Parsed): Parsed[] => [p, ...p.also.flatMap(readings)]
+  const via = (line: string) =>
+    readings(parse(lex(line).commands[0]))
+      .filter((r) => r.via)
+      .map((r) => [r.via, r.name, r.args.map((a) => a.value).join(" ")])
+  test.each([
+    ["npx -y inscope@0.18.0 check", [["npx", "inscope", "check"]]],
+    ["npx --call='tsc -v'", [["npx", "sh", "-c tsc -v"]]],
+    ["pnpm --filter app exec -c tsc -v", [["pnpm exec", "sh", "-c tsc -v"]]],
+    ["pnpm tsc -v", [["pnpm", "tsc", "-v"]]],
+    [
+      "corepack pnpm@9 exec tsc",
+      [
+        ["corepack", "pnpm", "exec tsc"],
+        ["pnpm exec", "tsc", ""],
+      ],
+    ],
+    ["deno run -A npm:portless@0.15.11 get", [["deno run", "portless", "get"]]],
+    ["mise x node@20 -- tsc -v", [["mise x", "tsc", "-v"]]],
+    ["yarn exec tsc --noEmit", [["yarn exec", "sh", "-c tsc --noEmit"]]],
+    ["bun --silent exec 'tsc -v'", [["bun exec", "sh", "-c tsc -v"]]],
+    ["deno -A npm:portless get", [["deno", "portless", "get"]]],
+    ["deno x npm:portless get", [["deno x", "portless", "get"]]],
+    ["pnpm -r exec -yc tsc -v", [["pnpm exec", "sh", "-c tsc -v"]]],
+    ["pnpm exec --shell-mode=false tsc -v", [["pnpm exec", "sh", "-c tsc -v"]]],
+    ["pnpm exec -r tsc -v", [["pnpm exec", "tsc", "-v"]]],
+    ["yarn workspace app exec tsc", [["yarn exec", "sh", "-c tsc"]]],
+    ["yarn workspaces foreach -A -j 2 exec tsc", [["yarn exec", "sh", "-c tsc"]]],
+    ["yarn workspace app build", []],
+    ["deno -A main.ts", []],
+    ["pnpm rm lodash", []],
+    ["bun run scripts/x.ts", []],
+    ["deno run -A main.ts", []],
+    ["npx", []],
+  ])("%s", (line, want) => {
+    expect(via(line)).toEqual(want)
+  })
+
+  test("bun run's name reads as no program where the nearest package.json above names its script", () => {
+    const root = mkdtempSync(join(tmpdir(), "runs-script-"))
+    mkdirSync(join(root, "sub"))
+    writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { del: "echo del" } }))
+    const reading = (line: string) =>
+      readings(parse(lex(line).commands[0])).find((r) => r.via) as Parsed
+    const at = (cwd: string): Env => ({
+      cwd,
+      files: new Map(),
+      known: {},
+      process: {},
+      vars: new Map(),
+    })
+    expect(runsScript(reading("bun run del"), at(join(root, "sub")))).toBe(true)
+    expect(runsScript(reading("pnpm del"), at(root))).toBe(true)
+    expect(runsScript(reading("bun run rmx"), at(root))).toBe(false)
+    expect(runsScript(reading("bun run del"), { ...at(root), cwdUnread: true })).toBe(false)
   })
 })

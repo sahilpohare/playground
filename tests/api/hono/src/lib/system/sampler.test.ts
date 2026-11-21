@@ -66,7 +66,10 @@ const readings = (cpu: { a: number; run: number }): Readings => ({
     vmPid: 4313,
   },
   glmAccount: true,
+  hostname: "machine-a",
   load: [11.7, 10.6, 9.1],
+  peers: [],
+  platform: "linux",
   problems: [],
   procs: [
     proc(4313, 1, 1000),
@@ -144,6 +147,7 @@ describe("compose", () => {
       usedBytes: 17 * GB,
     })
     expect(report.cpu).toEqual({ cores: 15, load: [11.7, 10.6, 9.1] })
+    expect(report.platform).toBe("linux")
     expect(report.docker).toEqual({
       containers: [{ bytes: 25 * MB, name: "playground-a-db", stack: "/r/wt/a" }],
       problem: null,
@@ -445,5 +449,71 @@ describe("checkoutOf", () => {
       join(root, ".claude/worktrees/gone/api"),
     )
     expect(checkoutOf("/")).toBeNull()
+  })
+})
+
+describe("compose: a cluster", () => {
+  const peerReading = {
+    cores: 20,
+    disk: { freeBytes: 300 * GB, totalBytes: 994 * GB },
+    load: [0.4, 0.3, 0.2] as [number, number, number],
+    memory: { totalBytes: 128 * GB, usedBytes: 4 * GB },
+    swap: { totalBytes: 16 * GB, usedBytes: 1 * GB },
+  }
+  const up = { name: "machine-b", problem: null, reading: peerReading }
+  const down = { name: "machine-b", problem: "ssh you@10.0.0.2 ran past 5s", reading: null }
+  const sample = (peers: Readings["peers"], state: SamplerState, at: number) =>
+    compose({ ...readings({ a: 0, run: 0 }), peers }, state, at, checkouts)
+
+  test("with no peers there are no machines, and the hour's point is this machine's alone, as before", () => {
+    const { report } = sample([], freshState(T0), T0)
+    expect(report.machines).toEqual([])
+    expect(report.history.at(-1)).toMatchObject({
+      load1: 11.7,
+      swapUsedBytes: 4.9 * GB,
+      usedBytes: 17 * GB,
+    })
+  })
+
+  test("with a peer that reads, this machine comes first under its name, then the peer, and the hour's point is their sum", () => {
+    const { report } = sample([up], freshState(T0), T0)
+    expect(report.machines).toEqual([
+      {
+        down: null,
+        name: "machine-a",
+        reading: {
+          cores: 15,
+          disk: { freeBytes: 785 * GB, totalBytes: 994 * GB },
+          load: [11.7, 10.6, 9.1],
+          memory: { totalBytes: 24 * GB, usedBytes: 17 * GB },
+          swap: { totalBytes: 6 * GB, usedBytes: 4.9 * GB },
+        },
+      },
+      { down: null, name: "machine-b", reading: peerReading },
+    ])
+    expect(report.history.at(-1)).toMatchObject({
+      load1: 12.1,
+      swapUsedBytes: 5.9 * GB,
+      usedBytes: 21 * GB,
+    })
+    // this machine's own figures, which the sidebar and the room for workers judge, stay its own
+    expect(report.cpu.cores).toBe(15)
+    expect(report.memory.totalBytes).toBe(24 * GB)
+  })
+
+  test("a peer that does not read is down with its reason since the first sample that missed it, never zeros, and is up again once it reads", () => {
+    const first = sample([down], freshState(T0), T0)
+    expect(first.report.machines[1]).toEqual({
+      down: { reason: "ssh you@10.0.0.2 ran past 5s", since: new Date(T0).toISOString() },
+      name: "machine-b",
+      reading: null,
+    })
+    expect(first.report.history.at(-1)).toMatchObject({ load1: 11.7, usedBytes: 17 * GB })
+    const second = sample([down], first.state, T0 + INTERVAL_MS)
+    expect(second.report.machines[1]?.down?.since).toBe(new Date(T0).toISOString())
+    const back = sample([up], second.state, T0 + 2 * INTERVAL_MS)
+    expect(back.report.machines[1]?.down).toBeNull()
+    const again = sample([down], back.state, T0 + 3 * INTERVAL_MS)
+    expect(again.report.machines[1]?.down?.since).toBe(new Date(T0 + 3 * INTERVAL_MS).toISOString())
   })
 })

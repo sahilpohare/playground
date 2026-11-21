@@ -4,6 +4,7 @@ import { join } from "node:path"
 
 import { dispatcherOf, isManagerKind, kindOf, managerOf } from "@packages/config/kinds"
 
+import { ghRead, isUnreachable, type Unreachable } from "../gh-read"
 import { leadOf } from "../ops-tick/tick"
 import { writeAtomic } from "../write-atomic"
 
@@ -17,7 +18,6 @@ const HOUR = 3_600_000
 export const SWITCHES = [
   "run-slot.3-off",
   "run-slot.4-off",
-  "run-slot.battery",
   "run-slot.clone-off",
   "run-slot.focus",
   "run-slot.idle-min",
@@ -29,13 +29,14 @@ export const SWITCHES = [
 ]
 export const SWITCH_HOURS = 4
 
-// What the last sweep saw, kept in the lead's own state file: the alerts and passed ETAs it printed (a parked row's as `parked <name> <eta>`), the closed and unreadable holds it printed, the queue line, which side of 15 the load was on, which state the single-slot flag was in and when it last listed the switches on.
+// What the last sweep saw, kept in the lead's own state file: the alerts and passed ETAs it printed (a parked row's as `parked <name> <eta>`), the closed and unreadable holds it printed, the queue line and the Builder's queue check, which side of 15 the load was on, which state the single-slot flag was in and when it last listed the switches on.
 type SweepState = {
   alerts: string[]
   etas: string[]
   holds?: string[]
   loadHigh: boolean
   queue: string
+  queueCheck?: string
   single: Single | boolean
   switchesAt?: number
 }
@@ -54,6 +55,7 @@ type Readings = {
   holds: Record<string, HoldState>
   load5: number
   now: Date
+  open: OpenPrs | null
   queue: unknown
   roster: unknown
   single: Single
@@ -85,6 +87,29 @@ const queueLine = (queue: unknown): string => {
   return prs.length ? prs.join(", ") : "empty"
 }
 
+const prList = (prs: number[]) => prs.map((pr) => `#${pr}`).join(", ")
+
+// The factory repo's open PRs: every one, and the owner's into canary, which the queue holds.
+export type OpenPrs = { all: number[]; mine: number[] }
+
+// The Builder's queue check (issue 2030): a missing queue while the owner's PRs are open, a listed PR no longer open or an owner's open one it leaves out, its parked PRs counting as listed; empty when it is in step or no open list was read.
+const queueCheckOf = (queue: unknown, open: OpenPrs | null): string => {
+  if (!open) return ""
+  const sorted = [...open.mine].sort((a, b) => a - b)
+  if (queue === null) return sorted.length ? `merge queue missing: open ${prList(sorted)}` : ""
+  const listed = [...listOf(queue, "queue"), ...listOf(queue, "parked")].flatMap((e) => {
+    const { pr } = (e ?? {}) as { pr?: unknown }
+    return typeof pr === "number" ? [pr] : []
+  })
+  const closed = [...new Set(listed.filter((pr) => !open.all.includes(pr)))]
+  const left = sorted.filter((pr) => !listed.includes(pr))
+  const parts = [
+    ...(closed.length ? [`lists closed ${prList(closed)}`] : []),
+    ...(left.length ? [`leaves out open ${prList(left)}`] : []),
+  ]
+  return parts.length ? `merge queue stale: ${parts.join(", ")}` : ""
+}
+
 // Pure: the lines this sweep prints and the state to keep. A first sweep compares every reading with a calm baseline, so it prints once what stands now.
 function sweep(
   lead: string,
@@ -102,6 +127,9 @@ function sweep(
 
   const queue = queueLine(r.queue)
   if (queue !== (prev?.queue ?? "empty")) lines.push(`queue: ${queue}`)
+  // an unread open list keeps the last check, so a failed read neither clears nor repeats its line
+  const queueCheck = r.open ? queueCheckOf(r.queue, r.open) : (prev?.queueCheck ?? "")
+  if (queueCheck && queueCheck !== prev?.queueCheck) lines.push(queueCheck)
 
   const loadHigh = r.load5 >= LOAD_LINE
   if (loadHigh !== (prev?.loadHigh ?? false))
@@ -186,6 +214,7 @@ function sweep(
       holds: holds.map((h) => h.key),
       loadHigh,
       queue,
+      queueCheck,
       single: r.single,
       switchesAt,
     },
@@ -212,10 +241,10 @@ const readableHold = (row: Row): string | null =>
     ? row.hold
     : null
 
-// Reads each hold on this machine: an issue or PR through gh in factory.repo, an Inbox item through bun run ask get in the Dashboard's checkout, which holds the Inbox's database; null when neither reads.
+// Reads each hold on this machine: an issue or PR through ghRead in factory.repo, unreachable when ghRead skips or stops gh, an Inbox item through bun run ask get in the Dashboard's checkout, which holds the Inbox's database; null when neither reads.
 export const readHold =
   (repo: string, factory: string) =>
-  async (hold: string): Promise<HoldState> => {
+  async (hold: string): Promise<HoldState | Unreachable> => {
     try {
       if (hold.startsWith("#i")) {
         const { dashboardCheckout } = await import("./probe")
@@ -230,12 +259,10 @@ export const readHold =
         const { status } = JSON.parse(out.slice(out.indexOf("{"))) as { status?: unknown }
         return typeof status === "string" ? (status === "open" ? "open" : "closed") : null
       }
-      const run = Bun.spawnSync(
-        ["gh", "api", `repos/${factory}/issues/${hold.slice(1)}`, "--jq", ".state"],
-        { stderr: "ignore", stdout: "pipe" },
-      )
-      const state = run.stdout.toString().trim()
-      return run.exitCode === 0 && (state === "open" || state === "closed") ? state : null
+      const run = ghRead(["api", `repos/${factory}/issues/${hold.slice(1)}`, "--jq", ".state"])
+      if (isUnreachable(run)) return run
+      const state = run.out.trim()
+      return run.code === 0 && (state === "open" || state === "closed") ? state : null
     } catch {
       return null
     }
@@ -305,17 +332,40 @@ const singleOf = (ops: string, on: boolean, cap: number, load5: number, now: Dat
   return load5 < cap && at - last <= LIFT_GAP && at - first >= LIFT_HOLD ? "lifted" : "held"
 }
 
-// `playground sweep <lead>`: one read of what changed since that lead's last sweep (and, for ops' lead, each switch on, once an hour), `quiet` when nothing did, its cursor in sweep/<lead>.json in the data folder.
+// Reads the factory repo's open PRs, drafts included, and which are the owner's into canary, in one REST call a sweep (the **github** rule) through ghRead; unreachable when ghRead skips or stops gh, null when it does not read.
+export const readOpenPrs = (factory: string) => async (): Promise<OpenPrs | Unreachable | null> => {
+  const owner = factory.split("/")[0]?.toLowerCase()
+  if (!owner) return null
+  try {
+    const run = ghRead([
+      "api",
+      `repos/${factory}/pulls?state=open&per_page=100`,
+      "--jq",
+      `{all: [.[].number], mine: [.[] | select(.base.ref == "canary" and (.user.login | ascii_downcase) == "${owner}") | .number]}`,
+    ])
+    if (isUnreachable(run)) return run
+    if (run.code !== 0) return null
+    const { all, mine } = JSON.parse(run.out) as Partial<Record<keyof OpenPrs, unknown>>
+    const numbers = (list: unknown): list is number[] =>
+      Array.isArray(list) && list.every((pr) => typeof pr === "number")
+    return numbers(all) && numbers(mine) ? { all, mine } : null
+  } catch {
+    return null
+  }
+}
+
+// `playground sweep <lead>`: one read of what changed since that lead's last sweep (and, for ops' lead, each switch on, once an hour; for the Builder, its merge queue against the open PRs), `quiet` when nothing did, its cursor in sweep/<lead>.json in the data folder.
 export async function runSweep(
   lead: string,
   dir: string,
   now = new Date(),
   load5 = loadavg()[1],
-  hold: (hold: string) => Promise<HoldState> = async () => null,
+  hold: (hold: string) => Promise<HoldState | Unreachable> = async () => null,
+  open: () => Promise<OpenPrs | Unreachable | null> = async () => null,
 ): Promise<string[]> {
   const roster = readJson(join(dir, "roster.json"))
   const leads = leadsOf(roster)
-  const [, opsLead] = leads
+  const [builderLead, opsLead] = leads
   if (!leads.includes(lead))
     throw new Error(`playground sweep takes a lead's name (${leads.join(" or ")}), not ${lead}`)
   const statePath = join(dir, "sweep", `${lead}.json`)
@@ -325,17 +375,28 @@ export async function runSweep(
   const cap = capOf(ops, switches)
   // only the lead's own parked rows' holds are read, and none already known closed
   const agents = listOf(roster, "agents") as Row[]
+  // once one gh read is unreachable the sweep reads gh no more, its unread holds left out, so one line says why in place of a line a hold
   const holds: Record<string, HoldState> = {}
+  let unreachable: string | undefined
   for (const row of agents) {
     const held = readableHold(row)
     if (
+      unreachable ||
       held === null ||
       ownerOf(agents, row) !== lead ||
       prev?.holds?.includes(`closed ${row.name} ${held}`) ||
       held in holds
     )
       continue
-    holds[held] = await hold(held)
+    const state = await hold(held)
+    if (isUnreachable(state)) unreachable = state.unreachable
+    else holds[held] = state
+  }
+  let openPrs: OpenPrs | null = null
+  if (lead === builderLead && !unreachable) {
+    const read = await open()
+    if (isUnreachable(read)) unreachable = read.unreachable
+    else openPrs = read
   }
   const { lines, next } = sweep(
     lead,
@@ -345,6 +406,7 @@ export async function runSweep(
       holds,
       load5,
       now,
+      open: openPrs,
       queue: readJson(join(dir, "merge-queue.json")),
       roster,
       single: singleOf(
@@ -359,5 +421,6 @@ export async function runSweep(
     prev,
   )
   await writeAtomic(statePath, `${JSON.stringify(next, null, 2)}\n`)
+  if (unreachable) lines.unshift(`gh unreachable: ${unreachable}`)
   return lines.length ? lines : ["quiet"]
 }

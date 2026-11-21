@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import type { Fetch } from "../../../../../../api/hono/src/lib/setup/app"
 
 const { firstRun, setupApp } = await import("../../../../../../api/hono/src/lib/setup/app")
+const { GuardError } = await import("../../../../../../api/hono/src/lib/sessions/guard")
 const { env } = await import("../../../../../../packages/env/dist/api-hono.mjs")
 const { site } = await import("../../../../../../packages/config/src/site")
 
@@ -130,6 +131,25 @@ describe("setup mode", () => {
     expect(await read(app)).toEqual({ reason: "Docker is not running.", status: "failed" })
     expect((await start(app)).status).toBe(202)
     expect(calls).toBe(2)
+  })
+
+  test("a start the guard refused as exposed reads so, and the next click asks start to move it", async () => {
+    const moves: boolean[] = []
+    const app = setupApp(async (_onStep, _engine, move) => {
+      moves.push(move)
+      if (moves.length === 1)
+        throw new GuardError("exposed", "playground-db-Ab12 publishes beyond loopback")
+    })
+    expect((await start(app)).status).toBe(202)
+    await Bun.sleep(0)
+    expect(await read(app)).toEqual({
+      exposed: true,
+      reason: "playground-db-Ab12 publishes beyond loopback",
+      status: "failed",
+    })
+    expect((await start(app)).status).toBe(202)
+    await Bun.sleep(0)
+    expect(moves).toEqual([false, true])
   })
 
   test("takes 5 starts a minute", async () => {

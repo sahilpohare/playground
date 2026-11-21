@@ -66,18 +66,22 @@ else
   status=1
 fi
 
-# Links the brief templates and the `playground` command (into ~/.bun/bin, on a login shell's PATH)
+# Links the brief templates and the `playground` command (into ~/.bun/bin, on a login shell's PATH), a real file set aside first; a link outside the data folder goes into the machine record (packages/scripts/src/machine-record/), and a record that fails leaves the run's status alone, since the next daily check names the link
 link_file() {
   local src="$1" target="$2"
   mkdir -p "$(dirname "$target")"
   if set_aside "$target"; then
     ln -sfn "$src" "$target"
     echo "linked $target -> $src"
+    case "$target" in
+      "$DATA"/*) ;;
+      *) "$BUN" --no-env-file "$REPO/packages/scripts/src/machine-record/cli.ts" add "$target" --kind link --why "link-skills.sh links it to $src" --undo "rm $target" --by link-skills.sh >/dev/null || echo "link-skills.sh: $target is not in the machine record; its next check names it" >&2 ;;
+    esac
   else
     status=1
   fi
 }
-for brief in new-reviewer new-tester new-worker; do
+for brief in new-research-worker new-reviewer new-tester new-worker; do
   link_file "$REPO/scripts/briefs/$brief.md" "$DATA/handoffs/$brief.md"
 done
 # brief-rush.md sits beside the state files, not in handoffs/; a copy from before it was versioned moves aside like beat.py's
@@ -88,6 +92,8 @@ if [ -f "$RUSH" ] && [ ! -L "$RUSH" ]; then
 fi
 link_file "$REPO/scripts/briefs/brief-rush.md" "$RUSH"
 link_file "$REPO/packages/scripts/src/playground/cli.ts" "$HOME/.bun/bin/playground"
+# Linux has no Keychain, so the secret store stands in as `security` there, serving the forms the factory runs
+if [ "$(uname -s)" = Linux ]; then link_file "$REPO/packages/scripts/src/security/cli.ts" "$HOME/.bun/bin/security"; fi
 # run-slot.sh keeps its state in the state folder (ops/run-slot*) beside the link, so every heavy run follows the checkout's copy
 link_file "$REPO/scripts/ops/run-slot.sh" "$DATA/ops/run-slot.sh"
 BEAT="$DATA/ops/beat.py"

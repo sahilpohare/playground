@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """beat.py <job> <pid> <startedAt> <cycleSeconds> <lastResult> [extra JSON]: write the job's heartbeat, ops/<job>.json, atomically.
-Imported, it also holds checkout(), the one place the ops scripts name the main checkout, and the factory login's one rule (factory_login, with has_token beside it), which login-flip.py and run.py read the flip state's `factory` through.
+Imported, it also holds checkout(), the one place the ops scripts name the main checkout, gh_down(), the gh sign-in probe's failed result, and the factory login's one rule (factory_login, with has_token beside it), which login-flip.py and run.py read the flip state's `factory` through.
 
-The dashboard reads it: Running while lastResult is "ok" and lastBeatAt is fresh, Waiting while it starts "waiting: " (the reason after it), Failing when lastResult is anything else,
+The dashboard reads it: Running while lastResult is "ok" or a steady healthy beat and lastBeatAt is fresh, Waiting while it starts "waiting: " (the reason after it), Failing when lastResult is not "ok" and not a steady healthy beat,
 Down when lastBeatAt is older than 3 x cycleSeconds, the pid is gone or the file is missing.
 """
-import json, os, shutil, subprocess, sys, time
+import calendar, json, os, shutil, subprocess, sys, time
 
 RESOLVER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "packages", "env", "src", "data-dir.ts")
 
@@ -24,6 +24,18 @@ def ops_dir():
 
 
 OPS = ops_dir()
+GH_STALE = 120  # GH_STALE_MS in packages/scripts/src/gh-read.ts, in seconds, which a test holds equal
+
+
+def gh_down(path=None, now=None):
+    """Why gh fails, from ops-tick's gh sign-in probe (tick/gh-auth.json) while its result reads failed and is under GH_STALE seconds old, else None: ghDown in packages/scripts/src/gh-read.ts, so an ops job skips gh rather than flood a broken one."""
+    try:
+        last = json.load(open(path or os.path.join(OPS, "tick", "gh-auth.json")))
+        at = calendar.timegm(time.strptime(last["at"][:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
+    fresh = (time.time() if now is None else now) - at <= GH_STALE
+    return (last.get("reason") or "gh fails") if last.get("ok") is False and fresh else None
 
 
 def checkout():

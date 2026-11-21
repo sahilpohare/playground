@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -170,6 +170,37 @@ describe("the hook", () => {
     expect(text).not.toContain("loud")
     expect(text.indexOf("- **glm**")).toBeLessThan(text.indexOf("- **hush**"))
     expect(text.indexOf("- **hush**")).toBeLessThan(text.indexOf("- **mine**"))
+  })
+
+  // A data folder whose acme extension, linked to the acme-inc org, holds one rule, and a home holding acme-inc's own folder with a repo inside it and a folder named for no org; none is a git checkout, so none has an origin.
+  const orgHome = () => {
+    const data = extensions({
+      "policy.json": JSON.stringify({
+        orgs: {},
+        schemaVersion: 1,
+        values: { "ext.links": { acme: ["acme-inc"] }, "ext.order": ["acme"] },
+      }),
+      "acme/rules/hush.md": "Keep acme's work quiet.\n",
+    })
+    const home = mkdtempSync(join(tmpdir(), "rules-home-"))
+    for (const folder of ["acme-inc/web", "other"])
+      mkdirSync(join(home, folder), { recursive: true })
+    const env = { HOME: home, PLAYGROUND_DATA_DIR: data, PLAYGROUND_ROLE: "worker" }
+    return async (folder: string) =>
+      JSON.parse((await check(input(join(home, folder)), env))!).hookSpecificOutput
+        .additionalContext as string
+  }
+
+  test("a session in an org's own folder in the home folder, or a folder inside it, with no origin, gets that org's rules", async () => {
+    const glance = orgHome()
+    expect(await glance("acme-inc")).toContain("- **hush**: Keep acme's work quiet.")
+    expect(await glance("acme-inc/web")).toContain("- **hush**: Keep acme's work quiet.")
+  })
+
+  test("a session in a folder with no origin outside every org's own folder gets no org's rules", async () => {
+    const text = await orgHome()("other")
+    expect(text).toContain("- **glm**: ")
+    expect(text).not.toContain("**hush**")
   })
 
   test("with no login, no login's rules render", async () => {

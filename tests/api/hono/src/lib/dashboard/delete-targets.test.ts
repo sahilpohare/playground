@@ -62,7 +62,7 @@ describe("a delete names its targets by full path", () => {
 
   test("the refusal reads a delete decision alone, naming each full path to write", () => {
     expect(deleteRefusal(remove("the worktree PG-882-before"), MACHINE)).toBe(
-      `a delete names each target by its full path, the one playground rm --decision matches: write ${WORKTREES}/PG-882-before for PG-882-before`,
+      `a delete names each target by its full path, so the owner approves the very path that goes: write ${WORKTREES}/PG-882-before for PG-882-before`,
     )
     expect(deleteRefusal(remove(`${WORKTREES}/PG-882-before`), MACHINE)).toBeNull()
     expect(

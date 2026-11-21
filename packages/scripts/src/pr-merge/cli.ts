@@ -16,8 +16,13 @@ at that head and the head is up to date with canary:
                 line, until it lapses (bun run ship:freeze), or a file that does not read,
                 holds every PR
   base          it merges into canary
+  code          this checkout's pr-merge code, verdicts.ts and the new-user gate's paths.ts,
+                uncommitted edits included, match origin/canary's, so a checkout behind
+                canary never skips a gate canary has added; else run it from a checkout on
+                origin/canary
   up to date    canary has no commit the head lacks, or the head merges with canary clean;
-                a conflict needs canary merged in, then checks and a 5/5 at the new head
+                a conflict needs canary merged in, then checks, a 5/5 and each PASS
+                its diff calls for at the new head
   keeps canary  no merge of canary into the PR dropped a line canary added that git's own
                 merge keeps and the squash still lacks, in a file that merges clean (a
                 merge with -s ours drops them); blank lines, moves and rewrites pass, and
@@ -28,6 +33,12 @@ at that head and the head is up to date with canary:
   body          the PR body is the PR template the Changelog reads, and its Evidence names
                 each changed *.md path by its full path
   review        ## ReviewBot · round <n>: 5/5 at <sha7>, at the head
+  checks        a PR changing a check (CI's workflows or actions, the gate code, the
+                refused-forms harness) or deleting a refused-forms line has that 5/5 name
+                each such path: Reviewed check change: <path>
+  tester        on a diff under web/next/: ## TesterBot · PASS at <sha7>, at the head
+  new-user      on an installer or first-run diff (NEW_USER_PATHS): ## NewUserGate · PASS
+                at <sha7>, at the head
   types         last, inside the merge lock: the tree the squash makes type-checks by CI's own
                 type steps in the kept merge-types worktree, each through run-slot; skipped
                 when the head already holds canary's tip, and a type error refuses with the

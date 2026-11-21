@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import { managerOf, type RosterKind } from "@packages/config/kinds"
+import { getSessionNames, managerOf, type RosterKind } from "@packages/config/kinds"
 import { atHead, verdictsOf } from "@packages/config/verdicts"
+import { ghSkipped } from "@packages/scripts/gh-read"
 
 import { readFixtureMachine, readsLive } from "@/lib/dashboard/fixture"
+import { gatesAt, readGates } from "@/lib/dashboard/gates"
 import { heldReason, readHeld } from "@/lib/dashboard/held"
 import { dashboardHub } from "@/lib/dashboard/hub"
 import { readManagersOrder } from "@/lib/dashboard/managers-order"
@@ -33,7 +35,7 @@ import {
 import { org } from "@/lib/org"
 import { dataDir } from "@/lib/sessions/paths"
 
-// What every agent is doing: the dispatcher's roster (who it dispatched and why) joined to the live sessions the dashboard already streams, with each one's last activity, last report to the dispatcher, branch and pull request. Read-only: it reads the roster, transcripts and git, and asks GitHub only through a cached `gh api graphql` read.
+// What every agent is doing: the dispatcher's roster (who it dispatched and why) joined to the live sessions the dashboard already streams, with each one's last activity, last report (to the dispatcher, or a runner's to Ops too), branch and pull request. Read-only: it reads the roster, transcripts and git, and asks GitHub only through a cached `gh api graphql` read.
 export type AgentState = Light | "down"
 
 export type CiState = "failing" | "none" | "passing" | "pending"
@@ -42,7 +44,13 @@ export type Pull = {
   // approvals still needed before it may merge: what its base branch's rules require, less the approvals it holds, while GitHub's review decision says one is required
   approvals: number
   ci: CiState
+  // it conflicts with its base (mergeable CONFLICTING or mergeStateStatus DIRTY), so GitHub starts no Actions run on it; UNKNOWN, while GitHub works it out, is no conflict
+  conflicts: boolean
   draft: boolean
+  // the pr:merge gates it fails at its head, as the merge train last read them (gates.json, `gatesAt`): none when it would merge, null while no read is at this head
+  gates: string[] | null
+  // its head commit
+  head: string
   number: number
   // in a merge queue, or set to merge itself once it may
   queued: boolean
@@ -137,8 +145,21 @@ const parse = (line: string): Json | null => {
 
 const REPORT_LIMIT = 600
 
-// A peer message from the dispatcher carries the uds address it sends from; a reply often goes there rather than to its name, so the address counts as the dispatcher's too.
-export const learnAddress = (line: string, dispatcher: string, addresses: Set<string>): void => {
+// Each report recipient's uds addresses by its name, as the registry and its own peer messages give them.
+export type Addresses = Map<string, Set<string>>
+
+const addressOf = (addresses: Addresses, name: string, address: string) => {
+  const held = addresses.get(name) ?? new Set<string>()
+  held.add(address)
+  addresses.set(name, held)
+}
+
+// A peer message from a recipient carries the uds address it sends from; a reply often goes there rather than to its name, so the address counts as that recipient's too.
+export const learnAddress = (
+  line: string,
+  recipients: readonly string[],
+  addresses: Addresses,
+): void => {
   const d = parse(line)
   if (!d) return
   const attachment = isRecord(d.attachment) ? d.attachment : {}
@@ -147,19 +168,21 @@ export const learnAddress = (line: string, dispatcher: string, addresses: Set<st
     : isRecord(attachment.origin)
       ? attachment.origin
       : {}
-  if (origin.kind === "peer" && str(origin.name) === dispatcher && str(origin.from)) {
-    addresses.add(str(origin.from))
+  if (origin.kind === "peer" && recipients.includes(str(origin.name)) && str(origin.from)) {
+    addressOf(addresses, str(origin.name), str(origin.from))
   }
 }
 
+// Pure: the last message one line sent to any of recipients, by name or by an address it wrote from.
 export const reportOf = (
   line: string,
-  dispatcher: string,
-  addresses: Set<string>,
+  recipients: readonly string[],
+  addresses: Addresses,
 ): Report | null => {
   let report: Report | null = null
   for (const { at, text, to } of sentIn(line)) {
-    if (text && (to === dispatcher || addresses.has(to))) {
+    const toRecipient = recipients.some((name) => to === name || addresses.get(name)?.has(to))
+    if (text && toRecipient) {
       report = { at, text: clip(text, REPORT_LIMIT) }
     }
   }
@@ -168,26 +191,27 @@ export const reportOf = (
 
 const timestampOf = (line: string): string | null => str(parse(line)?.timestamp) || null
 
-// Pure: complete transcript lines, oldest first, folded over what earlier lines said. It walks back from the newest line and parses only the lines that can hold what is still missing, so a long transcript with no report costs a substring test per line, not a JSON parse. dispatcher is null for the dispatcher's own transcript, which reports to no one.
+// Pure: complete transcript lines, oldest first, folded over what earlier lines said. It walks back from the newest line and parses only the lines that can hold what is still missing, so a long transcript with no report costs a substring test per line, not a JSON parse. recipients are who a session reports to (reportsTo), none for the dispatcher's own transcript.
 export function foldTranscript(
   text: string,
-  dispatcher: string | null,
-  addresses: Set<string>,
+  recipients: readonly string[],
+  addresses: Addresses,
   prior: TranscriptFacts,
 ): TranscriptFacts {
   const lines = text.split("\n")
-  if (dispatcher) {
-    for (const line of lines) if (line.includes('"peer"')) learnAddress(line, dispatcher, addresses)
+  const reports = recipients.length > 0
+  if (reports) {
+    for (const line of lines) if (line.includes('"peer"')) learnAddress(line, recipients, addresses)
   }
   let lastActivityAt: string | null = null
   let report: Report | null = null
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lastActivityAt && (report || !dispatcher)) break
+    if (lastActivityAt && (report || !reports)) break
     const line = lines[i] ?? ""
     if (!line.trim()) continue
     if (!lastActivityAt) lastActivityAt = timestampOf(line)
-    if (!report && dispatcher && line.includes('"SendMessage"')) {
-      report = reportOf(line, dispatcher, addresses)
+    if (!report && reports && line.includes('"SendMessage"')) {
+      report = reportOf(line, recipients, addresses)
     }
   }
   return {
@@ -207,10 +231,23 @@ export const CHUNK_BYTES = 2 * 1024 * 1024
 type Scan = TranscriptFacts & { offset: number }
 
 const scans = new Map<string, Promise<Scan>>()
-const dispatcherAddresses = new Set<string>()
+const recipientAddresses: Addresses = new Map()
+
+// Pure: who a session's report goes to: a runner reports to Ops, its manager, as well as to the dispatcher; the dispatcher to no one; every other session to the dispatcher.
+export const reportsTo = (role: Worker["role"] | undefined): readonly string[] =>
+  role === "dispatcher"
+    ? []
+    : role === "runner"
+      ? [DISPATCHER, getSessionNames().names.ops]
+      : [DISPATCHER]
 
 // Each transcript is read once from its end, then only from where the last read stopped, so a refresh costs the bytes written since. A file that shrank is read afresh. The bytes are folded a chunk at a time, oldest first; a chunk holding no whole line (one line longer than a chunk) is widened until it holds one.
-async function advance(path: string, prior: Scan | null, reports: boolean): Promise<Scan> {
+async function advance(
+  path: string,
+  prior: Scan | null,
+  recipients: readonly string[],
+): Promise<Scan> {
+  const reports = recipients.length > 0
   const file = Bun.file(path)
   const size = file.size
   let scan: Scan =
@@ -227,18 +264,21 @@ async function advance(path: string, prior: Scan | null, reports: boolean): Prom
       chunk *= 2
       continue
     }
-    const facts = foldTranscript(text, reports ? DISPATCHER : null, dispatcherAddresses, scan)
+    const facts = foldTranscript(text, recipients, recipientAddresses, scan)
     scan = { ...facts, offset: scan.offset + consumed }
     chunk = CHUNK_BYTES
   }
   return scan
 }
 
-export async function scanTranscript(path: string, reports: boolean): Promise<TranscriptFacts> {
+export async function scanTranscript(
+  path: string,
+  recipients: readonly string[],
+): Promise<TranscriptFacts> {
   const prior = scans.get(path)
   const next = (prior ?? Promise.resolve(null))
     .catch(() => null)
-    .then((scan) => advance(path, scan, reports))
+    .then((scan) => advance(path, scan, recipients))
   scans.set(path, next)
   return next
 }
@@ -470,7 +510,10 @@ export function pullOf(node: unknown, poster?: string): Pull | null {
   return {
     approvals: state === "open" ? approvalsOf(node) : 0,
     ci: ciOf(str(rollup.state)),
+    conflicts: node.mergeable === "CONFLICTING" || node.mergeStateStatus === "DIRTY",
     draft: node.isDraft === true,
+    gates: null,
+    head: str(node.headRefOid),
     number: node.number,
     queued: isRecord(node.mergeQueueEntry) || isRecord(node.autoMergeRequest),
     reviewed: reviewedOf(bodies),
@@ -487,7 +530,7 @@ export function pullOf(node: unknown, poster?: string): Pull | null {
 
 // One GraphQL read per PR: its title, state and last update, the head commit's check rollup, what its approvals and merge stand at, and only its last 30 comments, where a current ReviewBot score and TesterBot word sit, so a PR with a long thread costs no more than a short one.
 const PULL_FIELDS =
-  "fragment P on PullRequest { autoMergeRequest { enabledAt } baseRef { branchProtectionRule { requiredApprovingReviewCount } rules(first: 100) { nodes { parameters { ... on PullRequestParameters { requiredApprovingReviewCount } } } } } comments(last: 30) { nodes { author { login } body createdAt } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } headRefOid isDraft latestOpinionatedReviews(first: 20) { nodes { state } } mergeQueueEntry { state } number reviewDecision state title updatedAt url }"
+  "fragment P on PullRequest { autoMergeRequest { enabledAt } baseRef { branchProtectionRule { requiredApprovingReviewCount } rules(first: 100) { nodes { parameters { ... on PullRequestParameters { requiredApprovingReviewCount } } } } } comments(last: 30) { nodes { author { login } body createdAt } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } headRefOid isDraft latestOpinionatedReviews(first: 20) { nodes { state } } mergeQueueEntry { state } mergeStateStatus mergeable number reviewDecision state title updatedAt url }"
 const BY_BRANCH = `${PULL_FIELDS} query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { pullRequests(headRefName: $branch, first: 1, orderBy: { field: CREATED_AT, direction: DESC }) { nodes { ...P } } } viewer { login } }`
 const BY_NUMBER = `${PULL_FIELDS} query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { ...P } } viewer { login } }`
 
@@ -583,8 +626,10 @@ export function pullFromAnswer(out: string): Pull | null {
   return pullOf(repository.pullRequest ?? nodes(repository.pullRequests)[0], viewer || undefined)
 }
 
-// One `gh api graphql` read: its answer's body, `notFound` when GitHub answered that it holds no such repository or pull request, which reads as none, as an empty branch does. Any other failure throws, naming why, when GitHub's budget opens again and whether only a setup fixes it.
+// One `gh api graphql` read, skipped with ghSkipped's line while the gh sign-in probe reads failed: its answer's body, `notFound` when GitHub answered that it holds no such repository or pull request, which reads as none, as an empty branch does. Any other failure throws, naming why, when GitHub's budget opens again and whether only a setup fixes it.
 export async function ghGraphql(args: string[]): Promise<{ body: string; notFound: boolean }> {
+  const skipped = ghSkipped()
+  if (skipped) throw new Error(skipped)
   const { code, err, out } = await run(["gh", "api", "graphql", "-i", ...args], 10_000).catch(
     (error: unknown) => {
       throw isRecord(error) && error.code === "ENOENT"
@@ -618,7 +663,12 @@ const storedPull = (value: unknown): Pull | null => {
   const ok: Record<keyof Pull, boolean> = {
     approvals: intOf(value.approvals) !== null,
     ci: oneOf(value.ci, ["failing", "none", "passing", "pending"]),
+    // an entry stored before the field came reads as no conflict, since a merged PR has none
+    conflicts: value.conflicts === undefined || typeof value.conflicts === "boolean",
     draft: typeof value.draft === "boolean",
+    // a merged PR has no gate read, and an entry stored before head came reads as none
+    gates: value.gates === undefined || value.gates === null,
+    head: value.head === undefined || typeof value.head === "string",
     number: intOf(value.number) !== null,
     queued: typeof value.queued === "boolean",
     reviewed: typeof value.reviewed === "boolean",
@@ -631,7 +681,14 @@ const storedPull = (value: unknown): Pull | null => {
     url: typeof value.url === "string" && PR_URL_RE.test(value.url),
     verdict: value.verdict === null || typeof value.verdict === "string",
   }
-  return Object.values(ok).every(Boolean) ? (value as unknown as Pull) : null
+  return Object.values(ok).every(Boolean)
+    ? ({
+        ...value,
+        conflicts: value.conflicts === true,
+        gates: null,
+        head: typeof value.head === "string" ? value.head : "",
+      } as unknown as Pull)
+    : null
 }
 
 export const readMergedPulls = async (file: string): Promise<[string, Pull][]> => {
@@ -859,7 +916,7 @@ export async function agentsBoard(
   { readPull = pullFor }: { readPull?: (lookup: string) => Promise<Pull | null> } = {},
 ): Promise<AgentsBoard> {
   const path = rosterPath()
-  const [{ problem, roster }, sockets, read, held, queueRead, managersOrder, workQueue] =
+  const [{ problem, roster }, sockets, read, held, gates, queueRead, managersOrder, workQueue] =
     await Promise.all([
       readRoster(path),
       socketNames(),
@@ -871,14 +928,16 @@ export async function agentsBoard(
         }),
       ),
       readHeld(),
+      readGates(),
       readMergeQueue(),
       readManagersOrder(),
       readWorkQueue(),
     ])
   const { liveProblem, sessions } = read
-  // The registry names the dispatcher's current socket even when a transcript's first message from it lies before the window scanned.
+  // The registry names each recipient's current socket even when a transcript's first message from it lies before the window scanned.
+  const recipients = reportsTo("runner")
   for (const [address, name] of Object.entries(sockets)) {
-    if (name === DISPATCHER) dispatcherAddresses.add(address)
+    if (recipients.includes(name)) addressOf(recipientAddresses, name, address)
   }
   const perCwd = new Map<string, number>()
   for (const w of sessions.workers) perCwd.set(w.cwd, (perCwd.get(w.cwd) ?? 0) + 1)
@@ -889,13 +948,13 @@ export async function agentsBoard(
       const transcript = match.live ? sessions.transcripts.get(match.live.sessionId) : undefined
       const [facts, git] = await Promise.all([
         transcript
-          ? scanTranscript(transcript, match.live?.role !== "dispatcher").catch(() => null)
+          ? scanTranscript(transcript, reportsTo(match.live?.role)).catch(() => null)
           : null,
         cwd ? gitFacts(cwd).catch(() => null) : null,
       ])
       const work = workOf(match.roster, git, (perCwd.get(cwd) ?? 0) > 1)
       let pullProblem: PullProblem | null = null
-      const pr = work.lookup
+      const pull = work.lookup
         ? await readPull(work.lookup).catch((err: unknown) => {
             pullProblem = {
               reason: err instanceof Error ? err.message : "GitHub could not be read",
@@ -904,6 +963,7 @@ export async function agentsBoard(
             return null
           })
         : null
+      const pr = pull && { ...pull, gates: gatesAt(gates, pull) }
       return agentOf(
         match,
         facts,

@@ -12,7 +12,7 @@ import { join } from "node:path"
 
 import { SCRIPT, WAITING, machine, stop } from "./run-slot-fake"
 
-// a check waits on its run's exit or a line it prints, so the timeout only catches a hang: 60s, as run-slot.test.ts
+// a check waits on its run's exit or a line it prints, so the timeout only catches a hang: 60s
 setDefaultTimeout(60_000)
 
 // issue 1414, 7 Nov: a look's idle poll compares the ops folder and the script against marks the look took, and a mark taken after a read loses a change between them, so the waiter never looks again

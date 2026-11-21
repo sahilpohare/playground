@@ -1,9 +1,16 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { checkHerdr, pinHerdr } from "../../../../../packages/scripts/src/playground/herdr-pin"
+import { assetOf, pinnedSum } from "../../../../../packages/scripts/src/ops-herdr/pin"
+import {
+  checkHerdr,
+  pinHerdr,
+  releaseUrl,
+  runHerdrPin,
+} from "../../../../../packages/scripts/src/playground/herdr-pin"
+import { scratchEnv } from "../../../../scratch-env"
 
 const PIN = join(import.meta.dir, "../../../../../packages/scripts/src/playground/herdr-pin.ts")
 const scratch = mkdtempSync(join(tmpdir(), "playground-herdr-pin-"))
@@ -84,7 +91,7 @@ describe("pinHerdr", () => {
       version: "0.9.5",
     })
     expect(result.code).toBe(3)
-    expect(result.line).toContain("macOS on arm64 or x64")
+    expect(result.line).toContain("macOS or Linux, on arm64 or x64")
     expect(existsSync(path)).toBe(false)
   })
 })
@@ -111,10 +118,96 @@ describe("checkHerdr", () => {
   })
 })
 
+const LINUX_SUM = "17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c"
+
+describe("the Linux arm64 pin, read on any machine", () => {
+  const real = { arch: process.arch, home: process.env.HOME, platform: process.platform }
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: real.platform })
+    Object.defineProperty(process, "arch", { value: real.arch })
+    process.env.HOME = real.home
+  })
+
+  test("downloads herdr-linux-aarch64 from the pinned release", () => {
+    expect(releaseUrl("0.9.5", "linux-arm64")).toBe(
+      "https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-aarch64",
+    )
+  })
+
+  test("refuses a download whose sum is not the Linux pin's, naming both, and moves nothing", async () => {
+    const path = binPath()
+    const result = await pinHerdr({
+      asset: "linux-arm64",
+      download: async () => FAKE,
+      path,
+      sha256: pinnedSum("linux-arm64"),
+      version: "0.9.5",
+    })
+    expect(result).toEqual({
+      code: 2,
+      line: `herdr-pin: linux-arm64 0.9.5 has sha256 ${REAL_SUM}, not the pinned ${LINUX_SUM}; nothing was installed`,
+    })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test("--check on a Linux arm64 host reads its copy against the Linux pin", async () => {
+    const home = join(scratch, "linux-check")
+    process.env.HOME = home
+    Object.defineProperty(process, "platform", { value: "linux" })
+    Object.defineProperty(process, "arch", { value: "arm64" })
+    mkdirSync(join(pinnedAt(home), ".."), { recursive: true })
+    await Bun.write(pinnedAt(home), FAKE)
+    const errors = spyOn(console, "error").mockImplementation(() => {})
+    try {
+      expect(await runHerdrPin(["--check"])).toBe(1)
+      expect(errors).toHaveBeenCalledWith(
+        `herdr-pin: ${pinnedAt(home)} has sha256 ${REAL_SUM}, not the pinned ${LINUX_SUM}; run playground herdr pin`,
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+})
+
+const LINUX_X64_SUM = "14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d"
+
+describe("the Linux x64 pin, read on any machine", () => {
+  const real = { arch: process.arch, home: process.env.HOME, platform: process.platform }
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: real.platform })
+    Object.defineProperty(process, "arch", { value: real.arch })
+    process.env.HOME = real.home
+  })
+
+  test("downloads herdr-linux-x86_64 from the pinned release", () => {
+    expect(releaseUrl("0.9.5", "linux-x64")).toBe(
+      "https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64",
+    )
+  })
+
+  test("--check on a Linux x64 host reads its copy against the Linux x64 pin", async () => {
+    const home = join(scratch, "linux-x64-check")
+    process.env.HOME = home
+    Object.defineProperty(process, "platform", { value: "linux" })
+    Object.defineProperty(process, "arch", { value: "x64" })
+    mkdirSync(join(pinnedAt(home), ".."), { recursive: true })
+    await Bun.write(pinnedAt(home), FAKE)
+    const errors = spyOn(console, "error").mockImplementation(() => {})
+    try {
+      expect(await runHerdrPin(["--check"])).toBe(1)
+      expect(errors).toHaveBeenCalledWith(
+        `herdr-pin: ${pinnedAt(home)} has sha256 ${REAL_SUM}, not the pinned ${LINUX_X64_SUM}; run playground herdr pin`,
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+})
+
 // HOME moves the pinned path, so each run gets its own; the copy sits at its data folder's bin/herdr
 const run = (home: string, ...args: string[]) =>
   Bun.spawnSync([process.execPath, "--no-env-file", PIN, ...args], {
-    env: { ...process.env, HOME: home },
+    env: scratchEnv(home),
   })
 const pinnedAt = (home: string) => join(home, ".playground", "bin", "herdr")
 
@@ -139,12 +232,15 @@ describe.if(process.platform === "darwin")("herdr-pin.ts on a Mac", () => {
   })
 })
 
-test.if(process.platform !== "darwin")("herdr-pin.ts off a Mac installs nothing, exit 3", () => {
-  const home = join(scratch, "cli-linux")
-  const proc = run(home)
-  expect(proc.exitCode).toBe(3)
-  expect(existsSync(pinnedAt(home))).toBe(false)
-})
+test.if(assetOf() === null)(
+  "herdr-pin.ts on a machine with no pin installs nothing, exit 3",
+  () => {
+    const home = join(scratch, "cli-unpinned")
+    const proc = run(home)
+    expect(proc.exitCode).toBe(3)
+    expect(existsSync(pinnedAt(home))).toBe(false)
+  },
+)
 
 test("herdr-pin.ts refuses a word it does not take, exit 2", () => {
   const proc = run(join(scratch, "cli-usage"), "--force")

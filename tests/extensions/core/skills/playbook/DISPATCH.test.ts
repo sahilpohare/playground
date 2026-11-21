@@ -85,6 +85,15 @@ describe("DISPATCH.md", () => {
     expect(line).toContain("once nearly let a web build run beside the live dashboard's Postgres")
   })
 
+  test("a decision on an outside tool opens with a web check of its primary sources, cited by URL (PG-2523)", async () => {
+    const lines = (await Bun.file(DISPATCH).text()).split("\n")
+    const line = lines.find((l) =>
+      l.includes("Every decision on an outside tool, model, library or setup"),
+    )
+    expect(line).toContain("opens with a web check of its primary sources")
+    expect(line).toContain("cited by URL in the ruling beside our own measurements")
+  })
+
   test("the pre-build signal is an update, a decision only when the ask removes or reverses the owner's own rule (PG-1350)", async () => {
     const lines = (await Bun.file(DISPATCH).text()).split("\n")
     const at = lines.findIndex((l) => l.includes("Before a lane builds one of the owner's asks"))

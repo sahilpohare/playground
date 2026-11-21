@@ -218,8 +218,11 @@ export const canDraft = (item: InboxItem): boolean =>
 const chosen = (item: InboxItem) =>
   item.kind !== "update" && item.answer && "choice" in item.answer ? item.answer : null
 
-// What the dashboard's own run on an accept's, an apps change's, a grant's, an own card's or a guard setting's Approve gave, read off any answer, none for the rest.
-type Steps = Pick<InboxAnswer, "accepted" | "listed" | "opened" | "owned" | "set">
+// What the dashboard's own run on an accept's, a clone's, an apps change's, a grant's, an own card's, a root step's or a guard setting's Approve gave, read off any answer, none for the rest.
+type Steps = Pick<
+  InboxAnswer,
+  "accepted" | "cloned" | "listed" | "opened" | "owned" | "rooted" | "set"
+>
 const stepsOf = (answer: object | null): Steps => (answer ?? {}) as Steps
 
 // Pure: whether a card a reply collapsed opens again to its full self, its answers and Schedule back: an open decision or draft whose answer is that reply, its poster not done with it, which an answer or a Schedule from the card replaces.
@@ -375,7 +378,7 @@ export const SHELF_LABELS: Record<Exclude<Shelf, "inbox">, string> = {
   snoozed: "Later",
 }
 
-// A card's verbs, beside its own answers and Reply: Seen marks it read, Done sends it to Done, Later puts it off until a time, Archive takes it off his list unanswered and Move back returns it, and Dismiss sends it to Done marked dismissed.
+// A card's verbs, beside its own answers and Reply: Seen marks it read, Done sends it to Done, Later puts it off until a time, Archive takes it off his list or Done onto the Archive shelf and Move back returns it, and Dismiss sends it to Done marked dismissed.
 export type Verb = "archive" | "dismiss" | "done" | "later" | "moveBack" | "seen"
 
 // Pure: whether an item still waits on his answer: an open decision, draft or secret ask he has not replied to.
@@ -386,17 +389,22 @@ export const waiting = (item: InboxItem): boolean =>
 const dismissedMark = (item: InboxItem): boolean =>
   item.answer !== null && "dismissed" in item.answer && item.answer.dismissed === true
 
-// Pure: the verbs a card offers on its shelf, by its state: Seen while unread; what waits takes Later, Archive and Dismiss; an update in the list takes Done too; an answered, working or failed one takes Done and Dismiss; an archived one Later, Move back and Dismiss; and one on Done its Dismiss until dismissed, with Move back on one set aside while it waited.
+// Pure: the verbs a card offers on its shelf, by its state: Seen while unread; what waits takes Later, Archive and Dismiss; an update in the list takes Done too; an answered, working or failed one takes Done and Dismiss; an archived one Later, Move back and Dismiss, with no Later on one answered; and one on Done its Archive and Dismiss until dismissed, with Move back and no Archive on one set aside while it waited, and no Archive on one whose send failed.
 export function verbs(item: InboxItem, shelf: Shelf): Verb[] {
   if (shelf === "done") {
+    const archives = item.status !== "cleared" && item.delivery?.status !== "failed"
     return [
       ...(item.status === "cleared" ? (["moveBack"] as const) : []),
-      ...(dismissedMark(item) ? [] : (["dismiss"] as const)),
+      ...(dismissedMark(item)
+        ? []
+        : ([...(archives ? (["archive"] as const) : []), "dismiss"] as const)),
     ]
   }
-  // a set-aside one from before Archive kept items open has no Later, since it is no longer open
+  // Later takes what waits or an update alone, so a set-aside one and one archived from Done once answered have none (PG-1909)
   if (shelf === "archived") {
-    return item.status === "cleared" ? ["moveBack", "dismiss"] : ["later", "moveBack", "dismiss"]
+    return waiting(item) || item.kind === "update"
+      ? ["later", "moveBack", "dismiss"]
+      : ["moveBack", "dismiss"]
   }
   const seen = item.readAt === null ? (["seen"] as const) : []
   if (waiting(item)) return [...seen, "later", "archive", "dismiss"]
@@ -581,11 +589,13 @@ export function kindWord(item: InboxItem): string {
     apps: "Your apps",
     ask: "Ask",
     budget: "Budget",
+    clone: "Clone",
     delete: "Delete",
     grant: "Permission",
     guard: "Guard setting",
     own: "Own account",
     reveal: "Show a secret",
+    root: "Root step",
     schema: "Schema",
     secret: "Secret",
     ship: "Ship",
@@ -635,9 +645,9 @@ export function itemState(item: InboxItem): ItemState {
   }
   if (sendFailed(item)) return "failed"
   if (needsYou(item)) return "open"
-  // an accept, an apps change, an own flag or a guard setting the dashboard ran is done or failed by its exit code alone, since nothing is left for its poster to carry out; a grant that opened nothing failed, and one that opened its pane waits on its poster's recheck
-  const { accepted, listed, opened, owned, set } = stepsOf(provided)
-  const ran = accepted ?? listed ?? owned ?? set
+  // an accept, a clone, an apps change, an own flag, a root step or a guard setting the dashboard ran is done or failed by its exit code alone, since nothing is left for its poster to carry out; a grant that opened nothing failed, and one that opened its pane waits on its poster's recheck
+  const { accepted, cloned, listed, opened, owned, rooted, set } = stepsOf(provided)
+  const ran = accepted ?? cloned ?? listed ?? owned ?? rooted ?? set
   if (ran) return ran.exitCode === 0 ? "done" : "failed"
   if (opened && opened.exitCode !== 0) return "failed"
   // a reply is being carried out by its poster until it is closed, then done
@@ -755,13 +765,17 @@ export function outcomeLine(item: InboxItem): string | null {
   return item.answer.noLink ? `${done} · No link: ${item.answer.noLink}` : done
 }
 
-// Pure: the result line of a step the dashboard ran on Approve that leaves its poster nothing to do: an accept's, an apps change's, an own flag's, a guard setting's, or a grant that opened nothing; null for any other answer.
+// Pure: the result line of a step the dashboard ran on Approve that leaves its poster nothing to do: an accept's, a clone's, an apps change's, an own flag's, a root step's, a guard setting's, or a grant that opened nothing; null for any other answer.
 const stepLine = (answer: Steps): string | null => {
-  const { accepted, listed, opened, owned, set } = answer
+  const { accepted, cloned, listed, opened, owned, rooted, set } = answer
   if (accepted)
     return accepted.exitCode === 0
       ? `Accepted: ${accepted.line}`
       : `Accept failed (exit ${accepted.exitCode}): ${accepted.line}`
+  if (cloned)
+    return cloned.exitCode === 0
+      ? `Cloned: ${cloned.line}`
+      : `Clone failed (exit ${cloned.exitCode}): ${cloned.line}`
   if (listed)
     return listed.exitCode === 0
       ? `Your apps: ${listed.line}`
@@ -770,6 +784,10 @@ const stepLine = (answer: Steps): string | null => {
     return owned.exitCode === 0
       ? `Own account: ${owned.line}`
       : `Own account change failed (exit ${owned.exitCode}): ${owned.line}`
+  if (rooted)
+    return rooted.exitCode === 0
+      ? `Ran as root: ${rooted.line}`
+      : `Root step failed (exit ${rooted.exitCode}): ${rooted.line}`
   if (set)
     return set.exitCode === 0
       ? `Guard setting: ${set.line}`

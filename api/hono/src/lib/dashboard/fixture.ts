@@ -13,6 +13,7 @@ import {
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path"
 
+import { peerSchema } from "@packages/config/org"
 import { threadIdSchema } from "@packages/config/threads"
 import type { Roots } from "@packages/safe-delete"
 import { deriveRoot, HARNESS_IDS } from "@packages/settings"
@@ -220,10 +221,11 @@ const doctorCheck = z.object({
   status: z.enum(["MISSING", "ok", "optional", "waiting"]),
 })
 
-// A harness's made-up facts: the version installed (null when none), whether it is signed in, and its plan.
+// A harness's made-up facts: the version installed (null when none), whether it is signed in, its plan, and for Claude Code whether it trusts the checkout's folder (trusted when unsaid).
 const harnessFacts = z.object({
   plan: z.string().nullable(),
   signedIn: z.boolean(),
+  trusted: z.boolean().optional(),
   version: z.string().nullable(),
 })
 
@@ -265,6 +267,8 @@ export const fixtureSchema = z.object({
     screens: z.record(z.string(), z.string()),
     workspaces: z.array(json),
   }),
+  // The repo id the made-up machine's local model server serves as local (local-model.ts), which a local session's row names and draws the maker of.
+  localModel: z.string().optional(),
   // Each repo's merged PullRequest nodes, as the Usage app's query reads them (lib/usage/prs.ts).
   merged: z.record(z.string(), z.array(json)).optional(),
   // The made-up checkout's origin remote, which the sidebar's GitHub icon links to as its pull requests page.
@@ -276,12 +280,18 @@ export const fixtureSchema = z.object({
   system: z.object({
     cores: z.number().int().positive(),
     disk: z.object({ freeBytes: z.number(), totalBytes: z.number() }),
+    // The made-up machine's name beside its peers, `this machine` when unset.
+    hostname: z.string().optional(),
     load: z.tuple([z.number(), z.number(), z.number()]),
-    // Each System panel probe's stdout, by its name in probe.ts's COMMANDS.
+    // The made-up cluster's other machines, as org.ts's cluster names them; each one's ssh read is its `peer <target>` probe, and one with no answer reads as down.
+    peers: z.array(peerSchema).optional(),
+    // The made-up machine's operating system as Node names it, `darwin` when unset.
+    platform: z.enum(["darwin", "linux"]).optional(),
+    // Each System panel probe's stdout, by its name in probe.ts's COMMANDS (a peer's by `peer <target>`).
     probes: z.record(z.string(), z.string()),
     totalBytes: z.number(),
   }),
-  // The owner's made-up threads, which bun run ingest writes into a fixture stack's database once it has read the transcripts their messages are in.
+  // The owner's made-up threads, which the API's start writes into a fixture stack's database while its thread table is empty, and bun run ingest once it has read the transcripts their messages are in.
   threads: z.array(fixtureThread).optional(),
   // How far the made-up dashboard's build is behind the branch it follows, as the update check reports it (lib/dashboard/update.ts), so a fixture stack shows the update icon and Update now without running git.
   update: z
@@ -487,6 +497,7 @@ export function writeFixture(
     account: fixture.account ?? null,
     doctor: fixture.doctor ?? null,
     git: at(fixture.git),
+    localModel: fixture.localModel ?? null,
     merged: at(fixture.merged ?? {}),
     origin: fixture.origin ?? null,
     processes: at(fixture.processes),
@@ -547,7 +558,15 @@ export function ensureFixture(source: DashboardSource = currentSource()): string
 export type FixtureHerdr = Fixture["herdr"] & {
   // What has been typed into each pane's input and not yet sent.
   inputs: Record<string, string>
+  // The model each pane's status line names once a /model switched it, and the one its open confirm would switch to.
+  models?: Record<string, string>
+  switching?: Record<string, string>
+  // When each pane's turn ends, the message sent or the picker answered that set it working, since no made-up session replies.
+  turns?: Record<string, string>
 }
+
+// How long a made-up pane works a turn before it reads idle again.
+export const FIXTURE_TURN_MS = 3000
 
 const NO_HERDR: Fixture["herdr"] = {
   panes: [],
@@ -560,6 +579,7 @@ export type FixtureMachine = {
   account?: Fixture["account"] | null
   doctor?: Fixture["doctor"] | null
   git: Fixture["git"]
+  localModel?: string | null
   merged?: NonNullable<Fixture["merged"]>
   origin?: string | null
   processes: Fixture["processes"]
@@ -574,9 +594,17 @@ export type FixtureMachine = {
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8")) as T
 
 // A fixture written before herdr.json was runs no herdr server.
-export const readFixtureHerdr = (dir = ensureFixture()): FixtureHerdr => {
+// The made-up herdr server's state, each pane whose turn has ended by `now` read idle again.
+export const readFixtureHerdr = (dir = ensureFixture(), now = new Date()): FixtureHerdr => {
   const path = join(dir, "herdr.json")
-  return existsSync(path) ? readJson<FixtureHerdr>(path) : { ...NO_HERDR, inputs: {} }
+  const state = existsSync(path) ? readJson<FixtureHerdr>(path) : { ...NO_HERDR, inputs: {} }
+  for (const pane of state.panes) {
+    const ends = state.turns?.[pane.pane_id]
+    if (ends === undefined || Date.parse(ends) > now.getTime()) continue
+    pane.agent_status = "idle"
+    delete state.turns?.[pane.pane_id]
+  }
+  return state
 }
 
 const writeFixtureHerdr = (state: FixtureHerdr, dir: string): void => {
@@ -611,11 +639,26 @@ const changed = () => {
 const str = (value: unknown): string => (typeof value === "string" ? value : "")
 
 // An input box as Claude Code draws it, between two rules: empty, or holding what has been typed.
-const inputBox = (above: string, typed: string): string => {
+const inputBox = (above: string, typed: string, model?: string): string => {
   const rule = "─".repeat(60)
   const box = typed ? typed.split("\n").map((line, i) => `${i ? "  " : "❯ "}${line}`) : ["❯"]
-  return [above, rule, ...box, rule, "  ? for shortcuts"].join("\n")
+  return [above, rule, ...box, rule, `  ${model ? `${model} · ` : ""}? for shortcuts`].join("\n")
 }
+
+const MODEL_COMMAND = /^\/model ([a-z]+)$/
+const modelLabel = (alias: string): string =>
+  `${alias[0]?.toUpperCase() ?? ""}${alias.slice(1)} 9.9`
+// The confirm Claude Code 2.1.325 draws over the box when /model switches mid-conversation, with a made-up version.
+const switchConfirm = (alias: string): string =>
+  [
+    "─".repeat(60),
+    " Switch model? Your next response will be slower and use more tokens.",
+    "",
+    ` ❯ 1. Yes, switch to ${modelLabel(alias)}`,
+    "   2. No, go back",
+    "",
+    " Enter to confirm · Esc to cancel",
+  ].join("\n")
 
 // A Vibeground's Start or Stop on a fixture stack: its made-up worktree runs on this stack's own dashboard, a path of its own so the pane tells it from `$WEB`, or stops, in the scratch copy alone.
 export function fixtureVibe(path: string, running: boolean, dir = ensureFixture()): void {
@@ -802,30 +845,47 @@ export function fixtureHerdrScreen(pane: string, dir = ensureFixture()): string 
   paneOf(state, pane)
   const above = state.screens[pane] ?? ""
   const picker = state.prompts[pane]
-  return picker === undefined ? inputBox(above, state.inputs[pane] ?? "") : `${above}\n${picker}`
+  if (state.switching?.[pane]) return `${above}\n${switchConfirm(state.switching[pane])}`
+  return picker === undefined
+    ? inputBox(above, state.inputs[pane] ?? "", state.models?.[pane])
+    : `${above}\n${picker}`
 }
 
 export type FixtureHerdrInput = { keys: string[] } | { prompt: string } | { text: string }
 
-// What a request types into a made-up pane. A prompt (agent.prompt) sends its text as a paste and its Enter, as herdr's bracketed paste does, refused while the pane draws a picker, as herdr refuses one into a blocked session; words fill the input box; Enter sends the box, and Enter or a number key answers a picker, whose rows the arrows and Space move over unseen. A message sent or a picker answered sets the pane working.
+// What a request types into a made-up pane. A prompt (agent.prompt) sends its text as a paste and its Enter, as herdr's bracketed paste does, refused while the pane draws a picker, as herdr refuses one into a blocked session; words fill the input box; Enter sends the box, and Enter or a number key answers a picker, whose rows the arrows and Space move over unseen. A message sent or a picker answered sets the pane working for `FIXTURE_TURN_MS`.
 export function fixtureHerdrInput(
   pane: string,
   input: FixtureHerdrInput,
   dir = ensureFixture(),
   now = new Date(),
 ): void {
-  const state = readFixtureHerdr(dir)
+  const state = readFixtureHerdr(dir, now)
   const found = paneOf(state, pane)
   const session = { ...found, cwd: str(found.processes[0]?.cwd) }
+  const working = () => {
+    found.agent_status = "working"
+    state.turns = {
+      ...state.turns,
+      [pane]: new Date(now.getTime() + FIXTURE_TURN_MS).toISOString(),
+    }
+  }
   const send = (typed: string, pasted: boolean) => {
     sent(session, typed, pasted, dir, now)
-    found.agent_status = "working"
+    working()
   }
+  const alias = "prompt" in input ? MODEL_COMMAND.exec(input.prompt)?.[1] : undefined
   if ("prompt" in input) {
-    if (state.prompts[pane] !== undefined) {
+    if (state.prompts[pane] !== undefined || state.switching?.[pane]) {
       throw new FixtureHerdrRefusal("agent_blocked", `${pane} waits on a prompt`)
     }
-    send(input.prompt, true)
+    if (alias) state.switching = { ...state.switching, [pane]: alias }
+    else send(input.prompt, true)
+  } else if (state.switching?.[pane] && "keys" in input) {
+    const to = state.switching[pane]
+    const key = input.keys[0]
+    if (key === "enter" || key === "1") state.models = { ...state.models, [pane]: modelLabel(to) }
+    if (key === "enter" || /^\d$/.test(key ?? "") || key === "esc") delete state.switching[pane]
   } else if ("text" in input) {
     if (state.prompts[pane] === undefined)
       state.inputs[pane] = (state.inputs[pane] ?? "") + input.text
@@ -833,7 +893,7 @@ export function fixtureHerdrInput(
     for (const key of input.keys) {
       if (state.prompts[pane] !== undefined && (key === "enter" || /^\d$/.test(key))) {
         delete state.prompts[pane]
-        found.agent_status = "working"
+        working()
       } else if (key === "enter" && state.inputs[pane]) {
         send(state.inputs[pane], false)
         delete state.inputs[pane]

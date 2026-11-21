@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -105,4 +105,37 @@ describe("withPortlessCa", () => {
     })
     expect(await child.exited).toBe(7)
   })
+
+  // #2348: a signal to the first run's pid alone (TaskStop, a test's kill) ended it with the signal's own code while the run with the CA, which holds the cleanups, never heard it.
+  for (const signal of ["SIGINT", "SIGTERM"] as const)
+    test(`a ${signal} to the first run reaches the run with the CA, whose code it hands back`, async () => {
+      const marker = join(DIR, `heard-${signal}`)
+      const script = join(DIR, `signal-${signal}.ts`)
+      writeFileSync(
+        script,
+        [
+          `import { writeFileSync } from "node:fs"`,
+          `import { withPortlessCa } from ${JSON.stringify(MODULE)}`,
+          "await withPortlessCa()",
+          `process.on(${JSON.stringify(signal)}, () => { writeFileSync(${JSON.stringify(marker)}, "heard"); process.exit(130) })`,
+          "setTimeout(() => process.exit(9), 10_000)",
+          `console.log("ready")`,
+        ].join("\n"),
+      )
+      const child = Bun.spawn([process.execPath, script], {
+        env: childEnv(),
+        stderr: "pipe",
+        stdout: "pipe",
+      })
+      const reader = child.stdout.getReader()
+      let out = ""
+      while (!out.includes("ready")) {
+        const { done, value } = await reader.read()
+        if (done) break
+        out += new TextDecoder().decode(value)
+      }
+      child.kill(signal)
+      expect(await child.exited).toBe(130)
+      expect(existsSync(marker)).toBe(true)
+    })
 })

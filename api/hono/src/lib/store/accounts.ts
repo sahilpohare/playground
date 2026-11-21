@@ -100,20 +100,28 @@ const rowFrom = (input: AccountFields): Account =>
     ? { label: input.label, provider: "glm" }
     : { email: input.email, ...(input.label ? { label: input.label } : {}), provider: "claude" }
 
-// Why an add would be refused before any token is asked for: no login, the account listed already, or a row usage.accounts' schema refuses.
+// The row usage.accounts lists for the input's provider and key, if any.
+const listedRow = (rows: Account[], input: AccountFields): Account | undefined => {
+  const key = accountKey(rowFrom(input))
+  return rows.find((each) => providerOf(each) === input.provider && accountKey(each) === key)
+}
+
+// Why an add would be refused before any token is asked for: no login, the account listed already with its token kept, or a row usage.accounts' schema refuses; a row listed with no token kept, as one carried over from another machine, may take one.
 export const refusalOf = (input: AccountFields, data = dataDir()): Refusal | undefined => {
   const read = loginSettings(data)
   if (!read) return NO_LOGIN
   const row = rowFrom(input)
   const rows = accountSettings.get(read.settings, KEY)
   const key = accountKey(row)
-  if (rows.some((each) => providerOf(each) === input.provider && accountKey(each) === key))
-    return { message: `${key} is already listed`, ok: false, status: 409 }
+  if (listedRow(rows, input))
+    return hasSecret(read.settings, input.provider, key, keychainOf(data))
+      ? { message: `${key} is already listed`, ok: false, status: 409 }
+      : undefined
   const checked = checkSetting(KEY, [...rows, row])
   if (!checked.ok) return { message: checked.message, ok: false, status: 400 }
 }
 
-// Keeps the token, then lists the row: the row is checked by usage.accounts' schema before the Keychain is touched, so a refused row stores nothing.
+// Keeps the token, then lists the row: the row is checked by usage.accounts' schema before the Keychain is touched, so a refused row stores nothing; a row listed already keeps the token alone and stays as it is.
 export const addAccount = (
   input: AccountInput,
   who: Who,
@@ -130,6 +138,8 @@ export const addAccount = (
   } catch (error) {
     return { message: (error as Error).message, ok: false, status: 400 }
   }
+  const kept = listedRow(rows, input)
+  if (kept) return { account: rowOf(data, read.settings, kept), ok: true }
   const set = setSetting(data, { key: KEY, scope: read.login, value: [...rows, row] }, who)
   if (!set.ok) return set
   return { account: rowOf(data, read.settings, row), ok: true }

@@ -3,6 +3,7 @@ import { homedir } from "node:os"
 import { dirname, join, relative } from "node:path"
 
 import { withoutShebang } from "../shebang"
+import { userSystemctl } from "../user-systemctl"
 
 export type Run = (argv: string[]) => Promise<{ code: number; out: string }>
 
@@ -23,10 +24,16 @@ const entryOf = (argv: string[]) =>
     .map((word) => word.replace(/^~\//, `${homedir()}/`))
     .find((word) => word.startsWith("/") && !/\/(bash|bun|env|python3)$/.test(word))
 
-// A job's entry file: the first path in its jobs.json command, or, for a launchd job, in its plist's ProgramArguments.
-const entry = async (job: Job, run: Run) => {
+// A job's entry file: the first path in its jobs.json command, or, for a launchd job, in its plist's ProgramArguments, on Linux in its systemd user unit's ExecStart as systemd loaded it.
+const entry = async (job: Job, run: Run, platform: NodeJS.Platform) => {
   if (job.command) return entryOf(job.command.split(/\s+/))
   if (!job.launchd) return undefined
+  if (platform === "linux") {
+    const unit = `${job.launchd}.service`
+    const shown = await run(userSystemctl(["show", "--property=ExecStart", "--value", unit]))
+    const argv = /argv\[\]=([^;]*)/.exec(shown.out)?.[1]
+    return shown.code === 0 && argv ? entryOf(argv.trim().split(/\s+/)) : undefined
+  }
   const plist = join(homedir(), "Library", "LaunchAgents", `${job.launchd}.plist`)
   const read = await run(["plutil", "-convert", "json", "-o", "-", plist])
   if (read.code !== 0) return undefined
@@ -112,16 +119,17 @@ const stop = async (run: Run, pid: number, file: string, sleep: (ms: number) => 
   return !(await holds(run, pid, file))
 }
 
-// After a checkout moved from one head to another, render jobs.json from the settings with the new code, TERM each running ops job whose source the move changed, by its heartbeat's pid, then start the terminal ones again in herdr, and any the new code turns on that runs nowhere yet, with one up.py pass; launchd starts its own.
+// After a checkout moved from one head to another, render jobs.json from the settings with the new code, TERM each running ops job whose source the move changed, by its heartbeat's pid, then start the terminal ones again in herdr, and any the new code turns on that runs nowhere yet, with one up.py pass; launchd, or on Linux systemd, starts its own.
 export const restart = async (opts: {
   checkout: string
   from: string
   ops: string
+  platform?: NodeJS.Platform
   run: Run
   sleep?: (ms: number) => Promise<void>
   to: string
 }): Promise<string[]> => {
-  const { checkout, ops, run, sleep = Bun.sleep } = opts
+  const { checkout, ops, platform = process.platform, run, sleep = Bun.sleep } = opts
   const diff = await run(["git", "-C", checkout, "diff", "--name-only", opts.from, opts.to])
   const changed = diff.out.split("\n").filter(Boolean)
   if (diff.code !== 0 || !changed.length) return []
@@ -145,7 +153,7 @@ export const restart = async (opts: {
   const stopped: Job[] = []
   for (const job of jobs) {
     if (job.disabled || kept(job)) continue
-    const file = await entry(job, run)
+    const file = await entry(job, run, platform)
     if (!file || !existsSync(file)) continue
     // an entry linked into the checkout (ops-checks-go's go.py) counts by its target, while holds() matches the link path its argv names
     const real = realpathSync(file)

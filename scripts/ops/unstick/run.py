@@ -34,7 +34,7 @@ STALL = 600
 STARTED = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 ONCE = "--once" in sys.argv
 sys.path.insert(0, CODE)
-from beat import beat, checkout, setting  # noqa: E402
+from beat import beat, checkout, gh_down, setting  # noqa: E402
 
 CHECKOUT = checkout()
 
@@ -93,7 +93,7 @@ LIMIT_DIALOG = re.compile(r"What do you want to do\?", re.I)
 DIALOG_HINT = re.compile(r"Enter to confirm · Esc|Space to select · Esc|Esc to reject all")
 # The factory's herdr servers: each name's socket is <dir>/<name>.sock beside one config.toml, reached through HERDR_SOCKET_PATH (the CLI's
 # --session ignores it). A refused or missing socket is that server down, not a fault; `pane list` starts no server. The sockets follow HOME, never
-# CLAUDE_CONFIG_DIR, as ops-herdr puts them (herdrDir in packages/scripts/src/ops-herdr/herdr.ts), so every Claude login reads the same servers.
+# CLAUDE_CONFIG_DIR, as ops-herdr puts them (herdrDir in packages/env/src/data-dir.ts), so every Claude login reads the same servers.
 # herdr runs by the copy ops-herdr installs and pins, under the data folder of HOME alone (herdrPath in packages/scripts/src/ops-herdr/pin.ts).
 HERDR = os.environ.get("HERDR_BIN_PATH") or os.path.expanduser("~/.playground/bin/herdr")
 HERDR_DIR = os.environ.get("PLAYGROUND_HERDR_DIR") or os.environ.get("DESK_HERDR_DIR") or os.path.expanduser("~/.playground/herdr")
@@ -410,7 +410,7 @@ def stall(live, state):
     except (OSError, ValueError):
         q = []
     prs = [str(i.get("pr")) for i in q if i.get("pr")]
-    if not prs:
+    if not prs or gh_down():
         return None
     r = subprocess.run(["gh", "pr", "list", "--repo", setting("factory.repo"), "--state", "open", "--json", "number", "--jq", ".[].number"], capture_output=True, text=True, timeout=60)
     open_prs = [p for p in prs if p in r.stdout.split()]
@@ -1179,7 +1179,7 @@ def cycle(state):
 
 
 def dashboard_db():
-    """The live dashboard's /api/health `db` reading ("ok", "unreachable"), or None when it cannot be read: the checkout on live.branch, its API by portless as ops-dashboard's supervisor reads it."""
+    """The live dashboard's /api/health `db` reading ("ok", "unreachable"), or None when it cannot be read: the checkout on live.branch, its API by portless as ops-dashboard's supervisor reads it, in the folder portlessDir() names, whose CA curl trusts (on Linux the 1355 proxy's TLS marker and CA sit in ~/.portless/fallback)."""
     try:
         setting = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "packages", "scripts", "src", "playground", "setting.ts")
         live = subprocess.run(["bun", setting, "--text", "live.branch"], capture_output=True, text=True, timeout=30).stdout.strip()
@@ -1187,10 +1187,14 @@ def dashboard_db():
         dashboard = next((b.split("\n")[0].removeprefix("worktree ") for b in tree.split("\n\n") if live and f"branch refs/heads/{live}" in b.split("\n")), None)
         if not dashboard:
             return None
-        api = subprocess.run(["bunx", "portless", "get", "api.playground"], cwd=dashboard, capture_output=True, text=True, timeout=20).stdout.strip()
+        pdir = subprocess.run(["bun", "--no-env-file", "-e", "console.log((await import('./api/hono/src/lib/dev/proxy.ts')).portlessDir())"], cwd=dashboard, capture_output=True, text=True, timeout=20).stdout.strip()
+        env = {**os.environ, "PORTLESS_STATE_DIR": pdir} if pdir else None
+        api = subprocess.run(["bunx", "portless", "get", "api.playground"], cwd=dashboard, env=env, capture_output=True, text=True, timeout=20).stdout.strip()
         if not api.startswith("http"):
             return None
-        body = subprocess.run(["curl", "-s", "-m", "5", f"{api}/api/health"], capture_output=True, text=True, timeout=10).stdout
+        ca = os.path.join(pdir, "ca.pem") if pdir else ""
+        trust = ["--cacert", ca] if ca and os.path.isfile(ca) else []
+        body = subprocess.run(["curl", "-s", "-m", "5", *trust, f"{api}/api/health"], capture_output=True, text=True, timeout=10).stdout
         return json.loads(body)["data"]["db"]
     except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
         return None
@@ -1249,11 +1253,10 @@ def slot_stuck(state, now_t):
     if now_t - sf["since"] < 120:
         return None
     can = subprocess.run(["bash", os.path.join(CODE, "run-slot.sh"), "can-take", "run-slot", head], env=env, capture_output=True, text=True, timeout=30)
-    # issue 1842: a standing battery or focus hold closes can-take on purpose, so the line names that hold, not a stall
-    hold = re.search(r"^run-slot\.sh: held by run-slot\.(battery|focus for (\S+))$", can.stderr, re.M)
+    # issue 1842: a standing focus hold closes can-take on purpose, so the line names that hold, not a stall
+    hold = re.search(r"^run-slot\.sh: held by run-slot\.focus for (\S+)$", can.stderr, re.M)
     if can.returncode != 0 and hold:
-        why = "the battery's red mark (run-slot.battery)" if hold.group(2) is None else f"{hold.group(2)}'s focus (run-slot.focus)"
-        line = f"run-slot free for {int(now_t - sf['since'])}s while {first[2]} (pid {first[1]}) heads the queue, held by {why}, a hold, not a stall"
+        line = f"run-slot free for {int(now_t - sf['since'])}s while {first[2]} (pid {first[1]}) heads the queue, held by {hold.group(1)}'s focus (run-slot.focus), a hold, not a stall"
         return {"at": now(), "kind": "slot-stuck", "case": "hold", "line": line, "name": first[2], "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(sf["since"]))}
     if can.returncode != 0:
         # issue 1416: the units rule beside a free slot is as designed, so the alert only names it: the slot, the head's units, each holder's

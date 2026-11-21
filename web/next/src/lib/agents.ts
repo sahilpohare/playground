@@ -19,7 +19,7 @@ import {
   type EntriesListener,
   type SessionTask,
 } from "@/lib/dashboard"
-import { modelName } from "@/lib/model-label"
+import { levelName, showsEffort } from "@/lib/model-label"
 import { whenWords } from "@/lib/ops"
 import {
   checkedOf,
@@ -34,7 +34,7 @@ import {
   type ShownState,
   type Wait,
 } from "@/lib/status-icons"
-import { fullTime } from "@/lib/time"
+import { fullTime, relativeTime } from "@/lib/time"
 
 export const AGENTS_QUERY_KEY = ["dashboard", "agents"] as const
 
@@ -54,7 +54,7 @@ export async function fetchAgents() {
   return data
 }
 
-// A message to anyone may be a report to the dispatcher (sent by name or to its uds address), so it is the API, which knows the dispatcher's addresses, that decides.
+// A message to anyone may be a report (to the dispatcher, or a runner's to Ops too, by name or to a uds address), so it is the API, which knows those addresses, that decides.
 export const sentMessage = (entries: Entry[]): boolean =>
   entries.some((entry) => entry.kind === "tool" && entry.tool === "SendMessage")
 
@@ -102,7 +102,7 @@ type Placed = { agent: Agent; place: number }
 // Pure: the API's agents in the board's order, each with the socket's state for its session: one the socket no longer lists is down. A live agent's place is its session's position in workers, which the dashboard hands on in orderByStatus's order (managers by byManagerOrder; the rest by the state each row's icon draws, then byRowKey, each light settled), so the table moves when the sidebar does; a down one follows them all, in the API's order. workers is null until the socket's first list, when the API's states stand and rank each group, in the API's order within a status.
 export function liveAgents(agents: Agent[], workers: Worker[] | null): Agent[] {
   const ranks = new Map((workers ?? []).map((w, i) => [w.sessionId, { i, light: w.light }]))
-  // The sidebar's own order: managers, workers, runners, others, and in each, by place. Before the socket's first list there is no board to follow, so the API's states rank each group by status first.
+  // The sidebar's own order: managers, runners, workers, others, and in each, by place. Before the socket's first list there is no board to follow, so the API's states rank each group by status first.
   const compareAgents = (a: Placed, b: Placed): number =>
     groupOf(a.agent) - groupOf(b.agent) ||
     (workers ? 0 : STATUS_RANK[a.agent.state] - STATUS_RANK[b.agent.state]) ||
@@ -336,13 +336,13 @@ export function useAgents(
 export type RowLines = {
   // what the row's tooltip adds to the state (lightOf's detail)
   detail: string | null
-  // the effort the newest reply ran with, between the model and the state in the tooltip
+  // the effort the newest reply ran with, between the model and the state in the tooltip; none on a local model's row (showsEffort)
   effort: string | null
   // the time left, the tooltip's alone (timeLeft)
   eta: string | null
   // its kind (labelParts), which closes its label: its role word after the ticket and the pull request, else after the title
   kind: RosterKind | null
-  // the model's name, without the effort
+  // the model's name (levelName): any other model's without its effort, a local session's with its level in words, as high: Ornith 122B, thinking
   model: string | null
   pr: number | null
   // the row's one icon
@@ -381,13 +381,13 @@ export function rowLines(
     light,
     worker,
   })
-  const model = label ? null : modelName(worker.model)
+  const model = label ? null : levelName(worker)
   // a dispatcher named by its label keeps no session name (#i520), else its state keeps its name (Inbox #i493: "dispatcher keeps Playground; only managers drop names"), and an AI runner's ends with when it runs
   const name = dispatcher && !label ? sinName(worker) : null
   const when = worker.role === "runner" ? rosterWhen(agent?.schedule ?? null) : null
   return {
     detail: status.detail,
-    effort: model ? (worker.effort ?? null) : null,
+    effort: model && showsEffort(worker) ? (worker.effort ?? null) : null,
     eta: timeLeft(agentView, now, { checkers, light, worker }),
     ...(label
       ? {
@@ -435,6 +435,28 @@ const rosterWhen = (schedule: string | null): string | null =>
 // Pure: when an agent runs, for the System table's status, as its sidebar row says it: an AI runner's schedule in words, null for any other role.
 export const runnerWhen = (agent: Pick<Agent, "role" | "schedule">): string | null =>
   agent.role === "runner" ? rosterWhen(agent.schedule) : null
+
+const firstTextLine = (text: string): string =>
+  text
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean) ?? ""
+
+// Pure: an AI runner row's second line, what it last did: its latest report's first line, else its roster task, and its tooltip's words, the whole text, a report's with how long ago it came; null with neither.
+export const runnerNote = (
+  agent: Pick<Agent, "report" | "task"> | null,
+  now: number,
+  locale?: string,
+): { full: string; line: string } | null => {
+  const report = agent?.report?.text.trim()
+  if (report) {
+    const at = agent?.report?.at
+    const ago = at ? relativeTime(at, new Date(now), locale) : ""
+    return { full: `Report${ago ? ` ${ago}` : ""}: ${report}`, line: firstTextLine(report) }
+  }
+  const task = agent?.task?.trim()
+  return task ? { full: `Task: ${task}`, line: firstTextLine(task) } : null
+}
 
 // Pure: a live session as an agent before the board has read it: no pull request, roster or report yet.
 const agentOfWorker = (worker: Worker): Agent => ({
@@ -529,18 +551,20 @@ export const SHOWN_RANK: Record<ShownState, number> = {
   "no-progress": 2,
   fixing: 3,
   working: 4,
-  waiting: 5,
-  approval: 6,
-  approvals: 6,
-  ready: 7,
-  parked: 8,
-  "usage-limit": 9,
-  unknown: 9,
-  idle: 9,
-  done: 10,
-  merged: 11,
-  ended: 12,
-  down: 13,
+  conflicts: 5,
+  waiting: 6,
+  approval: 7,
+  approvals: 7,
+  ready: 8,
+  gated: 8,
+  parked: 9,
+  "usage-limit": 10,
+  unknown: 10,
+  idle: 10,
+  done: 11,
+  merged: 12,
+  ended: 13,
+  down: 14,
 }
 
 type RowKey = { pr: number | null; ticket: string | null; title: string }

@@ -13,7 +13,7 @@ rate-limit headers (a setup-token's inference scope cannot read /usage), taken h
 limitedUntil has passed, and shared through login-flip.json, so the two never probe the same account twice in that time. usage.json then adds `readAt` (when the
 limits were measured), `source` "token/ratelimit-headers" and `storedLogin` (the stored login's account and week). Remove `factory`
 from login-flip.json when the factory moves back to the stored login. login-flip.json's `accounts` lists every pool account the factory's
-sessions spend into, login-flip.py pruning it to the pool on each run; each is probed the same way, and usage.json's `accounts` holds each fresh week reading, which week-marks.py sums.
+sessions spend into, login-flip.py pruning it to the pool on each run; when that list is missing, `rotation.pool`'s accounts stand in; each is probed the same way, and usage.json's `accounts` holds each fresh week reading, which week-marks.py sums.
 ops/alerts-usage.json holds, while each lasts, one alert per factory account whose week is past 90, 97 or 98% (usage.json's account
 and each in its `accounts`), and the logged-in account's 5-hour window at 90% or more; ops-unstick folds it in.
 Each alert's `name` is its account, since the leads' sweep keys an alert by its kind and name.
@@ -32,6 +32,7 @@ HERE = os.path.join((os.path.abspath(os.environ.get("PLAYGROUND_DATA_DIR") or os
 OPS = os.path.dirname(HERE)
 OUT = os.path.join(os.path.dirname(OPS), "usage.json")
 STORED = os.path.join(HERE, "stored-login.json")
+STATUS = os.path.join(HERE, "stored-login-status.json")  # why the stored login read nothing, its Claude Code login ended (loginEnded) or its access token expired (tokenExpired), which spawn.sh reads in place of the Keychain
 FLIP = os.path.join(HERE, "login-flip.json")
 CYCLE = 300
 PROBE_EVERY, FRESH_FOR = 840, 1800
@@ -39,7 +40,7 @@ API = os.environ.get("PLAYGROUND_USAGE_API") or "https://api.anthropic.com/api/o
 PROBE_URL = os.environ.get("PLAYGROUND_PROBE_URL") or "https://api.anthropic.com/v1/messages"  # the new-user gate points it at a closed loopback port, so its made-up token never leaves the Mac
 STARTED = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 sys.path.insert(0, OPS)
-from beat import beat, checkout, factory_login, setting  # noqa: E402
+from beat import beat, checkout, factory_login, has_token, setting  # noqa: E402
 
 PROBE_MODEL, SERVICE = setting("models.probe"), setting("usage.keychainService")
 
@@ -63,6 +64,16 @@ def write(path, data):
 
 class NoLogin(RuntimeError):
     pass
+
+
+class TokenExpired(RuntimeError):
+    pass
+
+
+class LoginEnded(RuntimeError):
+    def __init__(self, reason):
+        super().__init__(f"Claude Code's login has ended ({reason}); the owner's /login brings it back")
+        self.reason = reason
 
 
 def oauth():
@@ -90,8 +101,12 @@ def window(w):
 
 def stored_login():
     o = oauth()
+    if o.get("loginEnded"):
+        raise LoginEnded(o["loginEnded"])
+    if o.get("refreshTokenExpiresAt") and o["refreshTokenExpiresAt"] / 1000 < time.time():
+        raise LoginEnded("refresh token expired")
     if o.get("expiresAt", 0) / 1000 < time.time():
-        raise RuntimeError("access token expired; waiting for Claude Code to refresh it")
+        raise TokenExpired("access token expired; waiting for Claude Code to refresh it")
     # the account is read every cycle, with the token it goes with: the owner switches logins, and a cached email names the wrong account
     account = (get("profile", o["accessToken"]).get("account") or {}).get("email")
     u = get("usage", o["accessToken"])
@@ -158,9 +173,13 @@ def seen(flip, email, now):
 
 
 def accounts_reading():
-    """Each account in login-flip.json's `accounts` (every account the factory's sessions spend into) with a fresh week reading."""
+    """Each account in login-flip.json's `accounts` (every account the factory's sessions spend into), or `rotation.pool`'s when that list is missing, each with a fresh week reading."""
     flip, now, out = flip_file() or {}, time.time(), {}
-    for email in flip.get("accounts") or []:
+    accounts = flip.get("accounts")
+    if not accounts:
+        rot = rotation(flip)
+        accounts = [e["account"] for e in rot["pool"]] if rot else []
+    for email in accounts:
         s = seen(flip, email, now)
         if fresh(s, now) and s.get("weekReset"):
             row = {"readAt": iso(s["at"]), "week": s["week"], "weekReset": int(s["weekReset"])}
@@ -263,13 +282,18 @@ while True:
     except SystemExit as e:
         problems.append(f"usage.accounts: {e}")
         FACTORY = None  # no list known, so no account counts as removed this cycle
+    failed = None
     try:
         stored = stored_login()
         write(STORED, stored)
         write_stored(stored)
     except Exception as e:
-        no_login = isinstance(e, NoLogin)
+        no_login, failed = isinstance(e, NoLogin), e
         problems.append(f"stored login: {type(e).__name__}: {e}")
+    try:
+        write(STATUS, {"loginEnded": failed.reason if isinstance(failed, LoginEnded) else None, "tokenExpired": isinstance(failed, TokenExpired), "writtenAt": iso(time.time())})
+    except OSError as e:
+        problems.append(f"stored login status: {type(e).__name__}: {e}")
     flip = flip_file() or {}
     resolved = resolved_factory(flip)
     try:
@@ -306,17 +330,46 @@ while True:
         write(os.path.join(OPS, "alerts-usage.json"), {"alerts": out, "writtenAt": data["writtenAt"]})
     five = data and data["rate_limits"].get("five_hour", {}).get("used_percentage")
     detail = f"{data['account']}: 5h {'none' if five is None else f'{five}%'}, 7d {data['rate_limits'].get('seven_day', {}).get('used_percentage')}%" if data else ""
-    # an expired stored token is expected while every session runs on another account's token, so only a missing factory reading fails; with no account at all, the job waits for one
-    if data and not any(p.startswith("factory") for p in problems):
+    # a missing factory reading fails, and so does a stored login that has read nothing for 15 minutes, by stored-login.json's writtenAt or else this run's start, since an --account start on it waits on that reading, but while its seat token carries it (below); one with no Claude Code login at all (NoLogin) keeps the beat it had. The cause is cut so the fix fits beat.py's 120 characters
+    try:
+        last = json.load(open(STORED))["writtenAt"]
+    except (OSError, ValueError, KeyError, TypeError):
+        last = STARTED
+    try:
+        quiet = int((time.time() - datetime.datetime.fromisoformat(str(last).replace("Z", "+00:00")).timestamp()) // 60)
+    except ValueError:
+        quiet = 0
+    quiet_stored = failed is not None and not no_login and quiet >= 15
+    cause = ("access token expired" if isinstance(failed, TokenExpired) else f"login ended: {failed.reason}" if isinstance(failed, LoginEnded) else f"{type(failed).__name__}: {failed}") if quiet_stored else None
+    # a quiet stored login whose seat token login-flip.json's seen read fresh (via token, under 60 minutes, its item still in the Keychain) runs every start on that token, the probe spawn.sh's seat start reads, so the beat stays ok and its detail names the login; another failing reading then beats its own error, the stored login's problem left to the detail
+    seat = None
+    if quiet_stored:
+        try:
+            own = json.load(open(STORED)).get("account")
+        except (OSError, ValueError, AttributeError):
+            own = None
+        entries = (flip_file() or {}).get("seen")
+        s = next((r for a, r in entries.items() if isinstance(a, str) and a.lower() == own.lower() and isinstance(r, dict)), None) if isinstance(own, str) and isinstance(entries, dict) else None
+        if s and s.get("via") == "token" and isinstance(s.get("at"), (int, float)) and time.time() - s["at"] < 3600 and has_token(own, SERVICE):
+            seat = f"{own}'s stored login reads nothing ({cause}), so it runs on its seat token, read {int((time.time() - s['at']) // 60)} min ago"
+    if quiet_stored and not seat:
+        fix = "; the owner's /login brings it back" if isinstance(failed, (LoginEnded, TokenExpired)) else ""
+        head = f"error: stored login read nothing for {quiet} min ("
+        result = head + cause[: 120 - len(head) - len(fix) - 1] + ")" + fix
+    elif data and not any(p.startswith("factory") for p in problems):
         result = "ok"
     elif no_login and not FACTORY and len(problems) == 1:
         result = "waiting: no Claude account yet; add one in the Dashboard"
     else:
-        result = ("error: " + "; ".join(problems))[:120]
-    if data and problems:
-        detail += " (" + "; ".join(problems)[:200] + ")"
+        rest = [p for p in problems if not (seat and p.startswith("stored login:"))]
+        result = ("error: " + "; ".join(rest))[:120] if rest else "ok"
+    # the stored login's error takes the result, or the seat token carries it out of the result, so the cycle's problems stay in the detail, with or without a reading
+    if problems and (data or seat or result.startswith("error: stored login")):
+        detail = (detail + " (" + "; ".join(problems)[:200] + ")").strip()
     # the status line's figures are not usage.json's, so a failed run shows in the detail and leaves the job's result alone
     if cost_problem:
         detail += f" ({cost_problem})"
+    if seat:
+        detail = f"{seat}. {detail}".strip()
     beat("ops-usage", os.getpid(), STARTED, CYCLE, result, {"detail": detail})
     time.sleep(CYCLE)

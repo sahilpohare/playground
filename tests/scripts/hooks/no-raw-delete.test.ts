@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { homedir } from "node:os"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { check } from "../../../scripts/hooks/no-raw-delete"
@@ -38,6 +39,8 @@ describe("a delete the hook lets run", () => {
     "rsync -a src/ dst/",
     "~/.playground/ops/run-slot.sh me -- rm notes.txt",
     "~/.playground/ops/run-slot.sh me -- bun run test",
+    'C="rm notes.txt"; $C',
+    "W=me; ~/.playground/ops/run-slot.sh $W -- bun run test",
     "git clean -f",
     "git clean -n -d",
     "git clean -ndx",
@@ -60,6 +63,20 @@ describe("a delete the hook lets run", () => {
     "$R/scripts/spawn.sh column reviewer $W --pr 1",
     "gh pr checks $N -R owner/repo",
     "'/bin/r?' -rf sub",
+    // #2244's controls: a glob used only as an argument, a glob that matches no file, an array the reader resolves, and an array the reader cannot read in a call that names no delete
+    "ls /bin/r?",
+    "/no/such/folder/r? notes.txt",
+    'A=(rm notes.txt); "${A[@]}"',
+    'A=(echo hi); A+=(there); "${A[@]}"',
+    // #2259's controls: a commit subject holding (…), a brace list or a subshell used only as an argument or a group, code with braces and parens a spaced word holds, and a commit scope read as a line after a cd into a folder that is gone
+    "git commit -m 'fix(PG-1): rm (a|b) files'",
+    'git commit -m "fix(#12): rm stale files"',
+    "mkdir -p /tmp/zz/{a,b}",
+    "(cd /tmp && ls)",
+    `agent-browser eval 'JSON.stringify({rm: f("(a: b)"), h: g()})'`,
+    `agent-browser eval "x.match(/rm[^a]{0,90}|y[^a]{0,60}/g)"`,
+    `cd /no/such/folder; ~/.playground/ops/run-slot.sh w -- git commit -m "docs(PG-1): rm help"`,
+    `~/.playground/ops/run-slot.sh me -- git commit -m "fix(PG-1): playground rm moves a file" -m "a (b) c"`,
     'rmdir "${S:?}/${m:?}"',
     "mv web/next/.next .turbo /tmp/claude-501/p/s/scratchpad/cold-1/",
     "playground rm sub/old",
@@ -79,7 +96,6 @@ describe("a delete the hook lets run", () => {
     "git diff | delta",
     "redis-cli del lock",
     "docker exec playground-x-redis redis-cli del k",
-    "bun run del",
     "bun add -d del-cli",
     "sudo -s <<< 'ls'",
     "su <<< 'echo hi'",
@@ -94,8 +110,32 @@ describe("a delete the hook lets run", () => {
     "pkexec <<< 'ls'",
     "echo ls | pkexec su",
     "{ echo ls | bash; } <<< 'rm -rf x'",
+    // #2136's controls: a program word the reader resolves, and an expansion used only as an argument
+    'A=(echo hi); "${A[@]}"',
+    "S='echo hi'; eval \"$S\"",
+    "S='ls -la'; sh -c \"$S\"",
+    "for c in echo; do $c hi; done",
+    'cat "$F"',
   ])("%s", async (command) => {
     expect(await check(input(command))).toBeUndefined()
+  })
+
+  // bun run runs the nearest package.json's script of that name in place of a program, from a subfolder too (#2397)
+  test("bun run del, where the package.json above the folder names a del script", async () => {
+    const root = mkdtempSync(join(tmpdir(), "raw-delete-script-"))
+    mkdirSync(join(root, "sub"))
+    writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { del: "echo del" } }))
+    expect(await check(input("bun run del", {}, root))).toBeUndefined()
+    expect(await check(input("bun run del", {}, join(root, "sub")))).toBeUndefined()
+    expect(await check(input(`bun run --cwd ${root} del`, {}, tmpdir()))).toBeUndefined()
+  })
+
+  // a runner's folder option is a folder, never a program word, even in a variable (#2397's 7-day replay)
+  test("bunx's --cwd in a variable, before files under it", async () => {
+    const w = join(tmpdir(), "raw-delete-w")
+    expect(
+      await check(input(`W=${w}; bunx --cwd $W oxfmt $W/tests/a.test.ts $W/b.ts`)),
+    ).toBeUndefined()
   })
 })
 
@@ -126,6 +166,12 @@ describe("a delete the hook refuses, naming playground rm", () => {
     const reason = await check(input("rm -rf node_modules"))
     expect(reason).toContain("leave a bigger tree or a scratch folder in place")
     expect(reason).toContain("bun install rebuild a node_modules in place")
+  })
+
+  test("a command built from a value it cannot read, in a call that names a delete, is pointed at a script file", async () => {
+    const reason = await check(input(`A=(echo -rf ${NEVER_MADE}); A[0]=rm; "\${A[@]}"`))
+    expect(reason).toContain("a command built from a value it cannot read")
+    expect(reason).toContain("write the script to a file and run it")
   })
 
   test("a word it cannot read is named by its variable", async () => {
@@ -165,6 +211,14 @@ describe("agent-browser eval's script is JavaScript, never a shell command line 
     `agent-browser eval 'f("x")?.outerHTML ?? "none"'`,
     INBOX,
     "agent-browser open http://x.localhost && agent-browser eval 'a?.b ?? 1'",
+    // #1887: a --session name before eval, alone or by =, and the same call's other commands
+    "agent-browser --session t eval 'a?.b ?? 1'",
+    "agent-browser --session=t eval 'a?.b ?? 1'",
+    "agent-browser --session t open http://x.localhost && agent-browser --session t eval 'a?.b ?? 1'",
+    "agent-browser --session t eval 'document.title'",
+    // #2320: --args' launch flags holding no blank, --ignore-https-errors and --json before eval too
+    `agent-browser --args "--no-sandbox,--mute-audio" --session t --ignore-https-errors eval 'a?.b ?? 1'`,
+    "agent-browser --args=--no-sandbox --json eval 'a?.b ?? 1'",
   ])("%s runs", async (command) => {
     expect(await check(input(command))).toBeUndefined()
   })
@@ -175,6 +229,11 @@ describe("agent-browser eval's script is JavaScript, never a shell command line 
     "agent-browser eval 'a?.b ?? 1' && r? -rf x",
     `agent-browser eval "$(rm -rf ${NEVER_MADE})"`,
     `agent-browser rm -rf ${NEVER_MADE}`,
+    // #1887: another option before eval, a session name and no eval, and a substitution in the session's script; #2320: --args' launch flags holding a blank
+    "agent-browser --profile p eval 'a?.b ?? 1'",
+    `agent-browser --args "--renderer-cmd-prefix=r? -rf x" eval 'a?.b ?? 1'`,
+    `agent-browser --session t rm -rf ${NEVER_MADE}`,
+    `agent-browser --session t eval "$(rm -rf ${NEVER_MADE})"`,
   ])("%s is still refused", async (command) => {
     expect(await check(input(command))).toContain("no-raw-delete hook ")
   })

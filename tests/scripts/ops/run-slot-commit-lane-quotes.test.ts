@@ -2,7 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 
-import { SCRIPT, machine } from "./run-slot-fake"
+import { machine, SCRIPT, spawn } from "./run-slot-fake"
 
 // a check waits on its run's exit or a line it prints, so the timeout only catches a hang
 setDefaultTimeout(60_000)
@@ -15,7 +15,7 @@ describe("a comment's quotes leave the commit lane's read alone", () => {
     const repo = join(m.root, "repo")
     mkdirSync(repo)
     expect(Bun.spawnSync(["git", "-C", repo, "init"]).exitCode).toBe(0)
-    const p = Bun.spawn(["bash", SCRIPT, "kind", "--", "bash", "-c", scriptOf(repo)], {
+    const p = spawn(["bash", SCRIPT, "kind", "--", "bash", "-c", scriptOf(repo)], {
       cwd: m.root,
       env: m.env(),
       stdout: "pipe",

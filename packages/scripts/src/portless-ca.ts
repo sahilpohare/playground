@@ -20,5 +20,7 @@ export const withPortlessCa = async (): Promise<void> => {
     env: { ...process.env, NODE_EXTRA_CA_CERTS: ca },
     stdio: ["inherit", "inherit", "inherit"],
   })
+  // A signal sent to this process's pid alone (TaskStop, a test's kill) goes on to the run, so its own handlers clean up and it decides the exit code.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => child.kill(signal))
   process.exit(await child.exited)
 }

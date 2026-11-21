@@ -7,7 +7,7 @@ import { checkoutRepo, pullsUrlOf, repoOf } from "@/lib/dashboard/repo"
 import { entries } from "@/lib/entries"
 import { dataDir } from "@/lib/sessions/paths"
 
-// The leads' merge queue (merge-queue.json in the data folder): each open pull request in the order it will merge, with when it is expected to merge and the leads' words for it, and the parked ones, beside other keys that belong to the leads. The leads write it; the dashboard only reads it, and reads only what the Pull requests tab shows. Its numbers belong to this checkout's repository.
+// The leads' merge queue (merge-queue.json in the data folder): each open pull request in the order it will merge, with when it is expected to merge and the leads' words for it, and the parked ones, beside other keys that belong to the leads. The Builder writes it (playbook's SWEEP.md); the dashboard only reads it, and reads only what the Pull requests tab shows. Its numbers belong to this checkout's repository.
 const isoTime = z.iso.datetime({ offset: true })
 
 const queueEntrySchema = z.object({

@@ -147,7 +147,15 @@ test("when Homebrew fails too, the step exits 1 and names the wider fault", asyn
 test("the restore and save steps cache the same key and the .deb files alone", async () => {
   const cache = (await steps()).filter((step) => step.uses?.startsWith("actions/cache/"))
   expect(cache.map((step) => [step.uses, step.with?.path, step.with?.key])).toEqual([
-    ["actions/cache/restore@v4", "~/.cache/zsh-debs/*.deb", "${{ steps.zsh-key.outputs.key }}"],
-    ["actions/cache/save@v4", "~/.cache/zsh-debs/*.deb", "${{ steps.zsh-key.outputs.key }}"],
+    [
+      "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
+      "~/.cache/zsh-debs/*.deb",
+      "${{ steps.zsh-key.outputs.key }}",
+    ],
+    [
+      "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830",
+      "~/.cache/zsh-debs/*.deb",
+      "${{ steps.zsh-key.outputs.key }}",
+    ],
   ])
 })

@@ -13,7 +13,16 @@ import {
   writeFiles,
   writeRoot,
 } from "./folder"
-import { fromStored, jobSchema, orgJob, orgJobKey } from "./jobs"
+import {
+  fromStored,
+  jobKey,
+  JOBS,
+  jobSchema,
+  orgJob,
+  orgJobKey,
+  retiredJobKey,
+  runsOn,
+} from "./jobs"
 import { CORE, extensionsDir, loginOf, scopeDir } from "./rendered"
 import { secretIn } from "./secrets"
 import {
@@ -74,16 +83,21 @@ export const deriveRoot = (data: string, login: string): void => {
 
 const byScopeKey = (a: Row, b: Row) => (`${a.scope} ${a.key}` < `${b.scope} ${b.key}` ? -1 : 1)
 
-// Every key with its default, every row, and the values a session of your login reads (each merge field's row over its default), which Settings > Jobs shows.
-export const listSettings = (data: string) => {
+// Every key with its default, every row, and the values a session of your login reads (each merge field's row over its default), which Settings > Jobs shows; a MAC_ONLY job's key on darwin alone, since the render gives it no row elsewhere.
+export const listSettings = (data: string, platform: string = process.platform) => {
   const rows = settingRows(data).sort(byScopeKey)
+  const elsewhere = Object.keys(JOBS)
+    .filter((name) => !runsOn(name, platform))
+    .map(jobKey)
   return {
-    keys: settingFields().map(({ field, key }) => ({
-      aliases: field.aliases ?? [],
-      default: field.default,
-      description: field.description,
-      key,
-    })),
+    keys: settingFields()
+      .filter(({ key }) => !elsewhere.includes(key))
+      .map(({ field, key }) => ({
+        aliases: field.aliases ?? [],
+        default: field.default,
+        description: field.description,
+        key,
+      })),
     rows,
     schemaVersion: SCHEMA_VERSION,
     values: settingsFor(rows, loginOrNone(data) ?? "").values,
@@ -237,7 +251,7 @@ export const setSetting = (
   return { key: checked.key, ok: true, scope: input.scope, value: checked.value }
 }
 
-// Takes a setting back to its default at a scope by dropping it from the scope's file, under its name and each alias.
+// Takes a setting back to its default at a scope by dropping it from the scope's file, under its name and each alias; an org's job row or a retired job's goes under its own key.
 export const resetSetting = (
   data: string,
   input: { key: string; scope: string },
@@ -245,7 +259,8 @@ export const resetSetting = (
 ): Result<{ key: string; scope: string }> => {
   const bad = badScope(data, input.scope)
   if (bad) return bad
-  const key = resolveKey(input.key) ?? (orgJobKey(input.key) ? input.key : undefined)
+  const own = orgJobKey(input.key) || retiredJobKey(input.key)
+  const key = resolveKey(input.key) ?? (own ? input.key : undefined)
   if (!key) return { message: `no setting ${input.key}`, ok: false, status: 404 }
   const values = readValues(data, input.scope)
   const names = (resolveKey(key) ? namesOf(key) : [key]).filter((name) => name in values)

@@ -12,6 +12,7 @@ import {
 } from "../../../../../packages/scripts/src/pr-merge/merge"
 import {
   ciSteps,
+  cloneArgs,
   slotted,
   typesGate,
   type Prepare,
@@ -428,7 +429,8 @@ describe("the types gate", () => {
       ["metrics", "bun packages/scripts/src/data-table-metrics.ts", false],
       ["check-types:tests", "bun run check-types:tests", true],
     ]
-    const clone = ["clone", "cp -cR /co/node_modules /wt/", false]
+    const flags = process.platform === "darwin" ? "-cR" : "-R --reflink=auto"
+    const clone = ["clone", `cp ${flags} /co/node_modules /wt/`, false]
     const forced = ["install", "bun install --force --ignore-scripts --cwd /wt", false]
     const install = ["install", "bun install --ignore-scripts --cwd /wt", false]
     const nice = process.env.RUN_SLOT_NICE
@@ -470,6 +472,12 @@ describe("the types gate", () => {
     ])
     expect(slotted(["tsc"], { RUN_SLOT_NICE: "10" }, "/ops/run-slot.sh")).toEqual(["tsc"])
     expect(slotted(["tsc"], {}, null)).toEqual(["tsc"])
+  })
+
+  // GNU cp has no -c, so the clone's macOS flag refused every merge behind canary on Linux (#2334)
+  test("cloneArgs clones with -c on macOS and with --reflink=auto on Linux", () => {
+    expect(cloneArgs("darwin")).toEqual(["-cR"])
+    expect(cloneArgs("linux")).toEqual(["-R", "--reflink=auto"])
   })
 })
 

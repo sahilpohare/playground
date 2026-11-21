@@ -14,6 +14,7 @@
   the message,
   the update message, a sent row action, the prompt's answer, the mode, the model or effort, the Vibeground's start or stop, its hand-back message to the dispatcher, the template's session start, the templates' list and the managers' order.
   A secret ask's Submit and a reveal card's Show and Copy also refuse the agent sign-in's account after the owner rung (`refuseAgent`), since that account holds the owner rung, so only the owner's own click moves a Keychain value (asks.md).
+  An Inbox answer, the composer's send, the Remote section's Approve and Revoke and the dispatcher's Start and Switch refuse that account too, after the owner rung (`refuseAgentOffFixture` in `api/hono/src/middlewares/agent.ts`), on every source but a fixture one (`currentSource()` in `api/hono/src/lib/dashboard/fixture.ts`), where testers drive them on made-up data.
   A thread view's opening (asks.md's Threads) and a sidebar thread's menu's Mark as read or unread, Pin or Unpin, Archive and Rename's Save are the confirmation for the thread's change.
   Behind portless the API's peer is always the proxy on loopback, so in portless LAN mode a LAN client passes `requireLoopback` and only the owner session stops it; keep LAN mode off while the dashboard runs.
   Under `PLAYGROUND_HOSTED=1` Yard's writes take the `member` rung, or the one their route names, with no `requireLoopback`, and a browser's write `requireTrustedOrigin`, while a `yard_` token's write takes none, since a token carries no cookie a page could send (stack.md's hosted rule).
@@ -34,7 +35,7 @@
   Close the probe the moment its test is done.
 - ALWAYS: Verify dashboard work with `bun run verify` (`--help` lists its checks) rather than a script of your own: a worker before it opens or updates a PR, the reviewer before it scores one, a runner after it restarts a stack.
   With no check it runs `all`.
-  With no URLs it checks this worktree's stack; for the live dashboard, read-only, run it from the dashboard's checkout (on branch `live.branch`, so portless names its stack `dashboard.playground` and `dashboard.api.playground`) with no URLs and `--expect <live.branch>` (its checkout runs `origin/canary`'s latest head, `.agents/dashboard/live.md`).
+  With no URLs it checks this worktree's stack; for the live dashboard, read-only, run it from the dashboard's checkout (on branch `live.branch`, so portless names its stack `dashboard.playground` and `dashboard.api.playground`) with no URLs and `--expect <live.branch>` (its checkout runs the latest head of the branch the main checkout sits on; see `.agents/dashboard/live.md`).
   A check it lacks goes into `packages/scripts/src/verify/`, so the next agent has it too.
   It builds the workspace packages it imports when their `dist` is missing (a fresh worktree) or lacks a name its sources import, and in the factory's main checkout (`$PLAYGROUND_REPO`) it stops instead and says to run from your own worktree.
   It also builds one whose `src` holds a file newer than its `dist`, but only while no stack runs in this worktree, since a rebuild under a running stack hangs it.

@@ -24,13 +24,14 @@ export function OuterProvider({ children }: { children: React.ReactNode }) {
   )
 }
 
-export function InnerProvider({ children }: { children: React.ReactNode }) {
+export function InnerProvider({ children, nonce }: { children: React.ReactNode; nonce?: string }) {
   return (
     <NextThemesProvider
       attribute="class"
       defaultTheme="system"
       enableSystem
       disableTransitionOnChange
+      nonce={nonce}
     >
       <TooltipProvider delay={TOOLTIP_DELAY_MS} timeout={0}>
         {children}

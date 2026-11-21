@@ -78,7 +78,7 @@ export async function publicDraftHit(
     return {
       refusal: `the public-draft check cannot read the extensions' settings (${read.refusal}), so it cannot name the repositories; fix that, then post again.`,
     }
-  const repos = reposOf(read.settings)
+  const repos = reposOf(read.settings, checkout)
   for (const [kind, re] of patterns(list.list, repos)) {
     if (text.search(re) === -1) continue
     const said = SAID[kind] ?? (TICKET_KINDS.has(kind) ? TICKET_HIT : undefined)

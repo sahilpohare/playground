@@ -49,15 +49,16 @@ export const routeOf = (pageFile: string): string => {
 // A <SidebarGroupLabel>'s label: its text (the words before any element or expression, as in a toggle's Other and its chevron, or Threads and its pager), or an expression ({label}), whose groups dashboardGroups reads from GROUP_ORDER.
 export type LabelChild = { text: string } | { expression: true }
 
-// The label of every <SidebarGroupLabel> in a source file. Its opening tag can hold JSX of its own (a render={<Link … />}), so the tag ends at the first > outside braces and quotes.
+// The label of every <SidebarGroupLabel> or <MovableGroupLabel> (the shell's group label, which wraps one) in a source file; a wrapper's own label, its bare {children}, is its callers', so it is skipped. Its opening tag can hold JSX of its own (a render={<Link … />}), so the tag ends at the first > outside braces and quotes.
 export const groupLabelChildren = (source: string): LabelChild[] => {
   const found: LabelChild[] = []
-  const tag = /<SidebarGroupLabel[\s>]/g
+  const tag = /<(SidebarGroupLabel|MovableGroupLabel)[\s>]/g
   for (let match = tag.exec(source); match; match = tag.exec(source)) {
+    const name = match[1]!
     let depth = 0
     let quote = ""
     let end = -1
-    for (let i = match.index + "<SidebarGroupLabel".length; i < source.length; i++) {
+    for (let i = match.index + name.length + 1; i < source.length; i++) {
       const char = source[i]
       if (quote) {
         if (char === quote) quote = ""
@@ -70,12 +71,13 @@ export const groupLabelChildren = (source: string): LabelChild[] => {
       }
     }
     if (end < 0 || source[end - 1] === "/") continue
-    const close = source.indexOf("</SidebarGroupLabel>", end)
+    const close = source.indexOf(`</${name}>`, end)
     if (close < 0) continue
     const text = source
       .slice(end + 1, close)
       .replace(/\s+/g, " ")
       .trim()
+    if (text === "{children}") continue
     const words = text.match(/^([^{}<]+?)\s*[{<]/)?.[1]
     if (!/[{}<]/.test(text)) found.push({ text })
     else if (words) found.push({ text: words })

@@ -20,7 +20,7 @@ import {
 
 // Relative, not @/: the web's tests type-check this file under web/next's own @/ paths.
 import { checkoutRoot, readsLive } from "../dashboard/fixture"
-import type { OwnerApps } from "../dashboard/inbox"
+import type { CloneRun, OwnerApps } from "../dashboard/inbox"
 import { OWNER_APPS } from "../dashboard/owner-apps"
 import { dataDir } from "../sessions/paths"
 import { NOT_SET_UP } from "./app-words"
@@ -54,6 +54,12 @@ export const runCli =
     ])
     return { code, err: err.trim(), out: out.trim() }
   }
+
+// What a clone card's Approve runs with: the CLI, and this checkout's guard lists, which it seeds after the clone (the step `playground ext import --from-tree extensions/core/lists` takes).
+export const cloneRun = (): CloneRun => ({
+  lists: join(checkoutRoot() ?? process.cwd(), "extensions/core/lists"),
+  run: runCli(),
+})
 
 const NO_LOGIN = {
   message: `Extensions are kept beside your settings, which are ${NOT_SET_UP}`,

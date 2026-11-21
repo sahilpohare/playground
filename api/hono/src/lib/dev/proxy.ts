@@ -42,6 +42,19 @@ export const listening = (port: number, timeout = 500): Promise<boolean> =>
     }).catch(() => settle(false))
   })
 
+const UNPREFIXED = new Set(["main", "master"])
+
+// The prefix portless gives a linked worktree's stack, as its cli.js names it (branchToPrefix and sanitizeForHostname): the branch's last segment, lowercased, with anything but letters, digits and hyphens turned to hyphens, runs of them merged and the ends trimmed; none on main or master, or when nothing is left. Its truncation of a label past 63 characters ends in a hash, so it never yields a short prefix such as dashboard.
+export const prefixOf = (branch: string): string | null => {
+  if (UNPREFIXED.has(branch)) return null
+  const prefix = (branch.split("/").at(-1) ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+  return prefix || null
+}
+
 // The unprivileged port a stack starts portless's proxy on while the one below 1024 is down: it needs no sudo, so no terminal, and every stack keeps its name on it.
 export const FALLBACK_PORT = 1355
 

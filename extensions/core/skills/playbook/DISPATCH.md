@@ -19,9 +19,11 @@ The steps to spawn and brief a session are in [SESSIONS.md](SESSIONS.md#spawn), 
   - Each Inbox item about it is posted with `playground ask new --thread <id>`.
   - A follow-up with no marker is routed to the open thread whose title it matches (`bun run thread list`), or opens a new one.
   - A route waits up to a minute for ingest to bring the message; one that fails names the quote, so check its words against the message and route again.
-- The Planner orders and decides, and builds nothing: every research or advisor pass goes to the Builder as a read-only research worker that reports to the Planner (**workers**).
+- The Planner orders and decides, and builds nothing: every research or advisor pass runs as a read-only research worker the Planner starts and briefs from `scripts/briefs/new-research-worker.md`, reporting to the Planner (**workers**).
   Every non-trivial plan it writes is researched first and passes an advisor (a research worker asked for a second opinion, on Opus at high effort) before it is decided (**verify**); a design choice goes in `~/.playground/bundles/decisions.md`.
   A decision that claims no change for this machine or for the owner's setup cites its measurement there, the command run and its output, since one such claim, unmeasured, once nearly let a web build run beside the live dashboard's Postgres.
+  Every decision on an outside tool, model, library or setup, the dispatcher's, the Planner's or a lead's, opens with a web check of its primary sources (the project's own docs, changelog or release notes, and issue tracker), cited by URL in the ruling beside our own measurements, since our own figures alone miss what the project has already shipped, fixed or deprecated.
+  A version any of them cites as a project's latest has `prerelease: false` and `draft: false` on GitHub's releases API (`gh api repos/<owner>/<repo>/releases`), and a pre-release is named as one.
   It sends the dispatcher each result with any decision on **ask**'s list, which the dispatcher posts to his Inbox, and keeps the roadmap in `~/.playground/bundles/plan.json`, re-groomed whenever the owner adds something.
   It files an issue in the repo where the work lives: the factory's own work in the factory repo, an org's in that org's extension repo and a person's in their login extension ([ADR 0016](../../../../.agents/adr/0016-playground-is-generic-with-a-small-core.md)).
   Before it files one, it searches that repo's open issues for the same file or symptom, and folds the finding into a match as a comment, filing a new issue only when none matches (one issue once duplicated another).
@@ -85,8 +87,8 @@ The steps to spawn and brief a session are in [SESSIONS.md](SESSIONS.md#spawn), 
   Steer a busy worker only with a correction to the very thing it is building.
   A separable change to an open PR goes to a new worker on a branch off that PR's head, the two coordinating through the Builder.
 - Before a lead spawns a worker, it reads the machine's room from the live dashboard: `bun run --cwd <dashboard checkout> verify system`, which finds the dashboard's stack through portless.
-  Room is held in code: `scripts/spawn.sh`, the one way a session starts another ([SPAWN.md](SPAWN.md#capacity-gate)), runs a capacity gate on load, memory, for a new worker a run-slot lane free with the load units for a run, or an empty queue, and the backend's usage, and refuses with the gate and its reading (the room is the cores in use, not a count of slots),
-  and refuses a name a live session already holds.
+  Room is held in code: `scripts/spawn.sh`, the one way a session starts another ([SPAWN.md](SPAWN.md#capacity-gate)), runs a capacity gate, whose gates SPAWN.md lists,
+  and refuses with the gate and its reading (the room is the cores in use, not a count of slots), and refuses a name a live session already holds.
   Its one bypass is the first dispatcher's ([SPAWN.md](SPAWN.md#capacity-gate)); past the gate otherwise only the owner starts a session, from his own terminal, whose sessions load no factory hook, or a PR changes the gate, and a priority task takes the room its lead frees by closing its lowest-priority worker (below).
   Spawn a new session only for a chore that needs its own context; a short job (a probe-sized check, a one-off script) runs as a background task in the session that wants it.
   Within them, spawn as many as its `system` line's room allows, and at "No room" spawn none and queue the task with that line as the reason.

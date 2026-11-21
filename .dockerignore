@@ -52,6 +52,7 @@ vercel-bundle/
 # custom files
 .npmrc
 .sdk-session
+.turbo-dev.log
 *.local.json
 cookies.txt
 web/next/content/blog/meta.json

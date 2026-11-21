@@ -24,7 +24,6 @@ const ALLOWLIST = Object.freeze([
   "tests/test_ops_jobs.py",
   "tests/test_ops_merge_train.py",
   "tests/test_setup_check.py",
-  "tests/test_skill_frontmatter.py",
 ])
 
 const RULE =

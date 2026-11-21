@@ -89,6 +89,17 @@ describe("templateArgv, each default template", () => {
     })
   })
 
+  test("a local template starts on the local backend with its effort, and no model or account", () => {
+    const template = { ...byId("orchestrator"), effort: "low" as const, model: "local" }
+    const made = templateArgv({ dispatcher: "dispatcher", name: "x", root: ROOT, template })
+    expect("steps" in made && made.steps[1]!.slice(4)).toEqual([
+      "--backend",
+      "local",
+      "--effort",
+      "low",
+    ])
+  })
+
   test("a template's model and effort reach spawn.sh's flags", () => {
     const template = { ...byId("orchestrator"), effort: "high" as const, model: "opus" }
     const made = templateArgv({ dispatcher: "dispatcher", name: "x", root: ROOT, template })

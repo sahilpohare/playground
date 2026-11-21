@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { scratchEnv } from "./scratch-env"
+
 const ROOT = join(import.meta.dir, "..")
 
 // The red-first run: a bare bun test outside the sandbox wrote under the real home and opened sessions on the live herdr server
@@ -16,10 +18,9 @@ test("a bare bun test outside the sandbox stops before any test runs and names b
       fixture,
       `import { test } from "bun:test"\nimport { mkdirSync, writeFileSync } from "node:fs"\nimport { homedir } from "node:os"\ntest("writes under the home", () => {\n  mkdirSync(homedir() + "/.claude", { recursive: true })\n  writeFileSync(homedir() + "/.claude/written", "")\n})\n`,
     )
-    const { TEST_SANDBOX_HOME: _, ...env } = process.env
     const run = Bun.spawnSync(["bun", "test", fixture], {
       cwd: ROOT,
-      env: { ...env, HOME: home },
+      env: scratchEnv(home, { TEST_SANDBOX_HOME: undefined }),
       stderr: "pipe",
       stdout: "pipe",
     })

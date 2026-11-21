@@ -27,7 +27,7 @@ const ALLOWED: Record<string, [number, string]> = {
   "packages/scripts/src/ops-herdr/cli.ts": [1, GUARD],
   "packages/scripts/src/ops-herdr/herdr.ts": [1, GUARD],
   "packages/scripts/src/parity/replay/run.ts": [1, GUARD],
-  "scripts/README.md": [4, `${HISTORY}; ${GUARD}`],
+  "scripts/README.md": [3, GUARD],
   "scripts/hooks/bundled/guards.js": [10, `${GUARD}, bundled beside every other Bash guard`],
   "scripts/hooks/no-raw-spawn.ts": [17, GUARD],
   "scripts/ops/README.md": [2, PROOF],

@@ -7,7 +7,6 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -34,7 +33,6 @@ import {
   pendingMigrations,
   PORTLESS,
   preflight,
-  prefixOf,
   setNextDevAside,
   type SettingsRead,
   syncAliases,
@@ -370,29 +368,6 @@ describe("isDryRun", () => {
   test("nothing else", () => {
     expect(isDryRun([])).toBe(false)
     expect(isDryRun(["--ui", "stream", "--dryer", "--filter=dry"])).toBe(false)
-  })
-})
-
-describe("prefixOf", () => {
-  test("cleans the branch's last segment as portless does", () => {
-    const cases: [string, string | null][] = [
-      ["feat/a", "a"],
-      ["feat/Desk", "desk"],
-      ["feat/desk-", "desk"],
-      ["feat/desk_", "desk"],
-      ["feat/_desk", "desk"],
-      ["live/desk", "desk"],
-      ["feat/a.b__c", "a-b-c"],
-      ["feat/main", "main"],
-    ]
-    for (const [branch, prefix] of cases)
-      expect([branch, prefixOf(branch)]).toEqual([branch, prefix])
-  })
-
-  test("gives none on main or master, or when nothing is left", () => {
-    for (const branch of ["main", "master", "feat/___", "feat/--"]) {
-      expect([branch, prefixOf(branch)]).toEqual([branch, null])
-    }
   })
 })
 
@@ -1013,8 +988,8 @@ describe("preflight", () => {
     if (checked.ok) expect(checked.proof).toContain("first run")
   })
 
-  // pglaunch reuses only a running container it named itself, so setup there would start a second, empty database beside one it cannot reuse; a running one it named is reused, as Try again does.
-  test("a missing POSTGRES_URL on the live dashboard's checkout is refused while its database exists where pglaunch cannot reuse it", async () => {
+  // startLocal reuses only a running container it named itself, so setup there would start a second, empty database beside one it cannot reuse; a running one it named is reused, as Try again does.
+  test("a missing POSTGRES_URL on the live dashboard's checkout is refused while its database exists where startLocal cannot reuse it", async () => {
     const cases = [
       { name: LIVE_DASHBOARD.database, state: "running" },
       { name: LIVE_DASHBOARD.database, state: "exited" },
@@ -1067,6 +1042,59 @@ describe("preflight", () => {
         if (failure === "vanished") expect(checked.refusal).not.toContain("start Docker")
       }
     }
+  })
+
+  // First run's own container, published on every interface before loopback was required: the guard refuses it as exposed and carries it, so the preflight lets it through to the proof and the schema checks.
+  const FIRST_RUN = "playground-pg-1-db-x9Kq"
+  const KEEP_DATA = `${FIRST_RUN} publishes port 33001 beyond loopback (0.0.0.0); keep its data and re-publish it on 127.0.0.1 alone`
+  const exposedOwn = () => {
+    const own = located(FIRST_RUN)
+    throw new GuardError("exposed", KEEP_DATA, {
+      ...own,
+      owner: { ...own.owner, addresses: ["0.0.0.0"] },
+    })
+  }
+
+  test("lets first run's own container through the loopback check alone, so a proof that fails still refuses", async () => {
+    const checked = await preflight(BRANCH, read(URL), {
+      locate: exposedOwn,
+      prove: failing("other-server", "the server on port 33001 is not that container's own"),
+      root: FACTORY_ROOT,
+    })
+    expect(checked.ok).toBe(false)
+    if (!checked.ok) {
+      expect(checked.refusal).toStartWith("the server on port 33001 is not that container's own; ")
+    }
+  })
+
+  test("starts first run's own container once its proof and schema pass, and warns with the keep-data fix", async () => {
+    const proof = proving()
+    const checked = await preflight(BRANCH, read(URL), {
+      locate: exposedOwn,
+      pending: current,
+      prove: proof.prove,
+      root: FACTORY_ROOT,
+      tables: seeded,
+    })
+    expect(proof.calls).toEqual([FIRST_RUN])
+    expect(checked.ok).toBe(true)
+    if (checked.ok) {
+      expect(checked.proof).toBe(`${URL} is ${FIRST_RUN}`)
+      expect(checked.warning).toBe(KEEP_DATA)
+    }
+  })
+
+  test("refuses an exposed container that is not first run's own, with the keep-data fix", async () => {
+    const checked = await preflight(BRANCH, read(URL), {
+      locate: () => {
+        throw new GuardError("exposed", "playground-a-db publishes port 33001 beyond loopback", {
+          ...located("playground-a-db"),
+        })
+      },
+      root: FACTORY_ROOT,
+    })
+    expect(checked.ok).toBe(false)
+    if (!checked.ok) expect(checked.refusal).toStartWith("playground-a-db publishes port 33001")
   })
 
   test("keeps the live dashboard's database to the live dashboard's own branch, refused before the proof runs anything in it", async () => {
@@ -1290,7 +1318,7 @@ describe("othersLiveDashboard", () => {
     expect(othersLiveDashboard("playground-pg-306-inbox-db", "pg-306-inbox")).toBe(false)
   })
 
-  test("is also the one first run started on the live checkout, which pglaunch names with a 4-character suffix", () => {
+  test("is also the one first run started on the live checkout, which startLocal names with a 4-character suffix", () => {
     const started = `${LIVE_DASHBOARD.database}-Ab12`
     expect(othersLiveDashboard(started, "pg-306-inbox")).toBe(true)
     expect(othersLiveDashboard(started, LIVE_DASHBOARD.branch)).toBe(false)

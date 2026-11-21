@@ -5,8 +5,13 @@ import { join } from "node:path"
 
 import { syncExtensions } from "../../../../../packages/scripts/src/ops-ext-sync/sync"
 import type { Run } from "../../../../../packages/scripts/src/ops-tick/tick"
-import { extGit, writeFiles } from "../../../../../packages/settings/src/folder"
-import { scopeDir } from "../../../../../packages/settings/src/rendered"
+import {
+  extGit,
+  rootLocked,
+  setRootLock,
+  writeFiles,
+} from "../../../../../packages/settings/src/folder"
+import { extensionsDir, scopeDir } from "../../../../../packages/settings/src/rendered"
 import { setSetting } from "../../../../../packages/settings/src/settings-folder"
 
 process.env.PLAYGROUND_LOGIN = "made-up-me"
@@ -47,6 +52,22 @@ const fixture = (visibility: Record<string, string> = {}) => {
 }
 
 const head = (dir: string) => extGit(dir, ["rev-parse", "HEAD"]).out.trim()
+
+// The root's file lock: every git write a sync makes, its fetch and push included, runs under withLock, which lifts that scope's folder of a locked root for it.
+test.skipIf(!Bun.which("chflags"))("a locked root syncs every scope and stays locked", async () => {
+  const { bares, data, run } = fixture()
+  setRootLock(data, true)
+  try {
+    const lines = await syncExtensions({ data, run })
+    expect(lines).toHaveLength(2)
+    expect(extGit(bares[`${ME}/playground-acme`]!, ["rev-parse", "main"]).out.trim()).toBe(
+      head(scopeDir(data, "acme")),
+    )
+    expect(rootLocked(extensionsDir(data))).toBe(true)
+  } finally {
+    setRootLock(data, false)
+  }
+})
 
 test("every scope's clone is pushed to <login>/playground-<scope>, set as its origin", async () => {
   const { bares, data, run } = fixture()

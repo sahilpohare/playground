@@ -1,6 +1,14 @@
 import { afterAll, beforeEach, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -62,7 +70,7 @@ test("storeSecret refuses a secret or key that would leave its quotes, and a ref
   expect(logged()).toBe("")
   process.env.FAKE_SECURITY_FAIL = "1"
   expect(() => storeSecret(settings, "glm", "zai", "made.up")).toThrow(
-    "the Keychain refused the playground-glm item for zai",
+    "the secret store refused the playground-glm item for zai",
   )
 })
 
@@ -97,4 +105,29 @@ test("with a record file, each secret is kept as its sha256 alone and security i
     "claude:made-up@example.test",
   ])
   expect(logged()).toBe("")
+})
+
+test("on Linux each call goes through the factory's own security, which keeps the item in the data folder's store", () => {
+  const cli = join(import.meta.dir, "../../../../packages/scripts/src/security/cli.ts")
+  const shim = join(bin, "shim")
+  const data = join(bin, "shim-data")
+  mkdirSync(shim)
+  writeFileSync(join(shim, "security"), `#!/bin/sh\nexec "${process.execPath}" "${cli}" "$@"\n`)
+  chmodSync(join(shim, "security"), 0o755)
+  const was = { data: process.env.PLAYGROUND_DATA_DIR, path: process.env.PATH }
+  process.env.PATH = `${shim}:${path}`
+  process.env.PLAYGROUND_DATA_DIR = data
+  try {
+    storeSecret(settings, "claude", "made-up@example.test", "sk-ant-oat01-made_up")
+    const item = join(data, "secrets", "keychain", "acme-claude", "made-up%40example%2Etest")
+    expect(readFileSync(item, "utf8")).toBe("sk-ant-oat01-made_up")
+    expect(statSync(item).mode & 0o777).toBe(0o600)
+    expect(hasSecret(settings, "claude", "made-up@example.test")).toBe(true)
+    expect(removeSecret(settings, "claude", "made-up@example.test")).toBe(true)
+    expect(hasSecret(settings, "claude", "made-up@example.test")).toBe(false)
+  } finally {
+    process.env.PATH = was.path
+    if (was.data === undefined) delete process.env.PLAYGROUND_DATA_DIR
+    else process.env.PLAYGROUND_DATA_DIR = was.data
+  }
 })

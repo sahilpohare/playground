@@ -194,6 +194,16 @@
   }
 }
 
+/* code shows each character as typed, since the mono font's ligatures draw `-<` as an arrow; outside init's base layer, which a shadcn sync rewrites */
+@layer base {
+  code,
+  kbd,
+  pre,
+  samp {
+    font-variant-ligatures: none;
+  }
+}
+
 /* no focus ring anywhere, an invalid field's included: a focused or invalid control, or the field wrapping it, highlights its border alone; unlayered, so it outranks every ring utility */
 :focus-visible,
 [aria-invalid="true"],

@@ -3,6 +3,7 @@
 import { dirname, join } from "node:path"
 
 import { WAITER } from "./after-compact"
+import { input } from "./input"
 import { fromFactory, MANAGER_ROLES, sessionOf, sessionRole } from "./role"
 
 // The transcript's tail it reads: a transcript runs to many megabytes, and its last entries sit at the end.
@@ -133,6 +134,6 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const out = await check(await Bun.stdin.text())
+  const out = await check(await input("after-resume", "recorder"))
   if (out) console.log(out)
 }

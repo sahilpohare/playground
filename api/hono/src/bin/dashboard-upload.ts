@@ -1,3 +1,4 @@
+import "@/bin/needs-database"
 import { createDatabase } from "@packages/db"
 import { env } from "@packages/env/db"
 

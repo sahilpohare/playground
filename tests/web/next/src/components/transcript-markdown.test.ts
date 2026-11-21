@@ -357,13 +357,53 @@ describe("code blocks and tables", () => {
   })
 })
 
+describe("a progress block", () => {
+  const BLOCK = [
+    "```progress",
+    "Mac reads | 100 | Reads every Mac | 9:10 pm",
+    "Yard channel | 40% | Posts land in the channel | 1:00 am",
+    "```",
+  ].join("\n")
+  const shown = (text: string, card: boolean) =>
+    decode(renderToStaticMarkup(createElement(TranscriptMarkdown, { card }, text)))
+
+  test("draws each item as a bar at the full width, with its name, percent, words and ETA, on a card and in the viewer (PG-2617)", () => {
+    for (const card of [true, false]) {
+      const html = shown(BLOCK, card)
+      expect(html).not.toContain('data-slot="code-block"')
+      // the name column stops at 6rem, so a long name never narrows the bars (PG-2617, a 63-character name left 64px bars)
+      expect(html).toContain("grid-cols-[fit-content(6rem)_minmax(4rem,1fr)_auto]")
+      const bars = [...html.matchAll(/<[^>]*role="progressbar"[^>]*>/g)].map((m) => m[0])
+      expect(bars).toHaveLength(2)
+      expect(bars[0]).toContain('aria-valuenow="100"')
+      // a row at 100 that names no state reads as done (PG-2730)
+      expect(bars[0]).toContain('aria-label="Mac reads, done"')
+      expect(bars[1]).toContain('aria-label="Yard channel"')
+      expect(bars[1]).toContain('aria-valuenow="40"')
+      expect(html.match(/data-slot="progress-track"[^>]*class="[^"]*\bw-full\b/g)).toHaveLength(2)
+      for (const words of ["Mac reads", "100%", "Reads every Mac", "9:10 pm", "40%", "1:00 am"])
+        expect(html).toContain(`>${words}<`)
+    }
+  })
+
+  test("a block that does not read stays the plain code block, as written", () => {
+    for (const card of [true, false]) {
+      const html = shown("```progress\nYard channel | 140 | Posts | 1:00 am\n```", card)
+      expect(html).not.toContain('role="progressbar"')
+      expect(html).toContain('data-slot="code-block"')
+      expect(html).toContain('data-language="progress"')
+      expect(html).toContain("Yard channel | 140 | Posts | 1:00 am")
+    }
+  })
+})
+
 describe("a drawing on a card", () => {
   test("its font shrinks from the card's 12px code size to fit its widest line, down to 10px", () => {
     expect(fitWidth(37)).toBe("clamp(10px, calc((100cqi - 1.25rem) / 37), 12px)")
   })
 
-  test("the widest line an ask's drawing runs is the one the narrowest card shows at 12px", () => {
-    expect(ASK_CODE_COLUMNS).toBe(37)
+  test("the widest line an ask's drawing runs is the owner's chosen width, which a narrow card shrinks to 10px or scrolls", () => {
+    expect(ASK_CODE_COLUMNS).toBe(72)
   })
 })
 

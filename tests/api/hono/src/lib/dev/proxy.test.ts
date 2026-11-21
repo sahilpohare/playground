@@ -16,6 +16,7 @@ import {
   fallbackDir,
   listening,
   portlessDir,
+  prefixOf,
   proxyDown,
   proxySetup,
   serviceDir,
@@ -217,5 +218,28 @@ describe("listening", () => {
       server.stop(true)
     }
     expect(await listening(port)).toBe(false)
+  })
+})
+
+describe("prefixOf", () => {
+  test("cleans the branch's last segment as portless does", () => {
+    const cases: [string, string | null][] = [
+      ["feat/a", "a"],
+      ["feat/Desk", "desk"],
+      ["feat/desk-", "desk"],
+      ["feat/desk_", "desk"],
+      ["feat/_desk", "desk"],
+      ["live/desk", "desk"],
+      ["feat/a.b__c", "a-b-c"],
+      ["feat/main", "main"],
+    ]
+    for (const [branch, prefix] of cases)
+      expect([branch, prefixOf(branch)]).toEqual([branch, prefix])
+  })
+
+  test("gives none on main or master, or when nothing is left", () => {
+    for (const branch of ["main", "master", "feat/___", "feat/--"]) {
+      expect([branch, prefixOf(branch)]).toEqual([branch, null])
+    }
   })
 })

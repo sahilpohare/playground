@@ -7,6 +7,9 @@ import {
   keychainSpec,
 } from "../../../../../api/hono/src/lib/keychain-items"
 
+// A made-up relay-on token, in the shape Yard mints one.
+const RELAY_TOKEN = `yard_relay_${"0123456789abcdefghijABCDEFGHIJ_-"}`
+
 // A fake `security`, so no test reaches the real Keychain.
 const fake = (answer: { code: number; stderr?: string }, name: KeychainItemName = "yard") => {
   const calls: { argv: string[]; input?: string }[] = []
@@ -20,6 +23,17 @@ const fake = (answer: { code: number; stderr?: string }, name: KeychainItemName 
 describe("an allowlisted Keychain item", () => {
   test("the allowlist holds slack and yard", () => {
     expect(Object.keys(KEYCHAIN_ITEMS)).toEqual(["slack", "yard"])
+  })
+
+  test("yard takes the relay-on token too, so the Mac keeps one Yard token in one item", async () => {
+    const { calls, item } = fake({ code: 0 })
+    await item.write(RELAY_TOKEN)
+    expect(calls).toEqual([
+      {
+        argv: ["security", "-i"],
+        input: `add-generic-password -U -s "playground-yard" -a "owner" -w "${RELAY_TOKEN}"\n`,
+      },
+    ])
   })
 
   test("slack takes a Slack user token, xoxp-, under playground-slack, and refuses any other", async () => {
@@ -56,7 +70,7 @@ describe("an allowlisted Keychain item", () => {
   test("names a refusal by its first line, with the value cut out", async () => {
     const { item } = fake({ code: 1, stderr: "security: could not add yard_made-up\nmore" })
     await expect(item.write("yard_made-up")).rejects.toThrow(
-      "the Keychain refused it: security: could not add …",
+      "the secret store refused it: security: could not add …",
     )
   })
 })

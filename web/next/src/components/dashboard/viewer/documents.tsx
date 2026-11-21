@@ -7,7 +7,14 @@ import { type Ref, useEffect, useRef, useState } from "react"
 import type { KindViewer, ViewProps } from "@/components/dashboard/viewer/registry"
 import { TranscriptMarkdown } from "@/components/transcript-markdown"
 import { Spinner } from "@/components/ui/spinner"
-import { asViewerPage, fenced, frameLoad, isPatch, viewerFrameMessage } from "@/lib/viewer"
+import {
+  asViewerPage,
+  documentNonce,
+  fenced,
+  frameLoad,
+  isPatch,
+  viewerFrameMessage,
+} from "@/lib/viewer"
 
 // The patch view's package loads only when a diff or patch is shown, so every other page carries none of it.
 const PatchView = dynamic(() => import("@/components/dashboard/viewer/patch-view"), {
@@ -58,7 +65,7 @@ function HtmlView({ active, item, onEdge, url }: ViewProps) {
     if (act === "stop") setStopped(true)
     else if (act === "restore" && frame.current && typeof page === "string") {
       restored.current = true
-      frame.current.srcdoc = asViewerPage(page)
+      frame.current.srcdoc = asViewerPage(page, documentNonce())
     }
   }
   // each load takes the ready that came with it; one still waiting when the next arrives never had one, and a ready that lands just after its load gets a moment's grace
@@ -135,7 +142,7 @@ export function PageFrame({
       data-viewer-owns-pointer
       onLoad={onLoad}
       sandbox="allow-scripts"
-      srcDoc={asViewerPage(page)}
+      srcDoc={asViewerPage(page, documentNonce())}
     />
   )
 }

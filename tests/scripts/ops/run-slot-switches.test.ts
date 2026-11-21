@@ -290,9 +290,9 @@ describe("what the command leaves in its process group", () => {
 
 describe("box-off", () => {
   // run-slot.sh box-off's words for a scratch state folder, the ssh key at a path of its own
-  const boxOff = async (m: ReturnType<typeof machine>, key: string) => {
+  const boxOff = async (m: ReturnType<typeof machine>, key?: string) => {
     const p = runSlot(["bash", SCRIPT, "box-off"], {
-      env: m.env({ RUNNER_HOST_KEY: key }),
+      env: m.env(key ? { RUNNER_HOST_KEY: key } : {}),
       stdout: "pipe",
       ops: m.ops,
     })
@@ -303,10 +303,11 @@ describe("box-off", () => {
   test("names each precondition of the runner-box route that fails, and nothing once every one holds (#129)", async () => {
     const m = machine()
     const key = join(m.ops, "a-key")
-    expect(await boxOff(m, key)).toEqual(["no-ci-sh", "no-ssh-key"])
+    expect(await boxOff(m, key)).toEqual(["no-ci-sh", "no-host", "no-ssh-key"])
     mkdirSync(join(m.ops, "runner-host"))
     writeFileSync(join(m.ops, "runner-host", "ci.sh"), "#!/bin/bash\n")
     chmodSync(join(m.ops, "runner-host", "ci.sh"), 0o755)
+    writeFileSync(join(m.ops, "runner-host", "ip"), "10.0.0.2\n")
     writeFileSync(key, "")
     expect(await boxOff(m, key)).toEqual([])
     writeFileSync(join(m.ops, "runner-host", "off"), "")
@@ -314,5 +315,18 @@ describe("box-off", () => {
     rmSync(join(m.ops, "runner-host", "off"))
     writeFileSync(join(m.ops, "runner-host", "slot-off"), "")
     expect(await boxOff(m, key)).toEqual(["slot-off"])
+  })
+
+  test("reads the key from runner-host/key when RUNNER_HOST_KEY is unset (#2529)", async () => {
+    const m = machine()
+    mkdirSync(join(m.ops, "runner-host"))
+    writeFileSync(join(m.ops, "runner-host", "ci.sh"), "#!/bin/bash\n")
+    chmodSync(join(m.ops, "runner-host", "ci.sh"), 0o755)
+    writeFileSync(join(m.ops, "runner-host", "ip"), "10.0.0.2\n")
+    const key = join(m.ops, "peer-key")
+    writeFileSync(join(m.ops, "runner-host", "key"), key)
+    expect(await boxOff(m)).toEqual(["no-ssh-key"])
+    writeFileSync(key, "")
+    expect(await boxOff(m)).toEqual([])
   })
 })

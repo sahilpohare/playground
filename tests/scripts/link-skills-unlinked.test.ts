@@ -15,6 +15,8 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
+import { scratchEnv } from "../scratch-env"
+
 const root = join(import.meta.dir, "..", "..")
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "link-skills-unlinked-")))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
@@ -29,15 +31,14 @@ writeFileSync(
 )
 for (const name of ["bun", "claude"]) chmodSync(join(fakeBin, name), 0o755)
 
-const env = (home: string) => ({
-  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
-  GIT_CONFIG_NOSYSTEM: "1",
-  CLAUDE_CONFIG_DIR: "",
-  HOME: home,
-  PATH: `${fakeBin}:${process.env.PATH}`,
-  PLAYGROUND_DATA_DIR: "",
-  XDG_CONFIG_HOME: "",
-})
+const env = (home: string) =>
+  scratchEnv(home, {
+    GIT_CONFIG_NOSYSTEM: "1",
+    CLAUDE_CONFIG_DIR: "",
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    PLAYGROUND_DATA_DIR: "",
+    XDG_CONFIG_HOME: "",
+  })
 
 let made = 0
 // A scratch checkout whose packages are copies, each with its own node_modules linking where the real one's entries resolve and a workspace package to its copy here, so an import resolves inside the scratch checkout; `omit` leaves one package's link out, as a pull that declared it and has not installed yet leaves it.

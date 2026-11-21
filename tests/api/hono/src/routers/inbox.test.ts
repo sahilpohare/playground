@@ -6,6 +6,7 @@ process.env.BETTER_AUTH_SECRET ||= "inbox-router-test-secret-not-for-use-anywher
 const { inboxRouter } = await import("../../../../../api/hono/src/routers/inbox")
 const { env } = await import("../../../../../packages/env/dist/api-hono.mjs")
 const { refuseAgent } = await import("../../../../../api/hono/src/middlewares/dashboard")
+const { refuseAgentOffFixture } = await import("../../../../../api/hono/src/middlewares/agent")
 const { site } = await import("../../../../../packages/config/src/site")
 
 // Validated, the setting is a list; with validation skipped, as in CI, it is the raw comma-separated string.
@@ -160,6 +161,27 @@ describe("an Approve the dashboard carries out: an accept, an apps change, a gra
     expect((await approve({ origin: trusted() }, peer("192.168.1.20"))).status).toBe(403)
     expect((await approve({ origin: trusted() }, peer("127.0.0.1"))).status).toBe(401)
   })
+
+  test("a clone's Approve takes the same guards, and the route hands it the CLI only on a stack that reads this machine (PG-2205)", async () => {
+    const source = await Bun.file(
+      join(import.meta.dir, "../../../../../api/hono/src/routers/inbox.ts"),
+    ).text()
+    expect(source).toContain("clone: readsLive() ? cloneRun() : undefined,")
+    expect((await approve({}, peer("127.0.0.1"))).status).toBe(403)
+    expect((await approve({ origin: "http://evil.localhost" }, peer("127.0.0.1"))).status).toBe(403)
+    expect((await approve({ origin: trusted() }, peer("192.168.1.20"))).status).toBe(403)
+    expect((await approve({ origin: trusted() }, peer("127.0.0.1"))).status).toBe(401)
+  })
+
+  // the one place pkexec is wired: a test or fixture stack reads no live machine, so no test reaches the password window on the owner's screen
+  test("a root step's Approve gets pkexec only on a Linux stack that reads this machine (PG-2433)", async () => {
+    const source = await Bun.file(
+      join(import.meta.dir, "../../../../../api/hono/src/routers/inbox.ts"),
+    ).text()
+    expect(source).toContain('readsLive() && process.platform === "linux"')
+    expect(source).toContain("? (argv, input) => runArgv(argv, ROOT_TIMEOUT_MS, input)")
+    expect(source.match(/runArgv\(argv, ROOT_TIMEOUT_MS, input\)/g)).toHaveLength(1)
+  })
 })
 
 describe("a secret's two routes refuse the agent sign-in (PG-1023)", () => {
@@ -204,5 +226,14 @@ describe("a reveal card's Show (PG-1023)", () => {
     expect((await reveal({ origin: trusted() }, peer("192.168.1.20"))).status).toBe(403)
     expect((await reveal({ origin: trusted() })).status).toBe(403)
     expect((await reveal({ origin: trusted() }, peer("127.0.0.1"))).status).toBe(401)
+  })
+})
+
+describe("an Inbox answer refuses the agent sign-in off a fixture stack", () => {
+  test("POST /:id/answer carries refuseAgentOffFixture", () => {
+    const handlers = inboxRouter.routes
+      .filter((route) => route.method === "POST" && route.path === "/:id/answer")
+      .map((route) => route.handler)
+    expect(handlers).toContain(refuseAgentOffFixture)
   })
 })

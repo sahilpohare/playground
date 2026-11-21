@@ -49,7 +49,17 @@ const said = (run: { stderr: Buffer; stdout: Buffer }) =>
 // One fetch of the pin per run, from uv's cache when the package index is down, so every skill after it validates offline; undefined once skills-ref is in the cache.
 const resolve = (): string | undefined => {
   const help = ["skills-ref", "validate", "--help"]
-  const online = Bun.spawnSync([...UV, ...help], { stderr: "pipe", stdout: "pipe" })
+  // uv fetches the pin with git over https, which the test sandbox's git config refuses for every other git call (packages/scripts/src/sandbox.ts)
+  const online = Bun.spawnSync([...UV, ...help], {
+    env: {
+      ...process.env,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "protocol.https.allow",
+      GIT_CONFIG_VALUE_0: "always",
+    },
+    stderr: "pipe",
+    stdout: "pipe",
+  })
   if (online.exitCode === 0) return
   const cached = Bun.spawnSync([...UV, "--offline", ...help], { stderr: "pipe", stdout: "pipe" })
   if (cached.exitCode === 0) {

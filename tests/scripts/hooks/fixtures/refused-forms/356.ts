@@ -98,7 +98,7 @@ export const groups: Group[] = [
       ["sed -i of a list", `sed -i '' 's/Slack//' ${LIST}`],
       ["tee into a list", `echo [] | tee ${LIST}`],
       ["touch under the root", `touch ${join(ROOT, "hooks", "new.json")}`],
-      ["ln into the root", `ln -sf /tmp/x ${LIST}`],
+      ["ln into the root", `ln -sf /.no-such-folder ${LIST}`],
       ["chmod of the root", `chmod -R u+w ${ROOT}`],
       ["dd of= a list", `dd if=/dev/null of=${LIST}`],
       ["bun -e naming the root", `bun -e 'await Bun.write("${LIST}", "[]")'`],

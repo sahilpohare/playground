@@ -44,6 +44,7 @@ In the app, **Set up settings** on the Settings page does the same for you: it n
 - Once you turn its job on (`jobs.opsExtSync`, off on a fresh install, [Ops jobs](/docs/jobs#turn-a-job-on)), each night at 02:30 every scope is pulled with a rebase and then pushed, with its whole history, so the repo's `git log` is the scope's.
   A scope with no repo stays on your machine, and one with no commit yet is skipped.
 - A secrets scan runs before each push (the extensions' own secret shapes on every file, and gitleaks over the history when it is installed), and a hit stops that scope's push, naming the file and the kind of secret.
+- A background job that runs a script or skill a sync changed restarts onto the new revision by itself, once it is between passes ([Ops jobs](/docs/jobs)).
 - `playground ext sync [<scope>]` syncs now.
 - With no GitHub login, syncing stays off and `playground doctor` says so.
 
@@ -51,6 +52,8 @@ In the app, **Set up settings** on the Settings page does the same for you: it n
 
 Install Playground with the GitHub CLI signed in to the same account ([Install](/docs/install)).
 Its `playground ext init` finds your repo and clones your login's folder from it, with your settings and their history, and your sessions read them from the first start.
+When the install could not, approve the Inbox card **Clone your extensions onto this machine?** that a session posts: it lists each repo it clones and the folder it fills, your login's first, and on **Approve** the dashboard clones them, making no repo, then copies the guards' lists from your checkout into your login's lists, keeping each one already there.
+It is refused on a machine whose extensions already hold any of those folders, so it runs only as the first clone.
 An org's scope comes back from an export, with `playground ext import <folder>`.
 
 ## What is not backed up

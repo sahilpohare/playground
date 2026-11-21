@@ -14,11 +14,19 @@ export const NO_TOKEN =
   "the Slack token is not in the Keychain: save it through the Inbox's secret ask for slack"
 
 export type Message = { subtype?: string; text?: string; ts: string; user?: string }
+export type Member = {
+  deleted?: boolean
+  id: string
+  name?: string
+  profile?: { display_name?: string; real_name?: string }
+}
 type Reply = {
   error?: string
   file_id?: string
+  members?: Member[]
   messages?: Message[]
   ok: boolean
+  response_metadata?: { next_cursor?: string }
   ts?: string
   upload_url?: string
 }

@@ -1,5 +1,6 @@
 // PreToolUse hook: refuses the Bash shapes Claude Code stops on for permission, so a session gets a reason and carries on rather than waiting on a prompt no one answers. Claude Code stops on an rm or an rmdir whose target has two or more parts that start with an unguarded variable (`rm -rf $S/$m`, `rmdir $O/$s`, `rmdir $HOME/$s`, `rmdir $S/$v.d`), and runs one with a single such part (`rmdir "$O"/d`) or a variable after a name (`rmdir $S/p$v`); measured with headless probes. It also stops on an rm or an rmdir of a name directly in / (`rm -f /scratchpad_*`, `rmdir /x`), and runs one a level deeper (`rm -f /usr/x`) and a redirect into / (`echo x > /x`); measured.
 
+import { input } from "./input"
 import { fromFactory } from "./role"
 import { type Env, lex, run, UNKNOWN, type Visit } from "./shell"
 
@@ -79,7 +80,7 @@ export async function check(raw: string): Promise<string | undefined> {
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-prompt-stop", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

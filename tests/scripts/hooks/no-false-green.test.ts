@@ -31,6 +31,19 @@ describe("bun with an option whose value is the next word, before run or test, i
     { $label: "through bash run-slot", command: `bash ${slot} bun --cwd /w test tests/a.test.ts` },
     { $label: "inside bash -c", command: "bash -c 'bun --cwd /w run test'" },
     { $label: "run-slot inside bash -c", command: `bash -c '${slot} bun --cwd /w run test'` },
+    { $label: "held in a variable (PG-2127)", command: `C="bun --cwd /w test x"; $C` },
+    {
+      $label: "run-slot's session name and separator held in a variable (PG-2127)",
+      command: `W="worker-x --"; ~/.playground/ops/run-slot.sh $W bun --cwd /w test x`,
+    },
+    {
+      $label: "held in a copy of a variable (PG-2127)",
+      command: `A="bun --cwd /w test x"; C=$A; $C`,
+    },
+    {
+      $label: "held in a variable set by export (PG-2127)",
+      command: `export C="bun --cwd /w test x"; $C`,
+    },
   ])("$label", async ({ command }) => {
     const reason = await bash(command)
     expect(reason).toContain("no-false-green hook refuses bun -")
@@ -89,6 +102,23 @@ describe("a test run piped with no pipefail is refused, naming the fix", () => {
     { $label: "uv tool run pytest", command: "uv tool run pytest -q | tail" },
     { $label: "uvx ruff at a version", command: "uvx ruff@latest check | tail" },
     { $label: "ruff format --check", command: "ruff format --check src | tail -1" },
+    {
+      $label: "a test run held in a variable, piped (PG-2127)",
+      command: `C="bun run test"; $C | tail`,
+    },
+    {
+      $label: "a test run held in a variable set by export, piped (PG-2127)",
+      command: `export C="bun run test"; $C | tail`,
+    },
+    {
+      $label: "a test run held in a variable set by declare, piped (PG-2127)",
+      command: `declare C="bun run test"; $C | tail`,
+    },
+    { $label: "in a paren after a wrapper (PG-2292)", command: "nice (bun test x | tail)" },
+    {
+      $label: "in a paren after a wrapper, its output joined (PG-2292)",
+      command: "command (bun test x 2>&1 | tail -5)",
+    },
   ])("$label", async ({ command }) => {
     const reason = await bash(command)
     expect(reason).toContain("no-false-green hook refuses a test run piped into")

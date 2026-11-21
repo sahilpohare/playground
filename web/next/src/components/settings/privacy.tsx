@@ -1,9 +1,12 @@
 "use client"
 
+import { RiErrorWarningLine } from "@remixicon/react"
 import { useForm } from "@tanstack/react-form"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useState } from "react"
 
 import { SetUpSettings } from "@/components/settings/set-up-settings"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
@@ -12,6 +15,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
 import { ACCOUNTS_QUERY_KEY, readAccounts } from "@/lib/accounts"
 import {
+  type OneWord,
   PRIVACY_KEYS,
   type PrivacyForm,
   privacyFormSchema,
@@ -66,12 +70,16 @@ export function Privacy() {
 
 function PrivacyFields({ saved, scope }: { saved: PrivacyForm; scope: string }) {
   const queryClient = useQueryClient()
+  const [oneWords, setOneWords] = useState<OneWord[]>([])
   const form = useForm({
     defaultValues: saved,
     onSubmit: async ({ value }) => {
       const writes = privacyWrites(saved, value)
       try {
-        for (const field of writes) await savePrivacySetting(field.key, field.value, scope)
+        const found: OneWord[] = []
+        for (const field of writes)
+          found.push(...(await savePrivacySetting(field.key, field.value, scope)))
+        setOneWords(found)
         toast.add({ title: writes.length ? "Privacy saved" : "Nothing to save", type: "success" })
       } catch (error) {
         toast.add({ title: (error as Error).message, type: "error" })
@@ -100,6 +108,22 @@ function PrivacyFields({ saved, scope }: { saved: PrivacyForm; scope: string }) 
             />
           )}
         </form.Field>
+        {oneWords.map(({ files, name }) => (
+          <Alert key={name} className="text-warning">
+            <RiErrorWarningLine />
+            <AlertTitle>{name} is one word</AlertTitle>
+            <AlertDescription>
+              The trace count finds it in {files.length} tracked{" "}
+              {files.length === 1 ? "file" : "files"}, so a made-up name or a common word can match
+              it too.
+              <ul className="max-h-32 overflow-y-auto font-mono text-xs break-all">
+                {files.map((file) => (
+                  <li key={file}>{file}</li>
+                ))}
+              </ul>
+            </AlertDescription>
+          </Alert>
+        ))}
         <form.Field name="archive">
           {(field) => (
             <PrivacyField

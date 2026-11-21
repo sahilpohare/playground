@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { scratchEnv } from "../../../scratch-env"
+
 const script = join(import.meta.dir, "../../../../scripts/ops/usage/account-watch.py")
 const scratch = mkdtempSync(join(tmpdir(), "account-watch-"))
 afterAll(() => rmSync(scratch, { force: true, recursive: true }))
@@ -27,7 +29,7 @@ def setting(key):
 `,
   )
   writeFileSync(join(stubs, "security"), "#!/bin/sh\necho made-up-token\n", { mode: 0o755 })
-  const env = { ...process.env, HOME: scratch, PATH: `${stubs}:${process.env.PATH}` }
+  const env = scratchEnv(scratch, { PATH: `${stubs}:${process.env.PATH}` })
   const child = Bun.spawn(["python3", "-I", script, "watched@example.org"], {
     env,
     stderr: "pipe",

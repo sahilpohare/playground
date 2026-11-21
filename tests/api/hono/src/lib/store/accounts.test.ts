@@ -165,7 +165,7 @@ describe("Settings' accounts on a stack that reads this machine", () => {
     expect(logged()).toBe("")
   })
 
-  test("an account listed already, or a row its schema refuses, stores nothing", () => {
+  test("an account listed already with its token kept, or a row its schema refuses, stores nothing", () => {
     const data = fresh()
     addAccount({ label: "zai", provider: "glm", token: GLM_KEY }, who("add"), data)
     writeFileSync(log, "")
@@ -178,7 +178,34 @@ describe("Settings' accounts on a stack that reads this machine", () => {
       data,
     )
     expect(bad).toMatchObject({ ok: false, status: 400 })
-    expect(logged()).toBe("")
+    expect(logged()).not.toContain("add-generic-password")
+  })
+
+  test("a row listed with no token kept, as one carried over from another machine, keeps the token and stays as it is", () => {
+    const data = fresh()
+    const row = { email: "made-up@example.test", label: "mac", provider: "claude" }
+    setSetting(data, { key: "usage.accounts", scope: "made-up-me", value: [row] }, who("carry"))
+    expect(
+      addAccount(
+        { email: "made-up@example.test", provider: "claude", token: TOKEN },
+        who("sign in"),
+        data,
+      ),
+    ).toEqual({
+      account: {
+        email: "made-up@example.test",
+        key: "made-up@example.test",
+        label: "mac",
+        own: false,
+        provider: "claude",
+        stored: true,
+      },
+      ok: true,
+    })
+    expect(logged()).toContain(
+      `stdin add-generic-password -U -s "playground-claude-oauth" -a "made-up@example.test" -w "${TOKEN}"`,
+    )
+    expect(listed(data)).toEqual([row])
   })
 
   test("a refused token is not saved and its words never echo it", () => {

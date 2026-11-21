@@ -14,6 +14,7 @@ import {
 import { auditLineSchema, remoteAudit } from "@/lib/relay/audit"
 import { type PairedKey, remoteKeys as keys } from "@/lib/relay/key"
 import { authMiddleware, guardWrites, requireConsoleRole, requireLoopback } from "@/middlewares"
+import { refuseAgentOffFixture } from "@/middlewares/agent"
 
 const pairedSchema = z.object({ fingerprint: z.string(), login: z.string(), pairedAt: z.string() })
 
@@ -47,6 +48,7 @@ export const remoteRouter = new Hono<{ Variables: Session }>()
   .use("/*", requireLoopback)
   .use("/*", authMiddleware)
   .use("/*", requireConsoleRole("owner"))
+  .use("/*", refuseAgentOffFixture)
   .get(
     "/",
     doc(

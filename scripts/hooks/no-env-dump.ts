@@ -1,5 +1,6 @@
 // PreToolUse hook, acting for a factory session alone (role.ts): refuses a Bash command that prints the whole environment (a bare declare, env, export, printenv, set or typeset), since the environment holds tokens and the output lands in the transcript (13 Oct: a planning subagent's `env` printed this machine's GitHub and Slack tokens). `env VAR=x cmd` runs a command and passes, as do `set -e` and `export VAR=x`.
 
+import { input } from "./input"
 import { fromFactory } from "./role"
 import { lex, program, run, type Visit } from "./shell"
 
@@ -51,7 +52,7 @@ export async function check(raw: string): Promise<string | undefined> {
 }
 
 if (import.meta.main) {
-  const raw = await Bun.stdin.text()
+  const raw = await input("no-env-dump", "guard")
   const reason = (await fromFactory(raw)) ? await check(raw) : undefined
   if (reason) {
     console.error(reason)

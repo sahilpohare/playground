@@ -51,7 +51,7 @@ export function keychainItem(
       )
       if (wrote.code !== 0 || wrote.stderr.trim()) {
         const said = (wrote.stderr.trim().split("\n")[0] ?? "").split(value).join("…")
-        throw new Error(`the Keychain refused it: ${said || `exit ${wrote.code}`}`)
+        throw new Error(`the secret store refused it: ${said || `exit ${wrote.code}`}`)
       }
     },
   }

@@ -1,4 +1,4 @@
-// The trace ratchet: counts each kind of private trace (kinds.ts) over the tree, past every live name the switch's migration moves (LIVE_NAMES, its allowlist, piece 21's reason) and past the paths the seed leaves out, so a check fails when any count rises above counts.json and each trace-out lowers it.
+// The trace ratchet: counts each kind of private trace (kinds.ts), and each Mac-only call with no Linux branch in front of it (mac-only.ts), over the tree, past every live name the switch's migration moves (LIVE_NAMES, its allowlist, piece 21's reason) and past the paths the seed leaves out, so a check fails when any count rises above counts.json and each trace-out lowers it.
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 
@@ -9,14 +9,18 @@ import {
   isPublicList,
   type Kind,
   LIST_KEYS,
+  ownerWord,
   patterns,
   type PublicList,
   readPast,
   type Repos,
   UNSET_REPOS,
 } from "./kinds"
+import { macOnlyAt, macOnlyLines } from "./mac-only"
 
-export type Counts = Partial<Record<Kind, number>>
+// Each kind the ratchet holds: the private traces kinds.ts patterns, and the Mac-only calls mac-only.ts counts, which no guard refuses.
+export type Counted = Kind | "macOnly"
+export type Counts = Partial<Record<Counted, number>>
 export type File = { path: string; text: string }
 
 export const COUNTS = join(import.meta.dir, "counts.json")
@@ -68,6 +72,17 @@ const NOT_A_PERSON = [
   /@\d+\.\d+/,
 ]
 
+// The paths of the files whose text, as the ownerName kind reads it, holds the name, so a name's hits show before a commit counts them.
+export const holding = (files: File[], name: string, repos: Repos): string[] => {
+  const word = new RegExp(ownerWord(name))
+  return files
+    .filter(({ path, text }) => {
+      if ([...LEFT_OUT, ...LOCKFILES].some((re) => re.test(path))) return false
+      return word.test(readable(text, repos))
+    })
+    .map((file) => file.path)
+}
+
 // Each kind's hits in one file's text, past the live names, the read-past repositories and the kinds its path is left out of.
 const hitsIn = (path: string, text: string, kinds: [Kind, RegExp][], repos: Repos): Counts => {
   const said = readable(text, repos)
@@ -100,7 +115,7 @@ const keptMiss = (
   if (held < entry.hits) return `its line holds ${held} ${entry.kind}, not ${entry.hits}`
 }
 
-// Every kind with a pattern gets a count, 0 included, so a kind a run could not measure (an empty list) is absent rather than read as gone; each kept entry that still stands takes its hits off.
+// Every kind with a pattern gets a count, 0 included, and macOnly always, so a kind a run could not measure (an empty list) is absent rather than read as gone; each kept entry that still stands takes its hits off.
 export function count(
   files: File[],
   list: PublicList = EMPTY_LIST,
@@ -110,10 +125,12 @@ export function count(
   const kinds = patterns(list, repos)
   const counts: Counts = Object.fromEntries(kinds.map(([kind]) => [kind, 0]))
   const byPath = new Map(files.map((file) => [file.path, file]))
-  for (const { path, text } of files) {
-    if ([...LEFT_OUT, ...LOCKFILES].some((re) => re.test(path))) continue
-    for (const [kind, n] of Object.entries(hitsIn(path, text, kinds, repos)))
+  counts.macOnly = 0
+  for (const file of files) {
+    if ([...LEFT_OUT, ...LOCKFILES].some((re) => re.test(file.path))) continue
+    for (const [kind, n] of Object.entries(hitsIn(file.path, file.text, kinds, repos)))
       counts[kind as Kind]! += n!
+    counts.macOnly += macOnlyLines(file).length
   }
   for (const entry of kept)
     if (counts[entry.kind] !== undefined && !keptMiss(entry, byPath.get(entry.path), kinds, repos))
@@ -140,7 +157,7 @@ export function stale(
 // Each measured kind whose count is over its baseline, or has none yet.
 export const risen = (now: Counts, baseline: Counts): string[] =>
   Object.entries(now).flatMap(([kind, n]) => {
-    const was = baseline[kind as Kind]
+    const was = baseline[kind as Counted]
     if (was !== undefined && n <= was) return []
     return [
       `${kind}: ${n} in the tree, counts.json allows ${was ?? "none, since it has no count yet"}`,
@@ -149,24 +166,30 @@ export const risen = (now: Counts, baseline: Counts): string[] =>
 
 // The refusal for the risen lines, naming the fix where a kind has one, then each file and line located found.
 export const refusal = (over: string[], at: string[] = []): string =>
-  `trace-count: a count rose; write the new text in plain words${over.some((line) => line.startsWith("issueRefs:")) ? "; describe the case in words; a doc cites no issue number" : ""}:\n${[...over, ...at].join("\n")}`
+  `trace-count: a count rose; write the new text in plain words${over.some((line) => line.startsWith("issueRefs:")) ? "; describe the case in words; a doc cites no issue number, and the PR body's Merge Danger or Links carry it" : ""}${over.some((line) => line.startsWith("macOnly:")) ? "; put a Linux branch in front of a Mac-only call (a uname or process.platform check that takes Linux another way)" : ""}:\n${[...over, ...at].join("\n")}`
 
 // Each line holding a hit of one of the kinds, as path:line: kind, past the paths never counted and the lines kept.json keeps while they hold no more than its hits; for each kind, the changed files' alone when they hold one, since a kind's floor can hold many older hits.
 export function located(
   files: File[],
-  wanted: Kind[],
+  wanted: Counted[],
   list: PublicList = EMPTY_LIST,
   repos: Repos = UNSET_REPOS,
   kept: Kept[] = [],
   changed: string[] = [],
 ): string[] {
   const near = files.filter((file) => changed.includes(file.path))
-  return patterns(list, repos)
-    .filter(([kind]) => wanted.includes(kind))
-    .flatMap((kind) => {
-      const own = locatedIn(near, [kind], repos, kept)
-      return own.length > 0 ? own : locatedIn(files, [kind], repos, kept)
-    })
+  const counted = files.filter(
+    ({ path }) => ![...LEFT_OUT, ...LOCKFILES].some((re) => re.test(path)),
+  )
+  return [
+    ...patterns(list, repos)
+      .filter(([kind]) => wanted.includes(kind))
+      .flatMap((kind) => {
+        const own = locatedIn(near, [kind], repos, kept)
+        return own.length > 0 ? own : locatedIn(files, [kind], repos, kept)
+      }),
+    ...(wanted.includes("macOnly") ? macOnlyAt(counted, changed) : []),
+  ]
 }
 
 const locatedIn = (from: File[], kinds: [Kind, RegExp][], repos: Repos, kept: Kept[]) =>
@@ -200,8 +223,8 @@ export const changedFiles = (root: string): string[] => {
 }
 
 // The kinds the risen lines name.
-export const risenKinds = (over: string[]): Kind[] =>
-  over.map((line) => line.slice(0, line.indexOf(":")) as Kind)
+export const risenKinds = (over: string[]): Counted[] =>
+  over.map((line) => line.slice(0, line.indexOf(":")) as Counted)
 
 // The baseline with each measured kind lowered to its count; a kind this run did not measure keeps its count.
 export const lowered = (now: Counts, baseline: Counts): Counts =>
@@ -210,7 +233,7 @@ export const lowered = (now: Counts, baseline: Counts): Counts =>
       .sort()
       .map((kind) => [
         kind,
-        Math.min(baseline[kind as Kind] ?? Infinity, now[kind as Kind] ?? Infinity),
+        Math.min(baseline[kind as Counted] ?? Infinity, now[kind as Counted] ?? Infinity),
       ]),
   )
 
@@ -251,13 +274,19 @@ export async function list(path: string): Promise<{ list: PublicList } | { refus
   return { list: value }
 }
 
-// The commit's count of the list-fed kinds, from the list at path, which the sandboxed tree test cannot see: nothing with no list there (the runner box, a machine with no org), else the refusal when one of them is over counts.json; an empty key counts nothing, so a partial list still gates the kinds it holds.
-export async function listGate(root: string, path: string): Promise<string> {
-  if (!existsSync(path)) return ""
+// The list file at path for the list checks (commit, push, CI): undefined with none, so a machine with no list checks nothing; the refusal for a file that is not the list.
+export async function readList(path: string): Promise<PublicList | string | undefined> {
+  if (!existsSync(path)) return undefined
   const value: unknown = await Bun.file(path)
     .json()
     .catch(() => undefined)
-  if (!isPublicList(value)) return `trace-count: ${path} is not no-public-leak's list`
+  return isPublicList(value) ? value : `trace-count: ${path} is not no-public-leak's list`
+}
+
+// The commit's count of the list-fed kinds, from the list at path, which the sandboxed tree test cannot see: nothing with no list there (the runner box, a machine with no org), else the refusal when one of them is over counts.json; an empty key counts nothing, so a partial list still gates the kinds it holds.
+export async function listGate(root: string, path: string): Promise<string> {
+  const value = await readList(path)
+  if (value === undefined || typeof value === "string") return value ?? ""
   const files = await tree(root)
   const kept = (await Bun.file(KEPT).json()) as Kept[]
   const counted = count(files, value, UNSET_REPOS, kept)
@@ -265,5 +294,58 @@ export async function listGate(root: string, path: string): Promise<string> {
   const over = risen(now, (await Bun.file(COUNTS).json()) as Counts)
   return over.length
     ? refusal(over, located(files, risenKinds(over), value, UNSET_REPOS, kept, changedFiles(root)))
+    : ""
+}
+
+// The list kinds a text holds (a commit's message, a branch's name), by kind alone, so a refusal never prints the term.
+export const listKindsIn = (text: string, list: PublicList): Kind[] => {
+  const counted = count([{ path: "", text }], list)
+  return LIST_KEYS.filter((kind) => (counted[kind] ?? 0) > 0)
+}
+
+const gitIn = (root: string, args: string[]) =>
+  Bun.spawnSync(["git", ...args], { cwd: root, env: { ...process.env } })
+
+// The pull request's list gate, as CI runs it: each list kind a changed file holds more of than at its merge-base with base, a new file's path, each commit message since that merge-base and the branch's name hold, by place and kind alone; nothing with no list at path.
+export async function listSince(
+  root: string,
+  base: string,
+  path: string,
+  branch = "",
+): Promise<string> {
+  const value = await readList(path)
+  if (value === undefined || typeof value === "string") return value ?? ""
+  const merged = gitIn(root, ["merge-base", base, "HEAD"])
+  if (merged.exitCode !== 0) return `trace-count: ${base} and HEAD have no merge-base`
+  const from = merged.stdout.toString().trim()
+  const kept = (await Bun.file(KEPT).json()) as Kept[]
+  const at = (rev: string, file: string): File | undefined => {
+    const shown = gitIn(root, ["show", `${rev}:${file}`])
+    if (shown.exitCode !== 0) return undefined
+    return { path: file, text: shown.stdout.includes(0) ? "" : shown.stdout.toString() }
+  }
+  const hits: string[] = []
+  const changed = gitIn(root, ["diff", "--name-only", "-z", "--no-renames", from, "HEAD"])
+  for (const file of changed.stdout.toString().split("\0").filter(Boolean)) {
+    const now = at("HEAD", file)
+    if (!now) continue
+    const was = at(from, file)
+    const inPath = listKindsIn(file, value)
+    const place = inPath.length ? "a changed file's path" : file
+    if (!was) hits.push(...inPath.map((kind) => `${place}: ${kind}`))
+    const before = was ? count([was], value, UNSET_REPOS, kept) : {}
+    const after = count([now], value, UNSET_REPOS, kept)
+    for (const kind of LIST_KEYS)
+      if ((after[kind] ?? 0) > (before[kind] ?? 0)) hits.push(`${place}: ${kind}`)
+  }
+  const log = gitIn(root, ["log", "--format=%H%x00%B%x01", `${from}..HEAD`])
+  for (const entry of log.stdout.toString().split("\x01")) {
+    const [sha, body] = entry.replace(/^\n/, "").split("\0")
+    if (sha && body !== undefined)
+      hits.push(...listKindsIn(body, value).map((kind) => `${sha.slice(0, 9)}'s message: ${kind}`))
+  }
+  hits.push(...listKindsIn(branch, value).map((kind) => `the branch's name: ${kind}`))
+  return hits.length
+    ? `trace-count: the pull request adds a term from no-public-leak's list, named here by place and kind alone; reword each in plain words:\n${[...new Set(hits)].join("\n")}`
     : ""
 }

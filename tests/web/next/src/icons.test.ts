@@ -12,8 +12,8 @@ const ICON_PACKAGES = /^(?:@fortawesome\/|lucide(?:-react)?|react-feather)/
 
 // Where an <svg> is drawn on purpose: the shared ui kit (charts included), which shadcn owns. A content SVG (a logo, a diagram) outside it is listed here by its path under web/next/src, with why.
 const SVG_ALLOWED: string[] = [
-  // Z.ai's logo on a GLM row, ZeroSDK's own mark, which Remix does not carry.
-  "components/dashboard/zai-logo.tsx",
+  // Each model maker's icon the API serves (useMakerIcon), which Remix does not carry.
+  "components/dashboard/model-logo.tsx",
   // Pierre Icons' file-type marks on the Inbox's file tiles, duo-tone in its palette, which Remix does not carry.
   "components/dashboard/viewer/file-icons.tsx",
 ]

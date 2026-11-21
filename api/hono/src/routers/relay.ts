@@ -22,7 +22,7 @@ import {
 } from "@/lib/relay/protocol"
 import type { YardVariables } from "@/lib/yard/caller"
 
-// The relay's hosted routes, inside Yard's router: the socket the owner's Mac holds with its own token, the Mac's status, the owner's browser's pair request, its reads, each forwarded to the Mac with a fresh id and time, and its signed writes, each forwarded as signed; every answer is passed back and kept nowhere. Every route takes the owner rung; a read also takes the hosted web's Origin when it names one, a write takes it always, and an answer comes sandboxed and unsniffed, as the Mac's own files are.
+// The relay's hosted routes, inside Yard's router: the socket the owner's Mac holds with its relay-on token, the Mac's status, the owner's browser's pair request, its reads, each forwarded to the Mac with a fresh id and time, and its signed writes, each forwarded as signed; every answer is passed back and kept nowhere. Every route takes the owner rung; a read also takes the hosted web's Origin when it names one, a write takes it always, and an answer comes sandboxed and unsniffed, as the Mac's own files are.
 export function relayRouter({
   hub,
   mac,
@@ -54,7 +54,7 @@ export function relayRouter({
       "/socket",
       describeRoute({
         description:
-          "The owner's Mac holds this socket, opened with the owner's own yard_ token: the hub sends it each read the owner's browser makes, as a request frame, and it answers each with a response frame.",
+          "The owner's Mac holds this socket, opened with the owner's relay-on token (yard_relay_, made on Yard's Account page with its Relay switch on) and no other: the hub sends it each read the owner's browser makes, as a request frame, and it answers each with a response frame.",
         responses: {
           101: { description: "Switching Protocols" },
           ...authErrorResponses,
@@ -64,8 +64,8 @@ export function relayRouter({
       }),
       mac,
       async (c, next) => {
-        if (c.get("caller").via !== "token")
-          throw new ApiError(403, "FORBIDDEN", "Only the owner's Mac holds the relay")
+        if (!c.get("caller").relay)
+          throw new ApiError(403, "FORBIDDEN", "Only the owner's relay-on token holds the relay")
         return next()
       },
       upgrade((c) => {

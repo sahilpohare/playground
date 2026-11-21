@@ -70,6 +70,7 @@ import { TemplatePicker } from "@/components/dashboard/template-picker"
 import { StatusIcon } from "@/components/dashboard/worker-light"
 import { Hint, OFF_FOCUSABLE } from "@/components/hint"
 import { GroupCount } from "@/components/shell/group-count"
+import { MovableGroups, MovableGroupLabel } from "@/components/shell/movable-group"
 import { ROW_BOX } from "@/components/shell/row-box"
 import type { MenuUpdate } from "@/components/shell/sidebar-user-menu"
 import { Button } from "@/components/ui/button"
@@ -110,7 +111,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { toast } from "@/components/ui/toast"
-import { YardGroups } from "@/components/yard/yard-groups"
+import { YardGroup } from "@/components/yard/yard-groups"
 import { agentLabel, chatLabel, kindWord, labelOf } from "@/lib/agent-label"
 import {
   checksOpen,
@@ -123,6 +124,7 @@ import {
   rowLabel,
   rowLines,
   rowText,
+  runnerNote,
   statusParts,
 } from "@/lib/agents"
 import { config } from "@/lib/config"
@@ -152,12 +154,18 @@ import {
 } from "@/lib/dashboard"
 import { useDrafted } from "@/lib/drafts"
 import { inboxWaitOf, inboxWaiting, useInbox } from "@/lib/inbox"
+import { useMakerIcon } from "@/lib/model-icons"
 import {
   dispatcherLabel,
+  initialsOf,
   isGlmModel,
+  levelName,
   modelName,
-  providerOf,
   type Provider,
+  rowEffort,
+  rowModelName,
+  rowProvider,
+  showsEffort,
 } from "@/lib/model-label"
 import { needsYouAnchor, sessionWaiting, targetNeedsYou } from "@/lib/needs-you"
 import {
@@ -171,9 +179,16 @@ import {
   whenWords,
 } from "@/lib/ops"
 import { MODE_LABELS } from "@/lib/permission-mode"
-import { MENU_HINT, opensMenu } from "@/lib/row-menu"
-import { type NavGroup, useGroupOpen } from "@/lib/sidebar-groups"
-import { effortIcon, PR_TONES, PROVIDER_ICONS, prTone } from "@/lib/status-icons"
+import { MENU_HINT, openMenuByKey } from "@/lib/row-menu"
+import {
+  moveGroup,
+  type NavGroup,
+  ORDERED_GROUPS,
+  type OrderedGroup,
+  useGroupOpen,
+  useGroupOrder,
+} from "@/lib/sidebar-groups"
+import { effortIcon, LOCAL_EFFORT_ICON, PR_TONES, prTone } from "@/lib/status-icons"
 import {
   glanceReadings,
   isStale,
@@ -203,6 +218,7 @@ import {
   THREADS_QUERY_KEY,
   useThreads,
 } from "@/lib/threads"
+import { yardGroups } from "@/lib/yard"
 import { holdsForYard, useYardChannels, useYardLate } from "@/lib/yard-api"
 
 const HEALTH_LABELS: Record<Health, string> = {
@@ -477,6 +493,7 @@ export function DispatcherUsage({
   read: SystemRead
 }) {
   const glm = provider === "zai"
+  const ZaiIcon = useMakerIcon("zai")
   const stale = report ? isStale(report.sampledAt, now) : false
   const readings =
     report && !stale ? (glm ? zaiReadings(report.zai, now) : systemReadings(report, now)) : []
@@ -497,7 +514,7 @@ export function DispatcherUsage({
       data-usage
       className="text-2xs flex shrink-0 items-center gap-1.5 font-mono tabular-nums group-data-[collapsible=icon]:hidden [&_svg]:size-3!"
     >
-      {logo && <PROVIDER_ICONS.zai aria-hidden className="size-3 shrink-0" />}
+      {logo && ZaiIcon && <ZaiIcon aria-hidden className="text-muted-foreground size-3 shrink-0" />}
       {known.map((reading, i) => {
         if (reading) return <ReadingItem key={reading.key} reading={reading} />
         const Icon = READING_ICONS[USAGE_READINGS[i]!].line
@@ -795,7 +812,12 @@ function MemberRow({
         <Hint content={info.join("\n")} description={null} side="right">
           <span className="min-w-0 flex-1 truncate">{rowLabel(lines) ?? first}</span>
         </Hint>
-        <ModelIcons effort={worker.effort} model={worker.model} />
+        <ModelIcons
+          effort={worker.effort}
+          localModel={worker.localModel}
+          localModels={worker.localModels}
+          model={worker.model}
+        />
       </SidebarMenuSubButton>
     </SidebarMenuSubItem>
   )
@@ -814,32 +836,39 @@ const PLUS_EFFORT_HIDDEN =
 
 const MODEL_ICON = "text-muted-foreground flex shrink-0 group-data-[collapsible=icon]:hidden"
 
-// A row's right end, ZeroSDK's: its provider's logo, naming its model on hover, then its effort's level, naming itself; with toggles, a row that opens, the effort gives way to the toggle (EFFORT_HIDDEN), and with no effort its place stays on every row, so the logos line up.
+// A row's right end, ZeroSDK's: its provider's logo (its model's initials in a chip for a maker with none, nothing with no model), naming its model on hover (a local model with its level, levelName), then its effort's level, naming itself, which a local model's row with no effort set draws as a plain circle (rowEffort, LOCAL_EFFORT_ICON); with toggles, a row that opens, the effort gives way to the toggle (EFFORT_HIDDEN), and with no effort its place stays on every row, so the logos line up.
 function ModelIcons({
   effort,
   effortHidden = EFFORT_HIDDEN,
+  localModel,
+  localModels,
   model,
   toggles = false,
 }: {
   effort: string | null
   effortHidden?: string
+  localModel?: string
+  localModels?: { id: string }[]
   model: string | null
   toggles?: boolean
 }) {
-  const provider = providerOf(model)
-  const Logo = provider ? PROVIDER_ICONS[provider] : null
-  const Effort = effortIcon(effort)
+  const name = rowModelName({ localModel, model })
+  const Logo = useMakerIcon(rowProvider({ localModel, model }), initialsOf(name))
+  const known = effortIcon(rowEffort({ effort, localModels, model }))
+  const Effort =
+    known ?? (model !== null && !showsEffort({ localModels, model }) ? LOCAL_EFFORT_ICON : null)
   return (
     <>
-      {Logo && (
-        <Hint content={modelName(model)}>
+      {model && !Logo && <span className="size-4 shrink-0 group-data-[collapsible=icon]:hidden" />}
+      {model && Logo && (
+        <Hint content={levelName({ effort, localModel, model })}>
           <span className={MODEL_ICON}>
             <Logo aria-hidden className="size-4" />
           </span>
         </Hint>
       )}
       {Effort ? (
-        <Hint content={effort}>
+        <Hint content={known ? effort : "No effort set"}>
           <span className={cn(MODEL_ICON, toggles && effortHidden)}>
             <Effort aria-hidden className="size-4" />
           </span>
@@ -861,21 +890,6 @@ export type RowDrag = {
   onClickCapture: (event: ReactMouseEvent) => void
   ref: (node: HTMLElement | null) => void
   style: CSSProperties
-}
-
-// Shift+F10 or the Menu key on a focused manager row opens its menu where the row is, as a right click would, since a browser need not raise a context menu event for them.
-const openMenuByKey = (event: KeyboardEvent<HTMLElement>) => {
-  if (!opensMenu(event)) return
-  event.preventDefault()
-  const box = event.currentTarget.getBoundingClientRect()
-  event.currentTarget.dispatchEvent(
-    new MouseEvent("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      clientX: box.left + box.width / 2,
-      clientY: box.top + box.height / 2,
-    }),
-  )
 }
 
 // A manager row's menu: Move up and Move down, the way to reorder besides the drag; every other row has no menu, its words its tooltip.
@@ -965,6 +979,9 @@ function SessionRowView({
   const checking = checksOpen(members.map(lightOf))
   const lines = rowLines(worker, agent, now, checking, waitsOn, light, label)
   const { first, prClass, prWords, second } = rowText(lines)
+  // an AI runner's row says what it last did on a second, muted line, so its work shows without opening it
+  const note =
+    worker.role === "runner" ? runnerNote(agent ?? { report: null, task: worker.task }, now) : null
   const dispatcher = worker.role === "dispatcher"
   // the row's link opens the first card in the group: the row's own first, else the first member's
   const holder = waiting.length ? { waiting, worker } : members.find((m) => m.waiting.length)
@@ -990,6 +1007,7 @@ function SessionRowView({
     label ? null : worker.name,
     first,
     [second, drafted ? "Draft" : null, lines.eta].filter(Boolean).join(" · "),
+    note?.full,
     // a hosted session's permission mode, which its composer's picker changes
     worker.permissionMode ? `${MODE_LABELS[worker.permissionMode]} mode` : null,
     prWords,
@@ -1047,17 +1065,24 @@ function SessionRowView({
       ) : (
         <StatusIcon kind={agent?.kind} state={lines.shown} still={still} />
       )}
-      {/* one line, ZeroSDK's: its title, whose tooltip holds the rest, a line each, and never over the readings and icons after it, which name themselves */}
+      {/* one line, ZeroSDK's, and a runner's note under it: its title, whose tooltip holds the rest, a line each, and never over the readings and icons after it, which name themselves */}
       {/* the pull request's number takes its colour, said in words for screen readers and in the row's tooltip; the title keeps the text's */}
       <Hint content={info.join("\n")} description={null} side="right">
-        <span className="flex min-w-0 flex-1">
+        <span className={cn("min-w-0 flex-1", note ? "grid" : "flex")}>
           <RowFirst line={lines} prClass={prClass} prWords={prWords} />
+          {note && (
+            <span className="text-2xs text-muted-foreground truncate leading-3" data-part="note">
+              {note.line}
+            </span>
+          )}
         </span>
       </Hint>
       {trailing}
       <ModelIcons
         effort={worker.effort}
         effortHidden={action ? PLUS_EFFORT_HIDDEN : undefined}
+        localModel={worker.localModel}
+        localModels={worker.localModels}
         model={worker.model}
         toggles={expandable || Boolean(action)}
       />
@@ -1325,11 +1350,11 @@ function ScriptsGroup({
   const rail = scriptsRail(ops)
   return (
     <SidebarGroup>
-      <SidebarGroupLabel className="w-full pl-2.5" render={labelToggle(open, setOpen)}>
+      <MovableGroupLabel open={open} setOpen={setOpen}>
         Scripts
         <LabelChevron open={open} />
         <GroupCount count={scriptCount(ops)} />
-      </SidebarGroupLabel>
+      </MovableGroupLabel>
       <SidebarMenu
         aria-busy={muted || undefined}
         className={cn("space-y-0.5", muted && "opacity-60")}
@@ -1431,47 +1456,28 @@ function ManagersGroup({
   )
   const names = sessions.map((worker) => worker.name)
   const moveTo = (from: number, to: number) => managers.move(arrayMove(names, from, to))
-  const label = (
-    <>
-      Orchestrators
-      <LabelChevron open={open} />
-      <GroupCount count={count} />
-    </>
-  )
   return (
     <SidebarGroup>
-      {/* the order is a write, so the hosted build keeps A to Z with no Reset, no menu and no drag */}
-      {config.hosted ? (
-        <SidebarGroupLabel className="w-full pl-2.5" render={labelToggle(open, setOpen)}>
-          {label}
-        </SidebarGroupLabel>
-      ) : (
-        <ContextMenu>
-          <ContextMenuTrigger
-            render={
-              <SidebarGroupLabel
-                className="w-full pl-2.5"
-                render={labelToggle(open, setOpen)}
-                aria-description={MENU_HINT}
-                onKeyDown={openMenuByKey}
-              />
-            }
-          >
-            {label}
-          </ContextMenuTrigger>
-          <ContextMenuContent>
-            <ContextMenuGroup>
-              <ContextMenuItem
-                className="text-xs"
-                disabled={managers.order.length === 0}
-                onClick={managers.reset}
-              >
-                Reset order to A to Z
-              </ContextMenuItem>
-            </ContextMenuGroup>
-          </ContextMenuContent>
-        </ContextMenu>
-      )}
+      {/* the managers' order is a write, so the hosted build keeps A to Z with no Reset and no row drag */}
+      <MovableGroupLabel
+        open={open}
+        setOpen={setOpen}
+        menu={
+          !config.hosted && (
+            <ContextMenuItem
+              className="text-xs"
+              disabled={managers.order.length === 0}
+              onClick={managers.reset}
+            >
+              Reset order to A to Z
+            </ContextMenuItem>
+          )
+        }
+      >
+        Orchestrators
+        <LabelChevron open={open} />
+        <GroupCount count={count} />
+      </MovableGroupLabel>
       <SidebarMenu
         aria-busy={muted || undefined}
         className={cn("space-y-0.5", muted && "opacity-60")}
@@ -1557,11 +1563,11 @@ function OtherGroup({
   })
   return (
     <SidebarGroup>
-      <SidebarGroupLabel className="w-full pl-2.5" render={labelToggle(open, setOpen)}>
+      <MovableGroupLabel open={open} setOpen={setOpen}>
         Other
         <LabelChevron open={open} />
         <GroupCount count={count} />
-      </SidebarGroupLabel>
+      </MovableGroupLabel>
       <SidebarMenu className="space-y-0.5">
         {rows.map((worker) => row(worker))}
         {open && idle > 0 && (
@@ -1977,11 +1983,11 @@ function SessionsGroup({
   const [open, setOpen] = useGroupOpen(label, true)
   return (
     <SidebarGroup>
-      <SidebarGroupLabel className="w-full pl-2.5" render={labelToggle(open, setOpen)}>
+      <MovableGroupLabel open={open} setOpen={setOpen}>
         {label}
         <LabelChevron open={open} />
         {count !== null && <GroupCount count={count} />}
-      </SidebarGroupLabel>
+      </MovableGroupLabel>
       <SidebarMenu {...menu}>{open ? children : kept}</SidebarMenu>
     </SidebarGroup>
   )
@@ -2258,17 +2264,24 @@ export function PendingRow({ rows = 1 }: { rows?: number }) {
   ))
 }
 
-// Pure: the nav's groups in order, Threads first once the threads are read, then Yard's Channels and Direct messages, then the session groups but Dispatchers, whose rows sit in the header (DashboardDispatchers); ThreadsGroup and YardGroups each draw nothing with no rows.
+// Pure: the nav's groups in order, Threads first once the threads are read, then every other group showing in the order you left them (groupOrder): Yard's Channels and Direct messages while each has rows (yard), and the session groups but Dispatchers, whose rows sit in the header (DashboardDispatchers).
 export const navGroups = (
   threads: boolean,
   sessions: Worker[],
-): { label: Exclude<GroupLabel, "Dispatchers"> | "Threads" | "Yard"; sessions: Worker[] }[] => [
-  ...(threads ? [{ label: "Threads" as const, sessions: [] }] : []),
-  { label: "Yard" as const, sessions: [] },
-  ...sessionGroups(sessions).flatMap(({ label, sessions }) =>
-    label === "Dispatchers" ? [] : [{ label, sessions }],
-  ),
-]
+  yard: OrderedGroup[] = [],
+  order: readonly OrderedGroup[] = ORDERED_GROUPS,
+): { label: OrderedGroup | "Threads"; sessions: Worker[] }[] => {
+  const shown = new Map<OrderedGroup, Worker[]>(yard.map((label) => [label, []]))
+  for (const { label, sessions: held } of sessionGroups(sessions))
+    if (label !== "Dispatchers") shown.set(label, held)
+  return [
+    ...(threads ? [{ label: "Threads" as const, sessions: [] }] : []),
+    ...order.flatMap((label) => {
+      const held = shown.get(label)
+      return held ? [{ label, sessions: held }] : []
+    }),
+  ]
+}
 
 // Whether a group draws None running: Orchestrators and Subagents by their rows alone, since a manager's tester counts in their sessions yet renders under its manager; the rest by their sessions.
 export const groupEmpty = (label: GroupLabel, sessions: Worker[], rows: number): boolean =>
@@ -2281,9 +2294,10 @@ const isRosterAgent = (agent: Agent): boolean =>
   agent.role === "worker" &&
   !checkerOf(agent.name, agent.kind)
 
-// Sidebar-nav slot: your threads, then Yard's Channels and Direct messages (YardGroups, each while it has rows), then every live session but the dispatchers (the header's, DashboardDispatchers), grouped by role into Orchestrators, Subagents (each reviewer and tester nested under its worker, a gone worker's under its muted roster row), AI Runners, Scripts (the ops jobs jobs.json does not pause, which have no session, collapsed until opened) and Other (each by status, as orderByStatus sets), each label with how many sessions it holds. Orchestrators, Subagents, AI Runners and Scripts always show, and Other follows while a probe or a session outside the factory's names is live; until the board is read they show the stored sidebar, muted, or nothing yet (useSidebarSource), so the first live frame replaces rows of the same count and order rather than moving any. Every group's label opens and closes it, kept across reloads (useGroupOpen), and a closed group still shows a session waiting on you or open in the view (keepsOther).
-export function DashboardNav() {
+// Sidebar-nav slot: your threads, then the other groups in the order you left them (MovableGroups, useGroupOrder), at first Yard's Channels and Direct messages (YardGroup, each while it has rows), then every live session but the dispatchers (the header's, DashboardDispatchers), grouped by role into Orchestrators, AI Runners (each with what it last did on a second line, runnerNote), Subagents (each reviewer and tester nested under its worker, a gone worker's under its muted roster row), Scripts (the ops jobs jobs.json does not pause, which have no session, collapsed until opened) and Other (each by status, as orderByStatus sets), each label with how many sessions it holds. Orchestrators, AI Runners, Subagents and Scripts always show, and Other follows while a probe or a session outside the factory's names is live; until the board is read they show the stored sidebar, muted, or nothing yet (useSidebarSource), so the first live frame replaces rows of the same count and order rather than moving any. Every group's label opens and closes it, kept across reloads (useGroupOpen), and a closed group still shows a session waiting on you or open in the view (keepsOther).
+export function DashboardNav({ account }: { account: string }) {
   const { allowed, board, selected } = useDashboard()
+  const [order, setOrder] = useGroupOrder(account)
   const source = useSidebarSource(allowed)
   const { close, memberOf, now, placed, row, still, waitingOf } = useSessionRows(source)
   const threads = useThreadRows(allowed)
@@ -2337,85 +2351,84 @@ export function DashboardNav() {
       ? heldCount(rowsFor(label), (item) => item.kind === "session")
       : sessions.length
 
+  const yardRows = yardGroups(yard.data ?? [])
+  const yardShown: OrderedGroup[] = [
+    ...(yardRows.channels.length > 0 ? (["Channels"] as const) : []),
+    ...(yardRows.dms.length > 0 ? (["Direct messages"] as const) : []),
+  ]
+  const groups = navGroups(threads.data !== undefined, workers, yardShown, order)
+  const sessionsOf = new Map(groups.map(({ label, sessions }) => [label, sessions]))
+  const shown = groups.flatMap(({ label }) => (label === "Threads" ? [] : [label]))
+  const draw = (label: OrderedGroup, sessions: Worker[]) =>
+    label === "Channels" || label === "Direct messages" ? (
+      <YardGroup group={label} shell="dashboard" />
+    ) : label === "Scripts" ? (
+      <ScriptsGroup muted={source.kind === "stored"} now={now} ops={source.ops} still={still} />
+    ) : label === "Orchestrators" && source.kind !== "lost" ? (
+      <ManagersGroup
+        count={count(label, sessions)}
+        keep={keep}
+        muted={source.kind === "stored"}
+        membersOf={membersOf}
+        row={row}
+        sessions={sessions}
+      />
+    ) : label === "Other" ? (
+      <OtherGroup
+        count={count(label, sessions)}
+        now={now}
+        row={row}
+        selected={selected?.sessionId ?? null}
+        sessions={sessions}
+        waitingOf={waitingOf}
+      />
+    ) : (
+      <SessionsGroup
+        count={source.kind === "lost" ? null : count(label, sessions)}
+        kept={
+          source.kind === "lost"
+            ? null
+            : label === "Subagents"
+              ? rowsFor(label).filter(keepsItem).map(renderRow)
+              : sessions.filter(keep).map((worker) => row(worker))
+        }
+        label={label}
+        menu={{
+          "aria-busy": source.kind === "stored" || undefined,
+          className: cn("space-y-0.5", source.kind === "stored" && "opacity-60"),
+          "data-agents":
+            source.kind === "stored" || (source.kind === "live" && board.agents === null)
+              ? "loading"
+              : "ready",
+          "data-source": source.kind,
+        }}
+      >
+        {source.kind === "lost" ? null : groupEmpty(label, sessions, rowsFor(label).length) ? (
+          // Hidden in the icon rail, where a row with no icon would show as a clipped word.
+          <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
+            <SidebarMenuButton disabled>
+              <span>None running</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        ) : label === "Subagents" ? (
+          rowsFor(label).map(renderRow)
+        ) : (
+          sessions.map((worker) => row(worker))
+        )}
+      </SessionsGroup>
+    )
+
   return (
     <>
-      {navGroups(threads.data !== undefined, workers).map(({ label, sessions }) =>
-        label === "Threads" ? (
-          threads.data && (
-            <ThreadsGroup
-              key={label}
-              data={threads.data}
-              onPage={threads.setPage}
-              onPatch={threads.patch}
-            />
-          )
-        ) : label === "Yard" ? (
-          <YardGroups key={label} shell="dashboard" />
-        ) : label === "Scripts" ? (
-          <ScriptsGroup
-            key={label}
-            muted={source.kind === "stored"}
-            now={now}
-            ops={source.ops}
-            still={still}
-          />
-        ) : label === "Orchestrators" && source.kind !== "lost" ? (
-          <ManagersGroup
-            key={label}
-            count={count(label, sessions)}
-            keep={keep}
-            muted={source.kind === "stored"}
-            membersOf={membersOf}
-            row={row}
-            sessions={sessions}
-          />
-        ) : label === "Other" ? (
-          <OtherGroup
-            key={label}
-            count={count(label, sessions)}
-            now={now}
-            row={row}
-            selected={selected?.sessionId ?? null}
-            sessions={sessions}
-            waitingOf={waitingOf}
-          />
-        ) : (
-          <SessionsGroup
-            key={label}
-            count={source.kind === "lost" ? null : count(label, sessions)}
-            kept={
-              source.kind === "lost"
-                ? null
-                : label === "Subagents"
-                  ? rowsFor(label).filter(keepsItem).map(renderRow)
-                  : sessions.filter(keep).map((worker) => row(worker))
-            }
-            label={label}
-            menu={{
-              "aria-busy": source.kind === "stored" || undefined,
-              className: cn("space-y-0.5", source.kind === "stored" && "opacity-60"),
-              "data-agents":
-                source.kind === "stored" || (source.kind === "live" && board.agents === null)
-                  ? "loading"
-                  : "ready",
-              "data-source": source.kind,
-            }}
-          >
-            {source.kind === "lost" ? null : groupEmpty(label, sessions, rowsFor(label).length) ? (
-              // Hidden in the icon rail, where a row with no icon would show as a clipped word.
-              <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
-                <SidebarMenuButton disabled>
-                  <span>None running</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            ) : label === "Subagents" ? (
-              rowsFor(label).map(renderRow)
-            ) : (
-              sessions.map((worker) => row(worker))
-            )}
-          </SessionsGroup>
-        ),
+      {threads.data && (
+        <ThreadsGroup data={threads.data} onPage={threads.setPage} onPatch={threads.patch} />
       )}
+      <MovableGroups
+        groups={shown}
+        onMove={(from, to) => setOrder(moveGroup(order, shown, from, to))}
+      >
+        {(label) => draw(label, sessionsOf.get(label) ?? [])}
+      </MovableGroups>
     </>
   )
 }

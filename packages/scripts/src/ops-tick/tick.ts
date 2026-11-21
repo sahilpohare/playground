@@ -1,5 +1,6 @@
 import { realpathSync, statfsSync } from "node:fs"
 import { appendFile, mkdir, readdir, stat, unlink } from "node:fs/promises"
+import { userInfo } from "node:os"
 import { basename, dirname, join } from "node:path"
 
 import {
@@ -10,7 +11,13 @@ import {
   managerOf,
 } from "@packages/config/kinds"
 import { purgeTrash, stripTrash } from "@packages/safe-delete"
-import { accountSettings, readPolicy, ruleSettings } from "@packages/settings"
+import {
+  accountKey,
+  accountSettings,
+  accountsOf,
+  readPolicy,
+  ruleSettings,
+} from "@packages/settings"
 
 import {
   sweep as autoEndSweep,
@@ -18,15 +25,22 @@ import {
   liveDeps,
 } from "../../../../scripts/ops/optimizer/auto_end"
 import { liveInput } from "../../../../scripts/ops/optimizer/idle_sessions"
+import STATUSES from "../../../../scripts/roster-statuses.json"
+import { GH_HANGS, GH_TIMEOUT_MS, type GhAuth, KEYRING_LOCKED } from "../gh-read"
+import { procSource, readBootTime, readSysctl, readUpSince } from "../ops-machine/readings"
 import { pending } from "../ops-outbox/drain"
 import { focusCard } from "../playground/focus"
 import { lapse } from "../playground/priority"
 import { dashboardCheckout, NO_CHECKOUT } from "../playground/probe"
+import { lockRootOf } from "../pr-merge/merge"
 import { ALERT_JOB, waiterLive } from "../stuck-alert"
 import { swapBundles, unswapBundles } from "../swap-bundles"
 import { writeAtomic } from "../write-atomic"
+import { bootCheckPass } from "./boot-check"
 import { dashboardWatch } from "./dashboard-watch"
+import { extLock } from "./ext-lock"
 import { guardProbe } from "./guard-probe"
+import { machineRecord } from "./machine-record"
 import { nightlyClean } from "./nightly-clean"
 
 // ops-tick: runner-steady-tick's timed beats, run as a script with no model call. Each beat runs at its old cron, in machine wall time as CronCreate ran it, runs the same script, and queues what that script prints for the session it went to before, through notify.sh and the ops relay (ADR 0010); a beat whose script prints nothing sends nothing. The Lanes keeper comes in a later change; the 98% move to GLM is retired (Inbox #i827) for the account rotation (`scripts/ops/usage/login-flip.py`).
@@ -96,21 +110,21 @@ const lines = (out: string): string[] =>
     .map((line) => line.trimEnd())
     .filter(Boolean)
 
-const python = (ctx: Context, path: string, isolated = true) =>
-  ctx.run(["python3", ...(isolated ? ["-I"] : []), join(ctx.ops, path)])
+const python = (ctx: Context, path: string, isolated = true, args: string[] = []) =>
+  ctx.run(["python3", ...(isolated ? ["-I"] : []), join(ctx.ops, path), ...args])
 
 const readJson = async (path: string): Promise<unknown> => JSON.parse(await Bun.file(path).text())
 
 const fresh = (at: unknown, now: Date, ms: number): boolean =>
   typeof at === "string" && now.getTime() - Date.parse(at) <= ms
 
-// The load averages, from sysctl's `{ 1m 5m 15m }`.
-const loadOf = async (ctx: Context): Promise<number[]> =>
-  (await ctx.run(["sysctl", "-n", "vm.loadavg"])).out
-    .replace(/[{}]/g, "")
-    .trim()
-    .split(/\s+/)
-    .map(Number)
+// load5 from sysctl's `{ 1m 5m 15m }`, or Linux's /proc/loadavg (readSysctl); a load neither gives throws, since an unread load is never 0.
+const load5Of = async (ctx: Context): Promise<number> => {
+  const loads = await readSysctl(ctx.run, "vm.loadavg")
+  if (loads === null)
+    throw new Error(`load5 unread: neither sysctl vm.loadavg nor ${procSource("vm.loadavg")} reads`)
+  return Number(loads.replace(/[{}]/g, "").trim().split(/\s+/)[1])
+}
 
 // Names the dashboard's paused file over 30 minutes old to ops, once a file; roll-now is left to Update now and `playground update`, so the dashboard's roll holds stand.
 const rollGate = async (ctx: Context) => {
@@ -384,8 +398,9 @@ const tick = async (ctx: Context) => {
   if (ctx.now.getMinutes() === 3 && marks[0]) await ctx.send("builder", `usage: ${marks[0]}`, true)
   const flip = (await python(ctx, "usage/login-flip.py")).out.trim()
   if (flip.includes("switch due")) await ctx.send("dispatcher", flip)
-  const [, load5 = 0] = await loadOf(ctx)
-  if (load5 > 15) {
+  const load5 = await load5Of(ctx).catch((error: Error) => error)
+  if (load5 instanceof Error) await ctx.send("builder", load5.message, true)
+  else if (load5 > 15) {
     await ctx.send("builder", `load5 ${load5}: ${(await loadReport(ctx)).join(" ")}`, true)
   }
   for (const line of lines((await python(ctx, "usage/near-limit.py")).out))
@@ -553,8 +568,8 @@ const resumeRelay = async (ctx: Context, line: string): Promise<boolean> => {
   return false
 }
 
-// A session the roster holds on purpose, or a probe, is never named as felled.
-const HELD = new Set(["done", "ended", "parked", "paused", "starting"])
+// A session the roster holds finished (roster-statuses.json) or starting is never named as felled, so a status added to that file is held without a second edit.
+const HELD = new Set<string>([...(STATUSES.finished as string[]), "starting"])
 
 type Agent = { kind?: unknown; name?: string; status?: string; worker?: unknown }
 
@@ -615,7 +630,7 @@ const up = async (ctx: Context) => {
 
 // load5 at 30 or more, told once a crossing and cleared under 22.5.
 const highLoad = async (ctx: Context) => {
-  const [, load5 = 0] = await loadOf(ctx)
+  const load5 = await load5Of(ctx)
   const toldPath = join(ctx.ops, "tick", "load-told")
   const told = await Bun.file(toldPath).exists()
   if (load5 >= 30 && !told) {
@@ -700,12 +715,60 @@ const glmCredits = async (ctx: Context) => {
   )
 }
 
+// Every Claude row of usage.accounts but the stored login, which ops-usage reads, read by account-watch.py into usage-<local part>.json, so spawn.sh judges an --account start on a reading under its hour; each line lands in ops/log/account-watch.log, and a read that fails throws, so the beat reads failed. A login whose read fails twice in a row has a file past that hour, which spawn.sh skips, so ops is told once per run of failures, kept in tick/other-logins.json by login until a read passes.
+export const otherLogins = async (ctx: Context) => {
+  const read = await readPolicy(join(ctx.ops, ".."))
+  if (read.refusal !== undefined) throw new Error(`the policy does not read: ${read.refusal}`)
+  const stored = (await readJson(join(ctx.ops, "usage", "stored-login.json")).catch(
+    () => null,
+  )) as {
+    account?: unknown
+  } | null
+  const skip = typeof stored?.account === "string" ? stored.account.toLowerCase() : ""
+  const emails = accountsOf(accountSettings.get(read.settings, "usage.accounts"), "claude")
+    .map(accountKey)
+    .filter((email) => email.includes("@") && email.toLowerCase() !== skip)
+  const streakPath = join(ctx.ops, "tick", "other-logins.json")
+  const streaks = ((await readJson(streakPath).catch(() => ({}))) ?? {}) as Record<
+    string,
+    { failed: number; told?: boolean }
+  >
+  const before = JSON.stringify(streaks)
+  const failed: string[] = []
+  const log: string[] = []
+  for (const email of emails) {
+    const { code, out } = await python(ctx, "usage/account-watch.py", true, [email])
+    const line = lines(out).at(-1) ?? `${email}: exit ${code}`
+    log.push(`${isoSeconds(ctx.now)} ${line.slice(0, 300)}\n`)
+    if (!code) {
+      delete streaks[email]
+      continue
+    }
+    failed.push(line)
+    const streak = (streaks[email] = {
+      failed: (streaks[email]?.failed ?? 0) + 1,
+      told: streaks[email]?.told,
+    })
+    if (streak.failed >= 2 && !streak.told) {
+      const text = `other-logins: ${email}'s usage read failed ${streak.failed} times in a row, so spawn.sh skips the usage check for --account ${email}: ${line.slice(0, 300)}`
+      if (await ctx.send("ops", text, true)) streak.told = true
+    }
+  }
+  for (const email of Object.keys(streaks)) if (!emails.includes(email)) delete streaks[email]
+  if (JSON.stringify(streaks) !== before) await writeAtomic(streakPath, JSON.stringify(streaks))
+  if (log.length) {
+    await mkdir(join(ctx.ops, "log"), { recursive: true })
+    await appendFile(join(ctx.ops, "log", "account-watch.log"), log.join(""))
+  }
+  if (failed.length) throw new Error(failed.join("; "))
+}
+
 const freeBytes = (dir: string): number => {
   const fs = statfsSync(dir)
   return fs.bavail * fs.bsize
 }
 
-// The trash playground rm fills, beside ops in the data folder, emptied hourly: purgeTrash (@packages/safe-delete) takes each batch over 7 days old, then the oldest while its disk has under 50 GB free, deleting being cheap whatever the load, and stripTrash beside it removes each batch's node_modules folders and web/next/.next, oldest first and paced, which an install or a build rebuilds; one line in ops/log/trash-purge.log.
+// The trash playground rm fills, beside ops in the data folder, emptied hourly: purgeTrash (@packages/safe-delete) takes each batch over 7 days old, then the oldest while its disk has under 50 GB free, deleting being cheap whatever the load, and stripTrash beside it removes each batch's node_modules folders and web/next/.next, oldest first and paced, which an install or a build rebuilds; one line in ops/log/trash-purge.log, naming once each batch it cannot remove.
 export const trashPurge =
   (
     trash?: string,
@@ -714,9 +777,12 @@ export const trashPurge =
   ) =>
   async (ctx: Context) => {
     const root = trash ?? join(dirname(ctx.ops), "trash")
-    const { removed, skipped } = purgeTrash(root, { free: () => free(root), now: ctx.now })
+    const { removed, skipped, stuck } = purgeTrash(root, {
+      free: () => free(root),
+      now: ctx.now,
+    })
     const strip = await stripTrash(root, { sleep })
-    const line = `removed ${removed.length}${removed.length ? ` (${removed.join(", ")})` : ""}${skipped.length ? `, skipped ${skipped.join(", ")}` : ""}${strip.folders ? `, stripped ${strip.folders} folders (${strip.batches.join(", ")})` : ""}${strip.failed.length ? `, not finished (${strip.failed.join(", ")})` : ""}`
+    const line = `removed ${removed.length}${removed.length ? ` (${removed.join(", ")})` : ""}${skipped.length ? `, skipped ${skipped.join(", ")}` : ""}${stuck.length ? `, cannot remove ${stuck.join(", ")}` : ""}${strip.folders ? `, stripped ${strip.folders} folders (${strip.batches.join(", ")})` : ""}${strip.failed.length ? `, not finished (${strip.failed.join(", ")})` : ""}`
     await mkdir(join(ctx.ops, "log"), { recursive: true })
     await appendFile(join(ctx.ops, "log", "trash-purge.log"), `${isoSeconds(ctx.now)} ${line}\n`)
   }
@@ -749,6 +815,12 @@ export const idleCompact = async (ctx: Context, checkout = dashboardCheckout(ctx
 }
 
 const words = (text: string) => async (ctx: Context) => void (await ctx.send("optimizer", text))
+
+// The local models' keep beat (playground model use): each machine whose localModels.hereModel or localModels.peerModel is set gets that model back once another sits idle, or once it is down; loaded only here, since it reads the settings package.
+const modelKeep = async (ctx: Context) => {
+  const { keepBeat } = await import("../local-model/live")
+  for (const line of await keepBeat(dirname(ctx.ops))) await ctx.send("ops", line)
+}
 
 // Every worktree of the repo's clone on canary, and the leads worktree on its leads branch, kept at the head of the origin branch each tracks (canary's, and for leads the branch the install cloned, which spawn.sh's cut sets: main on a public install), so every session runs that line rather than the live checkout: a fast-forward after a fetch, never in one holding an open change, an incoming change to bun.lock or a package.json fast-forwarding and installing back to back inside one run-slot slot (a fast-forward whose install then waited 42s for a slot once left a roster.ts run on new code and old node_modules) and owing that install in tick/canary-pull-owed.json until one exits 0, and a pull or install that fails named to ops once a failure, marked by its words in tick/canary-pull-told.json and cleared once that worktree pulls and owes no install.
 const canaryPull = async (ctx: Context) => {
@@ -869,13 +941,8 @@ const neverRanSince = async (ctx: Context, outbox: string): Promise<string | und
 
 // The week-usage alert's link, a dashboard path the card resolves against the app's own URL, so no host is written here.
 export const USAGE_LINK = "- 💰 Each account's week shows on the [System page](/dashboard/system)."
-// Pure: the relay-down alert's link line, naming the row that relays on this machine: the relay runner under AI Runners, else Ops under Orchestrators, whose sweep relays.
-export const relayLink = (relay: boolean): string =>
-  relay
-    ? `- 🔎 The relay's row is under AI Runners in the sidebar (${RELAY} on hover), and this Mac's state is on the [System page](/dashboard/system).`
-    : "- 🔎 Ops' row is under Orchestrators in the sidebar, since its sweep relays here, and this Mac's state is on the [System page](/dashboard/system)."
 
-// The late-stop line's text, the Inbox alert's title among its uses: the relay's own on a machine that runs it, else the sweep's, each with the next step and naming only what this machine runs.
+// The late-stop line's text: the relay's own on a machine that runs it, else the sweep's, each with the next step and naming only what this machine runs.
 const relayDown = (relay: boolean, moved: number): string => {
   const since = moved ? `since ${isoSeconds(new Date(moved))}` : "since the watch began"
   if (relay)
@@ -914,7 +981,7 @@ const sweepHold = async (ctx: Context): Promise<boolean> => {
   return !Number.isNaN(at) && at > ctx.now.getTime()
 }
 
-// Ops itself is down when nothing reads its queue: its alerts-wait waiter holds no running pid and handed it no alert within the grace (waiterLive, the liveness the stuck alerts judge a manager by), since a roster status cannot tell a down pane from a live one, live managers reading starting for their whole run; that absence no other check reports, so the Inbox is the fallback for it alone.
+// Ops itself is down when nothing reads its queue: its alerts-wait waiter holds no running pid and handed it no alert within the grace (waiterLive, the liveness the stuck alerts judge a manager by), since a roster status cannot tell a down pane from a live one, live managers reading starting for their whole run; that absence no other check reports, so the watch tells the dispatcher at once for it alone.
 const opsLive = async (ctx: Context): Promise<boolean> => {
   const roster = (await readJson(join(ctx.ops, "..", "roster.json")).catch(() => null)) as {
     agents?: unknown
@@ -932,35 +999,27 @@ const queueWaiterLine = async (ctx: Context, to: string, text: string) => {
   )
 }
 
-// The ops relay's watch: a line pending() reads is timed from the first cycle that reads it, and once it has waited two cycles of whoever relays (relayDown) with no cursor moved since, the stop goes to the session that can act on it, the way unstick routes a stuck session: one line into the managers' waiter queue for ops (queueWaiterLine, since the stalled relay or sweep that the stop names delivers every other channel), then one for the dispatcher once the escalation window has passed with Ops yet to pick it up; the Inbox alert under the ops manager's name posts only while Ops itself is down (opsLive), the one absence no other check reports. The state in tick/relay-watch.json keeps each stop to one line per route, the Inbox post resolved once a cursor moves after it or its item is gone, and a routed stop's state clearing once the cursor moves or nothing waits.
+// The ops relay's watch: a line pending() reads is timed from the first cycle that reads it, or from ops-session-resume's escalation window after the machine's last boot or wake (readUpSince, since no beat runs while it is off or asleep) when that is later, and once it has waited two cycles of whoever relays (relayDown) with no cursor moved since, the stop goes to the session that can act on it, the way unstick routes a stuck session: one line into the managers' waiter queue for ops (queueWaiterLine, since the stalled relay or sweep that the stop names delivers every other channel), then one for the dispatcher once the escalation window has passed with Ops yet to pick it up, or at once while Ops itself is down (opsLive); it posts nothing to the Inbox, and resolves an Inbox alert an earlier watch left open on its first cycle. The state in tick/relay-watch.json keeps each stop to one line per route, clearing once the cursor moves or nothing waits.
 const relayWatch = async (ctx: Context) => {
   const outbox = join(ctx.ops, "outbox")
   const statePath = join(ctx.ops, "tick", "relay-watch.json")
   const state = (await readJson(statePath).catch(() => null)) as RelayWatch | null
+  if (state?.id && state.by) {
+    await resolveOwn(
+      ctx,
+      state.id,
+      state.by,
+      "This alert goes to the dispatcher now, not the Inbox",
+    )
+    await unlink(statePath)
+    return
+  }
   if (await sweepHold(ctx)) {
-    if (state?.id && state.by)
-      await resolveOwn(
-        ctx,
-        state.id,
-        state.by,
-        "The sweep hold stands: Ops set ops/sweep-hold-until, and the watch stays quiet until it passes",
-      )
     if (state) await unlink(statePath)
     return
   }
   const moved = await relayMovedAt(outbox)
   const start = await neverRanSince(ctx, outbox)
-  if (state?.id && state.by) {
-    if (moved <= Date.parse(state.at ?? "")) return
-    await resolveOwn(
-      ctx,
-      state.id,
-      state.by,
-      `The relay moved its cursor again at ${isoSeconds(new Date(moved))}`,
-    )
-    await unlink(statePath)
-    return
-  }
   if ((await pending(outbox, start)).length === 0) {
     if (state) await unlink(statePath)
     return
@@ -971,46 +1030,128 @@ const relayWatch = async (ctx: Context) => {
     return
   }
   const relay = await hasRelay(ctx)
-  if (ctx.now.getTime() - since < 2 * (relay ? RELAY_CYCLE_MS : SWEEP_CYCLE_MS)) return
+  const escalate = await escalateMs(join(ctx.ops, ".."))
+  const from = Math.max(since, (await readUpSince(ctx.run)) + escalate)
+  if (ctx.now.getTime() - from < 2 * (relay ? RELAY_CYCLE_MS : SWEEP_CYCLE_MS)) return
   const line = relayDown(relay, moved)
+  const roster = (await readJson(join(ctx.ops, "..", "roster.json")).catch(() => null)) as {
+    agents?: unknown
+  } | null
+  const ask = "Resolve it; post it to the owner's Inbox only if you cannot."
   if (!(await opsLive(ctx))) {
-    if (!state?.id) {
-      const { by, id } = await postAlert(ctx, line, relayLink(relay))
+    if (!state?.toldDispatcher) {
+      await queueWaiterLine(ctx, dispatcherOf(roster?.agents, 1), `${line} Ops is down. ${ask}`)
       await writeAtomic(
         statePath,
-        JSON.stringify({ at: ctx.now.toISOString(), by, id, pendingSince: state?.pendingSince }),
+        JSON.stringify({ ...state, toldDispatcher: ctx.now.toISOString() }),
       )
     }
     return
   }
   if (!state?.sentAt) {
-    const roster = (await readJson(join(ctx.ops, "..", "roster.json")).catch(() => null)) as {
-      agents?: unknown
-    } | null
     await queueWaiterLine(ctx, managerOf(roster?.agents, "ops"), line)
-    await writeAtomic(
-      statePath,
-      JSON.stringify({ pendingSince: state?.pendingSince, sentAt: ctx.now.toISOString() }),
-    )
+    await writeAtomic(statePath, JSON.stringify({ ...state, sentAt: ctx.now.toISOString() }))
     return
   }
-  if (
-    !state.toldDispatcher &&
-    ctx.now.getTime() - Date.parse(state.sentAt) >= (await escalateMs(join(ctx.ops, "..")))
-  ) {
-    const roster = (await readJson(join(ctx.ops, "..", "roster.json")).catch(() => null)) as {
-      agents?: unknown
-    } | null
+  if (!state.toldDispatcher && ctx.now.getTime() - Date.parse(state.sentAt) >= escalate) {
     await queueWaiterLine(
       ctx,
       dispatcherOf(roster?.agents, 1),
-      `${line} Ops has not picked it up. Resolve it; post it to the owner's Inbox only if you cannot.`,
+      `${line} Ops has not picked it up. ${ask}`,
     )
     await writeAtomic(
       statePath,
       JSON.stringify({ ...state, toldDispatcher: ctx.now.toISOString() }),
     )
   }
+}
+
+export const TOKEN_INVALID = "gh token invalid"
+const BOOT_MS = 10 * 60_000
+const HOUR_MS = 60 * 60_000
+
+// Whether the owner is signed in at the desktop: loginctl lists a session of this user's on a seat, else, with no loginctl (macOS), who lists this user on the console or a display; true when neither reads, so an unread desktop never blames the keyring.
+const desktopUp = async (ctx: Context): Promise<boolean> => {
+  const me = userInfo().username
+  const sessions = await ctx.run(["loginctl", "list-sessions", "-o", "json"]).catch(() => null)
+  if (sessions?.code === 0)
+    try {
+      const list = JSON.parse(sessions.out) as { seat?: unknown; user?: unknown }[]
+      return list.some((s) => s.user === me && typeof s.seat === "string" && s.seat !== "")
+    } catch {
+      // not loginctl's JSON: who reads it instead
+    }
+  const who = await ctx.run(["who"]).catch(() => null)
+  if (who?.code !== 0) return true
+  return lines(who.out).some((line) => {
+    const [user, tty = ""] = line.split(/\s+/)
+    return user === me && /^(?:console|seat\d+|:\d+)$/.test(tty)
+  })
+}
+
+// One probe of gh's sign-in, null when it reads, else why not: past timeoutMs gh hangs, and a failure whose account line names the keyring as its store ("default" when the keyring gave no token, as a locked one gives none) with no desktop session up is the locked keyring's. ctx.run is async, so a hang holds no other beat.
+const ghProbe = async (ctx: Context, timeoutMs: number): Promise<string | null> => {
+  const start = performance.now()
+  const probe = await ctx
+    .run(["gh", "auth", "status", "-h", "github.com"], timeoutMs)
+    .catch(() => ({ code: 1, out: "" }))
+  if (performance.now() - start >= timeoutMs) return GH_HANGS
+  if (probe.code === 0) return null
+  return /account \S+ \((?:default|keyring)\)/.test(probe.out) && !(await desktopUp(ctx))
+    ? KEYRING_LOCKED
+    : TOKEN_INVALID
+}
+
+// gh-auth: probes gh's sign-in each minute for BOOT_MS after boot or wake and while it fails, else hourly, its last result in tick/gh-auth.json, which ghRead reads so no caller floods a broken gh. The first failure sends one line to Ops' waiter queue and posts one Inbox alert naming the fix; it stays quiet while gh keeps failing, and once gh reads again says so to Ops and resolves the alert.
+export const ghAuth =
+  (timeoutMs = GH_TIMEOUT_MS) =>
+  async (ctx: Context) => {
+    const path = join(ctx.ops, "tick", "gh-auth.json")
+    const last = (await readJson(path).catch(() => null)) as GhAuth | null
+    const now = ctx.now.getTime()
+    const booting = now - (await readUpSince(ctx.run)) < BOOT_MS
+    if (last?.ok && !last.id && !booting && now - Date.parse(last.at) < HOUR_MS) return
+    const reason = await ghProbe(ctx, timeoutMs)
+    const at = ctx.now.toISOString()
+    const alert = last?.id && last.by ? { by: last.by, id: last.id } : null
+    const roster = (await readJson(join(ctx.ops, "..", "roster.json")).catch(() => null)) as {
+      agents?: unknown
+    } | null
+    const ops = managerOf(roster?.agents, "ops")
+    if (reason === null) {
+      await writeAtomic(path, JSON.stringify({ at, ok: true, ...alert }))
+      if (last?.ok === false) await queueWaiterLine(ctx, ops, "gh reads GitHub again")
+      if (!alert) return
+      await resolveOwn(ctx, alert.id, alert.by, "gh reads GitHub again")
+      await writeAtomic(path, JSON.stringify({ at, ok: true }))
+      return
+    }
+    const failing: GhAuth = { at, ok: false, reason, ...alert }
+    await writeAtomic(path, JSON.stringify(failing))
+    if (last?.ok !== false) await queueWaiterLine(ctx, ops, `gh cannot read GitHub: ${reason}`)
+    if (alert) return
+    const posted = await postAlert(
+      ctx,
+      `gh cannot read GitHub: ${reason}`,
+      "- 🔑 Every gh read waits until gh reads again, and this clears by itself then.",
+    )
+    await writeAtomic(path, JSON.stringify({ ...failing, ...posted }))
+  }
+
+// boot-check: once per boot, never a wake, inside BOOT_MS (bootCheckPass in boot-check.ts): a merge lock taken before the boot let go, git fsck on the shared store, a gate-owned worktree's torn object repaired, and every other break one line to Ops' waiter queue and one Inbox alert; a check that never finished inside BOOT_MS is one line to Ops after it.
+export const bootCheck = (lockRoot?: string) => async (ctx: Context) => {
+  const boot = await readBootTime(ctx.run)
+  const roster = (await readJson(join(ctx.ops, "..", "roster.json")).catch(() => null)) as {
+    agents?: unknown
+  } | null
+  const ops = managerOf(roster?.agents, "ops")
+  await bootCheckPass(ctx, boot, ctx.now.getTime() - boot < BOOT_MS, {
+    alert: async (title, text) => {
+      await postAlert(ctx, title, text)
+    },
+    lockRoot: lockRoot ?? lockRootOf(),
+    tell: (text) => queueWaiterLine(ctx, ops, text),
+  })
 }
 
 // Each beat at its old cron, with the target its output goes to.
@@ -1022,27 +1163,43 @@ export const BEATS: Beat[] = [
   { cron: "7,37 * * * *", name: "sweep", run: sweep, to: "the session's lead, ops, dispatcher" },
   { cron: "*/5 * * * *", name: "auto-end", run: autoEnd(), to: "the session's lead" },
   { cron: "43 * * * *", name: "glm-credits", run: glmCredits, to: "ops/log/glm-credits.log" },
+  {
+    cron: "21,51 * * * *",
+    name: "other-logins",
+    run: otherLogins,
+    to: "ops/log/account-watch.log",
+  },
   { cron: "7 */2 * * *", name: "optimizer-tick", run: words("optimizer tick"), to: "optimizer" },
   { cron: "13 21 * * *", name: "optimizer-daily", run: words("optimizer daily"), to: "optimizer" },
   {
     cron: "0 3 * * *",
     name: "nightly-clean",
     run: nightlyClean(),
-    to: "ops/log/nightly-clean.log, the outbox line to ops, and the Inbox",
+    to: "ops/log/nightly-clean.log and the outbox line to ops",
   },
+  { cron: "45 3 * * *", name: "machine-record", run: machineRecord(), to: "ops, a line a finding" },
   { cron: "17 * * * *", name: "trash-purge", run: trashPurge(), to: "ops/log/trash-purge.log" },
   { cron: "*/5 * * * *", name: "idle-compact", run: idleCompact, to: "ops/log/idle-compact.log" },
   { cron: "*/5 * * * *", name: "canary-pull", run: canaryPull, to: "ops, once a failed pull" },
+  { cron: "*/5 * * * *", name: "model-keep", run: modelKeep, to: "ops" },
   {
     cron: "*/5 * * * *",
     name: "relay-watch",
     run: relayWatch,
-    to: "ops, then the dispatcher at unstick's escalation, and the Inbox once Ops is down",
+    to: "ops, then the dispatcher at unstick's escalation, or the dispatcher at once while Ops is down",
   },
   { cron: "*/10 * * * *", name: "guard-probe", run: guardProbe, to: "dispatcher" },
+  { cron: "*/5 * * * *", name: "ext-lock", run: extLock(), to: "ops/log/ext-lock.log" },
   { cron: "* * * * *", name: "focus-card", run: focusCardBeat, to: "the Inbox, by bun run ask" },
   { cron: "*/5 * * * *", name: "priority-lapse", run: priorityLapse, to: "ops" },
   { cron: "*/5 * * * *", name: "run-slot-hold", run: runSlotHold, to: "ops" },
+  { cron: "* * * * *", name: "gh-auth", run: ghAuth(), to: "ops and the Inbox, once a failure" },
+  {
+    cron: "* * * * *",
+    name: "boot-check",
+    run: bootCheck(),
+    to: "ops, and the Inbox for a break it leaves",
+  },
   {
     cron: "* * * * *",
     name: "dashboard-watch",

@@ -38,7 +38,7 @@ Abridged from [its file](../../extensions/core/skills/pr/SKILL.md):
 
 ## Links
 
-<tickets, issues it closes, docs, related PRs>
+<tickets, issues it closes, docs, related PRs; a ship-now PR not titled fix( adds a line opening Owner ask: with the owner's Inbox #i id, PG issue or quoted words>
 ```
 
 The first TL;DR bullet is load-bearing: the Changelog reads a merge's line from it, and the body gate in `bun run pr:merge` and merge-on-ready reads the body against the template it sits in.
@@ -46,7 +46,7 @@ The first TL;DR bullet is load-bearing: the Changelog reads a merge's line from 
 ## Common questions
 
 **Why is this skill someone else's?**
-It is upstream's `pr` skill with a TL;DR and a Links block added; core's NOTICE and the skill's CREDITS.md name its source and its credits, and a drift test holds the file to upstream plus those two blocks, so an edit beyond them fails `bun run test`.
+It is upstream's `pr` skill with a TL;DR, an Evidence note and a Links block added; core's NOTICE and the skill's CREDITS.md name its source and its credits, and a drift test holds the file to upstream plus those three blocks, so an edit beyond them fails `bun run test`.
 
 **What may a review change about a body or the template?**
 Nothing in the template: it is settled by the owner, and [code-review-loop](./code-review-loop.md) scores only that a body fills it and speaks in what the owner sees.
@@ -55,6 +55,7 @@ Nothing in the template: it is settled by the owner, and [code-review-loop](./co
 
 - The PRs you open read in the same five sections, and a reviewer finds the proof under Evidence and the risk under Merge Danger without asking.
 - A merge's Changelog line comes straight off the TL;DR with no second write.
+- A body whose code reads live machine state shows one read-only run of that code on the live layout, its output beside the injected stub, under Evidence.
 
 ## Where it fits
 

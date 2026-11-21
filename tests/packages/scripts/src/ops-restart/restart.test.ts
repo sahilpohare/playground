@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import { restart } from "../../../../../packages/scripts/src/ops-restart/restart"
+import { userSystemctl } from "../../../../../packages/scripts/src/user-systemctl"
 
 const dirs: string[] = []
 afterAll(() => {
@@ -152,6 +153,15 @@ const world = (changed: string[], live: Record<number, string> = {}, stubborn: n
         ? { code: 0, out: JSON.stringify({ ProgramArguments: plists[label] }) }
         : { code: 1, out: "" }
     }
+    if (argv.includes("systemctl")) {
+      const label = Object.keys(plists).find((l) => argv.at(-1) === `${l}.service`)
+      return label
+        ? {
+            code: 0,
+            out: `{ path=${plists[label]![0]} ; argv[]=${plists[label]!.join(" ")} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n`,
+          }
+        : { code: 1, out: "" }
+    }
     if (argv[0] === "ps") {
       const cmd = procs[Number(argv.at(-1))]
       return cmd ? { code: 0, out: `${cmd}\n` } : { code: 1, out: "" }
@@ -162,8 +172,8 @@ const world = (changed: string[], live: Record<number, string> = {}, stubborn: n
   }
   const kills = () => runs.filter((a) => a[0] === "kill").map((a) => a.join(" "))
   const ups = () => runs.filter((a) => a.some((w) => w.endsWith("/scripts/ops/up.py")))
-  const pass = () =>
-    restart({ checkout: co, from: "a1", ops, run, sleep: async () => {}, to: "b2" })
+  const pass = (platform: NodeJS.Platform = "darwin") =>
+    restart({ checkout: co, from: "a1", ops, platform, run, sleep: async () => {}, to: "b2" })
   return { co, kills, ops, pass, runs, ups }
 }
 
@@ -248,6 +258,18 @@ describe("restart", () => {
     await w.pass()
     expect(w.kills()).toEqual(["kill -TERM 104"])
     expect(w.ups()).toEqual([])
+  })
+
+  // #2203: on Linux systemd holds the job, so its entry is read from the unit systemd loaded
+  test("on Linux a launchd job's entry is read from its systemd unit's ExecStart, with no plutil", async () => {
+    const w = world(["packages/scripts/src/ops-tick/tick.ts"])
+    await w.pass("linux")
+    expect(w.kills()).toEqual(["kill -TERM 104"])
+    expect(w.ups()).toEqual([])
+    expect(w.runs).toContainEqual(
+      userSystemctl(["show", "--property=ExecStart", "--value", "com.playground.ops-tick.service"]),
+    )
+    expect(w.runs.some((argv) => argv[0] === "plutil")).toBe(false)
   })
 
   test("a heartbeat pid whose command line no longer holds the job's entry is left alone", async () => {

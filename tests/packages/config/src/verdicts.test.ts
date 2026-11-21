@@ -30,6 +30,22 @@ describe("a verdict comment", () => {
     })
   })
 
+  test("the new-user gate's word reads PASS, FAIL or INCONCLUSIVE at its sha, only PASS passing", () => {
+    expect(verdictOf("## NewUserGate · PASS at 9d77e97 · 7 of 7 passed")).toEqual({
+      at: "9d77e97",
+      gate: "new-user",
+      pass: true,
+      text: "## NewUserGate · PASS at 9d77e97 · 7 of 7 passed",
+    })
+    expect(verdictOf("## NewUserGate · FAIL at 9d77e97 · 6 of 7 passed")).toMatchObject({
+      gate: "new-user",
+      pass: false,
+    })
+    expect(
+      verdictOf("## NewUserGate · inconclusive at 9D77E97 · 6 of 7 passed, 1 inconclusive"),
+    ).toMatchObject({ at: "9d77e97", gate: "new-user", pass: false })
+  })
+
   test("any other comment, or a verdict below its first line, reads as nothing", () => {
     expect(verdictOf("Checks: PASS @ 9d77e97 · suite green")).toBeNull()
     expect(verdictOf("Looks good to me.")).toBeNull()

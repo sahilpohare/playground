@@ -9,11 +9,13 @@ export type Guard =
   | "no-extensions-write"
   | "no-glm-heavy-path"
   | "no-headless-login"
+  | "no-hidden-program"
   | "no-kill-by-name"
   | "no-linear-ticket"
   | "no-main-checkout"
   | "no-outside-pr-code"
   | "no-playground-leak"
+  | "no-protected-push"
   | "no-public-leak"
   | "no-raw-delete"
   | "no-raw-spawn"
@@ -21,12 +23,14 @@ export type Guard =
   | "no-stash"
   | "no-unslotted-run"
 
-// "process …" folders sit in the home `~` expands to (the process's own), the rest in the test's scratch machine.
+// "process …" folders sit in the home `~` expands to (the process's own), "system …" folders are the machine's own /bin and /usr/bin, which hold the programs a glob there matches, and the rest sit in the test's scratch machine.
 export type Folder =
   | "bare home"
   | "checkout"
   | "cli folder"
   | "data folder"
+  | "extension clone"
+  | "extension clone on a branch"
   | "extensions root"
   | "glm org repo"
   | "glm repo"
@@ -44,6 +48,8 @@ export type Folder =
   | "process tmp"
   | "process worktree"
   | "scratch folder"
+  | "system bin"
+  | "system usr bin"
   | "tmp"
   | "unknown folder"
   | "worktree"

@@ -6,10 +6,10 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 
 import { GroupCount } from "@/components/shell/group-count"
+import { MovableGroupLabel } from "@/components/shell/movable-group"
 import { ROW_BOX } from "@/components/shell/row-box"
 import {
   SidebarGroup,
-  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuBadge,
   SidebarMenuButton,
@@ -28,49 +28,54 @@ import {
 } from "@/lib/yard"
 import { useYardChannels } from "@/lib/yard-api"
 
-// The Channels and Direct messages groups, read from the API's Yard router; each is absent while it has no rows, and both while the stack has no Yard. Each collapses as every sidebar group does, its label the toggle, open to start and kept as you left it across reloads, and counts its rows.
+// The Channels and Direct messages groups, read from the API's Yard router; each is absent while it has no rows, and both while the stack has no Yard.
 export function YardGroups({ shell }: { shell: YardShell }) {
-  const { data } = useYardChannels()
-  const [channelsOpen, setChannelsOpen] = useGroupOpen("Channels", true)
-  const [dmsOpen, setDmsOpen] = useGroupOpen("Direct messages", true)
-  if (!data) return null
-  const { channels, dms } = yardGroups(data)
   return (
     <>
-      {channels.length > 0 && (
-        <SidebarGroup>
-          <SidebarGroupLabel
-            className="w-full pl-2.5"
-            render={toggle(channelsOpen, setChannelsOpen)}
-          >
-            Channels
-            <Chevron open={channelsOpen} />
-            <GroupCount count={channels.length} />
-          </SidebarGroupLabel>
-          {channelsOpen && <YardRows rows={channels} shell={shell} />}
-        </SidebarGroup>
-      )}
-      {dms.length > 0 && (
-        <SidebarGroup>
-          <SidebarGroupLabel className="w-full pl-2.5" render={toggle(dmsOpen, setDmsOpen)}>
-            Direct messages
-            <Chevron open={dmsOpen} />
-            <GroupCount count={dms.length} />
-          </SidebarGroupLabel>
-          {dmsOpen && <YardRows rows={dms} shell={shell} />}
-        </SidebarGroup>
-      )}
+      <YardGroup group="Channels" shell={shell} />
+      <YardGroup group="Direct messages" shell={shell} />
     </>
   )
 }
 
-const toggle = (open: boolean, setOpen: (open: boolean) => void) => (
-  <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} />
-)
-
-const Chevron = ({ open }: { open: boolean }) => (
-  <RiArrowRightSLine className={cn("transition-transform", open && "rotate-90")} />
-)
+// One of Yard's two groups, absent while it has no rows. It collapses as every sidebar group does, its label the toggle, open to start and kept as you left it across reloads, and counts its rows; in the dashboard's sidebar its label also moves it (MovableGroupLabel).
+export function YardGroup({
+  group,
+  shell,
+}: {
+  group: "Channels" | "Direct messages"
+  shell: YardShell
+}) {
+  const { data } = useYardChannels()
+  const [open, setOpen] = useGroupOpen(group, true)
+  if (!data) return null
+  const { channels, dms } = yardGroups(data)
+  const rows = group === "Channels" ? channels : dms
+  if (rows.length === 0) return null
+  const tail = (
+    <>
+      <RiArrowRightSLine className={cn("transition-transform", open && "rotate-90")} />
+      <GroupCount count={rows.length} />
+    </>
+  )
+  return (
+    <SidebarGroup>
+      {/* each label written out, so the dashboard map reads its words */}
+      {group === "Channels" ? (
+        <MovableGroupLabel open={open} setOpen={setOpen}>
+          Channels
+          {tail}
+        </MovableGroupLabel>
+      ) : (
+        <MovableGroupLabel open={open} setOpen={setOpen}>
+          Direct messages
+          {tail}
+        </MovableGroupLabel>
+      )}
+      {open && <YardRows rows={rows} shell={shell} />}
+    </SidebarGroup>
+  )
+}
 
 // A group's rows, each a Threads row's shape: the stock 32px row, its icon, then a channel's bare name (the # icon is its one hash) or the other member's login, cut at its end, its unread count as the badge.
 export function YardRows({ rows, shell }: { rows: YardChannel[]; shell: YardShell }) {

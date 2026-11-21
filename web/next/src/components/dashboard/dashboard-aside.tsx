@@ -7,8 +7,8 @@ import {
   RiChatThreadLine,
   RiInboxLine,
   RiPagesLine,
-  RiRobot2Line,
   RiSettings3Line,
+  RiTerminalBoxLine,
   RiWindowLine,
 } from "@remixicon/react"
 import { cn } from "cn"
@@ -368,7 +368,7 @@ export function DashboardAside({ children, split }: { children: ReactNode; split
     const PageIcon = pageIcon(pathname)
     const pageTab =
       view === "agent" && selected
-        ? iconTab("page", chatLabel(selected, dispatcher), <RiRobot2Line />)
+        ? iconTab("page", chatLabel(selected, dispatcher), <RiTerminalBoxLine />)
         : pathname === "/dashboard"
           ? iconTab("page", "Chat", <RiChat3Line />)
           : iconTab("page", pageName(pathname), <PageIcon />)

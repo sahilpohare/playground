@@ -25,6 +25,12 @@ export const gateSettings = defineSettings({
       "The share of the load gate's line a small worker keeps back for reviewers and testers, so a held review starts first; set it under gates.smallReserve, or a small worker's line falls below a medium one's.",
     schema: z.number().min(0).lt(1),
   },
+  "gates.sessionCap": {
+    default: 0,
+    description:
+      "The live workers, reviewers and testers in the roster a new one starts under, so the floor keeps to the cap the factory runs to; 0 caps nothing.",
+    schema: z.number().int().min(0),
+  },
   "gates.smallReserve": {
     default: 0.25,
     description:

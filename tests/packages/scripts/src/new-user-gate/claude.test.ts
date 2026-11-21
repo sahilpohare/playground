@@ -96,6 +96,21 @@ describe("stepOf", () => {
     expect(kindOfName(stepOf("lead", { ...at, typed: false })![3]!)).toBe("worker")
   })
 
+  // spawn.sh refuses a worker with no --account once usage.accounts lists a Claude row, which first run's Add writes before Alpha starts
+  test("the builder names the Claude account first run added on its worker's start", () => {
+    expect(stepOf("lead", { ...at, account: "gate@example.com", typed: false })).toEqual([
+      "bash",
+      "/r/scripts/spawn.sh",
+      "worker",
+      "g8tw7k-worker",
+      "handoffs/gate-task.md",
+      "--title",
+      "the routed task",
+      "--account",
+      "gate@example.com",
+    ])
+  })
+
   test("the builder starts a worker on the handed task, and the worker opens its PR", () => {
     expect(stepOf("lead", { ...at, typed: false })).toEqual([
       "bash",

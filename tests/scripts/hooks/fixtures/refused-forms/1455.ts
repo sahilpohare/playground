@@ -124,4 +124,8 @@ export const allowed: string[] = [
   "an in-place sed whose -e script holds a [",
   "an in-place sed whose range holds a ?",
   "a quiet commit whose message names playground migrate",
+  // #2320: a glob in / reaches the root only through a name it may match there, and neither backup path matches one: the suffix's folder sits under /tmp, and the bare -i's * stands for the file's name, never a glob
+  "an in-place sed whose backup suffix names another folder | no-extensions-write | tmp",
+  "an in-place sed whose bare -i takes a /regex/d holding a * as its suffix | no-extensions-write | home",
+  "an in-place sed whose bare -i takes a /regex/d holding a * as its suffix | no-extensions-write | tmp",
 ]

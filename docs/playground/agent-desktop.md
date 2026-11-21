@@ -14,6 +14,7 @@ A session loads it on its own before any `agent-desktop` command, or when a task
 | Both are in place                                    | Loads the binary's own docs (`skills get desktop`, `skills get platform`), then works headless                                          |
 | The task would touch one of your own apps            | Leaves the app alone                                                                                                                    |
 | The task needs `--headed`                            | Hands it to you as one command to run with `!`                                                                                          |
+| The task needs a window the app does not show        | Runs only while your screen is unlocked, with your yes to taking focus, in a stretch you are idle, and stops once you come back         |
 
 ## The grants
 

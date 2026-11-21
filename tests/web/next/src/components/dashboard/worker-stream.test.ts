@@ -9,10 +9,12 @@ import {
   OlderSteps,
   PeerStep,
   ReasoningStep,
+  sameStep,
   sameTool,
   StepRow,
   ToolStep,
 } from "../../../../../../web/next/src/components/dashboard/worker-stream"
+import { drawingOf, keepMakerIcon } from "../../../../../../web/next/src/lib/model-icons"
 
 // React resolves from the web app's own packages, which this directory cannot see; the two calls the test makes are typed here rather than through a path into node_modules.
 type Node = unknown
@@ -27,6 +29,11 @@ const { renderToStaticMarkup } = (await import(Bun.resolveSync("react-dom/server
 const { QueryClient, QueryClientProvider } = (await import(
   Bun.resolveSync("@tanstack/react-query", web)
 )) as { QueryClient: new () => unknown; QueryClientProvider: unknown }
+
+const { RiGitBranchLine } = (await import(Bun.resolveSync("@remixicon/react", web))) as Record<
+  "RiGitBranchLine",
+  unknown
+>
 
 const older = { load: () => {}, state: "idle" as const }
 const render = (shown: boolean) => renderToStaticMarkup(createElement(OlderSteps, { older, shown }))
@@ -180,6 +187,81 @@ describe("ToolStep's redraw", () => {
     ).toBe(false)
     expect(compare(base, props("output-error", { errorText: "denied" }))).toBe(false)
     expect(compare(base, props("output-available", { ...done, title: "Read" }))).toBe(false)
+  })
+})
+
+// the stream's now moves on every inbox read, every 5s, so a row compares what the clock shows in it (the day changing, the owner's Undo), not the moment; a row it leaves keeps its render count
+describe("StepRow's redraw on a tick", () => {
+  const compare = sameStep as (a: unknown, b: unknown) => boolean
+  // local times, so the day a time names is the same in every zone the suite runs in
+  const AT = new Date(2026, 9, 6, 12, 0, 0)
+  const later = (ms: number) => new Date(AT.getTime() + ms)
+  const at = AT.toISOString()
+  const outbox = {}
+  const worker = { name: "dispatcher", sessionId: "s1", tasks: [] }
+  const assistant = {
+    id: "a1",
+    metadata: { at, from: null, kind: "assistant" },
+    parts: [{ text: "done", type: "text" }],
+    role: "assistant",
+  }
+  const human = {
+    id: "e1",
+    metadata: { at, from: null, kind: "human" },
+    parts: [{ text: "hello", type: "text" }],
+    role: "user",
+  }
+  const sent = {
+    at,
+    attachments: [],
+    attempts: 1,
+    code: null,
+    deliveredAt: at,
+    entryId: "e1",
+    id: "m1",
+    reason: null,
+    retryAt: null,
+    sawPicker: false,
+    sessionId: "s1",
+    state: "delivered",
+    text: "hello",
+    to: "dispatcher",
+    typedAt: at,
+    unanswered: false,
+    unreached: 0,
+  }
+  const props = (message: unknown, now: Date, more: Record<string, unknown> = {}) => ({
+    composer: "composer",
+    marker: null,
+    message,
+    newest: true,
+    now,
+    outbox,
+    sent: null,
+    waiting: false,
+    worker,
+    ...more,
+  })
+
+  test("a tick that moves no row's shown time draws no row again", () => {
+    for (const message of [assistant, human]) {
+      expect(compare(props(message, later(5_000)), props(message, later(10_000)))).toBe(true)
+    }
+    expect(
+      compare(props(human, later(30_000), { sent }), props(human, later(35_000), { sent })),
+    ).toBe(true)
+  })
+
+  test("a tick into the next day draws the row again, since its time then names its day", () => {
+    const night = new Date(2026, 9, 6, 23, 59, 58)
+    const morning = new Date(2026, 9, 7, 0, 0, 3)
+    expect(compare(props(assistant, night), props(assistant, morning))).toBe(false)
+  })
+
+  test("a tick that closes the owner's newest message's Undo draws it again", () => {
+    expect(
+      compare(props(human, later(119_000), { sent }), props(human, later(121_000), { sent })),
+    ).toBe(false)
   })
 })
 
@@ -417,4 +499,59 @@ test("his delivered message draws the files its outbox record holds, though the 
     ),
   )
   expect(html).toContain("sketch.png")
+})
+
+// A subagent runs on its parent session's model, so its Agent call's line draws that model's logo, by the rows' resolver; a branch when the parent's model is unknown, never a robot (PG-2651).
+describe("a subagent's tool line", () => {
+  const T0 = "2026-10-06T00:00:00.000Z"
+  const ANTHROPIC = `data:image/svg+xml;base64,${Buffer.from('<svg data-maker="anthropic"><path d="M0 0"/></svg>').toString("base64")}`
+  const ORNITH = "data:image/png;base64,iVBORw0KGgo="
+  keepMakerIcon("anthropic", drawingOf(ANTHROPIC))
+  keepMakerIcon("ornith-ai", drawingOf(ORNITH))
+  const line = (worker: Record<string, unknown>) => {
+    const html = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        createElement(StepRow, {
+          composer: "composer",
+          marker: null,
+          message: {
+            id: "a1",
+            metadata: { at: T0, from: null, kind: "assistant" },
+            parts: [
+              {
+                ...toolPart("output-available", {}),
+                input: { json: "{}", summary: "Review the diff" },
+                title: "Agent",
+                toolName: "Agent",
+              },
+            ],
+            role: "assistant",
+          },
+          newest: true,
+          now: new Date(T0),
+          outbox: {},
+          sent: null,
+          waiting: false,
+          worker: { name: "builder", sessionId: "s1", tasks: [], ...worker },
+        }),
+      ),
+    )
+    return html.slice(html.indexOf('data-slot="trace-icon"'), html.indexOf("Review the diff"))
+  }
+  const branch = /<path d="([^"]+)"/.exec(renderToStaticMarkup(createElement(RiGitBranchLine)))?.[1]
+
+  test("draws its parent's model logo: Claude's, or a local model's served maker", () => {
+    expect(line({ model: "claude-opus-5-5" })).toContain(ANTHROPIC)
+    expect(line({ localModel: "ornith-ai/Ornith-1.5-122B-NVFP4", model: "local" })).toContain(
+      ORNITH,
+    )
+  })
+
+  test("draws a branch when its parent's model is unknown", () => {
+    expect(branch).toBeString()
+    expect(line({ model: null })).toContain(branch ?? "none")
+    expect(line({ model: "claude-opus-5-5" })).not.toContain(branch ?? "none")
+  })
 })

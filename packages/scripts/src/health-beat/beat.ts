@@ -4,14 +4,14 @@ import { join } from "node:path"
 import { parseSessionState, sessionStateDir } from "@packages/config/session-state"
 
 import { readMachine } from "../ops-machine/machine"
+import { readIdle } from "../ops-machine/readings"
 import type { Run } from "../ops-tick/tick"
 import { type Health, readRunning, type Running } from "./running"
 
-// health-beat: the owner's health beat as text, what the install runs, the Mac, its memory, the sessions, the ops jobs and the battery, read once and printed; the session that runs the beat posts it.
+// health-beat: the owner's health beat as text, what the install runs, the Mac, its memory, the sessions and the ops jobs, read once and printed; the session that runs the beat posts it.
 
 export type Reading = {
   at: Date
-  battery: { pct: number; state: string } | null
   cores: number
   down: string[]
   freeMin: number
@@ -70,7 +70,6 @@ export const beatText = (r: Reading): string => {
     `${mark(!memoryOk)} Memory: pressure ${r.pressure} (${PRESSURE_NAMES[r.pressure] ?? "unknown"}), ${r.freePct}% free${memoryOk ? "" : ", so spawn's gate refuses a Claude start"}`,
     `${mark(stuck > 0)} Sessions: ${r.sessions.working ?? 0} working, ${r.sessions.idle ?? 0} idle, ${stuck} stuck`,
     `${mark(r.late.length + r.down.length > 0)} Ops jobs: ${r.ok} ok${r.late.length ? `, late: ${r.late.join(", ")}` : ""}${r.down.length ? `, down: ${r.down.join(", ")}` : ""}`,
-    `🔋 ${r.battery ? `${r.battery.pct}%, ${r.battery.state}` : "?"}`,
   ].join("\n")
 }
 
@@ -119,7 +118,7 @@ const readJobs = async (
   return { down, late, ok }
 }
 
-// Reads everything the beat prints, once: what the install runs through running.ts, the Mac's load and memory through ops-machine's read, the CPU's idle share from top, and the battery from pmset.
+// Reads everything the beat prints, once: what the install runs through running.ts, the Mac's load and memory through ops-machine's read, the CPU's idle share from top or Linux's /proc/stat (readIdle, which waits `wait` between its two reads, a second unless a test passes its own).
 export const readBeat = async (input: {
   at: Date
   data: string
@@ -128,28 +127,21 @@ export const readBeat = async (input: {
   portless: string
   repo: string
   run: Run
+  wait?: () => Promise<void>
   zone: string
 }): Promise<Reading> => {
   const { at, data, run } = input
   const ops = join(data, "ops")
   const machine = await readMachine(run, ops, [], at)
-  const top = (await run(["top", "-l", "2", "-s", "1", "-n", "0"])).out
-  const cpu =
-    top
-      .split("\n")
-      .filter((line) => line.startsWith("CPU usage"))
-      .at(-1) ?? ""
-  const idle = /([\d.]+)% idle/.exec(cpu)
-  const batt = /(\d+)%; ([^;]+)/.exec((await run(["pmset", "-g", "batt"])).out)
+  const idle = await readIdle(run, input.wait)
   const jobs = await readJobs(ops, at)
   return {
     at,
-    battery: batt ? { pct: Number(batt[1]), state: batt[2]!.trim() } : null,
     cores: machine.cores,
     down: jobs.down,
     freeMin: input.freeMin,
     freePct: machine.freePct,
-    idlePct: idle ? Number(idle[1]) : null,
+    idlePct: idle,
     late: jobs.late,
     load5: machine.load5,
     ok: jobs.ok,

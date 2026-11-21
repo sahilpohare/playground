@@ -1,10 +1,11 @@
-// playground picker <session> allow|deny <key> ["reason"]: a session's manager answers the permission prompt its alert named, allowing what the work needs. Only the session's manager or the primary dispatcher answers, and only the call the alert's key names: a call of the session's still waiting on its result whose callKey() matches. The session's herdr pane gets a key only while its prompt shows that call: 1 (Yes, once) or Escape; a session in no herdr pane gets none. A deny carries its reason, which goes to the session as a message through the ops outbox, and every answer is one log line. A dispatcher's own prompt is never answered.
+// playground picker <session> allow|deny <key> [--rule <name>] ["reason"]: a session's manager answers the permission prompt its alert named, allowing what the work needs. Only the session's manager or the primary dispatcher answers, and only the call the alert's key names: a call of the session's still waiting on its result whose callKey() matches. The session's herdr pane gets a key only while its prompt shows that call: 1 (Yes, once) or Escape; a session in no herdr pane gets none. A deny carries its reason, which goes to the session as a message through the ops outbox, and every answer is one log line; --rule <name> cites the standing rule that settles the answer, named in that line and the deny's message, and a name no rules file holds presses nothing. A dispatcher's own prompt is never answered.
 import { appendFile, mkdir } from "node:fs/promises"
 import { join } from "node:path"
 
 import { dispatcherOf } from "@packages/config/kinds"
 import { configDirOf, dataDir } from "@packages/env/data-dir"
 
+import { ruleText } from "../../../../scripts/hooks/rules"
 import { herdrDir, serverEnv, sessionsOf } from "../ops-herdr/herdr"
 import { herdrPath } from "../ops-herdr/pin"
 import {
@@ -30,11 +31,14 @@ export type PickerDeps = {
   now: () => Date
   queue: (to: string, text: string) => Promise<void>
   reportsTo: (sessionId: string) => Promise<string | undefined>
+  // A standing rule's text by its name, as `playground rules <name>` prints it, or undefined when no rules file holds it.
+  rule: (name: string) => Promise<string | undefined>
   servers: string[]
   transcript: (sessionId: string) => Promise<string>
 }
 
-const PICKER_USAGE = 'usage: playground picker <session> allow <key> | deny <key> "<reason>"'
+const PICKER_USAGE =
+  'usage: playground picker <session> allow <key> [--rule <name>] | deny <key> [--rule <name>] "<reason>"'
 
 type Pane = { pane: string; server: string }
 
@@ -71,11 +75,24 @@ export async function runPicker(
   args: string[],
   deps: PickerDeps,
 ): Promise<{ code: number; out: string }> {
-  const [name = "", answer = "", key = "", ...words] = args
+  const [name = "", answer = "", key = "", ...rest] = args
+  const at = rest.indexOf("--rule")
+  const cited = at === -1 ? undefined : (rest[at + 1] ?? "")
+  const words = at === -1 ? rest : [...rest.slice(0, at), ...rest.slice(at + 2)]
   const reason = words.join(" ").trim()
   const refuse = (out: string) => ({ code: 1, out })
-  if (!name || !/^[0-9a-f]{8}$/.test(key) || (answer !== "allow" && answer !== "deny"))
+  if (
+    !name ||
+    !/^[0-9a-f]{8}$/.test(key) ||
+    (answer !== "allow" && answer !== "deny") ||
+    cited === "" ||
+    cited?.startsWith("-")
+  )
     return refuse(PICKER_USAGE)
+  // The standing rule the answer cites, by the name `playground rules` prints it under, a hyphen standing for a space.
+  const rule = cited?.replaceAll("-", " ")
+  if (rule && !(await deps.rule(rule)))
+    return refuse(`no rule named ${rule}: playground rules lists them; nothing was pressed`)
   if (answer === "deny" && !reason)
     return refuse(`a deny carries its reason, the simpler shape ${name} is to use: ${PICKER_USAGE}`)
   const live = await deps.live()
@@ -99,14 +116,15 @@ export async function runPicker(
   if (refusal) return refuse(refusal)
   await deps.herdr(pane.server, ["pane", "send-keys", pane.pane, answer === "allow" ? "1" : "esc"])
   const what = callOf(call).replace(/\s+/g, " ").slice(0, 120)
-  const at = deps
+  const when = deps
     .now()
     .toISOString()
     .replace(/\.\d{3}Z$/, "Z")
-  const line = `${at} ${deps.by} ${answer} ${name} via herdr: ${what}${reason ? ` (${reason})` : ""}`
+  const under = rule ? ` under **${rule}**` : ""
+  const line = `${when} ${deps.by} ${answer} ${name} via herdr: ${what}${rule ? `,${under}` : ""}${reason ? ` (${reason})` : ""}`
   await deps.log(line)
   if (answer === "deny")
-    await deps.queue(name, `${deps.by} denied your permission prompt (${what}): ${reason}`)
+    await deps.queue(name, `${deps.by} denied your permission prompt (${what})${under}: ${reason}`)
   return { code: 0, out: line }
 }
 
@@ -155,6 +173,7 @@ export async function pickerDeps(
     queue: (to, text) => queueLine(env, "picker", to, text),
     reportsTo: async (sessionId) =>
       reportsToOf(await transcriptPathOf(configDirOf(env), sessionId)),
+    rule: (name) => ruleText(name, process.cwd(), env),
     servers: sessionsOf(env),
     transcript: (sessionId) => transcriptOf(configDirOf(env), sessionId),
   }

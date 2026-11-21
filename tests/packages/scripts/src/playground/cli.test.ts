@@ -13,6 +13,8 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
+import { assetOf } from "../../../../../packages/scripts/src/ops-herdr/pin"
+
 const CLI = join(import.meta.dir, "../../../../../packages/scripts/src/playground/cli.ts")
 const dir = mkdtempSync(join(tmpdir(), "dispatcher-cli-"))
 afterAll(() => rmSync(dir, { force: true, recursive: true }))
@@ -41,7 +43,7 @@ describe("the shebang", () => {
 })
 
 describe("bare dispatcher", () => {
-  // a copy of the dispatcher folder and the portless-ca.ts, store's rendered.ts, herdr pin, data-dir.ts and the dev stack's proxy.ts and live-dashboard.ts it imports in a scratch repo, with ops-herdr, up.py's python3 (its body given) and every command the probes run stubbed, so nothing real starts; a case adds stubs and repo files of its own
+  // a copy of the dispatcher folder and the portless-ca.ts, user-systemctl.ts, store's rendered.ts, herdr pin, data-dir.ts, the dev stack's ca-trust.ts, proxy.ts and live-dashboard.ts and the sessions' proc-start.ts it imports in a scratch repo, with ops-herdr, up.py's python3 (its body given) and every command the probes run stubbed, so nothing real starts; a case adds stubs and repo files of its own
   const dispatcher = async (
     python3: string,
     more: Record<string, string> = {},
@@ -54,13 +56,22 @@ describe("bare dispatcher", () => {
     const repo = join(root, "repo")
     const src = join(repo, "packages", "scripts", "src")
     cpSync(dirname(CLI), join(src, "playground"), { recursive: true })
-    for (const file of ["portless-ca.ts", "swap-bundles.ts"])
+    for (const file of [
+      "portless-ca.ts",
+      "swap-bundles.ts",
+      "user-systemctl.ts",
+      "write-atomic.ts",
+    ])
       cpSync(join(dirname(CLI), "..", file), join(src, file))
-    for (const file of ["live-dashboard.ts", "proxy.ts"])
+    for (const file of ["ca-trust.ts", "live-dashboard.ts", "proxy.ts"])
       cpSync(
         join(dirname(CLI), "../../../../api/hono/src/lib/dev", file),
         join(repo, "api/hono/src/lib/dev", file),
       )
+    cpSync(
+      join(dirname(CLI), "../../../../api/hono/src/lib/sessions/proc-start.ts"),
+      join(repo, "api/hono/src/lib/sessions/proc-start.ts"),
+    )
     cpSync(
       join(dirname(CLI), "../../../settings/src/rendered.ts"),
       join(repo, "packages/settings/src/rendered.ts"),
@@ -159,6 +170,29 @@ describe("bare dispatcher", () => {
     expect(out).toEndWith(`Left for you:\n  - The dispatcher didn't start: ${refusal}\n`)
   }, 15_000)
 
+  // On a first start the run's first read names an idle ~/.portless's URL, and the stack's API starts the proxy that serves later, so the open step reads the URLs again after the wait (#2299)
+  test("opens the Dashboard at the URL portless names after the wait, not the one it named at the run's start", async () => {
+    const server = Bun.serve({ fetch: () => new Response("ok"), hostname: "127.0.0.1", port: 0 })
+    const { port } = server
+    const count = join(mkdtempSync(join(realpathSync(dir), "gets-")), "count")
+    const { child } = await dispatcher(
+      "exit 0",
+      {
+        bunx: `n=$(($(cat '${count}' 2>/dev/null || echo 0) + 1)); echo $n > '${count}'; [ $n -le 2 ] && echo http://127.0.0.1:1 || echo http://127.0.0.1:${port}`,
+        docker: "exit 1",
+        open: "exit 0",
+      },
+      { "scripts/briefs/dispatcher.md": "brief\n", "scripts/spawn.sh": "exit 1\n" },
+    )
+    const deadline = setTimeout(() => child.kill(), 10_000)
+    await child.exited
+    clearTimeout(deadline)
+    server.stop(true)
+    const out = await new Response(child.stdout).text()
+    expect(out).toContain("The Dashboard answered after")
+    expect(out).toContain(`Dashboard: http://127.0.0.1:${port}/dashboard\n`)
+  }, 15_000)
+
   // The servers Playground started had no stop of the user's own, so a pair that restored another herdr setup's layout stayed up
   test("herdr stop hands ops-herdr its stop-all, which reaches only the sockets in Playground's herdr folder, and keeps its exit", async () => {
     const log = join(mkdtempSync(join(realpathSync(dir), "log-")), "log")
@@ -177,10 +211,10 @@ describe("bare dispatcher", () => {
     expect(code).toBe(1)
   }, 15_000)
 
-  // Playground pins herdr only on macOS, so off a Mac pinHere refuses before any of this runs
-  const onMac = process.platform === "darwin"
+  // pinHere refuses a machine the pin names no asset for before any of this runs, so it runs only where the pin names one
+  const pinned = assetOf() !== null
   // Start <dispatcher> runs playground dispatcher, which on a fresh install found no herdr and no factory settings: spawn.sh refused on each in turn, since only install and the bare start set them up.
-  describe.if(onMac)(
+  describe.if(pinned)(
     "playground dispatcher sets up what install and the bare start do before spawn.sh",
     () => {
       const run = async (opts: {
@@ -206,9 +240,12 @@ describe("bare dispatcher", () => {
             ...(opts.linked === false
               ? {}
               : Object.fromEntries(
-                  ["factory-settings.json", "handoffs/new-worker.md", "ops/run-slot.sh"].map(
-                    (file) => [`../.playground/${file}`, "linked\n"],
-                  ),
+                  [
+                    "factory-settings.json",
+                    "handoffs/new-research-worker.md",
+                    "handoffs/new-worker.md",
+                    "ops/run-slot.sh",
+                  ].map((file) => [`../.playground/${file}`, "linked\n"]),
                 )),
             "packages/scripts/src/ops-herdr/cli.ts": `import { appendFileSync } from "node:fs"\nappendFileSync(${JSON.stringify(log)}, \`ops-herdr \${process.argv.slice(2).join(" ")}\\n\`)\n${opts.opsHerdr}\n`,
             "packages/scripts/src/ops-herdr/pin.json": JSON.stringify(pin),

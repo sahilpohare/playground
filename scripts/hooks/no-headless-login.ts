@@ -4,6 +4,7 @@ import { join } from "node:path"
 
 import { dataDir } from "../../packages/env/src/data-dir"
 import { readPolicy } from "../../packages/settings/src/rendered"
+import { input } from "./input"
 import { registryName, sessionOf, sessionRole } from "./role"
 import { lex, run, type Env, type Parsed, type Visit } from "./shell"
 
@@ -75,7 +76,7 @@ export async function check(
 }
 
 if (import.meta.main) {
-  const reason = await check(await Bun.stdin.text())
+  const reason = await check(await input("no-headless-login", "guard"))
   if (reason) {
     console.error(reason)
     process.exit(2)

@@ -1,10 +1,16 @@
 # Deploying through the Vercel CLI
 
+A factory session's `vercel` call passes the no-raw-vercel guard first ([scripts/hooks/README.md](../../../../scripts/hooks/README.md#no-raw-vercel)), which allows reads by name and refuses every other call.
+It runs `whoami`, `ls`, `inspect`, `logs`, help, the `ls` of `alias`, `dns`, `domains`, `integration`, `project` and `teams`, `env ls` without its values, `promote status`, `rollback status`, `rolling-release inspect`, a `vercel api` GET outside `/env`, and a preview deploy (`vercel deploy`, or `vercel ./<folder>`).
+A production move (a production deploy, a `redeploy` into production, a `promote`, `rollback`, alias change or rolling release step) passes for the Ops lead alone, since production ships from `main` through the release skill, whose step 4 deploys the hosted Yard with `bun run ship:yard <tag>`, a production move too.
+Every other call, `link` and `integration add` among them, is refused in the factory.
+
 Three traps one CLI deploy met (measured), each a step at the command it follows.
 
 1. **Keep the development env off disk.**
-   Run `vercel integration add <name> --no-env-pull`, since without the flag it pulls the project's development env, a client secret among it, into `.env.local` (`--no-env-pull` skips that pull, by `vercel integration add --help` on vercel 65.8.0).
-   Run `rm -f .env.local` right after `vercel link`, in the folder you ran it from, since link pulls the same env there and takes no such flag (its `--help` on 65.8.0), and one deploy found a client secret in a scratch folder that way.
+   Outside the factory, where the guard passes it, run `vercel integration add <name> --no-env-pull`, since without the flag it pulls the project's development env, a client secret among it, into `.env.local` (`--no-env-pull` skips that pull, by `vercel integration add --help` on vercel 65.8.0).
+   In the factory, name the project on each call with `--project <name>` in place of a link.
+   Outside it, run `rm -f .env.local` right after `vercel link`, in the folder you ran it from, since link pulls the same env there and takes no such flag (its `--help` on 65.8.0), and one deploy found a client secret in a scratch folder that way.
    Done when `ls .env.local` finds no file.
 2. **Read `vercel api` through its JSON alone.**
    Pipe it as `vercel api --raw <path> | grep -o '{.*' | jq`, since the CLI can print a warning line before its JSON, and a bare `| jq` stops on that line with "Invalid numeric literal".

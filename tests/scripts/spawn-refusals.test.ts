@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { OLD } from "../session-names"
+import { pidStat } from "./fixtures/proc"
 import { launchAfterRm, launchOf, LSTART, placing, root, spawn } from "./spawn-fake"
 
 // Every case runs spawn.sh, which starts fake processes and waits on them; one took 19.9s on the loaded runner box, so each gets twice that.
@@ -35,6 +36,20 @@ describe("a name a live session holds is refused, so no session starts under a g
     const reused = await spawn(lead, [
       { name: OLD.planner, pid: 5003, procStart: "Mon Oct 12 01:00:00 2026" },
     ])
+    expect(reused.code).toBe(0)
+  })
+
+  // Claude Code on Linux records procStart as clock ticks since boot, field 22 of /proc/<pid>/stat.
+  test("a Linux session holds its name while /proc gives its pid the start its file records, and frees it once the pid started at another", async () => {
+    const linux = [{ name: OLD.planner, pid: 5006, procStart: "1801742" }]
+    const proc = (ticks: string) => (home: string) => {
+      mkdirSync(join(home, "proc", "5006"), { recursive: true })
+      writeFileSync(join(home, "proc", "5006", "stat"), pidStat(5006, ticks))
+    }
+    const env = { PLAYGROUND_PROC: "{home}/proc" }
+    const live = await spawn(lead, linux, env, undefined, undefined, proc("1801742"))
+    expect(live.err).toContain(`a live session already holds the name ${OLD.planner} (pid 5006)`)
+    const reused = await spawn(lead, linux, env, undefined, undefined, proc("2900000"))
     expect(reused.code).toBe(0)
   })
 

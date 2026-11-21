@@ -87,6 +87,31 @@ describe("sessions.templates", () => {
     expect(sessionTemplates.safeParse([{ ...glm!, effort: "low" }]).success).toBe(false)
   })
 
+  test("a local template takes an effort, but no account and no planning kind, as spawn.sh's --backend local does", () => {
+    const [assistant] = defaults()
+    const local = { ...assistant!, model: "local" }
+    expect(templateBackend(local)).toBe("local")
+    expect(sessionTemplates.safeParse([{ ...local, effort: "low" }]).success).toBe(true)
+    const issues = (template: object) =>
+      sessionTemplates.safeParse([template]).error?.issues.map(({ message, path }) => ({
+        message,
+        path,
+      }))
+    expect(issues({ ...local, account: "someone@example.com" })).toEqual([
+      {
+        message: "a local template runs on this machine's local model, so it takes no account",
+        path: [0, "account"],
+      },
+    ])
+    for (const kind of ["dispatcher", "planner"] as const)
+      expect(issues({ ...local, kind })).toEqual([
+        {
+          message: "a dispatcher or a planner plans on Claude, so it takes no local model",
+          path: [0, "kind"],
+        },
+      ])
+  })
+
   test("the Orchestrator is the seatless orchestrator kind, and the second dispatchers take their own brief", () => {
     const byId = new Map(defaults().map((t) => [t.id, t]))
     expect(byId.get("orchestrator")).toMatchObject({

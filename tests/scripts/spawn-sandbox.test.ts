@@ -1,8 +1,16 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 
-import { FACTORY_SETTINGS, launchAfterRm, root, spawn } from "./spawn-fake"
+import {
+  FACTORY_SETTINGS,
+  launchAfterRm,
+  launchOf,
+  linuxTemp,
+  root,
+  spawn,
+  userTemp,
+} from "./spawn-fake"
 
 // Every case runs spawn.sh, which starts fake processes and waits on them; one took 19.9s on the loaded runner box, so each gets twice that.
 setDefaultTimeout(40_000)
@@ -13,8 +21,6 @@ const main = dirname(
     .stdout.toString()
     .trim(),
 )
-const temp = Bun.spawnSync(["getconf", "DARWIN_USER_TEMP_DIR"]).stdout.toString().trim()
-
 const sandboxOf = (home: string, data = join(home, ".playground")) => ({
   allowUnsandboxedCommands: false,
   enabled: true,
@@ -28,7 +34,7 @@ const sandboxOf = (home: string, data = join(home, ".playground")) => ({
       join(home, ".bun", "install", "cache"),
       join(home, ".cache", "turbo"),
       join(home, ".portless"),
-      ...(temp ? [temp.replace(/\/$/, "")] : []),
+      userTemp,
     ].sort(),
     denyWrite: expect.any(Array),
   },
@@ -39,6 +45,8 @@ const sandboxOf = (home: string, data = join(home, ".playground")) => ({
 })
 
 const settingsOf = (r: { home: string }, file: string) => join(r.home, ".playground", file)
+// The extensions root, the data folder's extensions folder (extensionsDir in packages/settings/src/rendered.ts).
+const extensionsOf = (home: string, data = join(home, ".playground")) => join(data, "extensions")
 const builtOf = (r: { home: string }, file: string) =>
   JSON.parse(readFileSync(settingsOf(r, file), "utf8"))
 
@@ -64,6 +72,33 @@ describe("a probe runs its shell commands in Claude Code's sandbox", () => {
     expect(existsSync(settingsOf(r, "factory-settings-400k.json"))).toBe(false)
   })
 
+  // Linux's /tmp is every user's and session's, so a sandboxed session there may write a folder of its own under it alone, mode 700, its TMPDIR, in a settings file of its own.
+  test.each([
+    ["a probe", ["probe", "probe-x", "ops", "p.md"], "factory-settings-sandbox-400k-probe-x.json"],
+    [
+      "a closed probe",
+      ["probe", "probe-x", "ops", "p.md", "--sandbox"],
+      "factory-settings-sandbox-closed-400k-probe-x.json",
+    ],
+  ])(
+    "on Linux %s may write its own temp folder under /tmp, and no other place there",
+    async (_, args, file) => {
+      const r = await spawn(args, [], { LINUX_GETCONF: "1" })
+      expect(r.code, r.err).toBe(0)
+      const { allowWrite } = builtOf(r, file).sandbox.filesystem
+      const own = allowWrite.filter((path: string) => dirname(path) === linuxTemp)
+      expect(own).toHaveLength(1)
+      expect(own[0]).toMatch(/\/playground-probe-x\.[A-Za-z0-9]{6}$/)
+      expect(statSync(own[0]).mode & 0o777).toBe(0o700)
+      expect(launchOf(r)).toContain(`export TMPDIR=${own[0]}\n`)
+      const writes = (path: string) =>
+        allowWrite.some((entry: string) => path === entry || path.startsWith(`${entry}/`))
+      for (const path of ["/tmp", "/tmp/another-session/file", join(linuxTemp, "another")])
+        expect(writes(path), path).toBe(false)
+      expect(existsSync(settingsOf(r, "factory-settings-sandbox-400k.json"))).toBe(false)
+    },
+  )
+
   test("a probe whose folder is the main checkout can write no entry of it, .git and .claude/worktrees included", async () => {
     const r = await spawn(["resume", "probe-x", main, id], [], {}, undefined, {
       name: "probe-x",
@@ -71,7 +106,7 @@ describe("a probe runs its shell commands in Claude Code's sandbox", () => {
     })
     expect(r.code, r.err).toBe(0)
     const { denyWrite } = builtOf(r, "factory-settings-sandbox-400k.json").sandbox.filesystem
-    expect(denyWrite).toEqual(
+    expect(denyWrite.filter((path: string) => path !== extensionsOf(r.home))).toEqual(
       readdirSync(main)
         .sort()
         .map((name) => join(main, name)),
@@ -97,7 +132,11 @@ describe("a probe runs its shell commands in Claude Code's sandbox", () => {
           .filter((path) => path !== own)
       : []
     expect(others.filter((path) => !covered(path))).toEqual([])
-    expect(denyWrite.filter((path: string) => !path.startsWith(`${main}/`))).toEqual([])
+    expect(
+      denyWrite.filter(
+        (path: string) => !path.startsWith(`${main}/`) && path !== extensionsOf(r.home),
+      ),
+    ).toEqual([])
   })
 
   test("a probe resumed in scripts/hooks writes that folder alone, in every checkout", async () => {
@@ -115,6 +154,21 @@ describe("a probe runs its shell commands in Claude Code's sandbox", () => {
     expect(covered(join(main, ".git"))).toBe(true)
     expect(covered(join(main, "README.md"))).toBe(true)
   })
+
+  test.each([
+    ["the data folder in the home", {}, ".playground"],
+    ["a scratch data folder", { SCRATCH_DATA: "1" }, "scratch-data"],
+  ])(
+    "a probe on %s can write nothing under the extensions root, while the rest of the data folder stays writable",
+    async (_, env, folder) => {
+      const r = await spawn(["probe", "probe-x", "ops", "p.md"], [], env)
+      expect(r.code, r.err).toBe(0)
+      const file = join(r.home, folder, "factory-settings-sandbox-400k.json")
+      const { allowWrite, denyWrite } = JSON.parse(readFileSync(file, "utf8")).sandbox.filesystem
+      expect(denyWrite).toContain(extensionsOf(r.home, join(r.home, folder)))
+      expect(allowWrite).toContain(join(r.home, folder))
+    },
+  )
 
   test("a resumed probe keeps the sandbox", async () => {
     const name = "probe-x"

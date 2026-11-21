@@ -86,6 +86,9 @@ export async function watch(io: Io) {
   await writeAtomic(path, JSON.stringify(state))
 }
 
+// The owner's DM words reach the dispatcher whole and stay out of alerts.log, which names the line's length alone, as ops-wa's and Yard's lines do.
+export const relay = sendAs("dm-watch", true, true)
+
 // one pass, no retry: its errors as one plain line, which the beat's failure alert reads
 const main = async () => {
   const token = await tokenOf()
@@ -95,7 +98,6 @@ const main = async () => {
   const channel = slackSettings.get(policy.settings, "slack.dmChannel")
   const owner = slackSettings.get(policy.settings, "slack.dmOwner")
   const now = Math.floor(Date.now() / 1000)
-  const send = sendAs("dm-watch", true)
   await watch({
     assistant: () => assistantOf(dir),
     busy: () => busyOf("dispatcher", dir, configDirOf(process.env), now),
@@ -104,7 +106,7 @@ const main = async () => {
     log: (line) => console.log(line),
     now,
     owner,
-    send,
+    send: relay,
     slack: slackOf(token),
     stuck: () => stuckOf("dispatcher", dir, configDirOf(process.env), now),
     tellOps: (text) => sendAs("unstick", true)("ops", text),

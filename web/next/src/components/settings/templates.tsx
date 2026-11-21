@@ -72,6 +72,7 @@ const DEFAULT: Option = { label: "Default", value: "" }
 export const BACKENDS: Option[] = [
   { label: "Claude", value: "claude" },
   { label: "GLM", value: "glm" },
+  { label: "Local", value: "local" },
 ]
 const KINDS: Option[] = TEMPLATE_KINDS.map((kind) => ({ label: kindWord(kind), value: kind }))
 const EFFORTS: Option[] = [
@@ -468,19 +469,21 @@ function TemplateDialog({
           {select("backend", "Backend", BACKENDS)}
           <form.Subscribe selector={(state) => state.values.backend}>
             {(backend) =>
-              backend === "claude" && (
-                <>
-                  {select("model", "Model", [
-                    DEFAULT,
-                    ...SESSION_MODELS.map((value) => ({ label: MODEL_LABELS[value], value })),
-                  ])}
-                  {select("effort", "Effort", EFFORTS)}
-                  {select("account", "Account", [
-                    DEFAULT,
-                    ...accounts.map((email) => ({ label: email, value: email })),
-                  ])}
-                </>
-              )
+              backend === "local"
+                ? select("effort", "Effort", EFFORTS)
+                : backend === "claude" && (
+                    <>
+                      {select("model", "Model", [
+                        DEFAULT,
+                        ...SESSION_MODELS.map((value) => ({ label: MODEL_LABELS[value], value })),
+                      ])}
+                      {select("effort", "Effort", EFFORTS)}
+                      {select("account", "Account", [
+                        DEFAULT,
+                        ...accounts.map((email) => ({ label: email, value: email })),
+                      ])}
+                    </>
+                  )
             }
           </form.Subscribe>
           {text("brief", "Brief", "A file name in the data folder or scripts/briefs.")}

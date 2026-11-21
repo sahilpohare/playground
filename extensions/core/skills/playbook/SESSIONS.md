@@ -26,8 +26,11 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    and a scratch world's of the session's own ([scripts/README.md](../../../../scripts/README.md#spawnsh)),
    naming the script; type every program by its literal name, since one held in a variable (`$V integration add`) reads as herdr when a herdr command group follows it.
    A lead starting a checker runs `roster.ts assign <checker> "Review: <its worker's title>" <task> worker=<live worker> pr=<n>` (`Test: ` for a tester) before spawn.sh, since spawn.sh writes `worker=` only for a worker's column and roster.ts refuses a checker's PR with no live worker (step 4).
+   A column start names its spawner's pane as `$HERDR_PANE_ID`, which herdr sets in every pane's shell.
+   `--account` takes the login's full email, never its domain alone, since one domain can match two logins, and a brief template's start resolves it into `$acct` in the start script ([SPAWN.md](SPAWN.md#--account)).
+   A worker that only reads (research, a fetch, an investigation) starts with `--reads-only` ([SPAWN.md](SPAWN.md#capacity-gate) holds the gate it passes), and its brief bars every run-slot run (a build, a suite, a type check, an install), since its start took no room.
    Read [SPAWN.md](SPAWN.md) for the command of the mode you start (a worker, a runner, a checker's or probe's column, a manager) and for each flag you pass,
-   and before you act on a refusal: it holds the capacity gate, the launch line with its model and effort, the resume, `--account`, `--backend glm`, `--runtime herdr` with `spawn.sh restore`, `--check`, and the role and settings every launch carries.
+   and before you act on a refusal: it holds the capacity gate, the launch line with its model and effort, the resume, `--account`, `--backend glm`, `--backend local`, `--runtime herdr` with `spawn.sh restore`, `--check`, `--sandbox`, and the role and settings every launch carries.
    Done when spawn.sh has printed herdr's `herdr pane <id> workspace <id>` line for the session, or a refusal you have acted on by its gate's section in SPAWN.md.
 
 3. Brief it with `SendMessage` once `ListAgents` lists the name, writing the brief with writing-for-agents loaded (SKILL.md's **writing** rule).
@@ -38,21 +41,31 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    and that it runs only commands that need no approval: one plain command per call, no `sh -c` or `bash -c` wrapper, no `rm`, no `cd` (absolute paths, `git -C` and `bun run --cwd` instead: inscope's zsh hook runs 1Password's `op` on every `cd` and new shell, prompting the owner's fingerprint)
    apart from the one at a worker's end (LIFECYCLE.md), which prompts once, the **signal** rule, a literal absolute path for `gh --body-file`, since `no-playground-leak` and `no-release-comment` each refuse a path built from a shell variable (`brief-rush.md` holds the three-call body edit), a scratch script written through the Write tool and run as `bun <path>` (new-worker.md says why),
    that a worker starts its fixture stack outside run-slot, only while it takes shots, since a command that never exits would hold a slot until it is stopped (**slots**), that a multi-stack ask (a bisect, an A/B) builds one stack at a time, and the **writing** rule: load writing-for-agents with the Skill tool before writing any agent-facing doc, a handoff included.
+   A worker's brief has it read `~/.playground/handoffs/new-worker.md`'s Standing lines, which hold a worker's standing rules, so the brief adds only its item's own steps and rules.
+   A premise in a brief or a plan about how a tool behaves (the folder a script starts a session in, what a flag or a hook does) cites the file:line it was read at plus the line quoted, such as `scripts/spawn.sh:13`, "its own workspace, this checkout or --in's folder", so a reader can grep for the quote once the file moves, or else its file:line at a named sha,
+   and the lead's plan review sends back a premise with neither, since a folded change once rested on an unread premise about where `spawn.sh resume` runs and cost a round.
    A worker's brief says that any change under `web/next/`, a docs `.mdx` included, gets its tester's drive, posted as a `## TesterBot · PASS at <sha7>` comment.
    A guard's plan and its brief (a hook or a gate that refuses calls) each name its threat model as a closed list of literal forms (for a path guard: an Edit or Write tool call on the path, and a shell write, copy, move or delete that names the path literally),
    say plainly that a same-user session can still get past the guard by a form outside that list, and hold a Done when that names only forms from that list.
+   A guard that reads a program started by a wrapper (`xargs`, `env`, `nice`, `timeout` and the like) names in its plan every wrapper option that changes what runs or what it runs with,
+   such as xargs' `-I`, `-J` and `--replace`, whose replace string can stand for the program's own word, and `--process-slot-var`, which sets a variable such as `PATH` in the program's environment, since one PR's round 1 found two such bypasses its new reader had opened.
    A guard's brief tells its worker that it, and every harness it starts, tests each form only as data, through the hook's own `check()` or test entry point, and runs no recursive-delete form at all, since a form can name a path outside HOME, so pointing HOME at a scratch folder contains nothing.
    A guard's false positive that has a working form takes the docs path first: name the working form once, in the skill that hits it.
    A loosening goes ahead only when no working form exists or the refusal recurs.
    A loosening's plan and brief name the one class of forms it lets run, and every other form keeps canary's verdict, as `tests/scripts/hooks/refused-forms.test.ts` checks row by row.
    By round 3 on that guard, or at its reviewer's ask for a scope ruling, the lead narrows the PR to that list or moves the protection to a layer that parses no shell, since a guard asked to stop every form never closes: on 1 Nov one ran 16 rounds over 299 minutes, each finding one more shell form, then shipped refusing read-only awk.
+   Every new guard or gate states its shape in its plan before round 1: an allow list or a list of refused forms, that it fails closed, and which roles pass (for a command one role alone runs, an allow list of its subcommands checked against the launching process's role, as `launchAbove` in `packages/scripts/src/ship/yard.ts` reads it);
+   the lead's plan review checks that line before the worker builds,
+   since two guard PRs that reserved a command for one role each took 6 rounds, 4 to 5 of their 12 spent on lists of refused spellings that the final allow list or launch check made moot.
    A worker starts its checkers in one step, once its PR's head is ready (its checks green at it): its reviewer always, and its tester (`bun run name tester`) with it when a tester's drive is due, since a reviewer started later left heads waiting over an hour; ops-sweep tells the worker's lead of a head ready 20 minutes with no review round and no live reviewer.
    Done when both are briefed, or the reviewer alone for a PR with no `web/next/` change.
-   A worker's brief says that before a push it runs only the touched tests, the list `extensions/core/skills/code-review-loop/scripts/state.ts touched-tests <worktree> origin/canary HEAD` writes to a file it checks is non-empty before passing it to xargs (code-review-loop's two steps), and check-types, through run-slot, and leaves the full suite to GitHub Actions,
-   whose `Audit, Lint, and Build` and `test` checks gate the head (**ci**).
+   A worker's brief says that before a push it runs the whole list `extensions/core/skills/code-review-loop/scripts/state.ts touched-tests <worktree> origin/canary HEAD` writes to a file it checks is non-empty before passing it to xargs (code-review-loop's two steps), and check-types, through run-slot, and leaves the full suite to GitHub Actions,
+   whose checks on the head gate it (`Audit, Lint, and Build`, `test` and, on `factory.repo`, `GitGuardian`) (**ci**).
    A brief names a `CLOCK_AHEAD_DAYS=30` run only for touched test files outside `CLOCK_EXEMPT` (`packages/scripts/src/clock-exempt.ts`), since a run over exempt files alone runs nothing, a no-op its report names as one rather than a pass: on one PR all 3 files a brief named were exempt.
    A brief that has its session clone a repo no org guards places the clone under `.claude/worktrees/<name>` in the Playground checkout and has the session name the clone's path in its last report, since no automated cleanup reaches a plain clone (two clones left in a session's scratch folder stayed behind), so its lead removes it by hand with `playground rm --worktree <path>`;
-   under `~/.playground` only the caller's own `scratch/<name>/` and `scratchpad/<name>/` clear, through a plain `playground rm <path>`, and every other path there stays refused.
+   under `~/.playground` only the caller's own `scratch/<name>/` and `scratchpad/<name>/`, its own loose file in `scratch/` (below), its own memory settings file `factory-settings-400k-memory-<name>.json` (a regular file), an ended session's whole `scratchpad/<folder>/` or `scratch/<folder>/` and a retired data folder whole (safe-delete's `RETIRED` list, `ci` today) clear,
+   through a plain `playground rm <path>`, and every other path there stays refused;
+   the ended folder, a retired data folder, a folder inside the caller's own `scratchpad/<name>/` (a ship rehearsal's two clones) and the caller's own temp folder (`/tmp/playground-<name>.*`) skip the 5,000-file tripwire and keep the 2 GB cap.
    A guarded org's clone goes where `scripts/briefs/new-reviewer.md` puts it, in the org's folder (code-review-loop says why).
    A worker's brief says that a PR holding a long-lived connection (a socket, a pub/sub subscriber, a retrying client) puts code-review-loop's lifecycle table in its Evidence before round 1, one row per path from connect to close.
    A worker's brief says that a PR loosening a guard puts code-review-loop's refusal table in its Evidence before round 1: a `canary | head` row for each row it adds to `tests/scripts/hooks/fixtures/refused-forms/` or names in a source file's `allowed` list, and the refused-forms test's pass count at canary and at the head for the rest.
@@ -65,19 +78,25 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    It also says that after a merge of canary that moves a path a test fixture uses, the worker points the fixture's reader at a missing path, confirms each fixture-reading case goes red, then restores the reader with `git checkout --`, since a reader that fails open passes a fixture at the old path.
    It also says that a worker that merges `canary` or its stack's parent into its PR keeps the merge commit a plain merge, holding its conflict resolutions alone, and lands each edit after it as a commit of its own, since code-review-loop scores an edit inside a merge as blocking, and that a stacked child takes its parent's final head, by DISPATCH.md's bundles.
    It also says that a stacked child retargeted to `canary` after its parent merges pushes a merge of `canary` before it asks for review, since on 2 Nov GitHub kept one retargeted PR CONFLICTING with no CI run while a local `git merge-tree` was clean, and only a push made it recompute.
+   It also says that a worker still holding a staged merge of `canary` when its lead says a fix has landed there runs `git merge --abort`, merges the fresh `canary` and resolves its conflicts again, then runs `bun install` through run-slot before it commits the merge,
+   since git takes no merge while one is staged and the merge commit's pre-commit build reads the `node_modules` the merged `bun.lock` installs,
+   and on 16 Nov a worktree's pre-commit build ran its old `node_modules` (a Next.js under an advisory canary had already moved past) until the install.
    A lead's instruction or a reviewer's brief leaves any raise of a ratchet, or bend of a check whose own rule says it never rises, to that rule's owner, asked on the PR or directly, before the code relies on it, and lists one as agreed only with the owner's words quoted (23 Oct: a raise a brief listed as agreed reached 5/5, and the code owner blocked it).
    A worker started `--in` another repository takes that folder's MCP tools, so its brief names the capability it needs (search Slack, read Datadog logs) and has the worker find the tool with its own `ToolSearch` (21 Oct: a brief named a Slack tool by the factory's own server, and the worker found it under its folder's server).
-   A worker briefs its checker by filling a template: it copies `~/.playground/handoffs/new-reviewer.md`, or `new-tester.md` for a Playground PR, to a file of its own under `~/.playground/`, since the linked template is the main checkout's file, fills each slot and passes that file to spawn.sh as `<brief>`.
+   A worker briefs its checker by filling a template: it copies `~/.playground/handoffs/new-reviewer.md`, or `new-tester.md` for a Playground PR, to a file in its own scratchpad, `~/.playground/scratchpad/<session name>/`,
+   since the linked template is the main checkout's file and `playground rm` refuses a file at the data folder's top, fills each slot and passes that file to spawn.sh as `<brief>` (`scratchpad/<session name>/<file>`),
+   and its end moves that folder to the trash (End, below).
    The fill rule: a slot is a word of capitals and digits with two underscores on each side, in backticks since the formatter turns a bare one bold, such as `__NAME__` for the session's own name, and a fill replaces those tokens alone, every one of them:
    a `sed` fill takes `/g`, since a slot can sit twice on one line (`__PR__` does in both templates) and a bare `s/…/…/` fills only the first, which spawn.sh then refuses as a slot left.
    So `<owner>/<name>` and every other angle-bracket word stays as written for the reader (22 Oct: a fill of `<name>` by `sed` also rewrote `--repo <owner>/<name>`), and a brief or template that names a token in its own text spells it in words (two underscores, NAME, two underscores), so a fill leaves that text alone.
+   A brief that names an extension item's revision pastes its sha whole from `playground ext why <scope> <kind> <key>`, never typed or joined from two, since one brief's sha took its tail from the revision before.
    Fill the brief and read it back in one call, then run spawn.sh in a later call, once the read shows every slot filled: spawn.sh refuses a brief still holding a slot of its role's template, naming each one, and a fill a hook refused in the same batch as the spawn would leave one.
    The template points at code-review-loop, dev and ui-verify for every step, so the filled brief adds only what its PR needs beyond them.
    The reviewer template's `__SPEC__` slot, under its This PR heading, holds the PR's scope as the lead ruled it, the bar the review scores against and any harness the reviewer re-runs, so the reviewer scores the ruled scope rather than the issue's first Done when.
    Fill it from the lead's ruling and the PR body's scope, and where the lead ruled nothing beyond the ticket, say so.
    Unlike the other slots, the `__SPEC__` fill replaces the backticked token together with its backticks, since the spec runs to paragraphs that inline code would break; the template keeps the backticks only so the slots test, which wants every slot backticked, stays green.
    Done when the filled brief's This PR section names the scope, the bar and the harness, or that there is none, and spawn.sh starts the reviewer, since it refuses a brief still holding the `__SPEC__` token, naming it.
-   The tester template carries no such slot, since a tester drives the diff's surfaces for CI and posts PASS or FAIL, not a score against the scope.
+   The tester template carries no such slot, since a tester drives the diff's surfaces and posts PASS or FAIL, the `tester` gate on a `web/next/` diff, not a score against the scope.
    A probe's brief adds that it ends by telling its spawner it is done, so the spawner closes its pane (End).
    A brief that has a script written for `/bin/bash` keeps it to macOS's bash 3.2.57, which stops on a fractional `read -t 0.5` (`invalid timeout specification`): wait in whole seconds (`read -t 1`), or run the script under zsh or bun.
    A rule that changes while a checker is live goes to it at once from its worker's lead by `SendMessage`, as an addition to its brief, since a checker that never heard of the change scores it as a finding (12 Oct).
@@ -85,6 +104,7 @@ Sessions run in bypass-permissions mode, yet some commands still prompt (`rm`, a
    A worker that spawned a checker or a probe sends the Builder its name, and adds `pr=<its PR's URL>` to a checker's entry beside the `worker=` spawn.sh wrote, which the Dashboard nests it under its worker by.
    A checker's next PR goes on its row with `roster.ts assign <checker> <title> <task> worker=<live worker> pr=<n>` whenever its row's `worker` is unset or ended, since the checker reaper ends a checker whose worker has gone (`checker-worker-gone`).
    roster.ts refuses `prs+=`, `prs=` or a new `pr` on such a row, spawn.sh's restart of an ended checker included, naming that assign.
+   A checker whose worker has ended reports to that worker's lead by its kind, as playbook's Chain says ([SKILL.md](SKILL.md#chain)).
 
 Send the brief with `notify_when_idle: true`, so its next idle arrives as a notice.
 Done when `ListAgents` shows the session busy on the brief and the roster shows the task.
@@ -93,16 +113,36 @@ Done when `ListAgents` shows the session busy on the brief and the roster shows 
 
 A reviewer's round sorts its findings into blocking, should-fix and nits; the worker's answer follows these rules, so a PR's rounds stay short and its nits land where they cost nothing.
 
-- A fix push carries only blocking and should-fix items, plus the `canary` merge the reviewer asks for (code-review-loop's step 8), and a body-only fix is a `gh pr edit` with no push, so a push always moves the head for a reason the reviewer named.
+- A fix push carries only blocking and should-fix items, plus a merge of `canary` (below), and a body-only fix is a `gh pr edit` with no push, so a push always moves the head for a reason the reviewer named.
+  Tell your reviewer by `SendMessage` once a body-only fix lands, since its head waiter sees no body edit and it holds the verdict until you do (code-review-loop's last 5/5).
+- A fix push merges `canary` into the branch, and the touched tests (code-review-loop's **The touched tests**) run green on that merge before you ask for the next round, since every round opens with code-review-loop's merge check (its step 2), and a conflict or a test red only on the merge ends that round as one blocking finding with no full read.
+  A test red beside the others and green alone gets one issue in place of a second rerun, as code-review-loop's step 2 gives a `BATCH-RED`, opened by you when you see it first, else linked to your reviewer's; on a work-org PR, you send it to your lead, who sends it up the chain (**tickets**), and the lone run's output is that run's own console output.
+  On a branch whose diff touches a hook bundle's input, make that merge from a clean tree with `bun run hooks:merge-canary` (`packages/scripts/src/hooks-merge-canary.ts`), then check `git status` is clean before you ask for the round, since a plain merge can join a bundle by text into a broken build.
+  The script takes canary's side of each conflicted bundle in `scripts/hooks/bundled/` and rebuilds the bundles in a commit of their own (`scripts/hooks/README.md` holds it whole).
+- Before each push, run the whole list `extensions/core/skills/code-review-loop/scripts/state.ts touched-tests <worktree> origin/canary HEAD` prints, through run-slot, as the reviewer does, since it holds the tests that scan the repo, which code-review-loop's **The touched tests** names in its fourth rule, beside the PR's own test files.
+  A scanner red first seen in review cost one PR its round 4.
+- A fix push that changes a figure, row count or table the body's Evidence measured refreshes the body in the same update, its Evidence naming the new head, so every round opens on a body that describes the head it scores.
+- When a scope ruling drops or changes an item, change the PR's title in the same update as its body (`gh pr edit <n> --title <title> --body-file <file>`), since the merge commit and the Changelog take the title: one PR merged under a title naming an item its ruling had dropped.
 - Keep a nit only if it fixes a wrong statement, a misleading name or comment, or a real readability problem; drop a style-only nit with a one-line note.
-- A head at 5/5 with green checks merges as it stands; fold each kept nit into the next PR that touches the same file, never a nits-only PR.
-- Post one sort comment per PR, naming each nit kept, with the PR it waits for, or dropped, with why.
-  Done when every finding of the round is fixed in the push, kept in the sort comment with its PR, or dropped there with its reason.
+- A head at 5/5 with green checks, and each PASS its diff calls for (the tester's, the new-user gate's), merges as it stands; fold each kept nit into the next PR that touches the same file, never a nits-only PR.
+- Post one sort comment per PR, naming each nit kept, with the PR it waits for, or dropped, with why; it posts once, before or after the merge, since pr:merge marks a green 5/5 draft ready itself and merge-on-ready can take it within a minute of its label (`packages/scripts/src/pr-merge/README.md`'s Gates).
+- Apply a patch copied from a GitHub comment with `git apply --recount <file>`, since a comment's patch often carries stale hunk counts.
+- A lead hands a reviewer's patch on by the reviewer's own path, its verdict comment or the file it saved, never as a copy the lead writes out again, since a rewritten copy lost the leading space of its blank context lines and failed `git apply --check`.
+- A lead that holds a PR (its own line in the held list, `packages/scripts/src/pr-merge/README.md`'s Holds and rulings) sends its reviewer the hold, then the resume, by `SendMessage`, as playbook's Chain sends a lead's word to a checker.
+  The reviewer stops its push waiter with `TaskStop` until the resume (code-review-loop's step 8), so a push the hold did not expect opens no round; a ship's freeze is no such hold.
+
+Done when every finding of the round is fixed in the push, kept in the sort comment with its PR, or dropped there with its reason.
+
+An extension repository's PR merges through `bun run ext:merge <owner>/<repo> <n>`, its worker committing on a branch other than `main` in its clone, as a `git commit` call of its own, then pushing that branch by remote and refspec (`git push origin HEAD:<branch>`) and its reviewer spawned for the PR's URL; done when the PR reads merged.
+
+An extension item's revision goes up with `playground ext put`, and its reviewer scores it with `playground ext score`.
+A put on an item whose earlier revision is still proposed moves the proposal's head, so a score on the earlier one is refused (`the proposal is at <sha>, not <rev>; read it again`): put a stacked revision once the one under it is judged.
 
 ## Write a handoff
 
 A handoff, for a respawn, a parked chore or a priority close, counts as written only once `TZ=UTC ls -l <path>` prints its file, and the report that names it quotes that line.
 A handoff names the session's open items, each PR with its head, its next step and its own transcript path, which `ls ~/.claude/projects/*/<id>.jsonl` prints, `<id>` the session id in `~/.playground/resume/<name>.sh`, so whoever picks the work up can read there a detail the handoff dropped.
+A frozen copy of a transcript, taken so a reader sees it as it stood, goes under the data folder's `scratch/<worker>/`, the folder of the session that takes it, and that same session removes it with `playground rm <path>`.
 A hook can refuse the write and leave nothing on disk, so a session whose write a hook refused answers the hook and retries the same write before it reports.
 Done when `TZ=UTC ls -l <path>` prints the file, `ls` prints the transcript path it names, and the report quotes the `ls -l` line.
 
@@ -122,9 +162,14 @@ A sweep reads each agent's state from four places:
 - `ListAgents`: its row says whether the session is busy, idle or waiting, and its absence means the session is down.
 - `herdr pane list`, run in a pane on the session's server: the pane whose `label` is the session's name has `agent_status`, which reads `blocked` while the session waits on a person, `working` while it runs, and `idle` or `done` while it waits.
 - `herdr pane read <pane id> --source visible --lines 40` (raise `--lines` for more): what it waits on, a picker or a permission prompt; `visible` reads the screen as it shows now, where `recent` would scroll the session.
+  A session on another server, such as a probe on `playground-probes`, reads through `spawn.sh read <name> [session-id]`, since `no-raw-spawn` refuses a herdr call carrying `HERDR_SOCKET_PATH`: it prints the last 200 lines of the pane spawn.sh opened under that name, found as `spawn.sh close` finds it, and writes nothing.
 - the session-state record at `session-state/<session id>.json` in the data folder: its `state` reads `working`, `idle`, `stuck`, `failed` or `usage-limit`.
   The way from a session's name to its id: the `~/.claude/sessions/<pid>.json` file that names the session holds its `sessionId`.
   A `stuck` or `usage-limit` record goes stale once the transcript holds a newer turn (`stateNow()` in `packages/config/src/session-state.ts` reads it as over), so the positive check is the record reading `working` with `at` after the send.
+
+Before you call a local session stuck, read its model's /metrics, where running and waiting requests are above 0 and generation tokens per second are rising, not the pane's idle counter.
+ops-session-resume's quiet line skips a working session the model serves for its first 45 minutes of quiet, counted from the moment it went quiet, and a session hung on a tool call is still flagged after that.
+A 15-minute compaction on a local session runs with no tool call and is not stuck, and 6 requests at once is the model's compute limit, which is normal.
 
 ## Message a session
 
@@ -134,6 +179,12 @@ When the failed send went by name to a session `ListAgents` lists, that one re-s
 The after-resume re-send ([SPAWN.md](SPAWN.md#resume)) takes the same `re-send` marker.
 Before you report that a session is acting on your message, read its session-state record as Check a session reads it: a record still holding `stuck` or `usage-limit` holds the message unread.
 Done when the send, or its one re-send, returns success.
+
+`SendMessage` reaches the sessions of its own machine alone.
+A session on the other machine, a probe started over `spawn.sh --ssh`, takes `playground send <name> <text>` both ways: it queues `{at, from, id, text, to}` in the outbox's `ops-peer.jsonl`, which Ops' ops-peer-relay job copies to the other machine ([LIFECYCLE.md](LIFECYCLE.md#starts-and-ends)).
+The session it names reads it through its own `playground alerts-wait <its name>` ([Keep the sweep running](#keep-the-sweep-running)) as `[ops-peer] <at> <from>: <text>`, so each side keeps its waiter running while the other lives.
+On the machine the job runs on, Ops' drain also sends an `ops-peer` line to a session in that machine's registry, the backstop for one with no waiter, and leaves every other one in its file.
+Done when the send prints `queued <id> for <name>`.
 
 ## A headless run
 
@@ -158,10 +209,14 @@ A manager answers the permission prompt its session's stuck alert names, by the 
 ```bash
 playground picker <session> allow <key>
 playground picker <session> deny <key> "<why, and the simpler shape to run instead>"
+playground picker <session> allow <key> --rule <name>
 ```
 
+When a standing rule settles the answer, add `--rule <name>`, the name `playground rules` lists it under with a hyphen for each space (`--rule local-page`), to either form; picker refuses a name no rules file holds and presses nothing.
+
 Allow presses Yes once in the session's herdr pane while its prompt shows that call, a subagent's command included; deny presses No (Escape), and the relay sends the session the reason.
-Each answer is a line in `ops/picker.log`: the time, the manager, the answer, the session and the command's first 120 characters.
+A hook's confirmation prompt is a permission prompt too, and so is one whose long command Claude Code clips at the pane's top: picker then matches the rows still showing to the end of the call's command.
+Each answer is a line in `ops/picker.log`: the time, the manager, the answer, the session, the command's first 120 characters and, with `--rule`, `under **<name>**`, which a deny's message to the session names too.
 Done when it prints that line; it refuses any caller but the session's manager or the primary dispatcher, a deny with no reason, a dispatcher's session, a session in no herdr pane, and a key no waiting call or shown prompt matches, which means the prompt changed: wait for its next alert.
 An ops-unstick alert that says picker cannot answer the prompt found no waiting call surely its own, and names the close and resume below.
 Picker also refuses a prompt that may be another waiting call's, as a subagent's file or URL prompt always is while its parent waits.
@@ -187,17 +242,21 @@ Done when `CronList` shows both.
 A lead's new session creates both again.
 Ops, when it slows or pauses its own sweep on purpose, a usage squeeze or maintenance, writes `~/.playground/ops/sweep-hold-until` one future ISO 8601 time with its zone, so ops-tick's relay watch stays quiet until it passes (it lapses on its own, and a missing, empty, past or unreadable time leaves the watch on; [LIFECYCLE.md](LIFECYCLE.md#starts-and-ends), the relay watch).
 
-Every manager (the dispatcher, the Planner and each lead) also keeps one background task waiting on its queue of alerts (ops-stuck-alert.jsonl, where a session's own hook queues its stuck alerts and ops-tick's relay watch queues its late-stop line), so a stuck session reaches it in seconds rather than after the relay's turn (**unstick**), and a late sweep reaches Ops, then the dispatcher,
-the same way:
+Every manager (the dispatcher, the Planner, each lead and the Optimizer) also keeps one background task waiting on the outbox for lines addressed to it, so a stuck session reaches it in seconds rather than after the relay's turn (**unstick**), and a late sweep reaches Ops, then the dispatcher, the same way.
+It reads its stuck alerts first (ops-stuck-alert.jsonl, where a session's own hook queues them and ops-tick's relay watch its late-stop line), then every other job's line, such as a firefighting heads-up to the Builder:
 
 ```bash
 playground alerts-wait <your name>
 ```
 
-Run it with Bash `run_in_background`; when it exits it has printed one alert: start it again at once, then act on the alert, a stuck session's or a late sweep's, whose line Ops answers by running its sweep or resuming the relay, and the dispatcher by resolving the stop, posting to the owner's Inbox only if it cannot.
-A waiter started after time down skips the alerts queued over 5 minutes before it began and names how many, since the relay sent each; while none runs, each alert also goes to Ops to send on, which is fast only while Ops' own waiter runs, so each line to Ops names Ops' restart while it does not.
-A worker a probe reports to keeps no waiter, and its probe's alert comes by the relay alone.
-Done when the task is running; the relay sends the same alert later, so drop that copy.
+Its line leads with its queue's `[ops-<job>]` tag, as the relay's copy does.
+Run it with Bash `run_in_background`; when it exits it has printed one line: start it again at once, then act on the line, a stuck session's alert, a job's line such as a heads-up, or a late sweep's, whose line Ops answers by running its sweep or resuming the relay, and the dispatcher by resolving the stop, posting to the owner's Inbox only if it cannot.
+A waiter started after time down skips the alerts queued over 5 minutes before it began and names how many, since the relay sent each, a line copied from the other machine counted from its `relayedAt`, its arrival, so one sent while the link was down still prints;
+while none runs, each alert also goes to Ops to send on, which is fast only while Ops' own waiter runs, so each line to Ops names Ops' restart while it does not.
+A worker a probe on its own machine reports to keeps no waiter, and its probe's alert comes by the relay alone; a probe on the other machine reports by `playground send`, so its spawner keeps a waiter while it lives ([Message a session](#message-a-session)).
+Each waiter keeps its own cursor (`alerts-wait/<name>` in the outbox), so a printed line is not printed again and a line addressed to another session waits for that session's waiter; Ops' `cursor.json` stays the drain's.
+A manager's stop with no live waiter is refused once, naming its restart ([no-chat-question](../../../../scripts/hooks/README.md#no-chat-question)), and an owner WhatsApp line the dispatcher has not answered in a minute goes to Ops to send on when its waiter neither runs nor has handed it an alert since the line came.
+Done when the task is running; the relay sends the same line later, so drop that copy.
 
 ## Wait on a signal
 
@@ -207,7 +266,8 @@ A Monitor or watch script runs under zsh, which does not word-split `$list`: loo
 Run each measurement as its own background task, since a chained task signals only when the whole chain ends, and a stall in its first stage once stayed hidden for 41 minutes.
 A wait on an owner step starts with two checks: the step's card is open in the Inbox as an ask the owner can answer, and its precondition can come true (whatever writes the file or state it waits on is running).
 When either check fails, report it to your lead at once, since a dead waiter, one whose condition can never come true, waits for good: one sat about 3 hours on a file only a job that was off could write.
-Wait on CI with `gh run watch <run id> --interval 300`; `gh pr checks --watch --required` exits 1 here, since the repo reports no required checks.
+Wait on CI with `playground ci-wait <pr>` as a background task, which polls the PR's head over REST every 5 minutes (the **github** rule's cap) until each check pr:merge needs exists there and has concluded, then exits 0 when all passed and 1 when any failed, waiting afresh on a head that moves, since a hand-written loop once read a check GitHub had not yet created as done.
+It exits 1 at once on a PR that conflicts with its base, naming the merge it needs, since GitHub starts no CI run on one and a reopen starts none either; merge the base into the branch and push.
 Before you report CI green, read the check-runs at the head sha once in the foreground (`gh api repos/<repo>/commits/<head sha>/check-runs`).
 A background or Monitor event alone is not a green.
 Done when every wait ends on a signal, each background task holds one measurement, every wait on an owner step has its open card and a precondition that can come true, every CI green you report was read in the foreground at the head, and every gap you name is checked against the sleep log.
@@ -232,21 +292,39 @@ A finished worker, reviewer or tester ends automatically (`scripts/ops/optimizer
   a worker whose PRs are all merged or closed and whose PR that closed last merged, an issue's URL among them never counting, while one whose last closed unmerged is kept as `worker-pr-closed` and its lead asked to reassign or end it,
   and a reviewer idle 30+ minutes whose every head carries its verdict.
   A session's PRs are its roster `pr` and `prs` list, its open branch PRs, its worker's, and every PR its own or its worker's transcript links, so one still open keeps it.
-- Each end runs `spawn.sh close <name>`, then `roster.ts report <name> "ended automatically: <why>" status=ended`, the merged sha in the why, and sends its lead one line: its roster `lead`, else its worker's.
+- On both paths a worker whose status reads `shell` (a background task of its chore still running, such as a tidy after its merge) stays until that task ends, while a checker in `shell` ends by the rules above.
+- Each end runs `spawn.sh close <name>`, then `roster.ts report <name> "ended automatically: <why>" endReason=<the check that ended it> status=ended`, the merged sha in the why (`endReason=merged` at a merge), so `spawn.sh resume` brings the session back only with `--force`, and sends its lead one line: its roster `lead`, else its worker's.
 - Then it cleans each worktree the session used, one at a time (`cleanWorktree`), and the lead's line names what went and what stayed, with why; a reviewer ended idle keeps its worktrees for its resume.
-  A Playground worktree in `.claude/worktrees/` with uncommitted work, unpushed commits or work not on canary stays until `playground rm` confirms its PR has merged or closed (its own PR, by its branch or its exact head), then goes through `playground rm --worktree <path> --discard` whatever it holds, with no Inbox decision; another repo's such worktree stays.
+  The worktrees a session used are each linked worktree its transcript ran in, for a worker each worktree on its PRs' branches, and, for a checker whose roster `pr` is the main checkout's own PR n, each of its clones in `.claude/worktrees/` that exists: a reviewer's `review-<n>`, a tester's `test-<n>` and `test-<n>-before` (`worktreesOf` in `scripts/ops/optimizer/auto_end.ts`).
+  The managers' `.claude/worktrees/leads`, where spawn.sh starts every manager, is the managers' alone (`LEADS_WORKTREE`): a worker resumed from it ends on its PRs' state, its own PR worktrees are still cleaned, and the managers' files there stay.
+  A checker's end then takes the other kind's clones of its PR n too, the ones an earlier end kept while this checker held them, once no other reviewer or tester row naming that PR is live in the roster (a roster it cannot read keeps them), each through the same `cleanWorktree` checks (`cleanupLive`).
+  A clone is taken by its PR's number, since a checker that reads it from outside it, as code-review-loop has a reviewer do, leaves no transcript `cwd` naming it, and a transcript that cannot be read cleans nothing, the clones included.
+  A Playground worktree in `.claude/worktrees/` with uncommitted work, unpushed commits or work on neither canary nor a branch origin holds stays until `playground rm` confirms its PR has merged or closed (its own PR, by its branch or its exact head), then goes through `playground rm --worktree <path> --discard` whatever it holds, with no Inbox decision;
+  `--discard` first writes its commits no remote holds, read live by `git ls-remote`, to a git bundle beside it in the trash, and another repo's such worktree stays.
   The live dashboard's checkout stays, by its branch.
-  A Playground worktree in `.claude/worktrees/` that a live session or a clone holds stays, where a hold by the merged PR's number alone, from the worker still merging it, does not count, nor does a row naming it by its branch or its own PR's number once that PR has merged or closed and the worktree sits at that PR's head (`playground rm`'s `freed by` line;
-  commits past that head keep the hold, named with them).
+  A Playground worktree in `.claude/worktrees/` that a live session or a clone holds stays, where a hold by the merged PR's number alone, from the worker still merging it, does not count while the worktree sits at or behind that PR's head,
+  nor does a row naming it by its branch or its own PR's number once that PR has merged or closed and the worktree sits at that PR's head (`playground rm`'s `freed by` line;
+  commits past that head keep the hold, named with them), nor does any live row on a worktree sitting clean, detached, at a commit its base holds (`origin/canary`, or another repo's default branch).
+  A before-shot worktree's branch is named `before-PG-<n>-<slug>`, a tester's `test-<pr>-before` (`scripts/briefs/new-tester.md`), each with no worker id, since safe-delete's byId rule (`packages/safe-delete/src/index.ts`) keeps a worktree whose folder or branch holds a live session's id until that session's row ends.
   So does one a symlink outside it points into (another worktree's, a marked scratch folder's or a session scratchpad's, at its top level or one level into its `node_modules`), and its line names the first three links.
   Any other whose `.turbo/dev.pgid` records a stack has it stopped first (`bun run dev:stop` there, whose refusal keeps it), so a clone with no record, a reviewer's with no `node_modules` among them, goes on with nothing to stop.
-  Then it goes to the 7-day trash through `playground rm --worktree` (`--pr <url>` at a merge), which keeps one a process holds,
+  Then it goes to the 7-day trash through `playground rm --worktree`'s own move, made in auto-end's process (`--pr <url>` at a merge), which keeps one a process holds,
   its `node_modules` folders and `web/next/.next` removed from the trashed copy, which a `bun install` rebuilds, and then loses its `playground-<worktree>-db` and `-redis` containers (`docker rm -fv`, each name matched whole, never the live dashboard's database) and its local branch.
   Another repo's worktree goes through `git -C <repo> worktree remove <path>` with no force flag, then `git worktree prune` and `git branch -D`; the main checkout is never one.
-  A session clears its own scratch itself before it ends, with `playground rm <path>`: its `~/.playground/scratch/<name>/` and `scratchpad/<name>/`, each path resolved past symlinks, are the one place `playground rm` clears there, for that session alone, and every other path there, another session's scratch included, stays refused.
-  A `scratch/` folder left once its session is gone, with no live session and no roster row naming it that has not ended, the nightly clean moves to the trash ([LIFECYCLE.md](LIFECYCLE.md)).
+  Then it moves the session's leftovers to the trash, each whole: its `~/.playground/scratch/<name>/` and `scratchpad/<name>/`, its memory settings file `factory-settings-400k-memory-<name>.json`, and on Linux each temp folder spawn.sh made it (`/tmp/playground-<name>.*`), so a session spends no turn cleaning up after itself.
+  Every move of an end, its worktrees' included, is charged to the ended session, so an end never spends its worker's minute under safe-delete's cap of 3 moves a minute (`removePath` in `packages/scripts/src/playground/rm.ts`).
+  A move past the cap is carried to the next auto-end beat, which makes it before it ends anyone; a folder over the tripwire (5,000 files or 2 GB) stays whole, named in the lead's line, for the nightly clean (`scratch/<name>/`) or its lead's cleanup (`scratchpad/<name>/`, below).
+  A temp folder skips the file count, since hook test data fills one past 5,000 files, and moves whole up to 2 GB; one past 2 GB stays in place with a plain refusal and no alert.
+  A leftover that a live process still runs in, by its working folder or a file it holds open (an orphan that outlived the session), stays, and the lead's line names its pid.
+  Its `~/.playground/scratch/<name>/` and `scratchpad/<name>/`, each path resolved past symlinks, its own loose file in `scratch/` (below) and its own memory settings file `factory-settings-400k-memory-<name>.json` (a regular file) are the places `playground rm` clears there for that session alone, and every other path there stays refused,
+  another live session's scratch included,
+  but the ended session's `scratchpad/<folder>/` or `scratch/<folder>/` below.
+  A `scratchpad/<folder>/` or `scratch/<folder>/` whose session has ended, a real folder no live roster row names as itself or as `<folder>-<role>`, clears whole through `playground rm <path>`, so Ops clears it on its lead's word as it does a worktree.
+  A session saves every download inside one of its own folders, `~/.playground/scratch/<name>/` or `scratchpad/<name>/` beside it; a loose regular file directly in `scratch/` named `<name>-*` or `<name>.*` is also its own, which `playground rm` clears, and every other loose entry there it refuses.
+  A `scratch/` folder or loose `<id>-*` file left once its session is gone, with no live session and no roster row naming it that has not ended, the nightly clean moves to the trash whole, past the 5,000-file tripwire and under its 2 GB cap ([LIFECYCLE.md](LIFECYCLE.md)).
 - Guards: only a worker, reviewer or tester, not busy for 10+ minutes, with no uncommitted or unpushed work in a worktree it used (the main checkout, where every session starts, is not one, nor a Playground worktree whose PR `playground rm` confirms merged or closed, which the cleanup discards); otherwise its lead gets a `Not ended` line saying why, and the session waits.
-- A reviewer ended idle is resumed by its worker on the next push, under the same name (**rounds**): `"${PLAYGROUND_REPO:?}/scripts/spawn.sh" resume <name> <dir> --pr <its PR's URL>`, or its extension item as `<scope>/<kind>/<key>` (the `--pr` rule is [SPAWN.md](SPAWN.md#modes)'s); its `Ended` line goes to its worker too.
+- A reviewer ended idle is resumed by its worker on the next push, under the same name (**rounds**): `"${PLAYGROUND_REPO:?}/scripts/spawn.sh" resume <name> <dir> --force --pr <its PR's URL> --account <its account>`, or its extension item as `<scope>/<kind>/<key>` (the `--pr` rule is [SPAWN.md](SPAWN.md#modes)'s); its `Ended` line goes to its worker too.
+  That line gives the whole command: `--account` names the account its resume record (`~/.playground/resume/<name>.sh`) held before the close, its `# account:` line, else its exec line's `--account`, and the line leaves it out when the record names none, so the resume stays on the reviewer's own seat.
 
 A session ends by closing its pane, so the workspace's other sessions live on, by the one it reports to, through spawn.sh, since the `no-raw-spawn` hook refuses `herdr pane close` to every factory session (herdr's socket has no access control):
 
@@ -257,13 +335,15 @@ A session ends by closing its pane, so the workspace's other sessions live on, b
 A session does not close its own pane, since that kills its claude mid-call: it tells the one it reports to that it is done (a checker or a probe, its spawner), who closes it.
 Before you close a checker by hand, read its roster entry and ask it which rounds it still holds, since it may be serving another PR (on one PR a reviewer closed mid-round).
 It closes the one pane spawn.sh opened for that name, found by the label it set, on the server the session's resume record names (the factory's when the record has no `# server:` line), and prints `closed <name> (pane <id> on <server>)`.
-It refuses a session whose runtime pin does not read herdr or that has no resume record, a server that is down or a herdr that is not the pinned one, no pane or two panes carrying the label, and your own pane, quoting herdr's words when herdr refuses the close.
+A session whose start stopped before its runtime pin closes the same way while its resume record stands and one pane carries its label, its pin written as herdr first.
+It refuses a session whose runtime pin reads another word or that has no resume record, a server that is down or a herdr that is not the pinned one, no pane or two panes carrying the label, and your own pane, quoting herdr's words when herdr refuses the close.
+Of two panes carrying the label, `spawn.sh close <name> <session-id>` closes the one whose claude runs that session, and leaves the roster row and its close time to the other.
 It sets the session's roster row to `ended` itself just before the pane closes, so a restore that finds the session gone leaves it down, and puts the old status back when herdr refuses the close;
 it leaves the pins and the resume record in place, so `spawn.sh resume` can reopen the session, setting the row back to `starting`, as any new start of that name does;
 a reviewer or tester comes back with `--pr <the PR it serves now>`, which replaces the PRs its row lists ([SPAWN.md](SPAWN.md#modes), scripts/README.md's spawn.sh).
 
 Record why it ended with `report <name> "<why it ended>"` (ROSTER.md, It ends).
-`"${PLAYGROUND_REPO:?}/scripts/spawn.sh" resume <name> <dir>` reopens the session later if it is needed, in the folder it ran in, or anywhere with its session id after `<dir>`: a resume by name alone refuses a folder whose transcripts hold no session of that name.
+`"${PLAYGROUND_REPO:?}/scripts/spawn.sh" resume <name> <dir>` reopens the session later if it is needed, in the folder it ran in, or anywhere with its session id after `<dir>`: a resume by name alone refuses a folder whose transcripts hold no session of that name, and a row auto-end ended or one marked done comes back only with `--force` ([SPAWN.md](SPAWN.md#resume)).
 A herdr session's end is its roster `ended`: with any status but done, ended, parked or paused, `spawn.sh restore` brings it back after the server's next restart.
 Done for a herdr session when `bun run --cwd <dashboard checkout> verify ended <name>`, read-only against the live dashboard, which it finds through portless from that checkout (`.agents/dashboard/writes.md`), passes:
 it reads the session Ended as the Dashboard does, the roster showing `ended` and no live session holding its name, and fails while live sessions or a herdr server could not be read.

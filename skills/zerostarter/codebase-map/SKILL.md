@@ -20,12 +20,12 @@ packages/safe-delete/ # playground rm's trash: quarantine, restore, the trash pu
 packages/settings/    # Playground's typed settings, the factory's items store and its jobs, read by the hooks and ops scripts
 packages/env/         # type-safe env, one validated entry per consumer
 packages/config/      # TS base, tsdown factory, and site.ts (brand identity)
-packages/scripts/     # build-only bun tooling (auth-schema, data-table-metrics, generate-env, lock, pr-merge, verify); every new script lands here, never bundled
+packages/scripts/     # build-only bun tooling (auth-schema, data-table-metrics, generate-env, lock, pr-merge, verify); every new script lands here, never bundled but for `ops-machine/readings`, which the API's bundle inlines
 packages/cli/         # the zerostarter scaffolding CLI (canonical repo only; init strips it)
 tests/                # the whole suite, mirroring each subject's path; *.e2e.test.ts drive a running stack (canonical repo only; forks take no tests)
 ```
 
-Read `AGENTS.md` first for the rules (the dashboard app's are in `.agents/dashboard/<topic>.md`: AGENTS.md holds each ALWAYS rule in one line and a pointer naming when to read its file); `curl "$(bunx portless get playground)/llms-full.txt"` dumps the whole codebase as one context file.
+Read `AGENTS.md` first for the rules (the dashboard app's are in `.agents/dashboard/<topic>.md`: AGENTS.md holds each ALWAYS rule in one line and a pointer naming when to read its file); `curl --cacert <pdir>/ca.pem "$(PORTLESS_STATE_DIR=<pdir> bunx portless get playground)/llms-full.txt"`, with `<pdir>` the path the `dev` skill's Start prints, dumps the whole codebase as one context file.
 
 ## Trace a feature across the stack
 
@@ -36,6 +36,8 @@ packages/db/src/schema  →  api/hono/src/routers  →  api/hono/src/local.ts (A
 ```
 
 To add a field end to end: edit and migrate the schema, then select and return it in the router. Every `apiClient` call site is retyped automatically, and the compiler becomes your worklist of what still must change.
+
+A `packages/scripts` file that needs an api type spells the type out locally, and a test that imports the api file relatively pins that copy to the real schema, since a type-only import of an api file that imports `@packages/db` still pulls the file into `@packages/scripts`' tsc, which fails with TS2307.
 
 ## Entry points (read these first)
 

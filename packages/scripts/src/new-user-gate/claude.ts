@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 
 import { dataDirOf } from "@packages/env/data-dir"
+import { accountKey, accountSettings, accountsOf, readPolicyOrDefaults } from "@packages/settings"
 
 export type Launch = { model: string; name: string; prompt: string; sessionId: string }
 
@@ -58,13 +59,21 @@ export const typedOf = (held: string, keys: string): { held: string; sent: strin
 // The task the dispatcher hands on, a brief under the data folder (spawn.sh takes a brief's path from there).
 const TASK = "handoffs/gate-task.md"
 
+// The first Claude row of usage.accounts in the data folder, the account first run's Add wrote; none when the settings list none or do not read.
+const claudeAccountOf = (data: string): string | undefined => {
+  const read = readPolicyOrDefaults(data)
+  if (read.refusal !== undefined) return undefined
+  const row = accountsOf(accountSettings.get(read.settings, "usage.accounts"), "claude")[0]
+  return row ? accountKey(row) : undefined
+}
+
 // The worker the builder starts, an `<id>-worker` name spawn.sh reads the kind from; one fixed id serves, since every box is a fresh HOME no session has used.
 const WORKER = "g8tw7k-worker"
 
-// Pure: the one step a session takes in the routed task, by the role spawn.sh started it as (lead for every manager but the dispatcher, and the builder is the one lead the gate starts), or null when that role waits; a dispatcher acts on a typed message alone, the rest on their start.
+// Pure: the one step a session takes in the routed task, by the role spawn.sh started it as (lead for every manager but the dispatcher, and the builder is the one lead the gate starts), or null when that role waits; a dispatcher acts on a typed message alone, the rest on their start. The builder names `account`, the Claude row first run added, since spawn.sh refuses a worker with none while usage.accounts lists one.
 export const stepOf = (
   role: string,
-  { data, repo, typed }: { data: string; repo: string; typed: boolean },
+  { account, data, repo, typed }: { account?: string; data: string; repo: string; typed: boolean },
 ): string[] | null => {
   if (role === "dispatcher" && typed)
     return ["bun", join(repo, "packages", "scripts", "src", "playground", "cli.ts"), "builder"]
@@ -77,6 +86,7 @@ export const stepOf = (
       TASK,
       "--title",
       "the routed task",
+      ...(account ? ["--account", account] : []),
     ]
   if (role === "worker" && !typed)
     return ["gh", "pr", "create", "--title", "the routed task", "--body-file", join(data, TASK)]
@@ -135,7 +145,7 @@ const main = async () => {
     }).unref()
   }
   const act = async (typed: boolean) => {
-    const argv = stepOf(role, { data, repo, typed })
+    const argv = stepOf(role, { account: claudeAccountOf(data), data, repo, typed })
     if (!argv) return
     report("working")
     const child = Bun.spawn(argv, {

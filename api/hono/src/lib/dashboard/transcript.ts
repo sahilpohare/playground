@@ -299,6 +299,8 @@ export const taskOf = (entries: Entry[]): string | null => {
 }
 
 export const TAIL_BYTES = 512 * 1024
+// How far back readTail reaches for a step when its first window holds none.
+export const TAIL_CEILING = 8 * 1024 * 1024
 export const HEAD_BYTES = 256 * 1024
 export const NEWLINE = 0x0a
 
@@ -308,7 +310,7 @@ export const completeLines = (bytes: Uint8Array): { consumed: number; text: stri
   return { consumed, text: new TextDecoder().decode(bytes.subarray(0, consumed)) }
 }
 
-// The last `limit` entries, read from the file's end so a long session costs one bounded read.
+// The last `limit` entries, read from the file's end so a long session costs a bounded read: its last TAIL_BYTES, and when they hold no whole step (a last line longer than that, such as a screenshot's result, or bookkeeping lines alone) twice as far back each time, reading only the new bytes, until a step shows, the file starts or TAIL_CEILING is reached.
 export async function readTail(
   path: string,
   limit: number,
@@ -317,10 +319,17 @@ export async function readTail(
   const file = Bun.file(path)
   if (!(await file.exists())) return []
   const size = file.size
-  const start = Math.max(0, size - TAIL_BYTES)
-  let text = await file.slice(start, size).text()
-  if (start > 0) text = text.slice(text.indexOf("\n") + 1)
-  return parseLines(text, options).slice(-limit)
+  let start = size
+  let bytes = new Uint8Array(0)
+  for (let window = TAIL_BYTES; ; window *= 2) {
+    const from = Math.max(0, size - Math.min(window, TAIL_CEILING))
+    bytes = Buffer.concat([new Uint8Array(await file.slice(from, start).arrayBuffer()), bytes])
+    start = from
+    let text = new TextDecoder().decode(bytes)
+    if (start > 0) text = text.slice(text.indexOf("\n") + 1)
+    const entries = parseLines(text, options)
+    if (entries.length > 0 || start === 0 || window >= TAIL_CEILING) return entries.slice(-limit)
+  }
 }
 
 // A subagent's id as Claude Code writes it, which names its transcript file; anything else could walk out of the folder.

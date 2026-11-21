@@ -1,10 +1,13 @@
-import { realpathSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 import { appendFile, mkdir } from "node:fs/promises"
 import { constants } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, relative, resolve, sep } from "node:path"
 
 import { dataDirOf } from "@packages/env/data-dir"
+import { extensionsDir, extGit, scopeDir } from "@packages/settings"
 
+import { sysctlOf } from "../ops-machine/readings"
+import { sourceOf } from "../ops-restart/restart"
 import {
   beat,
   type Beat,
@@ -13,6 +16,7 @@ import {
   CYCLE_SECONDS,
   resultOf,
   runner,
+  type Runner,
 } from "../ops-tick/tick"
 import { dashboardCheckout } from "../playground/probe"
 
@@ -121,28 +125,100 @@ export async function hold(
   return signal ? 128 + constants.signals[signal] : code
 }
 
-// Runs the beats at their crons, as ops-tick runs its own, under the job's own heartbeat.
-export function scheduled(job: string, beats: Beat[], ops = opsDir()) {
+// The file in an org's script folder under ops naming the accepted revision the render last wrote there (installScripts in playground/jobs.ts).
+export const REVISION = ".revision"
+
+// A scope's last commit on any of the paths in its clone, as a short sha, else "".
+export const lastRevision = (data: string, scope: string, ...paths: string[]): string =>
+  extGit(scopeDir(data, scope), ["log", "-1", "--format=%h", "--", ...paths]).out.trim()
+
+// The accepted revision of the code a job's entry file runs, else null: an extension item's run in place (<data>/extensions/<scope>/<kinds>/<key>/), its clone's last commit on that item or any other item of the scope its imports reach (sourceOf), which no proposal makes since one sits under proposed/; an org's script folder's under ops, from its REVISION file; none for a job of the checkout's own, or for an entry or file it can no longer read.
+export const revisionOf = (main: string, data: string): string | null => {
+  const [scope, kinds, key, ...file] = relative(extensionsDir(data), main).split(sep)
+  if (scope && kinds && key && file.length && scope !== ".." && kinds !== "proposed") {
+    try {
+      const items = sourceOf(scopeDir(data, scope), main)
+        .map((path) => path.split("/").slice(0, 2))
+        .filter(([folder, name]) => name && folder !== "packages" && folder !== "proposed")
+        .map((parts) => parts.join("/"))
+      return lastRevision(data, scope, ...new Set(items)) || null
+    } catch {
+      return null
+    }
+  }
+  const [folder, ...rest] = relative(join(data, "ops"), main).split(sep)
+  if (!folder || folder === ".." || !rest.length) return null
+  try {
+    return readFileSync(join(data, "ops", folder, REVISION), "utf8").trim() || null
+  } catch {
+    return null
+  }
+}
+
+// Pure: the revision a job stops for, a new one once no beat runs, so a pass is never cut; null while it carries on.
+const restartFor = (started: string | null, now: string | null, state: Runner) =>
+  now !== null && now !== started && state.running.size === 0 ? now : null
+
+// up.py's pass for one job, which drops its start's grace and starts it again in its pane at once, in a process group of its own so the old pane's close leaves it running.
+const upPass = (job: string) =>
+  Bun.spawn(["python3", "-I", join(REPO, "scripts", "ops", "up.py"), "--restarted", job], {
+    detached: true,
+    stderr: "ignore",
+    stdin: "ignore",
+    stdout: "ignore",
+  }).unref()
+
+// What a scheduled job runs from, who starts it again, and how often it looks; a test sets each.
+export type Watch = { main?: string; restart?: (job: string) => void; tickMs?: number }
+
+// Runs the beats at their crons, as ops-tick runs its own, under the job's own heartbeat; on an accepted revision of the code it runs (revisionOf), it stops at its next tick with no beat running, its heartbeat saying so, and has up.py start it again.
+export function scheduled(
+  job: string,
+  beats: Beat[],
+  ops = opsDir(),
+  { main = Bun.main, restart = upPass, tickMs = 20_000 }: Watch = {},
+) {
   const path = join(ops, `${job}.json`)
   const startedAt = new Date()
   const state = runner()
   const send = sendAs(job)
+  const data = dirname(ops)
+  const revision = revisionOf(main, data)
+  if (revision) console.log(`${job} runs revision ${revision}`)
   const pulse = () =>
     beat(path, startedAt, new Date(), resultOf(state), job).catch((err) => console.error(err))
   void pulse()
-  setInterval(
-    () => void cycle({ now: new Date(), ops, repo: REPO, run, send }, state, beats),
-    20_000,
-  )
-  setInterval(() => void pulse(), CYCLE_SECONDS * 1000)
+  const pulses = setInterval(() => void pulse(), CYCLE_SECONDS * 1000)
+  const ticks = setInterval(() => {
+    // the beats due start first, so a restart waits for a tick with none running and none due
+    void cycle({ now: new Date(), ops, repo: REPO, run, send }, state, beats)
+    const next = restartFor(revision, revisionOf(main, data), state)
+    if (!next) return
+    clearInterval(ticks)
+    clearInterval(pulses)
+    void beat(
+      path,
+      startedAt,
+      new Date(),
+      `loop exited: revision ${next} accepted, restarting`,
+      job,
+    )
+      .catch((err) => console.error(err))
+      .finally(() => {
+        restart(job)
+        process.exit(0)
+      })
+  }, tickMs)
 }
 
-// sysctl's `{ 1m 5m 15m }` load line, then the memory pressure level (4 is critical).
-export const gateOf = (out: string) => {
+// sysctl's `{ 1m 5m 15m }` load line, then the memory pressure level (4 is critical), each line that does not read taken from Linux's /proc text (sysctlOf), and null when neither gives it.
+export const gateOf = (out: string, code = 0) => {
   const [loads = "", pressure = ""] = out.split("\n")
+  const load = sysctlOf("vm.loadavg", { code, out: loads })
+  const level = sysctlOf("kern.memorystatus_vm_pressure_level", { code, out: pressure })
   return {
-    load5: Number(loads.replace(/[{}]/g, "").trim().split(/\s+/)[1]),
-    pressure: Number(pressure.trim()),
+    load5: load === null ? null : Number(load.replace(/[{}]/g, "").trim().split(/\s+/)[1]),
+    pressure: level === null ? null : Number(level),
   }
 }
 
@@ -158,14 +234,21 @@ export const failureOf = (out: string, log: string) => {
   return `${error} | ${tail.slice(-(337 - error.length))}`
 }
 
-// A dashboard script run as the old cron ran it: skipped with a line to ops under load, skipped quietly while busy matches a running command, its output appended to the log, and a failure sent to ops with its first error line and the log's last 5 lines.
+// A dashboard script run as the old cron ran it: skipped with a line to ops under load or while a reading does not read, skipped quietly while busy matches a running command, its output appended to the log, and a failure sent to ops with its first error line and the log's last 5 lines.
 export const dashboardRun =
   (label: string, args: string[], log: string, busy?: RegExp) => async (ctx: Context) => {
-    const { load5, pressure } = gateOf(
-      (await ctx.run(["sysctl", "-n", "vm.loadavg", "kern.memorystatus_vm_pressure_level"])).out,
-    )
-    if (load5 > 12 || pressure === 4) {
-      await ctx.send("ops", `${label} skipped: load5 ${load5}, pressure ${pressure}`)
+    const gate = await ctx.run([
+      "sysctl",
+      "-n",
+      "vm.loadavg",
+      "kern.memorystatus_vm_pressure_level",
+    ])
+    const { load5, pressure } = gateOf(gate.out, gate.code)
+    if (load5 === null || pressure === null || load5 > 12 || pressure === 4) {
+      await ctx.send(
+        "ops",
+        `${label} skipped: load5 ${load5 ?? "unread"}, pressure ${pressure ?? "unread"}`,
+      )
       return
     }
     if (busy?.test((await ctx.run(["ps", "-xo", "command"])).out)) return

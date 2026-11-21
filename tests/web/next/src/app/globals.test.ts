@@ -52,3 +52,17 @@ describe("status colours", () => {
     expect(hits).toEqual([])
   })
 })
+
+describe("code text", () => {
+  test("code turns the mono font's ligatures off, so `-<` shows as typed (#2337)", async () => {
+    const css = await Bun.file(CSS).text()
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selector, body]) => ({
+      body: body ?? "",
+      selectors: (selector ?? "").split(",").map((part) => part.trim()),
+    }))
+    const off = rules
+      .filter(({ body }) => /font-variant-ligatures:\s*none/.test(body))
+      .flatMap(({ selectors }) => selectors)
+    expect(["code", "kbd", "pre", "samp"].filter((tag) => !off.includes(tag))).toEqual([])
+  })
+})

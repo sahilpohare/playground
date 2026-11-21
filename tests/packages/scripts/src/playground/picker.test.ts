@@ -71,12 +71,75 @@ const fake = (
     now: () => new Date("2026-10-26T05:00:00Z"),
     queue: async (to, text) => void queued.push([to, text]),
     reportsTo: async () => undefined,
+    rule: async (name) =>
+      name === "no raw delete"
+        ? "**no raw delete**\n\nA delete runs through playground rm."
+        : undefined,
     servers: ["factory"],
     transcript: async () => transcript,
   }
   const presses = () => calls.filter((call) => call.includes("send-keys"))
   return { calls, deps, logged, presses, queued }
 }
+
+describe("a standing rule cited with --rule", () => {
+  test("an allow under a rule logs the rule beside the answer", async () => {
+    const { deps, logged, presses } = fake("herdr")
+    const line =
+      "2026-10-26T05:00:00Z m4n7pq-builder allow k3m9px-worker via herdr: rm -rf build, under **no raw delete**"
+    expect(
+      await runPicker(["k3m9px-worker", "allow", KEY, "--rule", "no-raw-delete"], deps),
+    ).toEqual({
+      code: 0,
+      out: line,
+    })
+    expect(presses()).toEqual([["herdr", "factory", "pane", "send-keys", "w1:p2", "1"]])
+    expect(logged).toEqual([line])
+  })
+
+  test("a deny under a rule names the rule in the log and in the session's message", async () => {
+    const { deps, logged, queued } = fake("herdr")
+    const result = await runPicker(
+      ["k3m9px-worker", "deny", KEY, "--rule", "no-raw-delete", "use", "playground", "rm"],
+      deps,
+    )
+    expect(result.code).toBe(0)
+    expect(logged).toEqual([
+      "2026-10-26T05:00:00Z m4n7pq-builder deny k3m9px-worker via herdr: rm -rf build, under **no raw delete** (use playground rm)",
+    ])
+    expect(queued).toEqual([
+      [
+        "k3m9px-worker",
+        "m4n7pq-builder denied your permission prompt (rm -rf build) under **no raw delete**: use playground rm",
+      ],
+    ])
+  })
+
+  test("a rule no rules file holds is refused, with no send-keys call to the pane", async () => {
+    const { calls, deps, logged, queued } = fake("herdr")
+    const result = await runPicker(["k3m9px-worker", "allow", KEY, "--rule", "no-such-rule"], deps)
+    expect(result.code).toBe(1)
+    expect(result.out).toContain("no rule named no such rule")
+    expect(calls.filter((call) => call.includes("send-keys")).length).toBe(0)
+    expect(logged).toEqual([])
+    expect(queued).toEqual([])
+  })
+
+  test("--rule with no name is refused, with no send-keys call to the pane", async () => {
+    const { calls, deps } = fake("herdr")
+    const result = await runPicker(["k3m9px-worker", "allow", KEY, "--rule"], deps)
+    expect(result.code).toBe(1)
+    expect(calls.filter((call) => call.includes("send-keys")).length).toBe(0)
+  })
+
+  test("an answer with no --rule logs as before, naming no rule", async () => {
+    const { deps, logged } = fake("herdr")
+    expect((await runPicker(["k3m9px-worker", "allow", KEY], deps)).code).toBe(0)
+    expect(logged).toEqual([
+      "2026-10-26T05:00:00Z m4n7pq-builder allow k3m9px-worker via herdr: rm -rf build",
+    ])
+  })
+})
 
 describe("playground picker (PG-2184)", () => {
   test("allow on herdr presses 1 in the session's own pane once its prompt shows the keyed call, and logs it", async () => {

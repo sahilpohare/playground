@@ -16,18 +16,20 @@ Tick **Auto-hide tab bar** at the top of the user menu to hide it on a wide scre
 
 Each item is a card of one of three kinds:
 
-- **Decision**: something a session will do only with your yes, such as a question only you can answer, a Slack message, a ship to main, a new Linear ticket, a delete, a database change, a spend, accepting an extension proposal, adding an app to your apps or taking one off, opening System Settings for a permission agent-desktop needs, setting a guard setting, a value a guard reads to allow or deny a session's call, or whether an ops job runs, or marking one of your Claude accounts as your own, or unmarking it.
+- **Decision**: something a session will do only with your yes, such as a question only you can answer, a Slack message, a ship to main, a new Linear ticket, a delete, a database change, a spend, accepting an extension proposal, cloning your extensions onto a new machine, adding an app to your apps or taking one off, opening System Settings for a permission agent-desktop needs, setting a guard setting, a value a guard reads to allow or deny a session's call, or whether an ops job runs, or marking one of your Claude accounts as your own, or unmarking it, or a step on this Linux machine that needs root, which runs only after you enter your password in your computer's own window.
   The card shows exactly what happens when you approve it, except a secret ask, which takes a value instead, and a card that shows you one (see Give a secret).
   Each pull request, ticket or page a card names is a link, so you can open it and check for yourself: a ship's pull requests and a delete's worktrees and branches included.
   On an accept, your **Approve** has the dashboard accept the proposal itself, or each of a set in the order the card lists them, and the card then shows what that gave ([Extensions](/docs/extensions#review)).
+  On a clone, your **Approve** has the dashboard clone each repo the card lists into the folder it names in this machine's extensions, in order, making no repo, then seed the guards' lists from your checkout, and the card then shows what it cloned and seeded; a card naming a folder already there is refused ([A new machine](/docs/backup#a-new-machine)).
   On a guard setting, your **Approve** has the dashboard write the value the card shows, and a card its session changed after you read it asks you to read it again; a job's card turns the job on or off alone or gives it a new config alone, keeping the rest of its value, so a registry job keeps the command and schedule Playground ships, an org's own job's card can also place its whole row ([Ops jobs](/docs/jobs)), and a value already in place changes nothing.
   On an own account card, your **Approve** has the dashboard set or clear that one account's Own account switch in Settings > Accounts, every other account as it was, and the card then shows what it found.
 - **Draft**: a Slack message or a Linear comment, ready to send in your name.
   The card shows its words, and Open thread shows where it goes.
 - **Update**: an outcome you should know, such as a merge, a ship, an alert, a finding or a decision.
-  Yard posts two kinds of update once you set it up ([CLI](/docs/cli#yard-playground-yard)).
+  Yard posts three kinds of update once you set it up ([CLI](/docs/cli#yard-playground-yard)).
   One says someone mentioned you, with the sender and their words in a quoted block whose links do not open.
-  The other says Yard holds one of your posts for your approval, and its **Approve** opens Yard's approve page in a new tab, since only your signed-in browser can approve there.
+  One says a bot of yours wrote in its DM with you, in the same quoted block, and names the bot as a bot ([Connect a bot](/docs/yard-bot)).
+  The last says Yard holds one of your posts for your approval, and its **Approve** opens Yard's approve page in a new tab, since only your signed-in browser can approve there.
 
 The list shows what needs you first, then unread updates, then the rest: whatever still waits on you or on its session, however old, and anything else from the last week, each part newest first.
 The Inbox square counts what needs you and came since you last looked at the Inbox, so opening the Inbox clears it.
@@ -37,14 +39,15 @@ The Inbox is six rows, each opened or closed by a click:
 - **Inbox** holds the list and shows how many it holds, and reads gray when it is empty. It starts open.
 - **In progress** holds what you approved or sent, from the moment you answer it until the session that posted it says it is done.
 - **Later** holds what you put away until a time.
-- **Archive** holds what you archived: still unanswered, out of your list until you move it back.
+- **Archive** holds what you archived: one still unanswered, out of your list until you move it back, or one you took off Done to keep.
 - **Done** holds what is settled.
 - **Preview** opens a small browser for active development, there even when the Inbox is empty (see [Preview](#preview)). It starts closed.
 
 Each row but Preview shows how many it holds; a row reads gray while it is empty, and Done reads gray once you have read all of it, though it still opens.
 An empty row ends in a small circle, and a row with something in it in an arrow that points down while it is open.
 An item is the same card on every row.
-An archived one offers **Later**, **Move back**, which puts it back at the top of the list to answer again, and **Dismiss**.
+An archived one offers **Later**, **Move back**, which puts it back at the top of the list to answer again, and **Dismiss**; one you answered before you archived it offers **Move back**, which returns it to In progress or Done as its answer stands, and **Dismiss**.
+A card on Done offers **Archive** and **Dismiss** until you dismiss it.
 The check on the Done row marks everything in Done read, and goes once it is all read.
 A row's heading stays at the top while you scroll through it.
 
@@ -72,6 +75,8 @@ The icon beside the title is the item's state, drawn like an agent's status icon
 
 A session's request in its own words shows as your chat shows a message, so code in it reads highlighted, with a Copy button.
 A drawing keeps its lines whole, its text shrinking to fit the card.
+A job's progress shows as bars, one a step, that fill the card on a phone and a wide screen alike, each with its percent, what is going on and when it ends.
+A step the session marks as being worked on now draws its bar in colour, and a step waiting, held or done draws muted.
 A Slack message shows exactly as it will be sent.
 
 Each decision shows its options as choices: press a number key, or click one, then **Send**.
@@ -110,18 +115,18 @@ A file that fails to arrive for any other reason, such as a server error or a lo
 ## Give a secret
 
 A session that needs a value only you hold, such as a client secret or an API key, asks for it as a **Secret** card.
-The card names the variable and where the value goes: a Vercel project and its environments, or an item in this Mac's Keychain, such as your Slack or Yard token, or another of Playground's own, named in full, such as `playground-glm`.
+The card names the variable and where the value goes: a Vercel project and its environments, or an item in this computer's secret store, such as your Slack or Yard token, or another of Playground's own, named in full, such as `playground-glm`.
 Paste the value into the masked box, then press **Submit** or Enter.
 
-The value goes straight to that project, once for each environment, or into the Keychain, and is kept nowhere else: not in the Inbox, the chat, a log or the session.
+The value goes straight to that project, once for each environment, or into the secret store, and is kept nowhere else: not in the Inbox, the chat, a log or the session.
 The card then shows only when you gave it and how each environment went, or that the Keychain saved it, green when every one took it and red when one did not.
 When the value was saved but the session that asked was not told yet, the card stays green and says so in a gray line underneath, with **Retry**, which tells the session again and never saves the value a second time.
 A secret card's comment box goes through **Reply** alone, never with Submit, and Reply refuses a comment that is the same as what the field holds, so a value still in the field is never sent to a chat by mistake.
 
-A session that needs you to have a value already in the Keychain, such as a key to paste into another app, posts a **Show a secret** card.
-The card names the Keychain item in full, such as `playground-glm`, and why you need it.
+A session that needs you to have a value already in this computer's secret store, such as a key to paste into another app, posts a **Show a secret** card.
+The card names the item in full, such as `playground-glm`, and why you need it.
 **Show** draws the value in the card until you press **Hide**, fold the card, or 30 seconds pass; **Copy** puts it on your clipboard without drawing it.
-The value comes from the Keychain only when you click, and is kept nowhere else: not in the Inbox, the chat, a log or the session.
+The value comes from the secret store only when you click, and is kept nowhere else: not in the Inbox, the chat, a log or the session.
 Once you answer, dismiss or archive the card, it shows nothing more.
 A comment on the card that holds the value, such as a Copy pasted into its comment box by mistake, is refused before it is sent, for a value of 8 characters or more.
 Only your own click on this Mac shows a value, so a session never reads one through the Inbox.
@@ -143,13 +148,19 @@ Change the words where they stand, then:
 
 A draft shows upfront where it will land, or why it has no link yet.
 
+With WhatsApp mode on, each draft also comes to your own WhatsApp, as written; the sender refuses token shapes.
+Reply `send` to that message to post it as written, or reply to it with your own words to post those instead.
+Either way it goes through Send, so a Send here makes a later WhatsApp reply say it is already sent, and a draft with files goes from here alone.
+
 ## After you answer
 
 Your answer goes to the session that posted the item, and that session carries it out.
 In that session's chat your answer shows as a small chip, the item's id and what you picked, such as `#i343 · Add all 4 lines`, with your note after it; click the chip to open the card in the Inbox.
-The Dashboard itself sends no message.
-The one thing it sends itself is a Slack message's files: on Send of a Slack draft, or Approve of a Slack message, it puts them in the same thread first, and the card counts them, such as 2 files shared.
-Until then, the card reads 2 files · uploads on Send under them.
+The Dashboard itself sends no message but one: a Slack message that holds files.
+On Send of a Slack draft it posts the files in the same thread with the draft's words as their message, so the session only closes the card.
+A name you tag (@name) shows as that person's Slack mention and a link stays a link; a tag that matches no one in Slack, or more than one person, stops the send and says which.
+A Slack message you Approve goes another way: the files go to that thread first, then the session posts the words.
+Either way the card counts them, such as 2 files shared; until then, it reads 2 files · uploads on Send, or on Approve, under them.
 
 Until the session confirms it, the card's light spins blue; its line adds a word only when the answer waits or fails, such as Queued for Ops or Send failed.
 Once confirmed, the card links to where it landed, such as Open thread for a Slack message.
@@ -167,14 +178,14 @@ A card with no Retry offers Dismiss.
 
 Every card has the buttons its state takes, beside its own answers:
 
-| Button    | On                                                          | Moves the card                          | The session that posted it                                                     |
-| --------- | ----------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
-| ✓ Seen    | anything in the list you have not read                      | nowhere; it is marked read              | hears nothing                                                                  |
-| ✓✓ Done   | an update, or a card you have answered                      | to Done                                 | for an update, hears it is done; otherwise nothing                             |
-| Later     | a decision, draft or update in the list, or an archived one | out of the list until the time you pick | hears nothing                                                                  |
-| Archive   | a decision, draft or update in the list                     | to Archive, unanswered                  | hears nothing, and keeps waiting                                               |
-| Move back | an archived card, or one dismissed while it waited          | back to the top of the list             | hears nothing                                                                  |
-| Dismiss   | every card, until it is dismissed                           | to Done, marked dismissed               | while it waits on you, hears that you set it aside; otherwise hears to drop it |
+| Button    | On                                                                                | Moves the card                                                         | The session that posted it                                                     |
+| --------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| ✓ Seen    | anything in the list you have not read                                            | nowhere; it is marked read                                             | hears nothing                                                                  |
+| ✓✓ Done   | an update, or a card you have answered                                            | to Done                                                                | for an update, hears it is done; otherwise nothing                             |
+| Later     | a decision, draft or update in the list, or an archived one you have not answered | out of the list until the time you pick                                | hears nothing                                                                  |
+| Archive   | a decision, draft or update in the list, or a card on Done you have not dismissed | to Archive                                                             | hears nothing; what waits keeps waiting                                        |
+| Move back | an archived card, or one dismissed while it waited                                | back to the top of the list, or an answered one to In progress or Done | hears nothing                                                                  |
+| Dismiss   | every card, until it is dismissed                                                 | to Done, marked dismissed                                              | while it waits on you, hears that you set it aside; otherwise hears to drop it |
 
 **Later**, the zzz button, offers times, each shown with its day and time in your time zone (`clock.ownerZone`), or Pick a time… for a day and time of your own.
 The item moves to Later and leaves the count until then, then comes back as new.
@@ -188,7 +199,8 @@ On any other card, Dismiss and Done both move it to Done at once, and an update 
 **Mark all as read**, the check at the right of the first row, marks everything on screen you have not read as seen, answering nothing; each stays in the list as it is, and the check turns into a gray double check, All read.
 
 An item you answered moves to Done as soon as the session that posted it says it is done.
-Nothing moves by itself: what you deny or discard goes to Done at once, a card you only replied to stays in the list until its session says it is done, and an update you read stays until you press Done or Dismiss.
+Nothing moves by itself: what you deny or discard goes to Done at once, a card you only replied to stays in the list until its session says it is done, and an update you read stays until you press Done or Dismiss. An update you marked Done comes back, unread, when its session changes it, so one job keeps one card.
+A session that posts an update again under the same title changes its card instead of adding a second one, so you never see the same update twice.
 
 ## Preview
 
@@ -213,6 +225,7 @@ Every card has **Reply**, the arrow at the right end of its buttons, folded card
 With the box empty, it moves the reply to your chat with Alpha: the box there starts with `re #i41: `, before any words it held, with the cursor at the end, and the card's top line reads Replying until you send.
 When the chat's words already start with another card's `re #i40`, Reply swaps it for this card's.
 A secret ask and a Show a secret card keep their reply in their own comment box, so a value never reaches the chat, and while Alpha's session is down every card does.
+On those two cards the box reads **Type a note to Playground, then press Reply**, and Reply with the box empty adds a gray line under it saying the note goes in that box and the token in its own field, gone once you type.
 With words in the box, it sends them alone to the session that posted the card, as `re #i41: <your words>`; on a folded card it opens the card to them first.
 On a decision or draft, a comment with no answer asks for changes: the session changes the card in place, and it comes back to you marked Updated.
 

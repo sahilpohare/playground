@@ -129,6 +129,12 @@ describe("turbo.json", () => {
     expect(reads.filter((name) => !passed.has(name))).toEqual([])
   })
 
+  // a task's temp folder is the caller's own TMPDIR, since turbo's strict mode drops it and a tool's os.tmpdir() falls back to /tmp, which Claude Code's sandbox gives a shell no write to (a build's mkdtemp there failed in a sandboxed trial)
+  test("TMPDIR is on turbo's global pass-through list", async () => {
+    const { globalPassThroughEnv = [] } = await readTurbo()
+    expect(globalPassThroughEnv).toContain("TMPDIR")
+  })
+
   test("globalPassThroughEnv stays in A to Z order", async () => {
     const { globalPassThroughEnv = [] } = await readTurbo()
     expect(globalPassThroughEnv).toEqual([...globalPassThroughEnv].sort())

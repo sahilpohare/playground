@@ -19,6 +19,7 @@ const ROOT = join(import.meta.dir, "../../../..")
 // The docs held to one sentence per line. CLAUDE.md is a link to AGENTS.md, so it is read once.
 export const PATTERNS = [
   ".agents/dashboard/*.md",
+  ".agents/shipping.md",
   ".agents/skill-trial.md",
   ".agents/testing.md",
   "AGENTS.md",

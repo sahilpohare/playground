@@ -6,6 +6,8 @@ import {
   RELAY_REPLACED_CLOSE,
   RELAY_SILENT_MS,
   RELAY_TIMEOUT_MS,
+  type RelayBotRead,
+  relayBotSchema,
   relayHeartbeatSchema,
   type RelayPair,
   relayPairSchema,
@@ -21,8 +23,8 @@ import { redisChannel } from "@/lib/yard/channel"
 
 type MacSocket = { close?: () => void; send: (data: string) => void }
 
-// A frame the hub carries to the Mac: a read, a pair request or a signed write.
-type Frame = RelayPair | RelayRequest | RelayWrite
+// A frame the hub carries to the Mac: a read, a bot's read, a pair request or a signed write.
+type Frame = RelayBotRead | RelayPair | RelayRequest | RelayWrite
 
 // A socket the hub holds, and when it last heard from it.
 type Held = { heard: number; socket: MacSocket }
@@ -43,7 +45,7 @@ export const RELAY_ACK_MS = 2000
 // The request ids the subscriber remembers, oldest dropped first, so a request on the bus twice (a publish whose first try landed and then reported closed) still reaches the Mac once.
 const SEEN_MAX = 500
 
-// What the instances tell each other over Redis, in transit alone: a request, a pair request or a signed write for the instance holding the Mac's socket, its ack, the Mac's answer, a status ping and its pong, and a socket gone.
+// What the instances tell each other over Redis, in transit alone: a request, a bot's read, a pair request or a signed write for the instance holding the Mac's socket, its ack, the Mac's answer, a status ping and its pong, and a socket gone.
 const busSchema = z.discriminatedUnion("kind", [
   z.object({ id: z.string(), kind: z.literal("ack") }),
   z.object({ kind: z.literal("gone"), since: z.string(), userId: z.string() }),
@@ -51,7 +53,7 @@ const busSchema = z.discriminatedUnion("kind", [
   z.object({ id: z.string(), kind: z.literal("pong") }),
   z.object({
     kind: z.literal("request"),
-    request: z.union([relayRequestSchema, relayPairSchema, relayWriteSchema]),
+    request: z.union([relayBotSchema, relayRequestSchema, relayPairSchema, relayWriteSchema]),
     userId: z.string(),
   }),
   z.object({ kind: z.literal("response"), response: relayResponseSchema, userId: z.string() }),
@@ -268,6 +270,25 @@ export function createHub({
       if (found) {
         if (found.userId === userId) settle(frame.data.id, frame.data)
       } else void send({ kind: "response", response: frame.data, userId })
+    },
+
+    // Sends a bot's GET to its maker's Mac, naming the bot, with a fresh id and time, through the instance holding its socket, and waits for its answer.
+    botRead(
+      userId: string,
+      login: string,
+      { bot, dm }: { bot: string; dm: string },
+      path: string,
+    ): Promise<Forwarded> {
+      return carry(userId, {
+        at: now().toISOString(),
+        bot,
+        dm,
+        id: id(),
+        login,
+        method: "GET",
+        path,
+        type: "bot",
+      })
     },
 
     // Sends one GET to the owner's Mac with a fresh id and time, through the instance holding its socket, and waits for its answer.
